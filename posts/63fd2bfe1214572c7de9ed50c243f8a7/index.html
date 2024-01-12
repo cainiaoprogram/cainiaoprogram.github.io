@@ -1,0 +1,1519 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>一起实践神经网络INT8量化系列教程（一） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="一起实践神经网络INT8量化系列教程（一）" />
+<meta property="og:description" content="开篇 老潘刚开始接触神经网络量化是2年前那会，用NCNN和TVM在树莓派上部署一个简单的SSD网络。那个时候使用的量化脚本是参考于TensorRT和NCNN的PTQ量化（训练后量化）模式，使用交叉熵的方式对模型进行量化，最终在树莓派3B&#43;上部署一个简单的分类模型（识别剪刀石头布静态手势）。
+这是那会的一篇文章，略显稚嫩哈哈：
+一步一步解读神经网络编译器TVM(二)——利用TVM完成C&#43;&#43;端的部署
+转眼间过了这么久啦，神经网络量化应用已经完全实现大面积落地了、相比之前成熟多了！
+我工作的时候虽然也简单接触过量化，但感觉还远远不够，趁着最近项目需要，重新再学习一下，也打算把重新学习的路线写成一篇系列文，分享给大家。
+本篇系列文的主要内容计划从头开始梳理一遍量化的基础知识以及代码实践。因为老潘对TensorRT比较熟悉，会主要以TensorRT的量化方式进行描述以及讲解。不过TensorRT由于是闭源工具，内部的实现看不到，咱们也不能两眼一抹黑。所以也打算参考Pytorch、NCNN、TVM、TFLITE的量化op的现象方式学习和实践一下。
+当然这只是学习计划，之后可能也会变动。对于量化我也是学习者，既然要用到这个技术，必须要先理解其内部原理。而且接触了挺长时间量化，感觉这里面学问还是不少。好记性不如烂笔头，写点东西记录下，也希望这系列文章在能够帮助大家的同时，抛砖引玉，一起讨论、共同进步。
+当然在学习途中，也认识了很多在量化领域经验丰富的大佬（田子宸、JermmyXu等等），嗯，这样前进路上也就不孤单了。
+OK，废话不多说开始吧。
+Why量化 我们都知道，训练好的模型的权重一般来说都是FP32也就是单精度浮点型，在深度学习训练和推理的过程中，最常用的精度就是FP32。当然也会有FP64、FP16、BF16、TF32等更多的精度：
+FP32 是单精度浮点数，用8bit 表示指数，23bit 表示小数；FP16半精度浮点数，用5bit 表示指数，10bit 表示小数；BF16是对FP32单精度浮点数截断数据，即用8bit 表示指数，7bit 表示小数。TF32 是一种截短的 Float32 数据格式，将 FP32 中 23 个尾数位截短为 10 bits，而指数位仍为 8 bits，总长度为 19 (=1 &#43; 8 &#43; 10) bits。
+对于浮点数来说，指数位表示该精度可达的动态范围，而尾数位表示精度。之前老潘的一篇文章中提到，FP16的普遍精度是~5.96e−8 (6.10e−5) … 65504，而我们模型中的FP32权重有部分数值是1e-10级别。这样从FP32-&gt;FP16会导致部分精度丢失，从而模型的精度也会下降一些。
+其实从FP32-&gt;FP16也是一种量化，只不过因为FP32-&gt;FP16几乎是无损的(CUDA中使用__float2half直接进行转换)，不需要calibrator去校正、更不需要retrain。
+而且FP16的精度下降对于大部分任务影响不是很大，甚至有些任务会提升。NVIDIA对于FP16有专门的Tensor Cores可以进行矩阵运算，相比FP32来说吞吐量提升一倍。
+实际点来说，量化就是将我们训练好的模型，不论是权重、还是计算op，都转换为低精度去计算。因为FP16的量化很简单，所以实际中我们谈论的量化更多的是INT8的量化，当然也有3-bit、4-bit的量化，不过目前来说比较常见比较实用的，也就是INT8量化了，之后老潘的重点也是INT8量化。
+那么经过INT8量化后的模型：
+模型容量变小了，这个很好理解，FP32的权重变成INT8，大小直接缩了4倍模型运行速度可以提升，实际卷积计算的op是INT8类型，在特定硬件下可以利用INT8的指令集去实现高吞吐，不论是GPU还是INTEL、ARM等平台都有INT8的指令集优化对于某些设备，使用INT8的模型耗电量更少，对于嵌入式侧端设备来说提升是巨大的 所以说，随着我们模型越来越大，需求越来越高，模型的量化自然是少不了的一项技术。
+如果你担心INT8量化对于精度的影响，我们可以看下NVIDIA量化研究的一些结论:
+出自《INTEGER QUANTIZATION FOR DEEP LEARNING INFERENCE: PRINCIPLES AND EMPIRICAL EVALUATION》，文末有下载链接。
+量化现状 量化技术已经广泛应用于实际生产环境了，也有很多大厂开源了其量化方法。不过比较遗憾的是目前这些方法比较琐碎，没有一套比较成熟比较完善的量化方案，使用起来稍微有点难度。不过我们仍可以从这些框架中学习到很多。
+Google 谷歌是比较早进行量化尝试的大厂了，感兴趣的可以看下Google的白皮书Quantizing deep convolutional networks for efficient inference: A whitepaper以及Quantization and Training of Neural Networks for Efficient Integer-Arithmetic-Only Inference。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/63fd2bfe1214572c7de9ed50c243f8a7/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-11-23T23:31:17+08:00" />
+<meta property="article:modified_time" content="2021-11-23T23:31:17+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">一起实践神经网络INT8量化系列教程（一）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="_0"></a>开篇</h2> 
+<p>老潘刚开始接触<strong>神经网络量化</strong>是2年前那会，用NCNN和TVM在树莓派上部署一个简单的SSD网络。那个时候使用的量化脚本是参考于TensorRT和NCNN的PTQ量化（训练后量化）模式，使用交叉熵的方式对模型进行量化，最终在<code>树莓派3B+</code>上部署一个简单的分类模型（识别剪刀石头布静态手势）。</p> 
+<p>这是那会的一篇文章，略显稚嫩哈哈：</p> 
+<ul><li><a href="https://mp.weixin.qq.com/s?__biz=Mzg3ODU2MzY5MA==&amp;mid=2247484929&amp;idx=1&amp;sn=3fcce36b5a50cd8571cf932a23083667&amp;chksm=cf109e04f86717129c3381ebeec2d0c1f7baf6ed057c66310662f5935beea88baf23e99898f4&amp;token=1276531538&amp;lang=zh_CN#rd" rel="nofollow">一步一步解读神经网络编译器TVM(二)——利用TVM完成C++端的部署<br> </a></li></ul> 
+<p>转眼间过了这么久啦，神经网络量化应用<strong>已经完全实现大面积落地了</strong>、相比之前成熟多了！</p> 
+<p>我工作的时候虽然也简单接触过量化，但感觉还远远不够，趁着最近项目需要，重新再学习一下，也打算把重新学习的路线写成一篇系列文，分享给大家。</p> 
+<p>本篇系列文的主要内容计划从头开始梳理一遍<strong>量化的基础知识以及代码实践</strong>。因为老潘对TensorRT比较熟悉，会主要以TensorRT的量化方式进行描述以及讲解。不过TensorRT由于是闭源工具，内部的实现看不到，咱们也不能两眼一抹黑。所以也打算参考Pytorch、NCNN、TVM、TFLITE的量化op的现象方式学习和实践一下。</p> 
+<p>当然这只是学习计划，之后可能也会变动。对于量化我也是学习者，既然要用到这个技术，必须要先理解其内部原理。而且接触了挺长时间量化，<strong>感觉这里面学问还是不少</strong>。好记性不如烂笔头，写点东西记录下，也希望这系列文章在能够帮助大家的同时，抛砖引玉，一起讨论、共同进步。</p> 
+<p>当然在学习途中，也认识了很多在量化领域经验丰富的大佬（田子宸、JermmyXu等等），嗯，这样前进路上也就不孤单了。</p> 
+<p>OK，废话不多说开始吧。</p> 
+<h2><a id="Why_21"></a>Why量化</h2> 
+<p>我们都知道，训练好的模型的<a href="https://mp.weixin.qq.com/s?__biz=Mzg3ODU2MzY5MA==&amp;mid=2247487770&amp;idx=1&amp;sn=749d1719844dcfe5f87dae2de65a8b6b&amp;chksm=cf10891ff86700096be8eeb671004693adca26051c3e75628dedb87a95ed857aadc0502c10b4&amp;token=1276531538&amp;lang=zh_CN#rd" rel="nofollow">权重</a>一般来说都是<strong>FP32</strong>也就是单精度浮点型，在深度学习训练和推理的过程中，最常用的精度就是FP32。当然也会有FP64、FP16、BF16、TF32等更多的精度：</p> 
+<p><img src="https://images2.imgbox.com/54/9c/WZsSS43E_o.png" alt="FP32与FP16精度差异"></p> 
+<p>FP32 是单精度浮点数，用8bit 表示指数，23bit 表示小数；FP16半精度浮点数，用5bit 表示指数，10bit 表示小数；BF16是对FP32单精度浮点数截断数据，即用8bit 表示指数，7bit 表示小数。TF32 是一种截短的 Float32 数据格式，将 FP32 中 23 个尾数位截短为 10 bits，而指数位仍为 8 bits，总长度为 19 (=1 + 8 + 10) bits。</p> 
+<p>对于浮点数来说，指数位表示该精度可达的动态范围，而尾数位表示精度。之前老潘的一篇<a href="https://mp.weixin.qq.com/s?__biz=Mzg3ODU2MzY5MA==&amp;mid=2247487770&amp;idx=1&amp;sn=749d1719844dcfe5f87dae2de65a8b6b&amp;chksm=cf10891ff86700096be8eeb671004693adca26051c3e75628dedb87a95ed857aadc0502c10b4&amp;token=1276531538&amp;lang=zh_CN#rd" rel="nofollow">文章</a>中提到，FP16的普遍精度是<code>~5.96e−8 (6.10e−5) … 65504</code>，而我们模型中的FP32权重有部分数值是<code>1e-10</code>级别。这样从FP32-&gt;FP16会导致部分精度丢失，从而模型的精度也会下降一些。</p> 
+<p><img src="https://images2.imgbox.com/fd/41/we7XsKMh_o.png" alt="two-modes-of-operation-on-ampere-tensor-cores"></p> 
+<p>其实从FP32-&gt;FP16也是一种量化，只不过因为FP32-&gt;FP16几乎是无损的(CUDA中使用<code>__float2half</code>直接进行转换)，不需要<code>calibrator</code>去校正、更不需要<code>retrain</code>。</p> 
+<p>而且FP16的精度下降对于<a href="https://mp.weixin.qq.com/s?__biz=Mzg3ODU2MzY5MA==&amp;mid=2247487034&amp;idx=1&amp;sn=728b01c2b38c436fd337dad0038e1f0a&amp;chksm=cf10963ff8671f2995d2b3a4dc9192f2b2b40dfecadc31d409c88b47c492c866758cb87af65a&amp;token=1276531538&amp;lang=zh_CN#rd" rel="nofollow">大部分任务</a>影响不是很大，甚至有些任务会提升。NVIDIA对于FP16有专门的Tensor Cores可以进行矩阵运算，相比FP32来说吞吐量提升一倍。</p> 
+<p><img src="https://images2.imgbox.com/08/73/GqnZKwaZ_o.png" alt="量化简单示意图"></p> 
+<p>实际点来说，<strong>量化就是将我们训练好的模型，不论是权重、还是计算op，都转换为低精度去计算</strong>。因为FP16的量化很简单，所以实际中我们谈论的量化更多的是<strong>INT8的量化</strong>，当然也有3-bit、4-bit的量化，不过目前来说比较常见比较实用的，也就是INT8量化了，之后老潘的重点也是INT8量化。</p> 
+<p>那么经过INT8量化后的模型：</p> 
+<ul><li>模型容量变小了，这个很好理解，FP32的权重变成INT8，大小直接缩了4倍</li><li>模型运行速度可以提升，实际卷积计算的op是INT8类型，在特定硬件下可以利用INT8的指令集去实现高吞吐，不论是GPU还是INTEL、ARM等平台都有<strong>INT8的指令集优化</strong></li><li>对于某些设备，使用INT8的模型耗电量更少，对于嵌入式侧端设备来说提升是巨大的</li></ul> 
+<p>所以说，随着我们模型越来越大，需求越来越高，模型的量化自然是少不了的一项技术。</p> 
+<p>如果你担心INT8量化对于<strong>精度</strong>的影响，我们可以看下NVIDIA量化研究的一些结论:</p> 
+<p><img src="https://images2.imgbox.com/46/15/F3rmYecy_o.png" alt="FP32、INT8量化指标评测"></p> 
+<p>出自《INTEGER QUANTIZATION FOR DEEP LEARNING INFERENCE: PRINCIPLES AND EMPIRICAL EVALUATION》，文末有下载链接。</p> 
+<h2><a id="_55"></a>量化现状</h2> 
+<p>量化技术已经广泛应用于<strong>实际生产环境</strong>了，也有很多大厂开源了其量化方法。不过比较遗憾的是目前这些方法比较琐碎，没有一套比较成熟比较完善的量化方案，使用起来稍微有点难度。不过我们仍可以从这些框架中学习到很多。</p> 
+<h3><a id="Google_59"></a>Google</h3> 
+<p>谷歌是比较早进行量化尝试的大厂了，感兴趣的可以看下Google的白皮书<code>Quantizing deep convolutional networks for efficient inference: A whitepaper</code>以及<code>Quantization and Training of Neural Networks for Efficient Integer-Arithmetic-Only Inference</code>。</p> 
+<p>TensorFlow很早就支持了量化训练，而TFLite也很早就支持了后训练量化，感兴趣的可以看下TFLite的<a href="https://www.tensorflow.org/lite/performance/quantization_spec" rel="nofollow">量化规范</a>，目前TensorRT支持TensorFlow训练后量化的导出的模型。</p> 
+<h3><a id="TensorRT_67"></a>TensorRT</h3> 
+<p>TensorRT在2017年公布了自己的后训练量化方法，不过没有开源，NCNN按照这个思想实现了一个，也特别好用。不过目前TensorRT8也支持直接导入通过ONNX导出的QTA好的模型，使用上方便了不少，之后老潘会重点讲下。</p> 
+<p><img src="https://images2.imgbox.com/4b/b3/62MpVGwJ_o.png" alt="Turing显卡的INT8速度"></p> 
+<p>NVIDIA自家也推出了针对Pytorch的量化工具（为什么没有TensorFlow，因为TF已经有挺好用的官方工具了），支持PTQ以及QTA，称为<a href="https://github.com/NVIDIA/TensorRT/tree/master/tools/pytorch-quantization">Pytorch Quantization</a>，之后也会提到。</p> 
+<h3><a id="TVMhttpsgithubcomapachetvm_76"></a><a href="https://github.com/apache/tvm">TVM</a></h3> 
+<p>TVM有自己的INT8量化操作，可以跑量化，我们也可以添加自己的算子。不过TVM目前只支持PTQ，可以通过交叉熵或者percentile的方式进行校准。不过如果动手能力强的话，应该可以拿自己计算出来的scale值传入TVM去跑，应该也有人这样做过了。</p> 
+<p>比较有参考意义的一篇：</p> 
+<ul><li><a href="https://zhuanlan.zhihu.com/p/365686106" rel="nofollow">ViT-int8 on TVM：提速4.6倍，比TRT快1.5倍 </a></li></ul> 
+<p>…</p> 
+<p>当然还有很多优秀的<strong>量化框架</strong>，想看详细的可以看<a href="https://zhuanlan.zhihu.com/p/355598250" rel="nofollow">这篇</a>，后续如果涉及到具体知识点老潘也会再提到。</p> 
+<h2><a id="_88"></a>量化基本知识</h2> 
+<p>进入主题前需要提两个概念，也就是量化的<strong>两个重要过程</strong>，一个是量化（Quantize），另一个是反量化（Dequantize）：</p> 
+<ul><li>量化就是将浮点型实数量化为整型数（FP32-&gt;INT8）</li><li>反量化就是将整型数转换为浮点型实数（INT8-&gt;FP32）</li></ul> 
+<p><img src="https://images2.imgbox.com/ad/5f/3MHoME40_o.png" alt="量化与反量化"></p> 
+<p>量化和反量化操作在最终的模型推理中都会用到，接下来我们就具体说下。</p> 
+<p>之后实数就代表我们的FP32浮点数，而整数就代表INT8整型数。</p> 
+<h3><a id="_100"></a>量化操作</h3> 
+<p>比如有一个FP32的浮点型数字<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         x 
+        
+       
+         = 
+        
+       
+         5.234 
+        
+       
+      
+        x=5.234 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span class="mord mathdefault">x</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 0.64444em; vertical-align: 0em;"></span><span class="mord">5</span><span class="mord">.</span><span class="mord">2</span><span class="mord">3</span><span class="mord">4</span></span></span></span></span>，然后我们需要把这个数变为整型，也就是要量化它，怎么搞。我们可以把这个数字乘上一个量化系数<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         s 
+        
+       
+      
+        s 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span class="mord mathdefault">s</span></span></span></span></span>，比如<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         s 
+        
+       
+         = 
+        
+       
+         100 
+        
+       
+      
+        s=100 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span class="mord mathdefault">s</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 0.64444em; vertical-align: 0em;"></span><span class="mord">1</span><span class="mord">0</span><span class="mord">0</span></span></span></span></span>，那么量化后的值<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          x 
+         
+        
+          q 
+         
+        
+       
+         = 
+        
+       
+         x 
+        
+       
+         ∗ 
+        
+       
+         s 
+        
+       
+         = 
+        
+       
+         5.234 
+        
+       
+         ∗ 
+        
+       
+         100 
+        
+       
+         = 
+        
+       
+         523.4 
+        
+       
+      
+        x_q = x*s=5.234*100=523.4 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.716668em; vertical-align: -0.286108em;"></span><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.151392em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight" style="margin-right: 0.03588em;">q</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.286108em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 0.46528em; vertical-align: 0em;"></span><span class="mord mathdefault">x</span><span class="mspace" style="margin-right: 0.222222em;"></span><span class="mbin">∗</span><span class="mspace" style="margin-right: 0.222222em;"></span></span><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span class="mord mathdefault">s</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 0.64444em; vertical-align: 0em;"></span><span class="mord">5</span><span class="mord">.</span><span class="mord">2</span><span class="mord">3</span><span class="mord">4</span><span class="mspace" style="margin-right: 0.222222em;"></span><span class="mbin">∗</span><span class="mspace" style="margin-right: 0.222222em;"></span></span><span class="base"><span class="strut" style="height: 0.64444em; vertical-align: 0em;"></span><span class="mord">1</span><span class="mord">0</span><span class="mord">0</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 0.64444em; vertical-align: 0em;"></span><span class="mord">5</span><span class="mord">2</span><span class="mord">3</span><span class="mord">.</span><span class="mord">4</span></span></span></span></span>，然后我们对这个数字进行四舍五入（也就是round操作）最终为</p> 
+<p><span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+         
+           x 
+          
+         
+           q 
+          
+         
+        
+          = 
+         
+        
+          r 
+         
+        
+          o 
+         
+        
+          u 
+         
+        
+          n 
+         
+        
+          d 
+         
+        
+          ( 
+         
+        
+          x 
+         
+        
+          ∗ 
+         
+        
+          s 
+         
+        
+          ) 
+         
+        
+          = 
+         
+        
+          r 
+         
+        
+          o 
+         
+        
+          u 
+         
+        
+          n 
+         
+        
+          d 
+         
+        
+          ( 
+         
+        
+          5.234 
+         
+        
+          ∗ 
+         
+        
+          100 
+         
+        
+          ) 
+         
+        
+          = 
+         
+        
+          523 
+         
+        
+       
+         x_q = round(x*s)=round(5.234*100)=523 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.716668em; vertical-align: -0.286108em;"></span><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.151392em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight" style="margin-right: 0.03588em;">q</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.286108em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord mathdefault" style="margin-right: 0.02778em;">r</span><span class="mord mathdefault">o</span><span class="mord mathdefault">u</span><span class="mord mathdefault">n</span><span class="mord mathdefault">d</span><span class="mopen">(</span><span class="mord mathdefault">x</span><span class="mspace" style="margin-right: 0.222222em;"></span><span class="mbin">∗</span><span class="mspace" style="margin-right: 0.222222em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord mathdefault">s</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord mathdefault" style="margin-right: 0.02778em;">r</span><span class="mord mathdefault">o</span><span class="mord mathdefault">u</span><span class="mord mathdefault">n</span><span class="mord mathdefault">d</span><span class="mopen">(</span><span class="mord">5</span><span class="mord">.</span><span class="mord">2</span><span class="mord">3</span><span class="mord">4</span><span class="mspace" style="margin-right: 0.222222em;"></span><span class="mbin">∗</span><span class="mspace" style="margin-right: 0.222222em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord">1</span><span class="mord">0</span><span class="mord">0</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 0.64444em; vertical-align: 0em;"></span><span class="mord">5</span><span class="mord">2</span><span class="mord">3</span></span></span></span></span></span></p> 
+<p>这样就行了吗，<strong>523有点大啊</strong>，我们的整型INT8的范围是[-128,127]，无符号INT8的范围也才[0-255]，这个量化后的值有点放不下呀。</p> 
+<p>怎么办，当然是要截断了，假设我们的INT8范围是<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         [ 
+        
+       
+         − 
+        
+        
+        
+          2 
+         
+         
+         
+           b 
+          
+         
+           − 
+          
+         
+           1 
+          
+         
+        
+       
+         , 
+        
+        
+        
+          2 
+         
+         
+         
+           b 
+          
+         
+           − 
+          
+         
+           1 
+          
+         
+        
+       
+         − 
+        
+       
+         1 
+        
+       
+         ] 
+        
+       
+      
+        [−2^{b−1}, 2^{b−1} − 1] 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.09911em; vertical-align: -0.25em;"></span><span class="mopen">[</span><span class="mord">−</span><span class="mord"><span class="mord">2</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.849108em;"><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight">b</span><span class="mord mtight">−</span><span class="mord mtight">1</span></span></span></span></span></span></span></span></span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em;"></span><span class="mord"><span class="mord">2</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.849108em;"><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight">b</span><span class="mord mtight">−</span><span class="mord mtight">1</span></span></span></span></span></span></span></span></span><span class="mord">−</span><span class="mord">1</span><span class="mclose">]</span></span></span></span></span>，因为我们使用的是INT8，所以这里的<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         b 
+        
+       
+         = 
+        
+       
+         8 
+        
+       
+      
+        b=8 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.69444em; vertical-align: 0em;"></span><span class="mord mathdefault">b</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 0.64444em; vertical-align: 0em;"></span><span class="mord">8</span></span></span></span></span>，那么上述的式子又可以变为：</p> 
+<p><span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+         
+           x 
+          
+         
+           q 
+          
+         
+        
+          = 
+         
+        
+          c 
+         
+        
+          l 
+         
+        
+          i 
+         
+        
+          p 
+         
+        
+          ( 
+         
+        
+          r 
+         
+        
+          o 
+         
+        
+          u 
+         
+        
+          n 
+         
+        
+          d 
+         
+        
+          ( 
+         
+        
+          x 
+         
+        
+          ∗ 
+         
+        
+          s 
+         
+        
+          ) 
+         
+        
+          , 
+         
+        
+          − 
+         
+         
+         
+           2 
+          
+          
+          
+            b 
+           
+          
+            − 
+           
+          
+            1 
+           
+          
+         
+        
+          , 
+         
+         
+         
+           2 
+          
+          
+          
+            b 
+           
+          
+            − 
+           
+          
+            1 
+           
+          
+         
+        
+          − 
+         
+        
+          1 
+         
+        
+          ) 
+         
+        
+          = 
+         
+        
+          c 
+         
+        
+          l 
+         
+        
+          i 
+         
+        
+          p 
+         
+        
+          ( 
+         
+        
+          r 
+         
+        
+          o 
+         
+        
+          u 
+         
+        
+          n 
+         
+        
+          d 
+         
+        
+          ( 
+         
+        
+          5.234 
+         
+        
+          ∗ 
+         
+        
+          100 
+         
+        
+          ) 
+         
+        
+          , 
+         
+        
+          − 
+         
+        
+          128 
+         
+        
+          , 
+         
+        
+          127 
+         
+        
+          ) 
+         
+        
+          = 
+         
+        
+          127 
+         
+        
+       
+         x_q = clip(round(x*s),−2^{b−1}, 2^{b−1} − 1)=clip(round(5.234*100),-128,127)=127 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.716668em; vertical-align: -0.286108em;"></span><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.151392em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight" style="margin-right: 0.03588em;">q</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.286108em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord mathdefault">c</span><span class="mord mathdefault" style="margin-right: 0.01968em;">l</span><span class="mord mathdefault">i</span><span class="mord mathdefault">p</span><span class="mopen">(</span><span class="mord mathdefault" style="margin-right: 0.02778em;">r</span><span class="mord mathdefault">o</span><span class="mord mathdefault">u</span><span class="mord mathdefault">n</span><span class="mord mathdefault">d</span><span class="mopen">(</span><span class="mord mathdefault">x</span><span class="mspace" style="margin-right: 0.222222em;"></span><span class="mbin">∗</span><span class="mspace" style="margin-right: 0.222222em;"></span></span><span class="base"><span class="strut" style="height: 1.14911em; vertical-align: -0.25em;"></span><span class="mord mathdefault">s</span><span class="mclose">)</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em;"></span><span class="mord">−</span><span class="mord"><span class="mord">2</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.899108em;"><span class="" style="top: -3.113em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight">b</span><span class="mord mtight">−</span><span class="mord mtight">1</span></span></span></span></span></span></span></span></span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em;"></span><span class="mord"><span class="mord">2</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.899108em;"><span class="" style="top: -3.113em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight">b</span><span class="mord mtight">−</span><span class="mord mtight">1</span></span></span></span></span></span></span></span></span><span class="mord">−</span><span class="mord">1</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord mathdefault">c</span><span class="mord mathdefault" style="margin-right: 0.01968em;">l</span><span class="mord mathdefault">i</span><span class="mord mathdefault">p</span><span class="mopen">(</span><span class="mord mathdefault" style="margin-right: 0.02778em;">r</span><span class="mord mathdefault">o</span><span class="mord mathdefault">u</span><span class="mord mathdefault">n</span><span class="mord mathdefault">d</span><span class="mopen">(</span><span class="mord">5</span><span class="mord">.</span><span class="mord">2</span><span class="mord">3</span><span class="mord">4</span><span class="mspace" style="margin-right: 0.222222em;"></span><span class="mbin">∗</span><span class="mspace" style="margin-right: 0.222222em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord">1</span><span class="mord">0</span><span class="mord">0</span><span class="mclose">)</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em;"></span><span class="mord">−</span><span class="mord">1</span><span class="mord">2</span><span class="mord">8</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em;"></span><span class="mord">1</span><span class="mord">2</span><span class="mord">7</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 0.64444em; vertical-align: 0em;"></span><span class="mord">1</span><span class="mord">2</span><span class="mord">7</span></span></span></span></span></span></p> 
+<p>这样就结束了么？</p> 
+<p>当然没有，刚才的这个数字<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         x 
+        
+       
+         = 
+        
+       
+         5.234 
+        
+       
+      
+        x=5.234 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span class="mord mathdefault">x</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 0.64444em; vertical-align: 0em;"></span><span class="mord">5</span><span class="mord">.</span><span class="mord">2</span><span class="mord">3</span><span class="mord">4</span></span></span></span></span>，被映射到了127，那么如果是<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         x 
+        
+       
+         = 
+        
+       
+         0 
+        
+       
+      
+        x=0 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span class="mord mathdefault">x</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 0.64444em; vertical-align: 0em;"></span><span class="mord">0</span></span></span></span></span>呢？貌似直接带入算出来也是0，但是这样做对么？</p> 
+<h3><a id="_117"></a>基于线性量化的对称量化和非对称量化</h3> 
+<p>对不对的关键在于我们是否是采用<strong>对称量化</strong>，什么是对称量化呢？这里的对称指的是以<strong>0为中心</strong>进行量化（还有另一种说法，这里老潘先略过），然后0两边的动态范围都是一样的。</p> 
+<p><img src="https://images2.imgbox.com/7b/77/iupk0rPr_o.png" alt="非对称量化和对称量化"></p> 
+<p>可以看上图，左边是非对称量化，右边是对称量化（也称为Affine quantization和Scale quantization）。可以观察到：</p> 
+<ul><li>对称量化的实数0也对应着整数的0，而非对称量化的实数0不一定对应着整数0，而是z。</li><li>对称量化实数的范围是对称的（<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+        
+          [ 
+         
+        
+          − 
+         
+        
+          α 
+         
+        
+          , 
+         
+        
+          α 
+         
+        
+          ] 
+         
+        
+       
+         [-\alpha,\alpha] 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mopen">[</span><span class="mord">−</span><span class="mord mathdefault" style="margin-right: 0.0037em;">α</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em;"></span><span class="mord mathdefault" style="margin-right: 0.0037em;">α</span><span class="mclose">]</span></span></span></span></span>），而非对称量化的则不对称(<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+        
+          [ 
+         
+        
+          − 
+         
+        
+          β 
+         
+        
+          , 
+         
+        
+          α 
+         
+        
+          ] 
+         
+        
+       
+         [-\beta,\alpha] 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mopen">[</span><span class="mord">−</span><span class="mord mathdefault" style="margin-right: 0.05278em;">β</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em;"></span><span class="mord mathdefault" style="margin-right: 0.0037em;">α</span><span class="mclose">]</span></span></span></span></span>)</li><li>对称量化整数的范围是对称的（[-127,127]），而非对称量化的则不对称（[-128,127]）</li></ul> 
+<p>所以上述的非对称量化过程可以简述为<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         f 
+        
+       
+         ( 
+        
+       
+         x 
+        
+       
+         ) 
+        
+       
+         = 
+        
+       
+         s 
+        
+       
+         ⋅ 
+        
+       
+         x 
+        
+       
+         + 
+        
+       
+         z 
+        
+       
+      
+        f (x) = s · x + z 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord mathdefault" style="margin-right: 0.10764em;">f</span><span class="mopen">(</span><span class="mord mathdefault">x</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 0.66666em; vertical-align: -0.08333em;"></span><span class="mord mathdefault">s</span><span class="mpunct">⋅</span><span class="mspace" style="margin-right: 0.166667em;"></span><span class="mord mathdefault">x</span><span class="mspace" style="margin-right: 0.222222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.222222em;"></span></span><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span class="mord mathdefault" style="margin-right: 0.04398em;">z</span></span></span></span></span>，其中<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         z 
+        
+       
+      
+        z 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span class="mord mathdefault" style="margin-right: 0.04398em;">z</span></span></span></span></span>是<code>zero-point</code>，这个数字就代表<strong>实数0映射到整数是多少</strong>，而对称量化则是<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         f 
+        
+       
+         ( 
+        
+       
+         x 
+        
+       
+         ) 
+        
+       
+         = 
+        
+       
+         s 
+        
+       
+         ⋅ 
+        
+       
+         x 
+        
+       
+      
+        f (x) = s · x 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord mathdefault" style="margin-right: 0.10764em;">f</span><span class="mopen">(</span><span class="mord mathdefault">x</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 0.44445em; vertical-align: 0em;"></span><span class="mord mathdefault">s</span><span class="mpunct">⋅</span><span class="mspace" style="margin-right: 0.166667em;"></span><span class="mord mathdefault">x</span></span></span></span></span>。</p> 
+<p>这样就明白了刚才的问题：<em>如果是<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+        
+          x 
+         
+        
+          = 
+         
+        
+          0 
+         
+        
+       
+         x=0 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span class="mord mathdefault">x</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 0.64444em; vertical-align: 0em;"></span><span class="mord">0</span></span></span></span></span>呢？貌似直接带入算出来也是0</em>，如果我们采用的是<strong>对称量化</strong>，那就没问题！</p> 
+<p>需要说明一点，不论是非对称还是对称量化，是基于线性量化（也可以称作均匀量化）的一种。线性量化将FP32映射到INT8数据类型，<strong>每个间隔是相等的</strong>，而不相等的就称为非线性量化。非线性量化因为对部署并不是很友好，虽然能够更好地捕捉到权重分布的密集点，但感觉用的并不多，这里也就先不多说了。</p> 
+<p>关于详细的<code>非对称量化，对称量化对比</code>可以参考这篇文章：</p> 
+<ul><li><a href="https://iq.opengenus.org/affine-quantization-vs-scale-quantization/" rel="nofollow">Affine Quantization vs Scale Quantization</a></li></ul> 
+<h3><a id="_139"></a>对称量化</h3> 
+<p>接下来的重点是<strong>对称量化</strong>，也就是TensorRT中使用的量化方式，这里的范围也就是[-127,127]，因为只比[-128,127]少了一个范围，所以实际量化中并没有太大的影响。</p> 
+<p>话说回来，上文量化操作中，量化系数随便说了个<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         s 
+        
+       
+         = 
+        
+       
+         100 
+        
+       
+      
+        s=100 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span class="mord mathdefault">s</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 0.64444em; vertical-align: 0em;"></span><span class="mord">1</span><span class="mord">0</span><span class="mord">0</span></span></span></span></span>，这个当然是不对的，这个<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         s 
+        
+       
+      
+        s 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span class="mord mathdefault">s</span></span></span></span></span>需要根据我们的<strong>实际数据分布</strong>来计算。</p> 
+<p><img src="https://images2.imgbox.com/dc/c7/wyAkKmCY_o.png" alt="Scale Quantization"></p> 
+<p>如上式，<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         α 
+        
+       
+      
+        \alpha 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span class="mord mathdefault" style="margin-right: 0.0037em;">α</span></span></span></span></span>代表当前输入数据分布中的实数最大值，因为是对称，因此实际范围是<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         [ 
+        
+       
+         − 
+        
+       
+         α 
+        
+       
+         , 
+        
+       
+         α 
+        
+       
+         ] 
+        
+       
+      
+        [-\alpha,\alpha] 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mopen">[</span><span class="mord">−</span><span class="mord mathdefault" style="margin-right: 0.0037em;">α</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em;"></span><span class="mord mathdefault" style="margin-right: 0.0037em;">α</span><span class="mclose">]</span></span></span></span></span>。而<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         b 
+        
+       
+         = 
+        
+       
+         8 
+        
+       
+      
+        b=8 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.69444em; vertical-align: 0em;"></span><span class="mord mathdefault">b</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 0.64444em; vertical-align: 0em;"></span><span class="mord">8</span></span></span></span></span>代表INT8量化，那么上述的量化公式就是之前提到的对称量化公式。</p> 
+<p>可以对比下非对称和对称的量化公式，对称量化因为<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         z 
+        
+       
+         = 
+        
+       
+         0 
+        
+       
+      
+        z=0 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span class="mord mathdefault" style="margin-right: 0.04398em;">z</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 0.64444em; vertical-align: 0em;"></span><span class="mord">0</span></span></span></span></span>，所以公式简化了很多。</p> 
+<p><img src="https://images2.imgbox.com/b4/aa/TPrQAwhF_o.png" alt="对称量化与非对称量化"></p> 
+<p>对于对称量化，假设当前根据权重分布，选取的<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         α 
+        
+       
+      
+        \alpha 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span class="mord mathdefault" style="margin-right: 0.0037em;">α</span></span></span></span></span>为4，那么<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         s 
+        
+       
+         = 
+        
+       
+         127 
+        
+       
+         / 
+        
+       
+         α 
+        
+       
+         = 
+        
+       
+         127 
+        
+       
+         / 
+        
+       
+         4 
+        
+       
+         = 
+        
+       
+         31.75 
+        
+       
+      
+        s=127/{\alpha}=127/4=31.75 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span class="mord mathdefault">s</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord">1</span><span class="mord">2</span><span class="mord">7</span><span class="mord">/</span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.0037em;">α</span></span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord">1</span><span class="mord">2</span><span class="mord">7</span><span class="mord">/</span><span class="mord">4</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 0.64444em; vertical-align: 0em;"></span><span class="mord">3</span><span class="mord">1</span><span class="mord">.</span><span class="mord">7</span><span class="mord">5</span></span></span></span></span>。</p> 
+<p>如下式子，在反量化的时候我们需要将反向操作一番，将量化后的结果乘以<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         1 
+        
+       
+         / 
+        
+       
+         s 
+        
+       
+      
+        1/s 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord">1</span><span class="mord">/</span><span class="mord mathdefault">s</span></span></span></span></span>重新变为浮点型。这里其实也就相当于乘以<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         α 
+        
+       
+         / 
+        
+       
+         127 
+        
+       
+      
+        \alpha/127 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord mathdefault" style="margin-right: 0.0037em;">α</span><span class="mord">/</span><span class="mord">1</span><span class="mord">2</span><span class="mord">7</span></span></span></span></span>，因为有<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         1 
+        
+       
+         / 
+        
+       
+         s 
+        
+       
+         = 
+        
+       
+         1 
+        
+       
+         / 
+        
+       
+         ( 
+        
+        
+        
+          127 
+         
+        
+          / 
+         
+        
+          α 
+         
+        
+       
+         ) 
+        
+       
+         = 
+        
+       
+         α 
+        
+       
+         / 
+        
+       
+         127 
+        
+       
+      
+        1/s=1/({127/{\alpha}})=\alpha/127 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord">1</span><span class="mord">/</span><span class="mord mathdefault">s</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord">1</span><span class="mord">/</span><span class="mopen">(</span><span class="mord"><span class="mord">1</span><span class="mord">2</span><span class="mord">7</span><span class="mord">/</span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.0037em;">α</span></span></span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord mathdefault" style="margin-right: 0.0037em;">α</span><span class="mord">/</span><span class="mord">1</span><span class="mord">2</span><span class="mord">7</span></span></span></span></span>。</p> 
+<p><img src="https://images2.imgbox.com/d8/15/lXOcqiCn_o.png" alt="对称量化|反量化操作"></p> 
+<p>那么实际操作过程中，scale系数是怎么用呢？或者说<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         s 
+        
+       
+      
+        s 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span class="mord mathdefault">s</span></span></span></span></span>这个量化系数是怎么作用于所有的输入、所有的权重呢？</p> 
+<p>一般量化过程中，有<code>pre-tensor</code>和<code>pre-channel</code>两种方式，<code>pre-tensor</code>显而易见，就是对于同一块输入（比如某个卷积前的输入tensor）我们采用一个scale，该层所有的输入数据共享一个scale值；而<code>pre-channel</code>呢一般是作用于权重，比如一个卷积的权重维度是[64,3,3,3]（输入通道为3输出通道为64，卷积核为3x3），<code>pre-channel</code>就是会产生64个scale值，分别作用于该卷积权重参数的64个通道。</p> 
+<p>为什么权重不能是<code>pre-tensor</code>呢？这个对精度的影响太大了，所以一般不用。输入就可以<code>pre-tensor</code>？当然可以，也经过测试了，对精度的影响不是很大，完全可以用。</p> 
+<p>那为什么权重必须是<code>pre-channel</code>呢？不能是每个权重值都有自己的scale么？呃，这个问题嘛，首先可以想到，这个计算量，应该挺大，其次嘛，让我们分析一下。</p> 
+<h3><a id="_167"></a>卷积操作量化</h3> 
+<p>铺垫了这么多，那么接下来说下<strong>量化最核心</strong>的操作吧，量化过程中最核心的操作当然是<strong>卷积量化</strong>。</p> 
+<p>我们都知道卷积操作可以拆分为<a href="https://mp.weixin.qq.com/s?__biz=Mzg3ODU2MzY5MA==&amp;mid=2247488158&amp;idx=1&amp;sn=3722bc7433811d494e179cb828dade32&amp;chksm=cf108a9bf867038d4e7e451212429925a48dcbd47d9811315c132271f104540fe503555e7611&amp;token=1276531538&amp;lang=zh_CN#rd" rel="nofollow">im2col+sgemm</a>，而大部分的计算都在<strong>矩阵运算</strong>也就是<strong>sgemm</strong>中，我们量化的重点也就是这个操作。以前是FP32计算，而现在变成INT8去计算，这是怎么转换的呢？</p> 
+<p>接下来重点分析一下<strong>量化公式</strong>！注意！这个很重要！</p> 
+<p>首先，矩阵相乘可以表示为<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         Y 
+        
+       
+         = 
+        
+       
+         X 
+        
+       
+         W 
+        
+       
+      
+        Y = X W 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.68333em; vertical-align: 0em;"></span><span class="mord mathdefault" style="margin-right: 0.22222em;">Y</span><span class="mspace" style="margin-right: 0.277778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em;"></span></span><span class="base"><span class="strut" style="height: 0.68333em; vertical-align: 0em;"></span><span class="mord mathdefault" style="margin-right: 0.07847em;">X</span><span class="mord mathdefault" style="margin-right: 0.13889em;">W</span></span></span></span></span>，X为输入W为权重，Y为输出。偏置bias一般可以去掉，对精度影响也不大，所以就先不考虑了。</p> 
+<p><img src="https://images2.imgbox.com/d6/9c/hWPJQK5Q_o.png" alt="卷积操作"></p> 
+<p>注意看上图输入X的维度为[m,p]而W的维度为[p,n]，因此i的范围为[0,m)，k的范围为[0,p)。W和Y同理。这里的输入和权重都是FP32精度，也就是实数。</p> 
+<p>而对应的INT8精度的输入和权重为，q下标就代表quantize也就是量化：</p> 
+<p><img src="https://images2.imgbox.com/0f/b7/1wNjbY8O_o.png" alt="量化后的X和W"></p> 
+<p>接下来，我们把矩阵公式细粒度拆成一个一个计算，也就是行和列每个元素相乘然后求和：</p> 
+<p><img src="https://images2.imgbox.com/c0/2f/TqVPR9EJ_o.png" alt="公式"></p> 
+<p>首先是最左边，<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          x 
+         
+         
+         
+           i 
+          
+         
+           k 
+          
+         
+        
+       
+      
+        x_{ik} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.58056em; vertical-align: -0.15em;"></span><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.336108em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight">i</span><span class="mord mathdefault mtight" style="margin-right: 0.03148em;">k</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span></span></span></span></span>和<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          w 
+         
+         
+         
+           k 
+          
+         
+           j 
+          
+         
+        
+       
+      
+        w_{kj} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.716668em; vertical-align: -0.286108em;"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.02691em;">w</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.336108em;"><span class="" style="top: -2.55em; margin-left: -0.02691em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight" style="margin-right: 0.03148em;">k</span><span class="mord mathdefault mtight" style="margin-right: 0.05724em;">j</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.286108em;"><span class=""></span></span></span></span></span></span></span></span></span></span>分别代表浮点型的输入和权重，<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         i 
+        
+       
+      
+        i 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.65952em; vertical-align: 0em;"></span><span class="mord mathdefault">i</span></span></span></span></span>代表第<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         i 
+        
+       
+      
+        i 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.65952em; vertical-align: 0em;"></span><span class="mord mathdefault">i</span></span></span></span></span>行，<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         k 
+        
+       
+      
+        k 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.69444em; vertical-align: 0em;"></span><span class="mord mathdefault" style="margin-right: 0.03148em;">k</span></span></span></span></span>代表第<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         k 
+        
+       
+      
+        k 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.69444em; vertical-align: 0em;"></span><span class="mord mathdefault" style="margin-right: 0.03148em;">k</span></span></span></span></span>列，因此<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          x 
+         
+         
+         
+           i 
+          
+         
+           k 
+          
+         
+        
+       
+      
+        x_{ik} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.58056em; vertical-align: -0.15em;"></span><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.336108em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight">i</span><span class="mord mathdefault mtight" style="margin-right: 0.03148em;">k</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span></span></span></span></span>代表第<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         i 
+        
+       
+      
+        i 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.65952em; vertical-align: 0em;"></span><span class="mord mathdefault">i</span></span></span></span></span>行，第<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         k 
+        
+       
+      
+        k 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.69444em; vertical-align: 0em;"></span><span class="mord mathdefault" style="margin-right: 0.03148em;">k</span></span></span></span></span>列的元素，<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          w 
+         
+         
+         
+           k 
+          
+         
+           i 
+          
+         
+        
+       
+      
+        w_{ki} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.58056em; vertical-align: -0.15em;"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.02691em;">w</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.336108em;"><span class="" style="top: -2.55em; margin-left: -0.02691em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight" style="margin-right: 0.03148em;">k</span><span class="mord mathdefault mtight">i</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span></span></span></span></span>同理。<strong>两者相乘求和</strong>就可以得到<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          y 
+         
+         
+         
+           i 
+          
+         
+           j 
+          
+         
+        
+       
+      
+        y_{ij} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.716668em; vertical-align: -0.286108em;"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em;">y</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em;"><span class="" style="top: -2.55em; margin-left: -0.03588em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight">i</span><span class="mord mathdefault mtight" style="margin-right: 0.05724em;">j</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.286108em;"><span class=""></span></span></span></span></span></span></span></span></span></span>，可以看到这里求和的范围是<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         p 
+        
+       
+      
+        p 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em; vertical-align: -0.19444em;"></span><span class="mord mathdefault">p</span></span></span></span></span>，<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         k 
+        
+       
+      
+        k 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.69444em; vertical-align: 0em;"></span><span class="mord mathdefault" style="margin-right: 0.03148em;">k</span></span></span></span></span>从1到<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         p 
+        
+       
+      
+        p 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em; vertical-align: -0.19444em;"></span><span class="mord mathdefault">p</span></span></span></span></span>变化。</p> 
+<p>进一步，两个浮点型的运算可以被近似为<strong>INT8反量化后</strong>的运算，进一步等于量化后的运算:</p> 
+<p><img src="https://images2.imgbox.com/ae/71/PL2CUgae_o.png" alt="量化输入和权重的计算"></p> 
+<p>可以看到上式每个元素都有自己的scale值，也就是<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         s 
+        
+       
+      
+        s 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span class="mord mathdefault">s</span></span></span></span></span>，<strong>而我们也必须把x和w的scale值提取到前面才能让x和w实现INT8类型的矩阵运算</strong>：</p> 
+<p><img src="https://images2.imgbox.com/99/45/orTgvv8r_o.png" alt="量化公式"></p> 
+<p>这里可以发现，如果想要把这两个scale元素，也就是<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          s 
+         
+         
+         
+           x 
+          
+         
+           , 
+          
+         
+           i 
+          
+         
+        
+       
+      
+        s_{x,i} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.716668em; vertical-align: -0.286108em;"></span><span class="mord"><span class="mord mathdefault">s</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight">x</span><span class="mpunct mtight">,</span><span class="mord mathdefault mtight">i</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.286108em;"><span class=""></span></span></span></span></span></span></span></span></span></span>和<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          s 
+         
+         
+         
+           w 
+          
+         
+           , 
+          
+         
+           j 
+          
+         
+        
+       
+      
+        s_{w,j} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.716668em; vertical-align: -0.286108em;"></span><span class="mord"><span class="mord mathdefault">s</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight" style="margin-right: 0.02691em;">w</span><span class="mpunct mtight">,</span><span class="mord mathdefault mtight" style="margin-right: 0.05724em;">j</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.286108em;"><span class=""></span></span></span></span></span></span></span></span></span></span>提出来，那么这个<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         k 
+        
+       
+      
+        k 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.69444em; vertical-align: 0em;"></span><span class="mord mathdefault" style="margin-right: 0.03148em;">k</span></span></span></span></span>必须干掉，这里可以暂停一下想下为什么？</p> 
+<p><img src="https://images2.imgbox.com/33/c4/tfit7Hz8_o.png" alt="INT8矩阵相乘"></p> 
+<p>当把k去除将s取出来之后，我们发现<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          s 
+         
+         
+         
+           x 
+          
+         
+           , 
+          
+         
+           i 
+          
+         
+        
+       
+      
+        s_{x,i} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.716668em; vertical-align: -0.286108em;"></span><span class="mord"><span class="mord mathdefault">s</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight">x</span><span class="mpunct mtight">,</span><span class="mord mathdefault mtight">i</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.286108em;"><span class=""></span></span></span></span></span></span></span></span></span></span>和<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          s 
+         
+         
+         
+           w 
+          
+         
+           , 
+          
+         
+           j 
+          
+         
+        
+       
+      
+        s_{w,j} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.716668em; vertical-align: -0.286108em;"></span><span class="mord"><span class="mord mathdefault">s</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight" style="margin-right: 0.02691em;">w</span><span class="mpunct mtight">,</span><span class="mord mathdefault mtight" style="margin-right: 0.05724em;">j</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.286108em;"><span class=""></span></span></span></span></span></span></span></span></span></span>分别代表输入的第<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         i 
+        
+       
+      
+        i 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.65952em; vertical-align: 0em;"></span><span class="mord mathdefault">i</span></span></span></span></span>行的scale和权重的第<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         j 
+        
+       
+      
+        j 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.85396em; vertical-align: -0.19444em;"></span><span class="mord mathdefault" style="margin-right: 0.05724em;">j</span></span></span></span></span>列的scale值，这样输入的每一行必须共享scale，而权重的每一列也必须共享scale！</p> 
+<p><img src="https://images2.imgbox.com/6f/d8/DX00plMC_o.png" alt="pre-col和pre-row共享scale"></p> 
+<p>那么<code>pre-channel</code>又是怎么来的呢？</p> 
+<p>还记得老潘之前说过的<a href="https://mp.weixin.qq.com/s?__biz=Mzg3ODU2MzY5MA==&amp;mid=2247488158&amp;idx=1&amp;sn=3722bc7433811d494e179cb828dade32&amp;chksm=cf108a9bf867038d4e7e451212429925a48dcbd47d9811315c132271f104540fe503555e7611&amp;token=1276531538&amp;lang=zh_CN#rd" rel="nofollow">im2col+sgemm</a>操作吗（如果不记得强烈建议去看看），其中的<code>sgemm</code>是这样的，需要注意，下图左边的kernel矩阵，每一行代表一个输出通道的kernel集合（这里因为输入图像是三通道的，因此kernel有三个，不同颜色代表一个kernel）：</p> 
+<p><img src="https://images2.imgbox.com/c7/8c/9lelFvY4_o.png" alt="卷积操作中，每个输出channel共享一个scale"></p> 
+<p>这就是<code>pre-channel</code>或者详细点就是<code>per-output-channel</code>也就是卷积输出通道，我们对每一个卷积权重的输出通道那一维进行量化，然后共享一个scale，这也就呼应了上述的公式！</p> 
+<h2><a id="_216"></a>后记</h2> 
+<p>到此我们已经讲述了量化的基本概念以及卷积量化的实际操作是什么样的，当然想说的还有很多…就是现在实在写不动了，关于<strong>非对称量化</strong>的公式以及为什么<strong>非对称量化计算量比较大</strong>，就放到第二期再说吧。文中提到的一些资料，号内回复”量化“即可获取。</p> 
+<p>后续文章会继续说明<strong>其他量化的操作细节以及实际部署中的代码细节</strong>，涉及到TensorRT以及Pytorch和TVM，感兴趣的不妨持续关注老潘~</p> 
+<p>也欢迎大家一起讨论，如有错误也欢迎指正。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/0e41ce9b6bfa0d3a142e21c57a25ed3c/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">mycat从0到成功进行分表操作</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/3fb88377117ee6500ced04b6f711935b/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">数据集处理（二）——Tiny-imagenet</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

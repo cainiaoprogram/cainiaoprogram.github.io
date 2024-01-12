@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>MPU6050使用心得（简单分享一下） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="MPU6050使用心得（简单分享一下）" />
+<meta property="og:description" content="前言 选用MPU6050做 倾斜检测 功能。
+前期准备 开发板：正点原子STM32F103 精英版（STM32F103ZET6）
+模块：GY-521 MPU6050
+其他：杜邦线若干、烧录线、FlyMcu、Keil5、正点原子开发板配套的套件（TFTLCD）
+例程、资料下载 源自淘宝卖家：https://pan.baidu.com/share/init?surl=dNDqcp76L9QdM7iSZYfz_A 密码：4eum
+GY-521 MPU6050模块 三维角度传感器6DOF三轴加速度计电子陀螺仪\MPU6050六轴角度加速度传感器\11，ATK-MPU6050六轴传感器模块\2，程序源码\（库函数版本，适合精英STM32开发板）实验30 MPU6050六轴传感器实验.rar
+我们的例程刚好选择的适配 我们开发版的正点原子例程，虽然这个程序是针对ATK-MPU6050，不过其实2个模块差别不大，可以通用例程，非常方便。
+原理图 我们可以看下2个模型的原理图，可以发现ATK-MPU6050只是有几个管脚没有接出来，不使用的话，其实没啥区别
+GY-521 MPU6050 ATK-MPU6050 这边的AUX_CL、AUX_DA就没接
+引脚描述 源自：姿态传感器——MPU6050
+SCL、SDA：是连接MCU的IIC接口，MCU通过这个IIC接口来控制MPU6050，此时MPU6050作为一个IIC从机设备，接单片机的I2C_SCL。 XCL、XDA：辅助IIC用来连接其他器件，可用来连接外部从设备，比如磁传感器，这样就可以组成一个九轴传感器，不需要连接单片机。 AD0：地址管脚，可以不接单片机。当MPU6050作为一个IIC从机设备的时候，有8位地址，高7位的地址是固定的，就是WHOAMI寄存器的默认——0x68，最低的一位是由AD0的连线决定的。 AD0接GND时，高8位的最后一位是0，所以iic从机地址是0x68； AD0接VCC时，高8位的最后一位是1，所以iic从机地址是0x69。 INT：数据输出的中断引脚，可以不接单片机，准备好数据之后,通过中断告诉STM32,从而获取数据。 VCC：接3.3V或5V电源 GND：接地 所以ATK-MPU6050这XCL、XDA不接也罢，不影响。
+接线 可以参考资料内的ATK-MPU6050六轴传感器模块用户手册_V1.0.pdf，或者直接看例程源码。
+VCC -》 3.3V GND -》 GND SCL -》 PB10 SDA -》 PB11 AD0 -》 PA15 源码关键部分分析 main.c 关注的核心部分就在 while(mpu_dmp_init())，DMP初始化这块，注意会出问题的部分
+inv_mpu.c //mpu6050,dmp初始化 //返回值:0,正常 // 其他,失败 u8 mpu_dmp_init(void) { u8 res=0; MPU_IIC_Init(); //初始化IIC总线 if(mpu_init()==0)	//初始化MPU6050 {	res=mpu_set_sensors(INV_XYZ_GYRO|INV_XYZ_ACCEL);//设置所需要的传感器 if(res)return 1; res=mpu_configure_fifo(INV_XYZ_GYRO|INV_XYZ_ACCEL);//设置FIFO if(res)return 2; res=mpu_set_sample_rate(DEFAULT_MPU_HZ);	//设置采样率 if(res)return 3; res=dmp_load_motion_driver_firmware();	//加载dmp固件 if(res)return 4; res=dmp_set_orientation(inv_orientation_matrix_to_scalar(gyro_orientation));//设置陀螺仪方向 if(res)return 5; res=dmp_enable_feature(DMP_FEATURE_6X_LP_QUAT|DMP_FEATURE_TAP|	//设置dmp功能 DMP_FEATURE_ANDROID_ORIENT|DMP_FEATURE_SEND_RAW_ACCEL|DMP_FEATURE_SEND_CAL_GYRO| DMP_FEATURE_GYRO_CAL); if(res)return 6; res=dmp_set_fifo_rate(DEFAULT_MPU_HZ);	//设置DMP输出速率(最大不超过200Hz) if(res)return 7; res=run_self_test();	//自检 核心部分，最容易出错的地方 if(res)return 8; res=mpu_set_dmp_state(1);	//使能DMP if(res)return 9; }else return 10; return 0; } 其中run_self_test()是关键，自检操作会对模块的各角度进行调整到“零度”，所谓的零度，不是真零度，稍后补充。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/ef601b96b3e010ad526d98c8279724d0/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-10-20T10:48:13+08:00" />
+<meta property="article:modified_time" content="2023-10-20T10:48:13+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">MPU6050使用心得（简单分享一下）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="_0"></a>前言</h2> 
+<p>选用MPU6050做 倾斜检测 功能。</p> 
+<h3><a id="_2"></a>前期准备</h3> 
+<p>开发板：正点原子STM32F103 精英版（STM32F103ZET6）<br> <img src="https://images2.imgbox.com/db/75/IkwTOH34_o.png" alt="在这里插入图片描述"></p> 
+<p>模块：GY-521 MPU6050<br> <img src="https://images2.imgbox.com/ad/cc/0pDgMP2b_o.jpg" alt="在这里插入图片描述"></p> 
+<p>其他：杜邦线若干、烧录线、FlyMcu、Keil5、正点原子开发板配套的套件（TFTLCD）</p> 
+<h2><a id="_11"></a>例程、资料下载</h2> 
+<p>源自淘宝卖家：https://pan.baidu.com/share/init?surl=dNDqcp76L9QdM7iSZYfz_A 密码：4eum</p> 
+<p><code>GY-521 MPU6050模块 三维角度传感器6DOF三轴加速度计电子陀螺仪\MPU6050六轴角度加速度传感器\11，ATK-MPU6050六轴传感器模块\2，程序源码\（库函数版本，适合精英STM32开发板）实验30 MPU6050六轴传感器实验.rar</code><br> 我们的例程刚好选择的适配 我们开发版的正点原子例程，虽然这个程序是针对ATK-MPU6050，不过其实2个模块差别不大，可以通用例程，非常方便。</p> 
+<h2><a id="_18"></a>原理图</h2> 
+<p>我们可以看下2个模型的原理图，可以发现ATK-MPU6050只是有几个管脚没有接出来，不使用的话，其实没啥区别</p> 
+<h3><a id="GY521_MPU6050_20"></a>GY-521 MPU6050</h3> 
+<p><img src="https://images2.imgbox.com/08/0e/SA9IRpX2_o.jpg" alt="在这里插入图片描述"></p> 
+<h3><a id="ATKMPU6050_22"></a>ATK-MPU6050</h3> 
+<p>这边的AUX_CL、AUX_DA就没接<br> <img src="https://images2.imgbox.com/a4/eb/SAOzdwHF_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="_25"></a>引脚描述</h2> 
+<p>源自：<a href="https://blog.csdn.net/weixin_52801934/article/details/126232654">姿态传感器——MPU6050</a></p> 
+<pre><code>SCL、SDA：是连接MCU的IIC接口，MCU通过这个IIC接口来控制MPU6050，此时MPU6050作为一个IIC从机设备，接单片机的I2C_SCL。
+XCL、XDA：辅助IIC用来连接其他器件，可用来连接外部从设备，比如磁传感器，这样就可以组成一个九轴传感器，不需要连接单片机。
+AD0：地址管脚，可以不接单片机。当MPU6050作为一个IIC从机设备的时候，有8位地址，高7位的地址是固定的，就是WHOAMI寄存器的默认——0x68，最低的一位是由AD0的连线决定的。
+AD0接GND时，高8位的最后一位是0，所以iic从机地址是0x68；
+AD0接VCC时，高8位的最后一位是1，所以iic从机地址是0x69。
+INT：数据输出的中断引脚，可以不接单片机，准备好数据之后,通过中断告诉STM32,从而获取数据。
+VCC：接3.3V或5V电源
+GND：接地
+</code></pre> 
+<p>所以ATK-MPU6050这XCL、XDA不接也罢，不影响。</p> 
+<h2><a id="_39"></a>接线</h2> 
+<p>可以参考资料内的<code>ATK-MPU6050六轴传感器模块用户手册_V1.0.pdf</code>，或者直接看例程源码。</p> 
+<pre><code>VCC -》 3.3V
+GND -》 GND
+SCL -》 PB10
+SDA -》 PB11
+AD0 -》 PA15
+</code></pre> 
+<h2><a id="_48"></a>源码关键部分分析</h2> 
+<h3><a id="mainc_49"></a>main.c</h3> 
+<p>关注的核心部分就在 <code>while(mpu_dmp_init())</code>，DMP初始化这块，注意会出问题的部分</p> 
+<h3><a id="inv_mpuc_51"></a>inv_mpu.c</h3> 
+<pre><code>//mpu6050,dmp初始化
+//返回值:0,正常
+//    其他,失败
+u8 mpu_dmp_init(void)
+{
+	u8 res=0;
+	MPU_IIC_Init(); 	//初始化IIC总线
+	if(mpu_init()==0)	//初始化MPU6050
+	{	 
+		res=mpu_set_sensors(INV_XYZ_GYRO|INV_XYZ_ACCEL);//设置所需要的传感器
+		if(res)return 1; 
+		res=mpu_configure_fifo(INV_XYZ_GYRO|INV_XYZ_ACCEL);//设置FIFO
+		if(res)return 2; 
+		res=mpu_set_sample_rate(DEFAULT_MPU_HZ);	//设置采样率
+		if(res)return 3; 
+		res=dmp_load_motion_driver_firmware();		//加载dmp固件
+		if(res)return 4; 
+		res=dmp_set_orientation(inv_orientation_matrix_to_scalar(gyro_orientation));//设置陀螺仪方向
+		if(res)return 5; 
+		res=dmp_enable_feature(DMP_FEATURE_6X_LP_QUAT|DMP_FEATURE_TAP|	//设置dmp功能
+		    DMP_FEATURE_ANDROID_ORIENT|DMP_FEATURE_SEND_RAW_ACCEL|DMP_FEATURE_SEND_CAL_GYRO|
+		    DMP_FEATURE_GYRO_CAL);
+		if(res)return 6; 
+		res=dmp_set_fifo_rate(DEFAULT_MPU_HZ);	//设置DMP输出速率(最大不超过200Hz)
+		if(res)return 7;   
+		res=run_self_test();		//自检 核心部分，最容易出错的地方
+		if(res)return 8;    
+		res=mpu_set_dmp_state(1);	//使能DMP
+		if(res)return 9;     
+	}else return 10;
+	return 0;
+}
+</code></pre> 
+<p>其中<code>run_self_test()</code>是关键，自检操作会对模块的各角度进行调整到“零度”，所谓的零度，不是真零度，稍后补充。<br> 如果自检这一套不通过，LCD上就会一直跳动<code>MPU6050 Error</code>，当然也许你运气好，直接通过了，也说不准hh<br> 那么按照正常操作，官方demo下，你应该将模块水平地面静止放置，芯片朝上（其实朝下也可以，但是有坑点！！！），然后复位程序（不复位也可以，会死循环跑），顺利的话，你就能看到各个角度值了，当然，细心的你会发现一些端倪，显示的<code>Yaw航向角</code>会跳动，那么这时候，你可以看看这篇文章的讲解：<a href="https://blog.csdn.net/qq_46554815/article/details/113121709">MPU6050常见问题的分析与处理</a>，讲得很好，直击痛点，其实就是硬件问题导致的漂移，需要额外追加磁力计。不过我需要实现的功能只是倾斜检测，所以Yaw航向角可以不做使用，也就不影响了。<br> <img src="https://images2.imgbox.com/37/85/in5zdRYp_o.jpg" alt="在这里插入图片描述"></p> 
+<p>那么到了这一步，即使你水平禁止放平了模块，依然无法完成自检，那我们就再继续深入。前情建议：可以换一个模块试试（因为我在深入探究后，最后发现是模块问题）</p> 
+<p>进入<code>run_self_test(void)</code>，一探究竟</p> 
+<pre><code>//MPU6050自测试
+//返回值:0,正常
+//    其他,失败
+u8 run_self_test(void)
+{
+	int result;
+	//char test_packet[4] = {0};
+	long gyro[3], accel[3];
+	
+	
+	//float sens;
+	//unsigned short accel_sens;
+	
+	
+	result = mpu_run_self_test(gyro, accel);
+	
+	// 强制自检成功，万不得已的情况下使用
+	//float sens;
+	//unsigned short accel_sens;
+	/*
+	mpu_get_gyro_sens(&amp;sens);
+	gyro[0] = (long)(gyro[0] * sens);
+	gyro[1] = (long)(gyro[1] * sens);
+	gyro[2] = (long)(gyro[2] * sens);
+	dmp_set_gyro_bias(gyro);
+	mpu_get_accel_sens(&amp;accel_sens);
+	accel[0] *= accel_sens;
+	accel[1] *= accel_sens;
+	accel[2] *= accel_sens;
+	dmp_set_accel_bias(accel);
+	return 0;
+	*/
+	
+	// 如果加速度和陀螺仪自检通过，就把当前读取到的各个xyz轴数据设置，作为基准值
+	if (result == 0x3) 
+	{
+		/* Test passed. We can trust the gyro data here, so let's push it down
+		* to the DMP.
+		*/
+		float sens;
+		unsigned short accel_sens;
+		mpu_get_gyro_sens(&amp;sens);
+		gyro[0] = (long)(gyro[0] * sens);
+		gyro[1] = (long)(gyro[1] * sens);
+		gyro[2] = (long)(gyro[2] * sens);
+		dmp_set_gyro_bias(gyro);
+		mpu_get_accel_sens(&amp;accel_sens);
+		accel[0] *= accel_sens;
+		accel[1] *= accel_sens;
+		accel[2] *= accel_sens;
+		dmp_set_accel_bias(accel);
+		return 0;
+	}else return 1;
+}
+</code></pre> 
+<p>在看到源码后，其实就显而易见了，自检不通过，其实就是<code>mpu_run_self_test</code>函数返回的结果不为0x3，那我们就继续深入<code>mpu_run_self_test</code>函数</p> 
+<pre><code>/* 
+这段注释解释了一个触发传感器自检的函数。自检过程会返回一个掩码，用于指示哪些传感器通过了自检，哪些未通过。
+其中，第 0 位表示陀螺仪，第 1 位表示加速度计，第 2 位表示磁罗盘。
+注释中还提到目前 MPU6500 不支持硬件自检，但仍然可以通过此函数获取加速度计和陀螺仪的偏移。
+另外，为了保证自检的准确性，调用此函数时设备应该处于面朝上或面朝下的状态，即 z 轴与重力平行。
+函数会返回一个结果掩码，用于表示哪些传感器未通过自检，哪些通过了。
+*/
+/**
+ *  @brief      Trigger gyro/accel/compass self-test.
+ *  On success/error, the self-test returns a mask representing the sensor(s)
+ *  that failed. For each bit, a one (1) represents a "pass" case; conversely,
+ *  a zero (0) indicates a failure.
+ *
+ *  \n The mask is defined as follows:
+ *  \n Bit 0:   Gyro.
+ *  \n Bit 1:   Accel.
+ *  \n Bit 2:   Compass.
+ *
+ *  \n Currently, the hardware self-test is unsupported for MPU6500. However,
+ *  this function can still be used to obtain the accel and gyro biases.
+ *
+ *  \n This function must be called with the device either face-up or face-down
+ *  (z-axis is parallel to gravity). 
+目前，MPU6500 不支持硬件自检。然而，该函数仍可用于获取加速度计和陀螺仪的偏移。
+调用此函数时，设备必须处于面朝上或面朝下的状态（z 轴与重力平行）。
+ *  @param[out] gyro        Gyro biases in q16 format.
+ *  @param[out] accel       Accel biases (if applicable) in q16 format.
+ *  @return     Result mask (see above).
+ */
+ // 此时的gyro，accel是前一个函数定义的局部变量，没有初始值
+int mpu_run_self_test(long *gyro, long *accel)
+{
+#ifdef MPU6050
+	  // 原来这个参数为2，堆栈中为0x02，即使改为0x03，在仿真堆栈中任然为0x02
+    const unsigned char tries = 2;
+    long gyro_st[3], accel_st[3];
+    unsigned char accel_result, gyro_result;
+#ifdef AK89xx_SECONDARY
+    unsigned char compass_result;
+#endif
+    int ii;
+#endif
+    int result;
+    unsigned char accel_fsr, fifo_sensors, sensors_on;
+    unsigned short gyro_fsr, sample_rate, lpf;
+    unsigned char dmp_was_on;
+
+    if (st.chip_cfg.dmp_on) {
+        mpu_set_dmp_state(0);
+        dmp_was_on = 1;
+    } else
+        dmp_was_on = 0;
+
+    /* Get initial settings. */
+		// 0x07D0
+    mpu_get_gyro_fsr(&amp;gyro_fsr);
+		// 0x02
+    mpu_get_accel_fsr(&amp;accel_fsr);
+		// 0x002A
+    mpu_get_lpf(&amp;lpf);
+		// 0x0064
+    mpu_get_sample_rate(&amp;sample_rate);
+		// 0x78 'x'
+    sensors_on = st.chip_cfg.sensors;
+		// 0x78 'x'
+    mpu_get_fifo_config(&amp;fifo_sensors);
+
+    /* For older chips, the self-test will be different. */
+#if defined MPU6050
+		
+    for (ii = 0; ii &lt; tries; ii++)
+        if (!get_st_biases(gyro, accel, 0))
+            break;
+    if (ii == tries) {
+        /* If we reach this point, we most likely encountered an I2C error.
+         * We'll just report an error for all three sensors.
+         */
+        result = 0;
+        goto restore;
+    }
+    for (ii = 0; ii &lt; tries; ii++)
+        if (!get_st_biases(gyro_st, accel_st, 1))
+            break;
+    if (ii == tries) {
+        /* Again, probably an I2C error. */
+        result = 0;
+        goto restore;
+    }
+		
+	printf("accel=%ld, %ld, %ld\r\n", accel[0], accel[1], accel[2]);
+	printf("accel_st=%ld, %ld, %ld\r\n", accel_st[0], accel_st[1], accel_st[2]);
+	printf("gyro=%ld, %ld, %ld\r\n", gyro[0], gyro[1], gyro[2]);
+	printf("gyro_st=%ld, %ld, %ld\r\n", gyro_st[0], gyro_st[1], gyro_st[2]);
+		
+	// 加速度传感器自检
+    accel_result = accel_self_test(accel, accel_st);
+	// 陀螺仪传感器的自检 
+    gyro_result = gyro_self_test(gyro, gyro_st);
+		
+	printf("accel_result=%d, gyro_result=%d\r\n", accel_result, gyro_result);
+
+    result = 0;
+    if (!gyro_result)
+        result |= 0x01;
+    if (!accel_result)
+        result |= 0x02;
+
+#ifdef AK89xx_SECONDARY
+    compass_result = compass_self_test();
+    if (!compass_result)
+        result |= 0x04;
+#endif
+restore:
+#elif defined MPU6500
+    /* For now, this function will return a "pass" result for all three sensors
+     * for compatibility with current test applications.
+     */
+    get_st_biases(gyro, accel, 0);
+    result = 0x7;
+#endif
+    /* Set to invalid values to ensure no I2C writes are skipped. */
+    st.chip_cfg.gyro_fsr = 0xFF;
+    st.chip_cfg.accel_fsr = 0xFF;
+    st.chip_cfg.lpf = 0xFF;
+    st.chip_cfg.sample_rate = 0xFFFF;
+    st.chip_cfg.sensors = 0xFF;
+    st.chip_cfg.fifo_enable = 0xFF;
+    st.chip_cfg.clk_src = INV_CLK_PLL;
+    mpu_set_gyro_fsr(gyro_fsr);
+    mpu_set_accel_fsr(accel_fsr);
+    mpu_set_lpf(lpf);
+    mpu_set_sample_rate(sample_rate);
+    mpu_set_sensors(sensors_on);
+    mpu_configure_fifo(fifo_sensors);
+
+    if (dmp_was_on)
+        mpu_set_dmp_state(1);
+
+    return result;
+}
+</code></pre> 
+<p>进来后其实可以发现，影响result值的其实就是这两个自检函数，两个传感器只要有一个不通过，就GG，同样可以通过返回值判断是哪块的错误。</p> 
+<pre><code>// 加速度传感器自检
+accel_result = accel_self_test(accel, accel_st);
+// 陀螺仪传感器的自检 
+gyro_result = gyro_self_test(gyro, gyro_st);
+</code></pre> 
+<p>当时我的错误是在加速度这块<code>accel_self_test</code>，其实这两块实现也差不多，我们继续深入<code>accel_self_test</code>函数。</p> 
+<pre><code>/*
+用于加速度传感器自检的函数，主要是通过比较两组偏移值来检查传感器是否正常工作。
+函数的目标是检测传感器在不同轴向上的偏移值是否在允许的范围内，如果都在范围内，则返回0，表示自检通过。
+*/
+// bias_regular[0] = 0xFFFF14F6, bias_st[0] = 0xFFFFA5DD
+static int accel_self_test(long *bias_regular, long *bias_st)
+{
+    int jj, result = 0;
+    float st_shift[3], st_shift_cust, st_shift_var;
+
+	// 计算加速度传感器的标定偏移
+	// st_shift[3] = {0.561419249, 0.47499004, 0.60024482}
+    get_accel_prod_shift(st_shift);
+    for(jj = 0; jj &lt; 3; jj++) {
+		// 强制跳过z轴检测
+		if(2 == jj) break;
+			
+	    // 计算当前轴向的自定义偏移，即标定偏移和测试偏移之间的差值除以一个常数
+		// 第三组数据时，st_shift_cust = 0，0xFFF10000
+        st_shift_cust = labs(bias_regular[jj] - bias_st[jj]) / 65536.f;
+		// 如果标定偏移不为零（即不等于零），则进入这个条件判断
+        if (st_shift[jj]) {
+			// 计算偏移变化，即自定义偏移相对于标定偏移的比例减去1
+			// test.max_accel_var设置于全局变量，为0.14
+			// 如果偏移变化的绝对值大于某个阈值 test.max_accel_var，则表示偏移变化超过了允许范围，将当前轴向的位设置到 result 变量中
+            if (fabs(st_shift_var) &gt; test.max_accel_var)
+                result |= 1 &lt;&lt; jj;
+				printf("accel_self_test fabs(st_shift_var)[%d]=%f\r\n", jj, fabs(st_shift_var));
+				// min_g=0.3， max_g=0.95
+        } else if ((st_shift_cust &lt; test.min_g) ||
+            (st_shift_cust &gt; test.max_g)) {
+            result |= 1 &lt;&lt; jj;
+					printf("st_shift_cust[%d]=%f\r\n", jj, st_shift_cust);
+			}
+    }
+
+    return result;
+}
+
+// 陀螺仪传感器的自检，通过计算偏移值和变化来检测陀螺仪是否在正常工作范围内。如果所有轴向的偏移值都在允许范围内，函数返回0，表示自检通过
+// bias_regular[0] = 0xFFFF7447, bias_st[0] = 0x0031289B
+static int gyro_self_test(long *bias_regular, long *bias_st)
+{
+	 // 定义了整型变量 jj 和 result，用于迭代循环和存储自检结果
+    int jj, result = 0;
+	 // 定义了一个长度为 3 的无符号字符数组 tmp，用于存储临时数据
+    unsigned char tmp[3];
+	 // 定义了三个浮点数变量 st_shift，st_shift_cust 和 st_shift_var，分别用于存储陀螺仪的标定偏移、自定义偏移和偏移变化
+    float st_shift, st_shift_cust, st_shift_var;
+
+	 // 从 I2C 设备中读取数据，并将其存储在 tmp 数组中。如果读取失败，返回错误代码 0x07
+    if (i2c_read(st.hw-&gt;addr, 0x0D, 3, tmp))
+        return 0x07;
+
+	// 通过按位与操作，将读取的数据中的高三位清零，以获得有效的偏移码
+    tmp[0] &amp;= 0x1F;
+    tmp[1] &amp;= 0x1F;
+    tmp[2] &amp;= 0x1F;
+
+		
+    for (jj = 0; jj &lt; 3; jj++) {
+		// 强制跳过z轴检测
+		if(2 == jj) break;
+			
+			
+		// 计算了自定义偏移和偏移变化，并进行了自检。如果偏移变化超过了阈值，或者自定义偏移值超出了允许的范围，则将当前轴向的位设置到 result 变量中
+        st_shift_cust = labs(bias_regular[jj] - bias_st[jj]) / 65536.f;
+        if (tmp[jj]) {
+            st_shift = 3275.f / test.gyro_sens;
+			// 将 st_shift 初始化为一个计算值。然后根据偏移码逐次进行迭代，每次将 st_shift 乘以 1.046，以计算标定偏移值
+            while (--tmp[jj])
+                st_shift *= 1.046f;
+            st_shift_var = st_shift_cust / st_shift - 1.f;
+            if (fabs(st_shift_var) &gt; test.max_gyro_var) {
+                result |= 1 &lt;&lt; jj;
+					printf("gyro_self_test fabs(st_shift_var)[%d]=%f\r\n", jj, fabs(st_shift_var));
+			}
+        } else if ((st_shift_cust &lt; test.min_dps) ||
+            (st_shift_cust &gt; test.max_dps)) {
+            result |= 1 &lt;&lt; jj;
+					printf("st_shift_cust[%d]=%f\r\n", jj, st_shift_cust);
+			}
+    }
+    return result;
+}
+</code></pre> 
+<p>可以发现我加了个z轴跳过的部分，大家可以忽略。那么我们来看一看都是什么，其实注释我也加上去了，简单来说就是计算2个偏移值，然后判断是否在限定的正常区间内，不在就会修改result，可以用于判断是那一块出的错，那么一共是3组数据的校验，xyz轴，其实到这里，已经可以定位到具体哪个部分不符合检查标准了，那么你可以通过修改检查区间来降低检查标准，当然可能修改了也仍然不行，那么就只好再进一步了。</p> 
+<p>我们这个自检的数据源自哪里？往上一级，来自<code>get_st_biases</code>函数。</p> 
+<pre><code>// 此时传入的gyro accel
+static int get_st_biases(long *gyro, long *accel, unsigned char hw_test)
+{
+    unsigned char data[MAX_PACKET_LENGTH];
+    unsigned char packet_count, ii;
+    unsigned short fifo_count;
+
+    data[0] = 0x01;
+    data[1] = 0;
+    if (i2c_write(st.hw-&gt;addr, st.reg-&gt;pwr_mgmt_1, 2, data))
+        return -1;
+    delay_ms(200);
+    data[0] = 0;
+    if (i2c_write(st.hw-&gt;addr, st.reg-&gt;int_enable, 1, data))
+        return -1;
+    if (i2c_write(st.hw-&gt;addr, st.reg-&gt;fifo_en, 1, data))
+        return -1;
+    if (i2c_write(st.hw-&gt;addr, st.reg-&gt;pwr_mgmt_1, 1, data))
+        return -1;
+    if (i2c_write(st.hw-&gt;addr, st.reg-&gt;i2c_mst, 1, data))
+        return -1;
+    if (i2c_write(st.hw-&gt;addr, st.reg-&gt;user_ctrl, 1, data))
+        return -1;
+		// 0x0c
+    data[0] = BIT_FIFO_RST | BIT_DMP_RST;
+    if (i2c_write(st.hw-&gt;addr, st.reg-&gt;user_ctrl, 1, data))
+        return -1;
+    delay_ms(15);
+		// 0x01
+    data[0] = st.test-&gt;reg_lpf;
+    if (i2c_write(st.hw-&gt;addr, st.reg-&gt;lpf, 1, data))
+        return -1;
+		// 0x00
+    data[0] = st.test-&gt;reg_rate_div;
+    if (i2c_write(st.hw-&gt;addr, st.reg-&gt;rate_div, 1, data))
+        return -1;
+    // 此处在计算2个比较值的地方有所出入
+		if (hw_test)
+			  // 0xE0
+        data[0] = st.test-&gt;reg_gyro_fsr | 0xE0;
+    else
+        data[0] = st.test-&gt;reg_gyro_fsr;
+    if (i2c_write(st.hw-&gt;addr, st.reg-&gt;gyro_cfg, 1, data))
+        return -1;
+
+		// 此处在计算2个比较值的地方有所出入
+    if (hw_test)
+			  // 0XF8
+        data[0] = st.test-&gt;reg_accel_fsr | 0xE0;
+    else
+        data[0] = test.reg_accel_fsr;
+    if (i2c_write(st.hw-&gt;addr, st.reg-&gt;accel_cfg, 1, data))
+        return -1;
+		// 此处在计算2个比较值的地方有所出入
+    if (hw_test)
+        delay_ms(200);
+
+    /* Fill FIFO for test.wait_ms milliseconds. */
+		// 0x40
+    data[0] = BIT_FIFO_EN;
+    if (i2c_write(st.hw-&gt;addr, st.reg-&gt;user_ctrl, 1, data))
+        return -1;
+		
+		// 0x78
+    data[0] = INV_XYZ_GYRO | INV_XYZ_ACCEL;
+    if (i2c_write(st.hw-&gt;addr, st.reg-&gt;fifo_en, 1, data))
+        return -1;
+    delay_ms(test.wait_ms);
+    data[0] = 0;
+    if (i2c_write(st.hw-&gt;addr, st.reg-&gt;fifo_en, 1, data))
+        return -1;
+
+		// data[0]=0x04
+    if (i2c_read(st.hw-&gt;addr, st.reg-&gt;fifo_count_h, 2, data))
+        return -1;
+
+		// 0x0400
+    fifo_count = (data[0] &lt;&lt; 8) | data[1];
+		// 0x55
+    packet_count = fifo_count / MAX_PACKET_LENGTH;
+    gyro[0] = gyro[1] = gyro[2] = 0;
+    accel[0] = accel[1] = accel[2] = 0;
+		
+		printf("packet_count=%d\r\n", packet_count);
+
+    for (ii = 0; ii &lt; packet_count; ii++) {
+        short accel_cur[3], gyro_cur[3];
+	    // 读取寄存器地址st.reg-&gt;fifo_r_w数据到data
+        if (i2c_read(st.hw-&gt;addr, st.reg-&gt;fifo_r_w, MAX_PACKET_LENGTH, data))
+            return -1;
+		// printf("data[2, 3]=%d, %d\r\n", data[2], data[3]);
+		// printf("data[4, 5]=%d, %d\r\n", data[4], data[5]);
+        accel_cur[0] = ((short)data[0] &lt;&lt; 8) | data[1];
+        accel_cur[1] = ((short)data[2] &lt;&lt; 8) | data[3];
+        accel_cur[2] = ((short)data[4] &lt;&lt; 8) | data[5];
+        accel[0] += (long)accel_cur[0];
+        accel[1] += (long)accel_cur[1];
+        accel[2] += (long)accel_cur[2];
+        gyro_cur[0] = (((short)data[6] &lt;&lt; 8) | data[7]);
+        gyro_cur[1] = (((short)data[8] &lt;&lt; 8) | data[9]);
+        gyro_cur[2] = (((short)data[10] &lt;&lt; 8) | data[11]);
+        gyro[0] += (long)gyro_cur[0];
+        gyro[1] += (long)gyro_cur[1];
+        gyro[2] += (long)gyro_cur[2];
+    }
+#ifdef EMPL_NO_64BIT
+    gyro[0] = (long)(((float)gyro[0]*65536.f) / test.gyro_sens / packet_count);
+    gyro[1] = (long)(((float)gyro[1]*65536.f) / test.gyro_sens / packet_count);
+    gyro[2] = (long)(((float)gyro[2]*65536.f) / test.gyro_sens / packet_count);
+    if (has_accel) {
+        accel[0] = (long)(((float)accel[0]*65536.f) / test.accel_sens /
+            packet_count);
+        accel[1] = (long)(((float)accel[1]*65536.f) / test.accel_sens /
+            packet_count);
+        accel[2] = (long)(((float)accel[2]*65536.f) / test.accel_sens /
+            packet_count);
+        /* Don't remove gravity! */
+        accel[2] -= 65536L;
+    }
+#else
+		
+	/*
+	printf("******* before\r\n");
+	printf("accel=%ld, %ld, %ld\r\n", accel[0], accel[1], accel[2]);
+	printf("gyro=%ld, %ld, %ld\r\n", gyro[0], gyro[1], gyro[2]);
+	printf("*******\r\n");
+	*/
+		
+    gyro[0] = (long)(((long long)gyro[0]&lt;&lt;16) / test.gyro_sens / packet_count);
+    gyro[1] = (long)(((long long)gyro[1]&lt;&lt;16) / test.gyro_sens / packet_count);
+    gyro[2] = (long)(((long long)gyro[2]&lt;&lt;16) / test.gyro_sens / packet_count);
+    accel[0] = (long)(((long long)accel[0]&lt;&lt;16) / test.accel_sens /
+        packet_count);
+    accel[1] = (long)(((long long)accel[1]&lt;&lt;16) / test.accel_sens /
+        packet_count);
+    accel[2] = (long)(((long long)accel[2]&lt;&lt;16) / test.accel_sens /
+        packet_count);
+    /* Don't remove gravity! */
+		printf("******* after\r\n");
+		printf("accel=%ld, %ld, %ld\r\n", accel[0], accel[1], accel[2]);
+		printf("gyro=%ld, %ld, %ld\r\n", gyro[0], gyro[1], gyro[2]);
+		printf("*******\r\n");
+		
+    if (accel[2] &gt; 0L)
+        accel[2] -= 65536L;
+    else
+        accel[2] += 65536L;
+#endif
+
+    return 0;
+}
+</code></pre> 
+<p>看到这里，其实数据来源就是通过i2c从模块寄存器中读取数据。那么也将到达我们的尾声了，对应的寄存器是什么内容。参考资料：<code>MPU-6000 &amp; MPU-6050 寄存器表及其描述(中文版).pdf</code><br> 然后层层上推，找到<code>4.18 S REGISTERS 9 59 TO 4 64 – – ACCELEROMETER MEASUREMENTS</code><br> <img src="https://images2.imgbox.com/7d/f8/LEMRVpIM_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/bd/db/tdk6PTMG_o.png" alt="在这里插入图片描述"><br> 那么此时，通过前面我追加的打印，和我当时模块输出的值，其加速度的第三组数据，也就是Z轴的值不会发现变化，无论我怎么摆放，怎么晃动。其通过计算后，结果为0，然后导致result不为0，最终导致自检永远无法通过，不过强制跳过z轴校验后，其横滚角和俯仰角也勉强看着能用（勉强）。</p> 
+<p>那么到这，我的判断就是模块损坏导致的这个问题，之后更换模块后，轻松秒杀。。。</p> 
+<p>既然模块算是测试通过了，我们再深入下，看看 倾斜检测，其实说是模块需要水平静止进行自检，实际上不是水平也可以自检通过，基本上只要静止不动就行，某些角度可能会自检失败，主要问题仍然是加速度z轴这块。不过问题不大，那么这就在最后收一个伏笔，在main中获取到3个角度后，做个简单的区间限定，就能判断是否超出了限定的倾斜阈值了，但是使用中我发现，自检中，<code>Roll</code>横滚角，会有问题！</p> 
+<p>当你芯片的法线是朝向水平线往上的（朝向天花板），Roll自检后是从0度开始。<br> 当你芯片的法线是朝向水平线往下的（朝向地面），Roll自检后是从-179.9度开始。<br> 坑点出现了，0度左右偏移后是 -1,1。-179.9度左右偏移后是-179,179，另外朝向地面的情况Roll计算会不怎么正常！！！<br> 那么我们最开始限定的区间判断角度在2种自检情况下，就不再适配了。<br> 那么在我们无法限定模块大致朝向的情况下，这个问题影响很大。<br> 那我给出的方案就是，在自检后，通过判断初始的Roll是靠近0 还是 靠近 -180，从而可以得出芯片的朝向，然后适配2种算法做实现，但是<strong>仅使用于完全平行地面朝下</strong>，斜朝下的话，Roll值读取出来不太正常，整体的角度比例会失调！！！</p> 
+<p><em>ps：芯片刚自检完，数据还会波动一会，需要等待一段时间，稳定后，才能正常使用。（尤其是在芯片朝向地面的情况）</em></p> 
+<p>需要注意的问题点：<br> 偏航角（yaw）零飘：<a href="https://blog.csdn.net/qq_46554815/article/details/113121709">MPU6050常见问题的分析与处理</a><br> 万向节锁：<a href="https://blog.csdn.net/EstrangedZ/article/details/125322769">欧拉角、万向节死锁理解</a></p> 
+<h2><a id="_573"></a>其他坑点</h2> 
+<p><a href="https://blog.csdn.net/qq_52105802/article/details/120595823">基于STM32的MPU6050</a></p> 
+<h2><a id="_576"></a>拓展</h2> 
+<h3><a id="STM32F103C8T6_577"></a>兼容STM32F103C8T6</h3> 
+<p>修改 <code>mpuiic.h</code></p> 
+<pre><code class="prism language-c"><span class="token comment">//IO方向设置</span>
+<span class="token comment">//#define MPU_SDA_IN()  {GPIOB-&gt;CRH&amp;=0XFFFF0FFF;GPIOB-&gt;CRH|=8&lt;&lt;12;}</span>
+<span class="token comment">//#define MPU_SDA_OUT() {GPIOB-&gt;CRH&amp;=0XFFFF0FFF;GPIOB-&gt;CRH|=3&lt;&lt;12;}</span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">MPU_SDA_IN</span><span class="token expression"><span class="token punctuation">(</span><span class="token punctuation">)</span>  <span class="token punctuation">{<!-- --></span>GPIOB<span class="token operator">-&gt;</span>CRL <span class="token operator">&amp;=</span> <span class="token number">0x0FFFFFFF</span><span class="token punctuation">;</span> GPIOB<span class="token operator">-&gt;</span>CRL <span class="token operator">|=</span> <span class="token number">8</span><span class="token operator">&lt;&lt;</span><span class="token number">28</span><span class="token punctuation">;</span><span class="token punctuation">}</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">MPU_SDA_OUT</span><span class="token expression"><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>GPIOB<span class="token operator">-&gt;</span>CRL <span class="token operator">&amp;=</span> <span class="token number">0x0FFFFFFF</span><span class="token punctuation">;</span> GPIOB<span class="token operator">-&gt;</span>CRL <span class="token operator">|=</span> <span class="token number">3</span><span class="token operator">&lt;&lt;</span><span class="token number">28</span><span class="token punctuation">;</span><span class="token punctuation">}</span></span></span>
+
+<span class="token comment">//IO操作函数	 </span>
+<span class="token comment">/*
+#define MPU_IIC_SCL    PBout(10) 		//SCL
+#define MPU_IIC_SDA    PBout(11) 		//SDA	 
+#define MPU_READ_SDA   PBin(11) 		//输入SDA 
+*/</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">MPU_IIC_SCL</span>    <span class="token expression"><span class="token function">PBout</span><span class="token punctuation">(</span><span class="token number">6</span><span class="token punctuation">)</span> 		</span><span class="token comment">//SCL</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">MPU_IIC_SDA</span>    <span class="token expression"><span class="token function">PBout</span><span class="token punctuation">(</span><span class="token number">7</span><span class="token punctuation">)</span> 		</span><span class="token comment">//SDA	 </span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">MPU_READ_SDA</span>   <span class="token expression"><span class="token function">PBin</span><span class="token punctuation">(</span><span class="token number">7</span><span class="token punctuation">)</span> 		</span><span class="token comment">//输入SDA </span></span>
+</code></pre> 
+<p>修改 <code>mpuiic.c</code></p> 
+<pre><code class="prism language-c"><span class="token comment">//初始化IIC</span>
+<span class="token keyword">void</span> <span class="token function">MPU_IIC_Init</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    GPIO_InitTypeDef  GPIO_InitStructure<span class="token punctuation">;</span>
+
+    <span class="token function">RCC_APB2PeriphClockCmd</span><span class="token punctuation">(</span>RCC_APB2Periph_GPIOB<span class="token punctuation">,</span>ENABLE<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//先使能外设IO PORTB时钟</span>
+
+    <span class="token comment">// GPIO_InitStructure.GPIO_Pin = GPIO_Pin_10|GPIO_Pin_11;	 // 端口配置</span>
+	GPIO_InitStructure<span class="token punctuation">.</span>GPIO_Pin <span class="token operator">=</span> GPIO_Pin_6<span class="token operator">|</span>GPIO_Pin_7<span class="token punctuation">;</span>	 <span class="token comment">// 端口配置</span>
+    GPIO_InitStructure<span class="token punctuation">.</span>GPIO_Mode <span class="token operator">=</span> GPIO_Mode_Out_PP<span class="token punctuation">;</span> 		 <span class="token comment">//推挽输出</span>
+    GPIO_InitStructure<span class="token punctuation">.</span>GPIO_Speed <span class="token operator">=</span> GPIO_Speed_50MHz<span class="token punctuation">;</span>		 <span class="token comment">//IO口速度为50MHz</span>
+    <span class="token function">GPIO_Init</span><span class="token punctuation">(</span>GPIOB<span class="token punctuation">,</span> <span class="token operator">&amp;</span>GPIO_InitStructure<span class="token punctuation">)</span><span class="token punctuation">;</span>					 <span class="token comment">//根据设定参数初始化GPIO</span>
+
+    <span class="token comment">//GPIO_SetBits(GPIOB,GPIO_Pin_10|GPIO_Pin_11);						 //PB10,PB11 输出高</span>
+	<span class="token function">GPIO_SetBits</span><span class="token punctuation">(</span>GPIOB<span class="token punctuation">,</span>GPIO_Pin_6<span class="token operator">|</span>GPIO_Pin_7<span class="token punctuation">)</span><span class="token punctuation">;</span>						 <span class="token comment">//PB10,PB11 输出高</span>
+<span class="token punctuation">}</span>
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/0cb37dd6daa14f35e69c7fa2cb6b34ba/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">uniGUI文件操作</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/15fdb8982bbd37d375e6d52265dae0b9/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">文件的逻辑结构（顺序文件，索引文件）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

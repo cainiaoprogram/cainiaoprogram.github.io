@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Linux内存管理第八章 -- Slab Allocator （一） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Linux内存管理第八章 -- Slab Allocator （一）" />
+<meta property="og:description" content="文章目录 Linux内存管理第八章 -- Slab AllocatorCachesCache Descriptor Cache Static FlagsCache Dynamic FlagsCache Allocation FlagsCache ColouringCache CreationCache ReapingCache ShrinkingCache Destroying Linux内存管理第八章 – Slab Allocator 在本章中，来介绍内核中更加通用的分配器。Linux使用的slab allocator与用在Solaris中使用的通用分配器有许多相似之处。Linux的实现基本上是在Bonwick的the first allocator论文的基础上进行了一些改进而这些改进与他后续的论文中的描述十分相似。在深入探讨slab allocator的每个部分之前先来通过一段描述快速浏览下slab allocator所使用的数据结构。
+slab allocator背后的思想是缓存经常使用的object并保持在初始状态供kernel使用。如果被基于object的allocator，内核将耗费很多时间在分配，初始化和释放相同的object。slab allocator的目的就是缓存一些被释放的object因此这些基础的structures在多次调用期间被预留起来。
+slab allocator由一组cache组成，这些cache由一个叫做cache chain的双向循环链表连接在一起。在slab allocator的上下文件，一个cache就是一个管理许多像mm_struct或者fs_cache这种特殊类型的object的管理者。这些cache通过cache struct的next字段连接在一起。
+每一cache维护了有多个连续物理page组成的block，这些block称之为slab。slab被切分成很多小块来存放slab自身的数据结构和其管理的object。他们之前的关系如下图：
+slab allocator有三个基本目标：
+更小块的内存分配可以帮忙消除buddy allocator原本会造成的内部碎片问题。缓存常用的object因此系统不会在分配，初始化和销毁object上浪费时间。在Solaris上的Benchmarks显示使用slab allocator之后对于分配速度有很大的提升。通过将object地址与L1或者L2 cache对齐后可以更好的利用硬件缓存。 为了帮助消除buddy allocator造成的内部碎片问题，系统有维护两个cache集合，这些cache由细小的内存块组成，其大小从25字节到217
+其中一个cache集合供DMA设备使用。这些cache叫做size-N和size-N(DMA)m其中N是指要分配的内存大小。可以调用kmallock()来分配这些cache中的memory。这样就解决了buddy allocator带来的low level page中的内部碎片问题。也就是如果只分配几个字节，如果没有slab allocator的话，也需要分配一个page。
+slab allocator的第二个任务是维护一些cache来分配常用的object。在内核中使用的许多结构体，初始化的时间甚至超过了分配时间。因此当一个新的slab被创建的时候，多个object被构造函数初始化后打包放入到slab中。如果一个object被释放了，它仍然以初始状态存放在slab中以以便object的分配能够加快。
+slab allocator最后一个任务是利用硬件缓存。如果object打包放入slab后还有剩余空间，这些剩余空间将被用来将slab着色。slab着色是一种尝试让在不同slab中的object在硬件cache中使用不同的行的方案。在不同的slab中将object以不同的起始偏移来进行摆放，这就好像这些object在使用CPU硬件缓存的不同行一样来帮助保证从同一个slab分配出来的object不会相互从CPU硬件缓存中被刷掉。使用这种方案后，原本要浪费的空间被添加上了一种新的功能。下图显示了从buddy allocator中分配出来的一个page如何被用来存储与L1 CPU缓存对齐的object。
+如果在编译阶段CONFIG_SLAB_DEBUG被打开，slab allocator提供了附加的slab debug功能。有两个debug功能：red zoning和object poisoning。使用red zoning后，object的两端会被放置水位标记。如果该水位不正常，分配器就知道当前object在分配的时候发生了buffer溢出的问题并立即上报。poisoning一个object是指在slab创建时和object释放时将object填充预定义好的bit pattern。在分配的时候，该pattern会被检查如果该pattern被修改了，allocator就知道该object在分配之前已经使用过了并标记它。
+slab allocator提供了短小精悍的API，如下表：
+kmem_cache_t * kmem_cache_create(const char *name, size_t size, size_t offset, unsigned long flags, void (ctor)(void, kmem_cache_t *, unsigned long),void (dtor)(void, kmem_cache_t *, unsigned long))创建一个新的cache并将它加入到cache chain中 int kmem_cache_reap(int gfp_mask)最多扫描REAP_SCAN个cache并选择其中一个来回收所有的per-cpu objects然后将该cache中的slab释放。该函数在memory很紧张时被调用 int kmem_cache_shrink(kmem_cache_t *cachep)该函数将删除一个cache中所有的per-cpu objects，并删除slabs_free list中的所有slabs，然后返回释放的page数目 void * kmem_cache_alloc(kmem_cache_t *cachep, int flags)从cache中分配单个object并将object返回给调用者 void kmem_cache_free(kmem_cache_t *cachep, void *objp)释放一个object并将它返还到cache中 void * kmalloc(size_t size, int flags)从匿名cache中分配一块memory void kfree(const void *objp)将kmalloc分配的内存块释放 int kmem_cache_destroy(kmem_cache_t * cachep)销毁cache中的所有slab中的所有object并释放与之相关的memory然后再将该cache从cache chain中剔除 Caches 每个cache只能缓存一种类型的object，也就是cache中有多个slab，每个slab中有多个object，但每个object的类型都相同。在一个正在运行的Linux系统中，可以通过cat /proc/slabinfo 来查看当前所有可用的caches列表。/proc/slabinfo文件中给出了cache的一些基本信息。下面来看一下该文件内容的摘要：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/300f6a7d0ffa3d33e07cc637c8938879/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-03-07T17:41:08+08:00" />
+<meta property="article:modified_time" content="2020-03-07T17:41:08+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Linux内存管理第八章 -- Slab Allocator （一）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><a href="#Linux__Slab_Allocator_1" rel="nofollow">Linux内存管理第八章 -- Slab Allocator</a></li><li><ul><li><a href="#Caches_57" rel="nofollow">Caches</a></li><li><ul><li><a href="#Cache_Descriptor_90" rel="nofollow">Cache Descriptor</a></li></ul> 
+   </li><li><a href="#Cache_Static_Flags_150" rel="nofollow">Cache Static Flags</a></li><li><a href="#Cache_Dynamic_Flags_178" rel="nofollow">Cache Dynamic Flags</a></li><li><a href="#Cache_Allocation_Flags_180" rel="nofollow">Cache Allocation Flags</a></li><li><a href="#Cache_Colouring_201" rel="nofollow">Cache Colouring</a></li><li><a href="#Cache_Creation_211" rel="nofollow">Cache Creation</a></li><li><a href="#Cache_Reaping_226" rel="nofollow">Cache Reaping</a></li><li><a href="#Cache_Shrinking_243" rel="nofollow">Cache Shrinking</a></li><li><a href="#Cache_Destroying_254" rel="nofollow">Cache Destroying</a></li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h2><a id="Linux__Slab_Allocator_1"></a>Linux内存管理第八章 – Slab Allocator</h2> 
+<p>在本章中，来介绍内核中更加通用的分配器。Linux使用的slab allocator与用在Solaris中使用的通用分配器有许多相似之处。Linux的实现基本上是在Bonwick的the first allocator论文的基础上进行了一些改进而这些改进与他后续的论文中的描述十分相似。在深入探讨slab allocator的每个部分之前先来通过一段描述快速浏览下slab allocator所使用的数据结构。</p> 
+<p>slab allocator背后的思想是缓存经常使用的object并保持在初始状态供kernel使用。如果被基于object的allocator，内核将耗费很多时间在分配，初始化和释放相同的object。slab allocator的目的就是缓存一些被释放的object因此这些基础的structures在多次调用期间被预留起来。</p> 
+<p>slab allocator由一组cache组成，这些cache由一个叫做cache chain的双向循环链表连接在一起。在slab allocator的上下文件，一个cache就是一个管理许多像mm_struct或者fs_cache这种特殊类型的object的管理者。这些cache通过cache struct的next字段连接在一起。</p> 
+<p>每一cache维护了有多个连续物理page组成的block，这些block称之为slab。slab被切分成很多小块来存放slab自身的数据结构和其管理的object。他们之前的关系如下图：<br> <img src="https://images2.imgbox.com/53/c3/6Xa9IevA_o.png" alt="1212"><br> slab allocator有三个基本目标：</p> 
+<ul><li>更小块的内存分配可以帮忙消除buddy allocator原本会造成的内部碎片问题。</li><li>缓存常用的object因此系统不会在分配，初始化和销毁object上浪费时间。在Solaris上的Benchmarks显示使用slab allocator之后对于分配速度有很大的提升。</li><li>通过将object地址与L1或者L2 cache对齐后可以更好的利用硬件缓存。</li></ul> 
+<p>为了帮助消除buddy allocator造成的内部碎片问题，系统有维护两个cache集合，这些cache由细小的内存块组成，其大小从2<sup>5</sup>字节到2<sup>17</sup><br> 其中一个cache集合供DMA设备使用。这些cache叫做size-N和size-N(DMA)m其中N是指要分配的内存大小。可以调用kmallock()来分配这些cache中的memory。这样就解决了buddy allocator带来的low level page中的内部碎片问题。也就是如果只分配几个字节，如果没有slab allocator的话，也需要分配一个page。</p> 
+<p>slab allocator的第二个任务是维护一些cache来分配常用的object。在内核中使用的许多结构体，初始化的时间甚至超过了分配时间。因此当一个新的slab被创建的时候，多个object被构造函数初始化后打包放入到slab中。如果一个object被释放了，它仍然以初始状态存放在slab中以以便object的分配能够加快。</p> 
+<p>slab allocator最后一个任务是利用硬件缓存。如果object打包放入slab后还有剩余空间，这些剩余空间将被用来将slab着色。slab着色是一种尝试让在不同slab中的object在硬件cache中使用不同的行的方案。在不同的slab中将object以不同的起始偏移来进行摆放，这就好像这些object在使用CPU硬件缓存的不同行一样来帮助保证从同一个slab分配出来的object不会相互从CPU硬件缓存中被刷掉。使用这种方案后，原本要浪费的空间被添加上了一种新的功能。下图显示了从buddy allocator中分配出来的一个page如何被用来存储与L1 CPU缓存对齐的object。<br> <img src="https://images2.imgbox.com/37/59/Wl4AFk7F_o.png" alt="1234"><br> 如果在编译阶段CONFIG_SLAB_DEBUG被打开，slab allocator提供了附加的slab debug功能。有两个debug功能：red zoning和object poisoning。使用red zoning后，object的两端会被放置水位标记。如果该水位不正常，分配器就知道当前object在分配的时候发生了buffer溢出的问题并立即上报。poisoning一个object是指在slab创建时和object释放时将object填充预定义好的bit pattern。在分配的时候，该pattern会被检查如果该pattern被修改了，allocator就知道该object在分配之前已经使用过了并标记它。</p> 
+<p>slab allocator提供了短小精悍的API，如下表：</p> 
+<table><thead><tr><th align="left">kmem_cache_t * kmem_cache_create(const char *name, size_t size, size_t offset, unsigned long flags, void (<em>ctor)(void</em>, kmem_cache_t *, unsigned long),void (<em>dtor)(void</em>, kmem_cache_t *, unsigned long))</th></tr></thead><tbody><tr><td align="left">创建一个新的cache并将它加入到cache chain中</td></tr></tbody></table> 
+<table><thead><tr><th align="left">int kmem_cache_reap(int gfp_mask)</th></tr></thead><tbody><tr><td align="left">最多扫描REAP_SCAN个cache并选择其中一个来回收所有的per-cpu objects然后将该cache中的slab释放。该函数在memory很紧张时被调用</td></tr></tbody></table> 
+<table><thead><tr><th align="left">int kmem_cache_shrink(kmem_cache_t *cachep)</th></tr></thead><tbody><tr><td align="left">该函数将删除一个cache中所有的per-cpu objects，并删除slabs_free list中的所有slabs，然后返回释放的page数目</td></tr></tbody></table> 
+<table><thead><tr><th align="left">void * kmem_cache_alloc(kmem_cache_t *cachep, int flags)</th></tr></thead><tbody><tr><td align="left">从cache中分配单个object并将object返回给调用者</td></tr></tbody></table> 
+<table><thead><tr><th align="left">void kmem_cache_free(kmem_cache_t *cachep, void *objp)</th></tr></thead><tbody><tr><td align="left">释放一个object并将它返还到cache中</td></tr></tbody></table> 
+<table><thead><tr><th align="left">void * kmalloc(size_t size, int flags)</th></tr></thead><tbody><tr><td align="left">从匿名cache中分配一块memory</td></tr></tbody></table> 
+<table><thead><tr><th align="left">void kfree(const void *objp)</th></tr></thead><tbody><tr><td align="left">将kmalloc分配的内存块释放</td></tr></tbody></table> 
+<table><thead><tr><th align="left">int kmem_cache_destroy(kmem_cache_t * cachep)</th></tr></thead><tbody><tr><td align="left">销毁cache中的所有slab中的所有object并释放与之相关的memory然后再将该cache从cache chain中剔除</td></tr></tbody></table> 
+<h3><a id="Caches_57"></a>Caches</h3> 
+<p>每个cache只能缓存一种类型的object，也就是cache中有多个slab，每个slab中有多个object，但每个object的类型都相同。在一个正在运行的Linux系统中，可以通过cat /proc/slabinfo 来查看当前所有可用的caches列表。/proc/slabinfo文件中给出了cache的一些基本信息。下面来看一下该文件内容的摘要：</p> 
+<p>slabinfo - version: 1.1 (SMP)</p> 
+<table><thead><tr><th align="left">cache-name</th><th>num-active-objs</th><th>total-objs obj-size</th><th>num-active-slabs</th><th>total-slabs</th><th>num-pages-per-slab</th><th>limit</th><th>batchcount</th></tr></thead><tbody><tr><td align="left">kmem_cache</td><td>80</td><td>80</td><td>248</td><td>5</td><td>5</td><td>1 : 252</td><td>126</td></tr><tr><td align="left">urb_priv</td><td>0</td><td>0</td><td>64</td><td>0</td><td>0</td><td>1 : 252</td><td>126</td></tr><tr><td align="left">tcp_bind_bucket</td><td>15</td><td>226</td><td>32</td><td>2</td><td>2</td><td>1 : 252</td><td>126</td></tr><tr><td align="left">inode_cache</td><td>5714</td><td>5992</td><td>512</td><td>856</td><td>856</td><td>1 : 124</td><td>62</td></tr><tr><td align="left">dentry_cache</td><td>5160</td><td>5160</td><td>128</td><td>172</td><td>172</td><td>1 : 252</td><td>126</td></tr><tr><td align="left">mm_struct</td><td>240</td><td>240</td><td>160</td><td>10</td><td>10</td><td>1 : 252</td><td>126</td></tr><tr><td align="left">vm_area_struct</td><td>3911</td><td>4480</td><td>96</td><td>112</td><td>112</td><td>1 : 252</td><td>126</td></tr><tr><td align="left">size-64(DMA)</td><td>0</td><td>0</td><td>64</td><td>0</td><td>0</td><td>1 : 252</td><td>126</td></tr><tr><td align="left">size-64</td><td>432</td><td>1357</td><td>64</td><td>23</td><td>23</td><td>1 : 252</td><td>126</td></tr><tr><td align="left">size-32(DMA)</td><td>17</td><td>113</td><td>32</td><td>1</td><td>1</td><td>1 : 252</td><td>126</td></tr><tr><td align="left">size-32</td><td>850</td><td>2712</td><td>32</td><td>24</td><td>24</td><td>1 : 252</td><td>126</td></tr></tbody></table> 
+<p>其中每一列的含义如下：</p> 
+<ul><li>cache-name:人类可读的名称如tcp_bind_bucket</li><li>num-active-objs:正在使用中的objects的数据</li><li>total-objs:包括没有使用的object，object的总数量</li><li>obj-size:每一个object的大小，通常都非常小</li><li>num-active-slabs:包含有active object的slab数目</li><li>total-slabs：cache中所有slab的数目</li><li>num-pages-per-slab:在创建一个slab时要求申请的page数目。通常是1</li><li>limit：SMP架构中，在将pool中一半的free objects给到全局的pool之前，pool中可以拥有free objects的数目(不理解)</li><li>batchcount：SMP架构中，当没有free object时，一个block中的processor可以分配的object数目(不理解)</li></ul> 
+<p>为了加快分配和释放object，slab被放入到三个list:</p> 
+<ul><li>slabs_full slab中的所有object都在使用</li><li>slabs_partial slab中有free objects，下次分配该object时，该slab是候选者</li><li>slabs_free slab中所有的object都没有被分配，该slab也是要被销毁的候选者</li></ul> 
+<h4><a id="Cache_Descriptor_90"></a>Cache Descriptor</h4> 
+<pre><code class="prism language-c"><span class="token keyword">struct</span> kmem_cache_s <span class="token punctuation">{<!-- --></span>
+<span class="token comment">/* 1) per-cpu data, touched during every alloc/free */</span>
+	<span class="token keyword">struct</span> array_cache	<span class="token operator">*</span>array<span class="token punctuation">[</span>NR_CPUS<span class="token punctuation">]</span><span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span>		batchcount<span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span>		limit<span class="token punctuation">;</span>
+<span class="token comment">/* 2) touched by every alloc &amp; free from the backend */</span>
+	<span class="token keyword">struct</span> kmem_list3	lists<span class="token punctuation">;</span>
+	<span class="token comment">/* NUMA: kmem_3list_t	*nodelists[MAX_NUMNODES] */</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span>		objsize<span class="token punctuation">;</span> <span class="token comment">//slab中object的size</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span>	 	flags<span class="token punctuation">;</span>	<span class="token comment">/* constant flags,这些标记位将影响slab allocator的行为，后面会详细描述 */</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span>		num<span class="token punctuation">;</span>	<span class="token comment">/* # of objs per slab，每个slab中包含object的个数 */</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span>		free_limit<span class="token punctuation">;</span> <span class="token comment">/* upper limit of objects in the lists */</span>
+	spinlock_t		spinlock<span class="token punctuation">;</span>
+
+<span class="token comment">/* 3) cache_grow/shrink */</span>
+	<span class="token comment">/* order of pgs per slab (2^n) */</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span>		gfporder<span class="token punctuation">;</span><span class="token comment">//表示每个slab占用page个数，每个slab消耗2^gfpflags 个pages</span>
+
+	<span class="token comment">/* force GFP flags, e.g. GFP_DMA */</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span>		gfpflags<span class="token punctuation">;</span><span class="token comment">//slab从buddy allocator分配page时所使用的GFP flag</span>
+
+	size_t			colour<span class="token punctuation">;</span>		<span class="token comment">/* cache colouring range， 每个object尽可能存放不同的cache line中*/</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span>		colour_off<span class="token punctuation">;</span>	<span class="token comment">/* colour offset，在slab中为了对齐所占用的byte */</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span>		colour_next<span class="token punctuation">;</span>	<span class="token comment">/* cache colouring，下一个要使用的colour line，如果达到colour大小则从0再开始 */</span>
+	kmem_cache_t		<span class="token operator">*</span>slabp_cache<span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span>		slab_size<span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span>		dflags<span class="token punctuation">;</span>		<span class="token comment">/* dynamic flags */</span>
+
+	<span class="token comment">/* constructor func， object的构造函数*/</span>
+	<span class="token keyword">void</span> <span class="token punctuation">(</span><span class="token operator">*</span>ctor<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span><span class="token punctuation">,</span> kmem_cache_t <span class="token operator">*</span><span class="token punctuation">,</span> <span class="token keyword">unsigned</span> <span class="token keyword">long</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token comment">/* de-constructor func，object的析构函数 */</span>
+	<span class="token keyword">void</span> <span class="token punctuation">(</span><span class="token operator">*</span>dtor<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span><span class="token punctuation">,</span> kmem_cache_t <span class="token operator">*</span><span class="token punctuation">,</span> <span class="token keyword">unsigned</span> <span class="token keyword">long</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">/* 4) cache creation/removal */</span>
+	<span class="token keyword">const</span> <span class="token keyword">char</span>		<span class="token operator">*</span>name<span class="token punctuation">;</span> <span class="token comment">//人类可读的名称</span>
+	<span class="token keyword">struct</span> list_head	next<span class="token punctuation">;</span>指向cache chain中的下一个cache
+
+<span class="token comment">/* 5) statistics */</span>
+<span class="token macro property">#<span class="token directive keyword">if</span> STATS</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">long</span>		num_active<span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">long</span>		num_allocations<span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">long</span>		high_mark<span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">long</span>		grown<span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">long</span>		reaped<span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">long</span> 		errors<span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">long</span>		max_freeable<span class="token punctuation">;</span>
+	atomic_t		allochit<span class="token punctuation">;</span>
+	atomic_t		allocmiss<span class="token punctuation">;</span>
+	atomic_t		freehit<span class="token punctuation">;</span>
+	atomic_t		freemiss<span class="token punctuation">;</span>
+<span class="token macro property">#<span class="token directive keyword">endif</span></span>
+<span class="token macro property">#<span class="token directive keyword">if</span> DEBUG</span>
+	<span class="token keyword">int</span>			dbghead<span class="token punctuation">;</span>
+	<span class="token keyword">int</span>			reallen<span class="token punctuation">;</span>
+<span class="token macro property">#<span class="token directive keyword">endif</span></span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<h3><a id="Cache_Static_Flags_150"></a>Cache Static Flags</h3> 
+<p>cache创建时的一些flag集合在cache整个生命周期中都是不变的。这些flag会影响slab的内部结构以及object在slab中如何存放。所有的这些flag存放在cache描述符的flags字段，以bitmask的形式组合使用。&lt;linux/slab.h&gt;中定义了全部可能用到的flag。</p> 
+<p>当前有三个基本的flag集合。第一个集合是internal flags，这些flag仅仅被slab allocator自己使用。在此集合中只有一个flag:CFGS_OFF_SLAB起决定了slab描述符如何存放。</p> 
+<table><thead><tr><th align="left">Flag</th><th align="left">Description</th></tr></thead><tbody><tr><td align="left">CFGS_OFF_SLAB</td><td align="left">置位表示该cache的slab manager和slab是分离的</td></tr><tr><td align="left">CFGS_OPTIMEZE</td><td align="left">该flag没有用到</td></tr></tbody></table> 
+<p>第二组flag集合是通过cache creator设置，这些flag决定了allocator如何对待slab以及slab中的object如何存放，见下表：</p> 
+<table><thead><tr><th align="left">Flag</th><th align="left">Description</th></tr></thead><tbody><tr><td align="left">SLAB_HWCACHE_ALIGN</td><td align="left">将object地址L1 CPU cache对齐</td></tr><tr><td align="left">SLAB_MUST_HWCACHE_ALIGN</td><td align="left">强制与L1 CPU cache对齐尽管可能会造成很多浪费或者slab debug被打开</td></tr><tr><td align="left">SLAB_NO_REAP</td><td align="left">从不回收cache中的此slab</td></tr><tr><td align="left">SLAB_CACHE_DMA</td><td align="left">从ZONE_DMA中分配slab</td></tr><tr><td align="left">SLAB_STORE_USER</td><td align="left">该flag纯粹是一个debug flag，用来记录释放object的函数。如果一个object使用后被释放，那么它的poison byte将不匹配并且此时内核会呈现error message。因为上一个使用该object的函数被记录下来，那么该问题将很好debug</td></tr><tr><td align="left">SLAB_RECLAIM_ACCOUNT</td><td align="left">该flag用于那些好回收object的cache，例如inode cache。一个名为slab_reclaim_pages的变量用于记录cache中的slab总共使用了多少个page。该计数将在后续的vm_enough_memory()中被使用来帮助决断系统是否有真的out of memory</td></tr></tbody></table> 
+<p>第三组flag会对slab和object执行一些附加的检查项，这些检查项只有在刚开发该cache时才显得比较有价值。这些flag只有在CONFIG_SLAB_DEBUG宏被打开时才有效。</p> 
+<table><thead><tr><th align="left">Flag</th><th align="left">Description</th></tr></thead><tbody><tr><td align="left">SLAB_DEBUG_FREE</td><td align="left">执行比较昂贵的操作来检查free slab</td></tr><tr><td align="left">SLAB_DEBUG_INITIAL</td><td align="left">当释放一个object时，调用构造函数检查一下来保证object仍然是被正确地初始化</td></tr><tr><td align="left">SLAB_RED_ZONE</td><td align="left">在object的首位放置标记来追踪内存覆盖</td></tr><tr><td align="left">SLAB_POISON</td><td align="left">在向未分配或者未初始化的object中添加固定的样式字节来追踪object的状态是否正确被改变</td></tr></tbody></table> 
+<p>为了阻止调用者使用错误的flag，在mm/slab.c中定义了一个CREATE_MASK，它有所有被允许的flag组合而成。当cache正在被创建时，被使用的flag将和CREATE_MASK进行对比，如果发现非法的flag将会向上报告错误。</p> 
+<h3><a id="Cache_Dynamic_Flags_178"></a>Cache Dynamic Flags</h3> 
+<p>dflag字段只有一个flag，DFLGS_GROWN，但是它非常重要。在kmem_cache_grow()中该flag被置位，因此kmem_cache_reap()将不会选择该cache回收内存。当kmem_cache_reap()发现了一个DFLGS_GROWN被置位的cache，会先将该cache的DFLGS_GROWN flag清楚然后跳过该cache。</p> 
+<h3><a id="Cache_Allocation_Flags_180"></a>Cache Allocation Flags</h3> 
+<p>allocation flags与之对应的是GFP page flags选项，用来从buddy allocator中为slab分配memory。调用这个有时候使用SLAB_* 开头的flags有时候又使用GFP_* flags。但是他们应该只是用SLAB_* flags。与之对应的GFP flag的含义在前一张buddy allocator中有详细描述。SLAB_* 这些flag存在的原因是之前假设SLAB_*与现有的GFP flag可能不能完全匹配，功能上有些不同。但是实际上它们之间没有区别。</p> 
+<table><thead><tr><th align="left">Flag</th><th align="left">Description</th></tr></thead><tbody><tr><td align="left">SLAB_ATOMIC</td><td align="left">Equivalent to GFP_ATOMIC</td></tr><tr><td align="left">SLAB_DMA</td><td align="left">Equivalent to GFP_DMA</td></tr><tr><td align="left">SLAB_KERNEL</td><td align="left">Equivalent to GFP_KERNEL</td></tr><tr><td align="left">SLAB_NFS</td><td align="left">Equivalent to GFP_NFS</td></tr><tr><td align="left">SLAB_NOFS</td><td align="left">Equivalent to GFP_NOFS</td></tr><tr><td align="left">SLAB_NOHIGHIO</td><td align="left">Equivalent to GFP_NOHIGHIO</td></tr><tr><td align="left">SLAB_NOIO</td><td align="left">Equivalent to GFP_NOIO</td></tr><tr><td align="left">SLAB_USER</td><td align="left">Equivalent to GFP_USER</td></tr></tbody></table> 
+<p>还有一些少量的flags被传入到object的构造函数和析构函数中：</p> 
+<table><thead><tr><th align="left">Flag</th><th align="left">Description</th></tr></thead><tbody><tr><td align="left">SLAB_CTOR_CONSTRUCTOR</td><td align="left">如果该标志被置位，则传入到cache中的构造函数既是构造函数又是析构函数</td></tr><tr><td align="left">SLAB_CTOR_ATOMIC</td><td align="left">表示构造函数不能睡眠</td></tr><tr><td align="left">SLAB_CTOR_VERIFY</td><td align="left">表示构造函数仅仅是用来验证object有没有被正确地初始化</td></tr></tbody></table> 
+<h3><a id="Cache_Colouring_201"></a>Cache Colouring</h3> 
+<p>为了更好地利用硬件缓存，slab allocator在不同的slab中使用不同大小的offset来间隔object，具体的offset大小取决于slab中最后剩余的memory大小是多少。offset的单位是BYTES_PER_WORD,但是在SLAB_HWCACHE_ALIGN被开启时，object将要与L1_CACHE_BYTES对齐。<br> 在cache创建时，会计算一个slab适合放置多少个object，多少字节将会被浪费。基于要浪费的memory大小，会计算出cache描述符中的下面两个数字:</p> 
+<ul><li>colour:当前cache中的slab可以使用的offset大小</li><li>colour_off:这是offset每个object的倍数</li></ul> 
+<p>有了object offset之后，它们将使用对用硬件缓存中不同的lines。因此slab中的object几乎不会出现相互覆盖的状况。<br> 下面来通过一个例子来解释下上述原理。假设一个slab中第一个object的地址s_mem,为方便描述，s_mem = 0,这个slab中有100个字节要浪费，并且要与L1 cache执行32字节对齐。<br> 在上述背景下，第一个被创建的slab中，它的objects从0开始摆放，第二个slab是从32字节开始摆放object，第三个slab从64字节开始摆放object，而第四个slab从96字节开始摆放object，然后第五个slab又从0开始摆放slab。通过这样的安排，从每一个object中分配出来的object都会命中不同的CPU硬件缓存。此时变量colour的值为3，而变量colour_off为32。</p> 
+<h3><a id="Cache_Creation_211"></a>Cache Creation</h3> 
+<p>kmem_cache_create()函数的功能是创建新caches并将它们加入到cache chain中。创建cache过程中需要做的事情如下：</p> 
+<ul><li>执行一些基本的重要的检查放置使用不当的情况</li><li>如果CONFIG_SLAB_DEBUG被置位，执行debug相关的一些检查项</li><li>从名为cache_cache的全局slab cache中分配一个kmem_cache_t结构体。</li><li>将object的大小按字大小对齐</li><li>计算一个slab上放置多少个object比较合适</li><li>将object的大小与硬件缓存对齐</li><li>计算着色偏移</li><li>初始化slab cache描述符中剩余字段</li><li>将新cache加入到cache chain中。</li></ul> 
+<p>下图展示了与cache创建相关的调用图。<br> <img src="https://images2.imgbox.com/f5/36/fhUfAcVx_o.png" alt="12ssdf"></p> 
+<h3><a id="Cache_Reaping_226"></a>Cache Reaping</h3> 
+<p>当一个slab被释放，它会被放置在slabs_free列表中供后续继续使用。caches不会自动地收缩它们自己因此当kswapd进程发现memory很紧张了，它就会调用kmem_cache_reap()来释放一些memory。该函数的作用是选择一个cache并收缩这个cache的内存使用量。值得注意的是，缓存收割并不考虑node或者zone的内存压力。这意味着在NUMA或者high memory机器中，内核可能会花费很多时间来释放内存并不是很紧张的区域。但这对于像x86架构这样只有一个memory bank的机器来说不是一个问题。<br> <img src="https://images2.imgbox.com/0e/9c/Jh7VoAaW_o.png" alt="12333"><br> 如果系统中有很多个cache时，每次调用kmem_cache_reap()只会扫描并检查REAP_SCANLEN个(当前定义为10)cache。上一轮被扫描过的cache被存储在clock_searchp记录下来从而避免相同的cache被重复扫描。每次扫描，会对被扫中的cache做如下事情：</p> 
+<ul><li>查看SLAB_NO_REAP标志位，如果被置位，则跳过该cache</li><li>如果该cache正在增长，跳过该cache</li><li>如果一个最近有增长或者正在增长，DFLGS_GROWN会被置位。如果该标志位已经被置位，此slab会被跳过但是该flag会被清楚因此下次回收的时候，就可能将它回收。</li><li>计算slabs_free链表中空闲slab的个数并计算出要释放多少个page，将结果存入到变量pages中</li><li>如果一个cache拥有构造函数或者拥有巨多slabs，调整pages变量，让该cache不要被选中为释放的对象</li><li>如果要释放的page个数超过了REAP_PERFECT的值，那么将释放slabs_free链表中的一半空闲slab</li><li>否则继续扫描剩余的cahce，并选择一个cache至多释放掉它的slabs_free中的一半。</li></ul> 
+<p>Liunx2.6中的变化：<br> 在Linux2.6中kmem_cache_reap()不再存在因为当cache用户可以做出一个更好的决定的时候仍然肆意地收缩cache。cache使用者现在可以通过set_shrinker()注册一个"shrink cache"的callback用于智能判断和收缩slab。这个简单的函数通过操作一个struct shrinker，其中有一个指针指向callback。并包含一个seek字段用户表示重新创建一个object的困难程度，然后再将shinker放入到shrinker_list中。<br> 在page回收的过程中，shrink_slab()函数被调用，来遍历shrinker_list然后调用每个callback两次。首先传入参数0这表示该callback应该要返回它期望自己能释放的page的个数。使用一个启发的方式来决定是否值得调用该callback来回收pages。如果值得，该callback将被调用第二次，传入要释放的page的个数。<br> 每一个进程描述符struct task中有一个reclaim_state字段。当slab allocator释放pages时，这个字段被更新为这次释放的page个数。在调用shrink_slab()之前，这个字段被设置为0然后当shrink_cache()被调用后再次读取该字段的值来决定要释放多少个page。</p> 
+<h3><a id="Cache_Shrinking_243"></a>Cache Shrinking</h3> 
+<p>当一个cache被选中来收缩自己，它所采取的步骤简单而残酷。</p> 
+<ul><li>删除per CPU caches中的所有objects</li><li>如果growing flag没有被置位，删除slab_free中的所有slabs</li></ul> 
+<p>如果没有微妙之处，Linux将什么都不是。<br> <img src="https://images2.imgbox.com/2d/93/49LhX49L_o.png" alt="1233333"><br> 提供了两类令人迷惑的相似名称的收缩函数。kmem_cache_shrink()从slabs_free链表中删除所有的slabs并返回释放的pages个数。这是一个被导出供slab allocator使用者使用的基本函数。<br> <img src="https://images2.imgbox.com/ba/09/hZmnRb8P_o.png" alt="1234455ff"><br> 第二个函数为__kmem_cache_shrink(),其释放slabs_free链表中的所有slab之后再来检查slabs_partial和slabs_full中是否为空。该函数仅仅在slab allocator内部使用，并且在缓存销毁过程中非常重要，因为不管释放了多少页，缓存都是空的。</p> 
+<h3><a id="Cache_Destroying_254"></a>Cache Destroying</h3> 
+<p>当一个module被卸载的时候，该模块有责任通过调用kmem_cache_destroy()来销毁任何cache。更重要的是一个cache可能已经被销毁因为拥有两个同名的cache是不允许存在的。内核核心代码通常不会去销毁它的cache因为它在系统的生命周期内始终存在。销毁一个cache的步骤如下：</p> 
+<ul><li>从cache chain中删除该cache</li><li>同过删除该cache中所有的slab来收缩该cache</li><li>删除任何的per CPU cache</li><li>从cache_cache中删除该cache的cache描述符。</li></ul> 
+<p><img src="https://images2.imgbox.com/d8/13/YB2zbB8g_o.png" alt="detory"></p> 
+<p>Slab，object，后续更新中…</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/090b5a174f2aeda3545e965443273a3d/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">方舟编译器课程笔记</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/e56efc835d007f39dad69bb387f78975/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">6个高效学习编程的方法</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

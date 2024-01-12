@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>muduo网络库学习笔记(13)：TcpConnection生命期的管理 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="muduo网络库学习笔记(13)：TcpConnection生命期的管理" />
+<meta property="og:description" content="本篇通过分析muduo中TcpConnection对断开连接事件的处理，来学习muduo网络库对TcpConnection生命期的管理。
+TcpConnection对连接断开事件的处理 首先，我们来看一下TcpConnection处理连接断开事件时函数调用的流程： 我们这里所指的连接断开，都是指被动关闭，即对方先关闭连接，本地read(2)返回0，触发关闭逻辑。
+分析：一个服务器（TcpServer）维护了一个连接列表，当一个连接断开时，TcpConnection中的通道处于活跃的状态，EventLoop的事件循环返回了这个活跃的通道，然后调用通道的handleEvent()函数来处理。连接关闭是可读事件，进而回调了TcpConnection的handleRead()函数，handleRead()中又调用了read()返回为0，判断read()返回为0又会调用handleClose()函数。handleClose()函数会回调TcpServer的removeConnection()函数，其中会调用erase()将该连接从连接列表移除。
+这里我们需要注意的是——一般情况下，将连接从连接列表移除后，我们就可以将这个连接对象销毁（delete）掉了，但是在这里我们不能立即销毁这个连接对象，原因如下：
+如果我们销毁了这个对象，TcpConnection所包含的Channel对象也就跟着被销毁了，而我们当前正在调用Channel对象的handleEvent()函数，就会出现core dump。所以，我们必须保证TcpConnection的生存期长于Channel::handleEvent()函数。
+muduo选择用智能指针shared_ptr来管理TcpConnection的生命期，并且让TcpConnection类继承自boost::enable_shared_from_this。
+源码分析 具体代码改动如下：
+代码片段1：Channel的改动 文件名：Channel.cc // 析构函数中会判断Channel是否仍处于事件处理状态 // 在事件处理期间Channel对象不会析构 Channel::~Channel() { assert(!eventHandling_); } // 开始处理事件之前，会将事件处理标志位置为true // 直到事件处理完，事件处理标志位再置为false void Channel::handleEventWithGuard(Timestamp receiveTime) { eventHandling_ = true; if ((revents_ &amp; POLLHUP) &amp;&amp; !(revents_ &amp; POLLIN)) { if (logHup_) { LOG_WARN &lt;&lt; &#34;Channel::handle_event() POLLHUP&#34;; } if (closeCallback_) closeCallback_(); } if (revents_ &amp; POLLNVAL) { LOG_WARN &lt;&lt; &#34;Channel::handle_event() POLLNVAL&#34;; } if (revents_ &amp; (POLLERR | POLLNVAL)) { if (errorCallback_) errorCallback_(); } if (revents_ &amp; (POLLIN | POLLPRI | POLLRDHUP)) { if (readCallback_) readCallback_(receiveTime); } if (revents_ &amp; POLLOUT) { if (writeCallback_) writeCallback_(); } eventHandling_ = false; } 代码片段2：TcpConnection::handleRead()函数的改动 文件名：TcpConnection." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/707d90d76858528b99bb9e9312820b2b/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2016-11-13T22:07:10+08:00" />
+<meta property="article:modified_time" content="2016-11-13T22:07:10+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">muduo网络库学习笔记(13)：TcpConnection生命期的管理</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>本篇通过分析muduo中TcpConnection对断开连接事件的处理，来学习muduo网络库对TcpConnection生命期的管理。</p> 
+<h2 id="tcpconnection对连接断开事件的处理"><strong>TcpConnection对连接断开事件的处理</strong></h2> 
+<p>首先，我们来看一下TcpConnection处理连接断开事件时函数调用的流程： <br> <img src="https://images2.imgbox.com/73/1d/aPaAjiZr_o.png" alt="这里写图片描述" title=""> <br> <strong>我们这里所指的连接断开，都是指被动关闭，即对方先关闭连接</strong>，本地read(2)返回0，触发关闭逻辑。</p> 
+<p><strong>分析：</strong>一个服务器（TcpServer）维护了一个连接列表，当一个连接断开时，TcpConnection中的通道处于活跃的状态，EventLoop的事件循环返回了这个活跃的通道，然后调用通道的handleEvent()函数来处理。连接关闭是可读事件，进而回调了TcpConnection的handleRead()函数，handleRead()中又调用了read()返回为0，判断read()返回为0又会调用handleClose()函数。handleClose()函数会回调TcpServer的removeConnection()函数，其中会调用erase()将该连接从连接列表移除。</p> 
+<p><strong>这里我们需要注意的是</strong>——一般情况下，将连接从连接列表移除后，我们就可以将这个连接对象销毁（delete）掉了，但是在这里我们不能立即销毁这个连接对象，原因如下：</p> 
+<p><strong>如果我们销毁了这个对象，TcpConnection所包含的Channel对象也就跟着被销毁了，而我们当前正在调用Channel对象的handleEvent()函数，就会出现core dump。所以，我们必须保证TcpConnection的生存期长于Channel::handleEvent()函数。</strong></p> 
+<p>muduo选择用智能指针shared_ptr来管理TcpConnection的生命期，并且让TcpConnection类继承自boost::enable_shared_from_this。</p> 
+<h2 id="源码分析"><strong>源码分析</strong></h2> 
+<p>具体代码改动如下：</p> 
+<pre class="prettyprint"><code class=" hljs java">代码片段<span class="hljs-number">1</span>：Channel的改动
+文件名：Channel.cc
+
+<span class="hljs-comment">// 析构函数中会判断Channel是否仍处于事件处理状态</span>
+<span class="hljs-comment">// 在事件处理期间Channel对象不会析构</span>
+Channel::~Channel()
+{
+  <span class="hljs-keyword">assert</span>(!eventHandling_);
+}
+
+<span class="hljs-comment">// 开始处理事件之前，会将事件处理标志位置为true</span>
+<span class="hljs-comment">// 直到事件处理完，事件处理标志位再置为false</span>
+<span class="hljs-keyword">void</span> Channel::handleEventWithGuard(Timestamp receiveTime)
+{
+  eventHandling_ = <span class="hljs-keyword">true</span>;
+  <span class="hljs-keyword">if</span> ((revents_ &amp; POLLHUP) &amp;&amp; !(revents_ &amp; POLLIN))
+  {
+    <span class="hljs-keyword">if</span> (logHup_)
+    {
+      LOG_WARN &lt;&lt; <span class="hljs-string">"Channel::handle_event() POLLHUP"</span>;
+    }
+    <span class="hljs-keyword">if</span> (closeCallback_) closeCallback_();
+  }
+  <span class="hljs-keyword">if</span> (revents_ &amp; POLLNVAL)
+  {
+    LOG_WARN &lt;&lt; <span class="hljs-string">"Channel::handle_event() POLLNVAL"</span>;
+  }
+  <span class="hljs-keyword">if</span> (revents_ &amp; (POLLERR | POLLNVAL))
+  {
+    <span class="hljs-keyword">if</span> (errorCallback_) errorCallback_();
+  }
+  <span class="hljs-keyword">if</span> (revents_ &amp; (POLLIN | POLLPRI | POLLRDHUP))
+  {
+    <span class="hljs-keyword">if</span> (readCallback_) readCallback_(receiveTime);
+  }
+  <span class="hljs-keyword">if</span> (revents_ &amp; POLLOUT)
+  {
+    <span class="hljs-keyword">if</span> (writeCallback_) writeCallback_();
+  }
+  eventHandling_ = <span class="hljs-keyword">false</span>;
+}</code></pre> 
+<pre class="prettyprint"><code class=" hljs cs">代码片段<span class="hljs-number">2</span>：TcpConnection::handleRead()函数的改动
+文件名：TcpConnection.cc
+
+<span class="hljs-keyword">void</span> TcpConnection::handleRead(Timestamp receiveTime)
+{
+  loop_-&gt;assertInLoopThread();
+  <span class="hljs-keyword">int</span> savedErrno = <span class="hljs-number">0</span>;
+  <span class="hljs-keyword">char</span> buf[<span class="hljs-number">65536</span>];
+  ssize_t n = ::read(channel_-&gt;fd(), buf, <span class="hljs-keyword">sizeof</span> buf);
+  <span class="hljs-comment">// 根据read(2)的返回值分别调用messageCallback_()、handleClose()和handleError()</span>
+  <span class="hljs-keyword">if</span> (n &gt; <span class="hljs-number">0</span>)
+  {
+    messageCallback_(shared_from_this(), buf, n);
+  }
+  <span class="hljs-keyword">else</span> <span class="hljs-keyword">if</span> (n == <span class="hljs-number">0</span>)
+  {
+    handleClose();
+  }
+  <span class="hljs-keyword">else</span>
+  {
+    errno = savedErrno;
+    LOG_SYSERR &lt;&lt; <span class="hljs-string">"TcpConnection::handleRead"</span>;
+    handleError();
+  }  
+}</code></pre> 
+<pre class="prettyprint"><code class=" hljs lasso">代码片段<span class="hljs-number">3</span>：TcpConnection<span class="hljs-tag">::handleClose</span>()函数
+文件名：TcpConnection<span class="hljs-built_in">.</span>cc
+
+<span class="hljs-literal">void</span> TcpConnection<span class="hljs-tag">::handleClose</span>()
+{
+  loop_<span class="hljs-subst">-&gt;</span>assertInLoopThread();
+  LOG_TRACE <span class="hljs-subst">&lt;&lt;</span> <span class="hljs-string">"fd = "</span> <span class="hljs-subst">&lt;&lt;</span> channel_<span class="hljs-subst">-&gt;</span>fd() <span class="hljs-subst">&lt;&lt;</span> <span class="hljs-string">" state = "</span> <span class="hljs-subst">&lt;&lt;</span> state_;
+  <span class="hljs-comment">// 断定此时连接处于已连接状态</span>
+  assert(state_ <span class="hljs-subst">==</span> kConnected);
+  <span class="hljs-comment">// we don't close fd, leave it to dtor, so we can find leaks easily.</span>
+  channel_<span class="hljs-subst">-&gt;</span>disableAll();
+
+  <span class="hljs-comment">// must be the last line</span>
+  <span class="hljs-comment">// 调用所设置的连接关闭回调函数</span>
+  closeCallback_(shared_from_this()); 
+}</code></pre> 
+<pre class="prettyprint"><code class=" hljs lasso">代码片段<span class="hljs-number">4</span>：TcpServer<span class="hljs-tag">::removeConnection</span>()函数
+文件名：TcpServer<span class="hljs-built_in">.</span>cc
+
+<span class="hljs-literal">void</span> TcpServer<span class="hljs-tag">::removeConnection</span>(const TcpConnectionPtr<span class="hljs-subst">&amp;</span> conn)
+{
+  loop_<span class="hljs-subst">-&gt;</span>assertInLoopThread();
+  LOG_INFO <span class="hljs-subst">&lt;&lt;</span> <span class="hljs-string">"TcpServer::removeConnectionInLoop ["</span> <span class="hljs-subst">&lt;&lt;</span> name_
+           <span class="hljs-subst">&lt;&lt;</span> <span class="hljs-string">"] - connection "</span> <span class="hljs-subst">&lt;&lt;</span> conn<span class="hljs-subst">-&gt;</span>name();
+  <span class="hljs-comment">// 将断开的连接从连接列表中移除</span>
+  size_t n <span class="hljs-subst">=</span> connections_<span class="hljs-built_in">.</span>erase(conn<span class="hljs-subst">-&gt;</span>name());
+  (<span class="hljs-literal">void</span>)n;
+  assert(n <span class="hljs-subst">==</span> <span class="hljs-number">1</span>);
+  <span class="hljs-comment">// 此处一定要用EventLoop::queueInLoop()，避免Channel对象被提前销毁</span>
+  <span class="hljs-comment">// 这里用boost::bind让TcpConnection的生命期长到调用connectDestroyed()的时刻</span>
+  <span class="hljs-comment">// 使用boost::bind得到一个boost::function对象,会把conn传递进去，引用计数会加1</span>
+  loop_<span class="hljs-subst">-&gt;</span>queueInLoop(
+      boost<span class="hljs-tag">::bind</span>(<span class="hljs-subst">&amp;</span>TcpConnection<span class="hljs-tag">::connectDestroyed</span>, conn));
+}</code></pre> 
+<p>Channel::handleEvent()事件处理完后就会调用functors（见博客“muduo网络库学习笔记(11)：有用的runInLoop()函数”）即调用TcpConnection::connectDestroyed()。</p> 
+<pre class="prettyprint"><code class=" hljs scss">代码片段5：TcpConnection<span class="hljs-value">::connectDestroyed()函数
+文件名：TcpConnection.cc
+
+// connectDestroyed()是TcpConnection析构前最后调用的一个成员函数
+// 它通知用户连接已断开
+void TcpConnection::connectDestroyed()
+{
+  loop_-&gt;assertInLoopThread();</span>
+  <span class="hljs-function">assert(state_ == kConnected)</span>;
+  <span class="hljs-function">setState(kDisconnected)</span>;
+  channel_-&gt;<span class="hljs-function">disableAll()</span>;
+  <span class="hljs-function">connectionCallback_(<span class="hljs-function">shared_from_this()</span>)</span>;  <span class="hljs-comment">// 回调用户设定的回调函数</span>
+  loop_-&gt;<span class="hljs-function">removeChannel(<span class="hljs-function">get_pointer(channel_)</span>)</span>;  <span class="hljs-comment">// 从poll/epoll中移除channel</span>
+}</code></pre> 
+<h2 id="boostenablesharedfromthis"><strong>boost::enable_shared_from_this</strong></h2> 
+<p>由于TcpConnection模糊的生命期，我们用到了shared_ptr来管理它的生命期，并让TcpConnection类继承自boost::enable_shared_from_this。那么，boost::enable_shared_from_this的作用是什么呢？</p> 
+<p>使用示例：</p> 
+<pre class="prettyprint"><code class=" hljs cpp"><span class="hljs-preprocessor">#include &lt;boost/enable_shared_from_this.hpp&gt;</span>
+<span class="hljs-preprocessor">#include &lt;boost/shared_ptr.hpp&gt;</span>
+<span class="hljs-preprocessor">#include &lt;cassert&gt;</span>
+
+<span class="hljs-comment">// class Y继承自boost::enable_shared_from_this&lt;Y&gt;</span>
+<span class="hljs-keyword">class</span> Y: <span class="hljs-keyword">public</span> boost::enable_shared_from_this&lt;Y&gt;
+{
+<span class="hljs-keyword">public</span>:
+    boost::<span class="hljs-built_in">shared_ptr</span>&lt;Y&gt; f()
+    {
+        <span class="hljs-keyword">return</span> shared_from_this();  <span class="hljs-comment">// 返回指向自身的shared_ptr</span>
+    }
+
+    Y* f2()
+    {
+        <span class="hljs-keyword">return</span> <span class="hljs-keyword">this</span>; 
+    }
+};
+
+<span class="hljs-keyword">int</span> main()
+{
+    boost::<span class="hljs-built_in">shared_ptr</span>&lt;Y&gt; p(<span class="hljs-keyword">new</span> Y);  <span class="hljs-comment">// p的引用计数为1</span>
+    boost::<span class="hljs-built_in">shared_ptr</span>&lt;Y&gt; q = p-&gt;f();  <span class="hljs-comment">// 将当前对象转换为一个shared_ptr，赋值给q，此时p/q引用计数为2</span>
+
+    Y* r = p-&gt;f2(); 
+    assert(p == q);  <span class="hljs-comment">// 断言正确</span>
+    assert(p.get() == r);  <span class="hljs-comment">// 断言正确</span>
+
+    <span class="hljs-built_in">std</span>::<span class="hljs-built_in">cout</span> &lt;&lt; p.use_count() &lt;&lt; <span class="hljs-built_in">std</span>::endl;  <span class="hljs-comment">// 输出：2</span>
+
+    <span class="hljs-comment">// 构造一个shared_ptr对象s,将r赋给s</span>
+    <span class="hljs-comment">// 打印出的s的引用计数应该为1，而不是3</span>
+    <span class="hljs-comment">// 因为此时构造了一个新的、独立的shared_ptr对象，而不是将一个shared_ptr对象赋值给另一个shared_ptr对象</span>
+    boost::<span class="hljs-built_in">shared_ptr</span>&lt;Y&gt; s(r); 
+    <span class="hljs-built_in">std</span>::<span class="hljs-built_in">cout</span> &lt;&lt; s.use_count() &lt;&lt; <span class="hljs-built_in">std</span>::endl;
+    assert(p == s);  <span class="hljs-comment">// 断言失败</span>
+
+    <span class="hljs-keyword">return</span> <span class="hljs-number">0</span>;
+}</code></pre> 
+<p>测试结果如图： <br> <img src="https://images2.imgbox.com/36/c9/eQtEO3pT_o.png" alt="这里写图片描述" title=""></p> 
+<p>所以，在TcpConnection的生命期管理过程中，如果我们直接用this指针传递对象，可能会构建一个新的shared_ptr对象，并不是直接将我们之前管理的对象的shared_ptr拷贝过去从而使引用计数加1，故我们需要用到boost::enable_shared_from_this的shared_from_this()函数。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/ca4344a4c571e0ed15f8c6fa7631cafa/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Contrastive Loss (对比损失)</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/3ff98f80848dbc80507c2ee9e55ef38c/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Delphi 动态分配内存</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

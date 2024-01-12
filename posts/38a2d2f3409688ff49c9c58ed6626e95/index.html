@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>chat聊天系统消息消费时遇到的问题及优化思路(二) - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="chat聊天系统消息消费时遇到的问题及优化思路(二)" />
+<meta property="og:description" content="1、前言 考虑下面几个条件下如何提升kafka的消费速度
+消息要求严格有序，如chat聊天消息业务处理速度慢，如处理一条数据需要100ms分片不合理，如有的分区很闲，有的分区消息数量积压 2、解决方案 1、顺序问题 关于消息消费时存在先后顺序问题，在chat聊天系统消息消费时遇到的问题及优化思路(一)中已经加以说明。具体实现大致为对同一会话、帖子Id等维度放入同一分区中，如使用Id % 分区数，如下图：
+上面的解决方案是将同一会话的消息发送至同一分区进行消费，但是但消费者的消费能力大概率是不够的，因此，需要并发处理，详见
+chat聊天系统消息消费时遇到的问题及优化思路(一)
+注意：此时需要注意一个问题就是，当单个消费者消费分区，并将获取到的消息放入不同的队列中，此时还可能存在乱序问题，所以，可以考虑复用Id%队列数的方式，将同一个会话的消息放入到相同的队列中，让协程进行消费。
+2、消息不丢失问题 上面的方案，当消费者从kafka拉到消息后，并没有等待处理完成就继续从kafka拉取消息然后缓存到内存中，等待消费队列慢慢消费，这个时候如果机器宕机，则内存中的消息将会丢失。
+基于上面描述的问题，考虑使用手动提交offset。但是这样其实还存在一个问题就是：各个协程处理的offset值其实是不一样的，如下图：
+此时goroutine1和goroutine2 的消息的offset不一致，为了保证消息不丢失，采用以下策略：定期手动提交当前的offset信息，提交的offset值选当前分区的最小的offset，如上面的就选1001这个offset值。可以采用在内存中缓存处理的offset列表的实现方式，如下：
+当内存中待处理的最大offset与最小的offset差值&gt;= M时，阻塞消费线程继续从kafka拉取消息，控制异常情况下的数据最多不多于M条
+但是此时会引进一个新问题：消息重复消费
+此时要保证消息消费的幂等性，如可通过消息唯一标识放入如redis中判断
+3、消息堆积问题 堆积原因：
+生产者短时间生产大量消息到broker，消费者无法及时消费，如大促生产者无法感知消息堆积，仍继续生产消息，导致消息堆积进一步加剧消费者能力不足，消费时间长，消费者宕机、网络异常与broker无法通信业务功能存在bug，导致消费者无法消费 解决方案
+消费者端
+增加消费者数量，并采用并发消费提高消费速度，避免消费时间过长。如果单条消息消费时间无法优化，可以提高批次拉取的数量(当批次拉取的数量较少时，拉取数据量/处理时间 &lt; 生产速度时就容易堆积)消费消息时尽量减少耗时操作，尽量减少三方接口调用、读写库等合理设置消费组服务数量，合理增加topic的partition=个数，消费者数 &gt;= 分区数补偿消费，即消费跳过积压数据，直接消费最新的数据，同时启动补偿数据进程消费积压数据 生产者端
+支持熔断与隔离，当broker消息积压时，对生产者熔断根据key采用合适的算法，将消息均匀分不到对应的分区中 服务端
+进行预估，设置合理的分区数 在电商中经常大促，因此很容易出现短时间内产生大量消息的问题，因此在大促前可根据历史情况进行容量预估和相关的扩容策略。
+参考： 我是如何将一个老系统的Kafka消费者服务的性能提升近百倍的" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/38a2d2f3409688ff49c9c58ed6626e95/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-08-28T09:45:58+08:00" />
+<meta property="article:modified_time" content="2023-08-28T09:45:58+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">chat聊天系统消息消费时遇到的问题及优化思路(二)</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="1_0"></a>1、前言</h3> 
+<p>考虑下面几个条件下如何提升kafka的消费速度</p> 
+<ul><li>消息要求严格有序，如chat聊天消息</li><li>业务处理速度慢，如处理一条数据需要100ms</li><li>分片不合理，如有的分区很闲，有的分区消息数量积压</li></ul> 
+<h3><a id="2_6"></a>2、解决方案</h3> 
+<h4><a id="1_7"></a>1、顺序问题</h4> 
+<p>关于消息消费时存在先后顺序问题，在<a href="https://blog.csdn.net/qq_43060759/article/details/128814780">chat聊天系统消息消费时遇到的问题及优化思路(一)</a>中已经加以说明。具体实现大致为对同一会话、帖子Id等维度放入同一分区中，如使用Id % 分区数，如下图：<br> <img src="https://images2.imgbox.com/e9/8f/WbCqeInm_o.png" alt="在这里插入图片描述"><br> 上面的解决方案是将同一会话的消息发送至同一分区进行消费，但是但消费者的消费能力大概率是不够的，因此，需要并发处理，详见<br> <a href="http://t.csdn.cn/9p4qz" rel="nofollow">chat聊天系统消息消费时遇到的问题及优化思路(一)</a><br> <img src="https://images2.imgbox.com/59/54/0bU4a1YA_o.png" alt="在这里插入图片描述"><br> <strong>注意</strong>：此时需要注意一个问题就是，当单个消费者消费分区，并将获取到的消息放入不同的队列中，此时还可能存在乱序问题，所以，可以考虑复用Id%队列数的方式，将同一个会话的消息放入到相同的队列中，让协程进行消费。</p> 
+<h4><a id="2_15"></a>2、消息不丢失问题</h4> 
+<p>上面的方案，当消费者从kafka拉到消息后，并没有等待处理完成就继续从kafka拉取消息然后缓存到内存中，等待消费队列慢慢消费，这个时候如果机器宕机，则内存中的消息将会丢失。</p> 
+<p>基于上面描述的问题，考虑使用手动提交offset。但是这样其实还存在一个问题就是：各个协程处理的offset值其实是不一样的，如下图：<br> <img src="https://images2.imgbox.com/8d/1f/4V72Egqh_o.png" alt="在这里插入图片描述"><br> 此时goroutine1和goroutine2 的消息的offset不一致，为了保证消息不丢失，采用以下策略：定期手动提交当前的offset信息，提交的offset值选当前分区的最小的offset，如上面的就选1001这个offset值。可以采用在内存中缓存处理的offset列表的实现方式，如下：<br> <img src="https://images2.imgbox.com/f0/db/VnUXnayY_o.png" alt="在这里插入图片描述"><br> <strong>当内存中待处理的最大offset与最小的offset差值&gt;= M时，阻塞消费线程继续从kafka拉取消息，控制异常情况下的数据最多不多于M条</strong><br> 但是此时会引进一个新问题：消息重复消费</p> 
+<p>此时要保证消息消费的幂等性，如可通过消息唯一标识放入如redis中判断</p> 
+<h4><a id="3_26"></a>3、消息堆积问题</h4> 
+<p>堆积原因：</p> 
+<ul><li>生产者短时间生产大量消息到broker，消费者无法及时消费，如大促</li><li>生产者无法感知消息堆积，仍继续生产消息，导致消息堆积进一步加剧</li><li>消费者能力不足，消费时间长，消费者宕机、网络异常与broker无法通信</li><li>业务功能存在bug，导致消费者无法消费</li></ul> 
+<p>解决方案<br> 消费者端</p> 
+<ul><li>增加消费者数量，并采用并发消费</li><li>提高消费速度，避免消费时间过长。如果单条消息消费时间无法优化，可以提高批次拉取的数量(当批次拉取的数量较少时，拉取数据量/处理时间 &lt; 生产速度时就容易堆积)</li><li>消费消息时尽量减少耗时操作，尽量减少三方接口调用、读写库等</li><li>合理设置消费组服务数量，合理增加topic的partition=个数，消费者数 &gt;= 分区数</li><li>补偿消费，即消费跳过积压数据，直接消费最新的数据，同时启动补偿数据进程消费积压数据</li></ul> 
+<p>生产者端</p> 
+<ul><li>支持熔断与隔离，当broker消息积压时，对生产者熔断</li><li>根据key采用合适的算法，将消息均匀分不到对应的分区中</li></ul> 
+<p>服务端</p> 
+<ul><li>进行预估，设置合理的分区数</li></ul> 
+<p>在电商中经常大促，因此很容易出现短时间内产生大量消息的问题，因此在大促前可根据历史情况进行容量预估和相关的扩容策略。</p> 
+<h3><a id="_50"></a>参考：</h3> 
+<p><a href="https://www.51cto.com/article/713177.html" rel="nofollow">我是如何将一个老系统的Kafka消费者服务的性能提升近百倍的</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/1d3221b775db62635e5578d9f3283742/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">校招算法题实在不会做，有没有关系？</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/b0771fed999271fac6bab340e86ffb87/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">10*1000【3】</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【clickhouse踩坑记录】clusters表中分片副本的浅析 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【clickhouse踩坑记录】clusters表中分片副本的浅析" />
+<meta property="og:description" content="背景 对于一个数据开发，刚接手一套新的clickhouse集群，仅通过clickhouse中system表，快速了解clickhouse的架构
+角度 分片副本 通过clusters表，可以很清晰的看到clickhouse集群的分片副本情况。
+select * from system.clusters; 主要字段说明：
+cluster： 集群的命名
+shard_num： 分片的编号
+shard_weight： 分片的权重
+replica_num： 副本的编号
+host_name： 机器的host名称
+host_address： 机器的ip地址
+port： clickhouse集群的端口
+is_local： 是否为你当前查询本地
+user： 创建用户
+结果说明：
+例一（一分片三副本）：
+clustershard_numshard_weightreplica_numhost_namehost_addressportis_localcluster_test111ck_01xxx.xxx.xxx.xxx90001cluster_test112ck_02xxx.xxx.xxx.xxx90000cluster_test113ck_03xxx.xxx.xxx.xxx90000 这种部署方式需要3台机器，没做分片，三个副本，可实现高可用。架构比较绕。
+因为副本数为3，每次写入一条数据，都会把这条数据写入到三台机器上，所以在机器/存储有限的情况下，资源利用率并不会很高。
+优点则是部署相对简单，不用去修改很多的配置文件。
+例二（三分片双副本）：
+clustershard_numshard_weightreplica_numhost_namehost_addressportis_localcluster_test111ck_01xxx.xxx.xxx.xxx90001cluster_test211ck_01xxx.xxx.xxx.xxx90001cluster_test311ck_02xxx.xxx.xxx.xxx90000cluster_test112ck_02xxx.xxx.xxx.xxx90000cluster_test212ck_03xxx.xxx.xxx.xxx90000cluster_test312ck_03xxx.xxx.xxx.xxx90000 这种部署方式需要3台机器，三个分片，两个副本，可实现高可用。
+因为副本数为2，每次写入一条数据，都会把这条数据写入到其中的两台机器上，所以相比于第一架构方式，资源利用率更高。但是假设通过ck_01节点写入，数据会存到分片1与分片2中，如果你连接ck_02进行查询本地表，是查不到写入分片2的数据。如何解决这个问题呢？目前博主想到的解决方案是在本地表上面再建一个分布式表。
+例三（三分片双副本）：
+clustershard_numshard_weightreplica_numhost_namehost_addressportis_localcluster_test111ck_01xxx.xxx.xxx.xxx90001cluster_test112ck_02xxx.xxx.xxx.xxx90000cluster_test211ck_03xxx.xxx.xxx.xxx90000cluster_test212ck_04xxx.xxx.xxx.xxx90000cluster_test311ck_05xxx.xxx.xxx.xxx90000cluster_test312ck_06xxx.xxx.xxx.xxx90000 这种部署方式需要6台机器，三个分片，两个副本，可实现高可用。架构相对较清晰。
+因为副本数为2，每次写入一条数据，都会把这条数据写入到其中的两台机器上，其他四台机器上没有此数据。 假设通过ck_01节点写入，数据仅会在ck_01跟ck_02两个节点，如果链接ck_03的数据库，此时是查不到任何数据的。
+存储大小 select * from system.disks; 主要字段说明：
+name： 磁盘名称
+path： 数据对应在相应磁盘的路径
+free_space： 可用存储大小
+total_space： 总存储大小
+另外，还可通过下面查看对应的存储策略，因为考虑到集群的扩展性，一些表可以指定存储策略存到指定磁盘下
+select * from system.storage_policies; 主要字段说明：
+policy_name： 存储策略名称
+volume_name： 卷名称
+disks： 对应磁盘名称" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/5dae26d8c06e90cd0963dc890998716c/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-09-27T18:24:20+08:00" />
+<meta property="article:modified_time" content="2021-09-27T18:24:20+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【clickhouse踩坑记录】clusters表中分片副本的浅析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="_0"></a>背景</h3> 
+<p>对于一个数据开发，刚接手一套新的clickhouse集群，仅通过clickhouse中system表，快速了解clickhouse的架构</p> 
+<h3><a id="_3"></a>角度</h3> 
+<h4><a id="_4"></a>分片副本</h4> 
+<p>通过<strong>clusters</strong>表，可以很清晰的看到clickhouse集群的分片副本情况。</p> 
+<pre><code class="prism language-sql"><span class="token keyword">select</span> <span class="token operator">*</span> <span class="token keyword">from</span> system<span class="token punctuation">.</span>clusters<span class="token punctuation">;</span>
+</code></pre> 
+<p><strong>主要字段说明：</strong><br> <strong>cluster：</strong> 集群的命名<br> <strong>shard_num：</strong> 分片的编号<br> <strong>shard_weight：</strong> 分片的权重<br> <strong>replica_num：</strong> 副本的编号<br> <strong>host_name：</strong> 机器的host名称<br> <strong>host_address：</strong> 机器的ip地址<br> <strong>port：</strong> clickhouse集群的端口<br> <strong>is_local：</strong> 是否为你当前查询本地<br> <strong>user：</strong> 创建用户</p> 
+<p><strong>结果说明：</strong></p> 
+<p>例一（一分片三副本）：</p> 
+<table><thead><tr><th>cluster</th><th>shard_num</th><th>shard_weight</th><th>replica_num</th><th>host_name</th><th>host_address</th><th>port</th><th>is_local</th></tr></thead><tbody><tr><td>cluster_test</td><td>1</td><td>1</td><td>1</td><td>ck_01</td><td>xxx.xxx.xxx.xxx</td><td>9000</td><td>1</td></tr><tr><td>cluster_test</td><td>1</td><td>1</td><td>2</td><td>ck_02</td><td>xxx.xxx.xxx.xxx</td><td>9000</td><td>0</td></tr><tr><td>cluster_test</td><td>1</td><td>1</td><td>3</td><td>ck_03</td><td>xxx.xxx.xxx.xxx</td><td>9000</td><td>0</td></tr></tbody></table> 
+<p>这种部署方式需要3台机器，没做分片，三个副本，可实现高可用。架构比较绕。<br> 因为副本数为3，<strong>每次写入一条数据，都会把这条数据写入到三台机器上</strong>，所以在机器/存储有限的情况下，资源利用率并不会很高。</p> 
+<p>优点则是部署相对简单，不用去修改很多的配置文件。</p> 
+<p>例二（三分片双副本）：</p> 
+<table><thead><tr><th>cluster</th><th>shard_num</th><th>shard_weight</th><th>replica_num</th><th>host_name</th><th>host_address</th><th>port</th><th>is_local</th></tr></thead><tbody><tr><td>cluster_test</td><td>1</td><td>1</td><td>1</td><td>ck_01</td><td>xxx.xxx.xxx.xxx</td><td>9000</td><td>1</td></tr><tr><td>cluster_test</td><td>2</td><td>1</td><td>1</td><td>ck_01</td><td>xxx.xxx.xxx.xxx</td><td>9000</td><td>1</td></tr><tr><td>cluster_test</td><td>3</td><td>1</td><td>1</td><td>ck_02</td><td>xxx.xxx.xxx.xxx</td><td>9000</td><td>0</td></tr><tr><td>cluster_test</td><td>1</td><td>1</td><td>2</td><td>ck_02</td><td>xxx.xxx.xxx.xxx</td><td>9000</td><td>0</td></tr><tr><td>cluster_test</td><td>2</td><td>1</td><td>2</td><td>ck_03</td><td>xxx.xxx.xxx.xxx</td><td>9000</td><td>0</td></tr><tr><td>cluster_test</td><td>3</td><td>1</td><td>2</td><td>ck_03</td><td>xxx.xxx.xxx.xxx</td><td>9000</td><td>0</td></tr></tbody></table> 
+<p>这种部署方式需要3台机器，三个分片，两个副本，可实现高可用。<br> 因为副本数为2，<strong>每次写入一条数据，都会把这条数据写入到其中的两台机器上</strong>，所以相比于第一架构方式，资源利用率更高。但是假设通过ck_01节点写入，数据会存到分片1与分片2中，如果你连接ck_02进行查询本地表，是查不到写入分片2的数据。如何解决这个问题呢？目前博主想到的解决方案是在本地表上面再建一个分布式表。</p> 
+<p>例三（三分片双副本）：</p> 
+<table><thead><tr><th>cluster</th><th>shard_num</th><th>shard_weight</th><th>replica_num</th><th>host_name</th><th>host_address</th><th>port</th><th>is_local</th></tr></thead><tbody><tr><td>cluster_test</td><td>1</td><td>1</td><td>1</td><td>ck_01</td><td>xxx.xxx.xxx.xxx</td><td>9000</td><td>1</td></tr><tr><td>cluster_test</td><td>1</td><td>1</td><td>2</td><td>ck_02</td><td>xxx.xxx.xxx.xxx</td><td>9000</td><td>0</td></tr><tr><td>cluster_test</td><td>2</td><td>1</td><td>1</td><td>ck_03</td><td>xxx.xxx.xxx.xxx</td><td>9000</td><td>0</td></tr><tr><td>cluster_test</td><td>2</td><td>1</td><td>2</td><td>ck_04</td><td>xxx.xxx.xxx.xxx</td><td>9000</td><td>0</td></tr><tr><td>cluster_test</td><td>3</td><td>1</td><td>1</td><td>ck_05</td><td>xxx.xxx.xxx.xxx</td><td>9000</td><td>0</td></tr><tr><td>cluster_test</td><td>3</td><td>1</td><td>2</td><td>ck_06</td><td>xxx.xxx.xxx.xxx</td><td>9000</td><td>0</td></tr></tbody></table> 
+<p>这种部署方式需要6台机器，三个分片，两个副本，可实现高可用。架构相对较清晰。<br> 因为副本数为2，<strong>每次写入一条数据，都会把这条数据写入到其中的两台机器上，其他四台机器上没有此数据。</strong> 假设通过ck_01节点写入，数据仅会在ck_01跟ck_02两个节点，如果链接ck_03的数据库，此时是查不到任何数据的。</p> 
+<h4><a id="_59"></a>存储大小</h4> 
+<pre><code class="prism language-sql"><span class="token keyword">select</span> <span class="token operator">*</span> <span class="token keyword">from</span> system<span class="token punctuation">.</span>disks<span class="token punctuation">;</span>
+</code></pre> 
+<p><strong>主要字段说明：</strong><br> <strong>name：</strong> 磁盘名称<br> <strong>path：</strong> 数据对应在相应磁盘的路径<br> <strong>free_space：</strong> 可用存储大小<br> <strong>total_space：</strong> 总存储大小</p> 
+<p>另外，还可通过下面查看对应的存储策略，因为考虑到集群的扩展性，一些表可以指定存储策略存到指定磁盘下</p> 
+<pre><code class="prism language-sql"><span class="token keyword">select</span> <span class="token operator">*</span> <span class="token keyword">from</span> system<span class="token punctuation">.</span>storage_policies<span class="token punctuation">;</span>
+</code></pre> 
+<p><strong>主要字段说明：</strong><br> <strong>policy_name：</strong> 存储策略名称<br> <strong>volume_name：</strong> 卷名称<br> <strong>disks：</strong> 对应磁盘名称</p> 
+<h3><a id="_80"></a>总结</h3> 
+<p>通过clusters表，可以让我们快速的了解集群的架构，同时遇到需要较大存储的项目，可利用disks跟storage_policies进行评估，是否需要扩容。以上，仅为笔者对clickhouse的一点浅显理解，如果疑问，欢迎讨论与指正。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/82895a71c3fdc5d947096b01c4b4cec0/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">vue项目列表跳转详情返回列表页保留搜索条件</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/bddc9e91a07e7008b13199faeb7a9abb/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">文件服务器 —— FTP（搭建、运行、查看、用户设置和管理）【在线/离线安装】</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

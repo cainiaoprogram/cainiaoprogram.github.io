@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>heap pwn 入门大全 - 1：glibc heap机制与源码阅读(上) - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="heap pwn 入门大全 - 1：glibc heap机制与源码阅读(上)" />
+<meta property="og:description" content="本文为笔者学习heap pwn时，学习阅读glibc ptmalloc2源码时的笔记，与各位分享。可能存在思维跳跃或错误之处，敬请见谅，欢迎在评论中指出。本文也借用了部分外网和其他前辈的素材图片，向各位表示诚挚的感谢！如有侵权，请联系笔者删除。
+glibc的堆管理器为ptmalloc2
+heap management 堆管理器向kernel申请批量内存，自己管理，堆的内存管理空间称为 arena，堆管理器与用户的内存交易发生在arena中
+operations malloc n=0时，返回允许的堆的最小内存块 n&lt;0时，size_t 为无符号数，通常无法分配这么大的内存，返回ERRNOMEM free p 为空指针：无操作p 已经释放后，double free当释放较大内存块后，manager通过系统调用将内存直接还给系统 syscalls (s)brk
+堆的内存布局由两个指针控制：start_brk, brk，分别为开始和结尾
+mmap
+malloc 使用mmap创建独立的匿名映射段，可以申请全0内存，且此内存仅被调用进程所调用
+void *mmap(void addr[.length], size_t length, int prot, int flags, int fd, off_t offset); Flags - MAP_ANONYMOUS: 该区域为匿名映射，不与任何文件关联，内存赋初值为0
+当单次申请超过128KB内存，并且arena中没有剩余空间，则直接调用mmap申请内存，而不是brk
+多线程支持 与之前实现中多线程共享一个堆不同，ptmalloc2中，所有的线程共享多个堆，在堆申请、释放时，不需要等待其他线程退出临界区 critical area
+使用pthread多线程，自线程申请的堆单独建立，
+上图为thread malloc(0x32000)后的vmmap情况，其中：
+heap： 为main_arena空间，为初始化大小0x21000
+vmmap堆创建时，总共会申请得到1MB内存（0x7ffff00- ~ 0x7ffff40-），其中仅有132KB(0x7ffff0000000 ~ 0x7ffff0021000 = 0x21000B)内存可以作为堆内存进行读写，这是堆默认初始大小，当malloc大于0x20000，会直接使用mmap而不是在堆中创建
+由于申请的size大于initial heap size，于是进行了扩充
+pwndbg&gt; heap	// in thread 2 Allocated chunk | PREV_INUSE | NON_MAIN_ARENA Addr: 0x7ffff00008c0	// tcache_perthread_struct Size: 0x290 (with flag bits: 0x295) Allocated chunk | PREV_INUSE | NON_MAIN_ARENA Addr: 0x7ffff0000b50	// printf in use Size: 0x410 (with flag bits: 0x415) Allocated chunk | PREV_INUSE | NON_MAIN_ARENA Addr: 0x7ffff0000f60	// 0x32000 user space allocated Size: 0x32010 (with flag bits: 0x32015) Top chunk | PREV_INUSE Addr: 0x7ffff0032f70	// remainder / top chunk Size: 0x90 (with flag bits: 0x91) 其他多线程支持机制：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/436c3e3743249dc06a34bb7672b28991/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-08-13T23:02:09+08:00" />
+<meta property="article:modified_time" content="2023-08-13T23:02:09+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">heap pwn 入门大全 - 1：glibc heap机制与源码阅读(上)</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <blockquote> 
+ <p>本文为笔者学习heap pwn时，学习阅读glibc ptmalloc2源码时的笔记，与各位分享。可能存在思维跳跃或错误之处，敬请见谅，欢迎在评论中指出。本文也借用了部分外网和其他前辈的素材图片，向各位表示诚挚的感谢！如有侵权，请联系笔者删除。</p> 
+</blockquote> 
+<p>glibc的堆管理器为<code>ptmalloc2</code></p> 
+<h3><a id="heap_management_4"></a>heap management</h3> 
+<p>堆管理器向kernel申请批量内存，自己管理，堆的内存管理空间称为 <strong>arena</strong>，堆管理器与用户的内存交易发生在arena中</p> 
+<h3><a id="operations_8"></a>operations</h3> 
+<ul><li><strong>malloc</strong> 
+  <ul><li><code>n=0</code>时，返回允许的堆<strong>的最小</strong>内存块 
+    <ul><li><code>n&lt;0</code>时，size_t 为无符号数，通常无法分配这么大的内存，返回<code>ERRNOMEM</code></li></ul> </li></ul> </li><li><strong>free</strong> 
+  <ul><li>p 为空指针：无操作</li><li>p 已经释放后，<strong>double free</strong></li><li>当释放较大内存块后，manager通过系统调用将内存直接还给系统</li></ul> </li></ul> 
+<h3><a id="syscalls_18"></a>syscalls</h3> 
+<ul><li> <p>(s)brk</p> </li><li> <p>堆的内存布局由两个指针控制：<code>start_brk</code>, <code>brk</code>，分别为开始和结尾<br> <img src="https://images2.imgbox.com/bc/5d/6W9ZPdki_o.png" alt="在这里插入图片描述"></p> </li><li> <p>mmap</p> 
+  <ul><li> <p>malloc 使用mmap创建独立的匿名映射段，可以申请全0内存，且此内存仅被调用进程所调用</p> </li><li> <pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token operator">*</span><span class="token function">mmap</span><span class="token punctuation">(</span><span class="token keyword">void</span> addr<span class="token punctuation">[</span><span class="token punctuation">.</span>length<span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token class-name">size_t</span> length<span class="token punctuation">,</span> <span class="token keyword">int</span> prot<span class="token punctuation">,</span> <span class="token keyword">int</span> flags<span class="token punctuation">,</span>
+                  <span class="token keyword">int</span> fd<span class="token punctuation">,</span> <span class="token class-name">off_t</span> offset<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> </li><li> <p>Flags - <code>MAP_ANONYMOUS</code>: 该区域为匿名映射，不与任何文件关联，内存赋初值为0</p> </li><li> <p>当单次申请超过128KB内存，并且arena中没有剩余空间，<strong>则直接调用mmap申请内存，而不是brk</strong></p> </li></ul> </li></ul> 
+<h3><a id="_41"></a>多线程支持</h3> 
+<p>与之前实现中多线程共享一个堆不同，<code>ptmalloc2</code>中，<strong>所有的线程共享多个堆</strong>，在堆申请、释放时，不需要等待其他线程退出临界区 critical area</p> 
+<p>使用pthread多线程，自线程申请的堆单独建立，</p> 
+<p><img src="https://images2.imgbox.com/e0/d4/4lzezn6p_o.png" alt="在这里插入图片描述"></p> 
+<p>上图为thread <code>malloc(0x32000)</code>后的vmmap情况，其中：</p> 
+<ul><li> <p>heap： 为main_arena空间，为初始化大小<code>0x21000</code></p> </li><li> <p>vmmap堆创建时，总共会申请得到1MB内存（<code>0x7ffff00- ~ 0x7ffff40-</code>），其中仅有132KB(<code>0x7ffff0000000 ~ 0x7ffff0021000</code> = <code>0x21000B</code>)内存可以作为堆内存进行读写，<em>这是堆默认初始大小，当malloc大于<code>0x20000</code>，会直接使用mmap而不是在堆中创建</em></p> </li><li> <p>由于申请的size大于initial heap size，于是进行了扩充</p> </li><li> <pre><code class="prism language-c">pwndbg<span class="token operator">&gt;</span> heap		<span class="token comment">// in thread 2</span>
+Allocated chunk <span class="token operator">|</span> PREV_INUSE <span class="token operator">|</span> NON_MAIN_ARENA
+Addr<span class="token operator">:</span> <span class="token number">0x7ffff00008c0</span>				<span class="token comment">// tcache_perthread_struct</span>
+Size<span class="token operator">:</span> <span class="token number">0x290</span> <span class="token punctuation">(</span>with flag bits<span class="token operator">:</span> <span class="token number">0x295</span><span class="token punctuation">)</span>
+
+Allocated chunk <span class="token operator">|</span> PREV_INUSE <span class="token operator">|</span> NON_MAIN_ARENA
+Addr<span class="token operator">:</span> <span class="token number">0x7ffff0000b50</span>				<span class="token comment">// printf in use</span>
+Size<span class="token operator">:</span> <span class="token number">0x410</span> <span class="token punctuation">(</span>with flag bits<span class="token operator">:</span> <span class="token number">0x415</span><span class="token punctuation">)</span>
+
+Allocated chunk <span class="token operator">|</span> PREV_INUSE <span class="token operator">|</span> NON_MAIN_ARENA
+Addr<span class="token operator">:</span> <span class="token number">0x7ffff0000f60</span>				<span class="token comment">// 0x32000 user space allocated</span>
+Size<span class="token operator">:</span> <span class="token number">0x32010</span> <span class="token punctuation">(</span>with flag bits<span class="token operator">:</span> <span class="token number">0x32015</span><span class="token punctuation">)</span>
+
+Top chunk <span class="token operator">|</span> PREV_INUSE
+Addr<span class="token operator">:</span> <span class="token number">0x7ffff0032f70</span>				<span class="token comment">// remainder / top chunk</span>
+Size<span class="token operator">:</span> <span class="token number">0x90</span> <span class="token punctuation">(</span>with flag bits<span class="token operator">:</span> <span class="token number">0x91</span><span class="token punctuation">)</span>
+</code></pre> </li></ul> 
+<p>其他多线程支持机制：</p> 
+<ul><li>单次malloc映射的132KB内存(in main thread)称为<code>arena</code></li><li>当heap空间不足，可以通过扩充arena进行拓展，空间剩余过多时则可以进行shrink</li><li>thread arena 的数量受限于机器的核数，64bit 系统，最大<code>8*cores</code></li></ul> 
+<h3><a id="Chunk_85"></a>Chunk</h3> 
+<p>chunk是堆管理中的基本结构，无论chunk状态如何，都使用同一个结构体表示：</p> 
+<p>code in <code>malloc.c</code></p> 
+<pre><code class="prism language-c"><span class="token keyword">struct</span> <span class="token class-name">malloc_chunk</span> <span class="token punctuation">{<!-- --></span>
+
+  INTERNAL_SIZE_T      prev_size<span class="token punctuation">;</span>  <span class="token comment">/* Size of previous chunk (if free).  */</span>
+  INTERNAL_SIZE_T      size<span class="token punctuation">;</span>       <span class="token comment">/* Size in bytes, including overhead. */</span>
+
+  <span class="token keyword">struct</span> <span class="token class-name">malloc_chunk</span><span class="token operator">*</span> fd<span class="token punctuation">;</span>         <span class="token comment">/* double links -- used only if free. */</span>
+  <span class="token keyword">struct</span> <span class="token class-name">malloc_chunk</span><span class="token operator">*</span> bk<span class="token punctuation">;</span>
+
+  <span class="token comment">/* Only used for large blocks: pointer to next larger size.  */</span>
+  <span class="token keyword">struct</span> <span class="token class-name">malloc_chunk</span><span class="token operator">*</span> fd_nextsize<span class="token punctuation">;</span> <span class="token comment">/* double links -- used only if free. */</span>
+  <span class="token keyword">struct</span> <span class="token class-name">malloc_chunk</span><span class="token operator">*</span> bk_nextsize<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<ul><li> <p><code>INTERNAL_SIZE_T</code>: 用于存储chunk size的数据类型，一般为size_t</p> </li><li> <p><code>SIZE_SZ</code>: size of <code>INTERNAL_SIZE_T</code>, 8 in 64-bit system</p> </li><li> <p><code>MALLOC_ALIGNMENT</code>: <code>2 * SIZE_SZ</code>，为chunk size 对齐宽度</p> </li><li> <p><strong>prev_size</strong>, 如果该 chunk 的**物理相邻的前一地址 chunk（两个指针的地址差值为前一 chunk 大小）**是空闲的话，那该字段记录的是前一个 chunk 的大小 (包括 chunk 头)。否则，该字段可以用来存储物理相邻的前一个 chunk 的数据。<strong>这里的前一 chunk 指的是较低地址的 chunk</strong> 。</p> </li><li> <p><strong>size</strong>，该 chunk 的大小，大小必须是 2 * <code>SIZE_SZ</code> 的整数倍。如果申请的内存大小不是 2 * <code>SIZE_SZ</code> 的整数倍，会被转换满足大小的最小的 2 * <code>SIZE_SZ</code> 的倍数。32 位系统中，<code>SIZE_SZ</code> 是 4；64 位系统中，<code>SIZE_SZ</code> 是 8。 该字段的低三个比特位对 chunk 的大小没有影响，它们从高到低分别表示</p> 
+  <ul><li><code>NON_MAIN_ARENA</code>，记录当前 chunk 是否不属于主线程，1 表示不属于，0 表示属于。</li><li><code>IS_MAPPED</code>，记录当前 chunk 是否是由 mmap 分配的。 若该位被置位，则其他bit被忽略，因为mmap分配的块不属于arena，也不会与其他free chunk物理相邻。</li><li><code>PREV_INUSE</code>，记录前一个（物理相邻） chunk 块是否被分配。一般来说，堆中<strong>第一个</strong>被分配的内存块的 size 字段的 P 位都会被设置为 1，以便于<em>防止访问前面的非法内存</em>。当一个 chunk 的 size 的 P 位为 0 时，我们能通过 prev_size 字段来获取上一个 chunk 的大小以及地址。这也方便进行空闲 chunk 之间的合并。</li></ul> </li><li> <p><strong>fd, bk</strong>: forward, back，<strong>只在空闲时使用</strong>。当chunk空闲时，会被添加到空闲块管理列表中，为双向链表。fd为下一个，bk为上一个，<em>注意，指针指向非物理相邻的free chunk</em></p> </li><li> <p><strong>fd_nextsize, bk_nextsize</strong>: 只在空闲时，且大chunk时使用，记录下/上一个块的大小</p> 
+  <ul><li>free large chunk一般会由大到小排列，避免挨个遍历</li></ul> </li></ul> 
+<p>structure of a malloced-chunk:</p> 
+<pre><code>chunk-&gt; +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        |             Size of previous chunk, if unallocated (P clear)  |
+        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        |             Size of chunk, in bytes                     |A|M|P|
+  mem-&gt; +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        |             User data starts here...                          .
+        .                                                               .
+        .             (malloc_usable_size() bytes)                      .
+next    .                                                               |
+chunk-&gt; +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        |             (size of chunk, but used for application data)    |
+        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        |             Size of next chunk, in bytes                |A|0|1|
+        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+</code></pre> 
+<ul><li>对于下一个chunk，<code>prev_inuse</code>=1</li><li><strong>malloc返回的指针位于user data的起始处</strong>，末尾三位为<code>010</code><br> <img src="https://images2.imgbox.com/04/ed/Chxbhy60_o.png" alt="在这里插入图片描述"></li></ul> 
+<p>structure of a free chunk:</p> 
+<pre><code>chunk-&gt; +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        |             Size of previous chunk, if unallocated (P clear)  |
+        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+`head:' |             Size of chunk, in bytes                     |A|0|P|
+  mem-&gt; +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        |             Forward pointer to next chunk in list             |
+        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        |             Back pointer to previous chunk in list            |
+        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        |             Unused space (may be 0 bytes long)                .
+        .                                                               .
+ next   .                                                               |
+chunk-&gt; +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+`foot:' |             Size of chunk, in bytes                           |
+        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        |             Size of next chunk, in bytes                |A|0|0|
+        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+</code></pre> 
+<ul><li>对于一个free chunk，有两个地方可以保存其大小，一个是该chunk的size，另一个是<code>next_chunk</code>的<code>prev_size</code></li></ul> 
+<p>注意事项：</p> 
+<ul><li>一般情况下，物理相邻的两个chunk会自动合并为一个</li><li>fastbin中的free chunk在堆管理器看来是一个allocated chunk</li></ul> 
+<h4><a id="chunk__175"></a>chunk 相关宏</h4> 
+<ul><li> <p><code>INTERNAL_SIZE_T</code>: 用于存储chunk size的数据类型，一般为size_t</p> </li><li> <p><code>SIZE_SZ</code>: size of <code>INTERNAL_SIZE_T</code>, 8 in 64-bit system</p> </li><li> <p><code>MALLOC_ALIGNMENT</code>: <code>2 * SIZE_SZ</code>，为chunk size 对齐宽度</p> </li><li> <p>chunk与user data空间头部指针的转换：</p> <pre><code class="prism language-c"><span class="token comment">/* conversion from malloc headers to user pointers, and back */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">chunk2mem</span><span class="token expression"><span class="token punctuation">(</span>p<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span><span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>p<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token number">2</span> <span class="token operator">*</span> SIZE_SZ<span class="token punctuation">)</span><span class="token punctuation">)</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">mem2chunk</span><span class="token expression"><span class="token punctuation">(</span>mem<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>mchunkptr<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>mem<span class="token punctuation">)</span> <span class="token operator">-</span><span class="token number">2</span> <span class="token operator">*</span> SIZE_SZ<span class="token punctuation">)</span><span class="token punctuation">)</span></span></span>
+</code></pre> </li><li> <p>最小chunk大小</p> <pre><code class="prism language-c"><span class="token comment">/* The smallest possible chunk */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">defin</span><span class="token expression"><span class="token function">MIN_CHUNK_SIZE</span> <span class="token punctuation">(</span><span class="token function">offsetof</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">malloc_chunk</span><span class="token punctuation">,</span> fd_nextsize<span class="token punctuation">)</span><span class="token punctuation">)</span> </span><span class="token comment">//  32 Byte</span></span>
+</code></pre> 
+  <ul><li><code>offsetof</code>计算结构体中成员的偏置，即该成员前所有成员的大小之和</li><li>最小的chunk至少要包含两个指针 （fd，bk），以及前面的两个size，共32B</li></ul> </li><li> <p>检查是否对齐</p> <pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">aligned_OK</span><span class="token expression"><span class="token punctuation">(</span>m<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">long</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>m<span class="token punctuation">)</span> <span class="token operator">&amp;</span> MALLOC_ALIGN_MASK<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span></span></span>
+</code></pre> </li><li> <p>请求字节数检查，避免超限</p> <pre><code class="prism language-c"><span class="token comment">/*
+   Check if a request is so large that it would wrap around zero when
+   padded and aligned. To simplify some other code, the bound is made
+   low enough so that adding MINSIZE will also not wrap around zero.
+ */</span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">REQUEST_OUT_OF_RANGE</span><span class="token expression"><span class="token punctuation">(</span>req<span class="token punctuation">)</span>                                              </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">long</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>req<span class="token punctuation">)</span> <span class="token operator">&gt;=</span> <span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">long</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>INTERNAL_SIZE_T<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">2</span> <span class="token operator">*</span> MINSIZE<span class="token punctuation">)</span><span class="token punctuation">)</span></span></span>
+</code></pre> </li><li> <p>将用户请求字节数转化为chunk size</p> <pre><code class="prism language-c"><span class="token comment">/* pad request bytes into a usable size -- internal version */</span>
+<span class="token comment">//MALLOC_ALIGN_MASK = 2 * SIZE_SZ -1</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">request2size</span><span class="token expression"><span class="token punctuation">(</span>req<span class="token punctuation">)</span>                                                      </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span>req<span class="token punctuation">)</span> <span class="token operator">+</span> SIZE_SZ <span class="token operator">+</span> MALLOC_ALIGN_MASK <span class="token operator">&lt;</span> MINSIZE<span class="token punctuation">)</span>                           </span><span class="token punctuation">\</span>
+         <span class="token expression"><span class="token operator">?</span> MINSIZE                                                             </span><span class="token punctuation">\</span>
+         <span class="token expression"><span class="token operator">:</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>req<span class="token punctuation">)</span> <span class="token operator">+</span> SIZE_SZ <span class="token operator">+</span> MALLOC_ALIGN_MASK<span class="token punctuation">)</span> <span class="token operator">&amp;</span> <span class="token operator">~</span>MALLOC_ALIGN_MASK<span class="token punctuation">)</span></span></span>
+
+<span class="token comment">/*  Same, except also perform argument check */</span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">checked_request2size</span><span class="token expression"><span class="token punctuation">(</span>req<span class="token punctuation">,</span> sz<span class="token punctuation">)</span>                                          </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">REQUEST_OUT_OF_RANGE</span><span class="token punctuation">(</span>req<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>                                           </span><span class="token punctuation">\</span>
+        <span class="token expression"><span class="token function">__set_errno</span><span class="token punctuation">(</span>ENOMEM<span class="token punctuation">)</span><span class="token punctuation">;</span>                                                   </span><span class="token punctuation">\</span>
+        <span class="token expression"><span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>                                                              </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token punctuation">}</span>                                                                          </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token punctuation">(</span>sz<span class="token punctuation">)</span> <span class="token operator">=</span> <span class="token function">request2size</span><span class="token punctuation">(</span>req<span class="token punctuation">)</span><span class="token punctuation">;</span></span></span>
+</code></pre> </li><li> <p><code>chunk_at_offset</code>：将一个<code>ptr+offset</code>处的内存视为一个内存块</p> </li></ul> 
+<p>当一个 chunk 处于<strong>已分配</strong>状态时，它的物理相邻的下一个 chunk 的 <strong>prev_size 字段必然是无效的</strong>，故而这个字段就可以被当前这个 chunk 使用。这就是 ptmalloc 中 chunk 间的复用。</p> 
+<ul><li>request size + chunk header <code>2 * SIZE_SZ</code>，但复用了prev_size，只需要一个<code>SIZE_SZ</code>即可</li></ul> 
+<p>chunk 申请流程</p> 
+<ol><li>首先，利用 REQUEST_OUT_OF_RANGE 判断是否可以分配用户请求的字节大小的 chunk。</li><li>其次，需要注意的是用户请求的字节是用来存储数据的，即 chunk header 后面的部分。与此同时，由于 chunk 间复用，所以可以使用下一个 chunk 的 prev_size 字段。因此，这里只需要再添加 SIZE_SZ 大小即可以完全存储内容。</li><li>由于系统中所允许的申请的 chunk 最小是 MINSIZE，所以与其进行比较。如果不满足最低要求，那么就需要直接分配 MINSIZE 字节。</li><li>如果大于的话，因为系统中申请的 chunk 需要 2 * SIZE_SZ 对齐，所以这里需要加上 MALLOC_ALIGN_MASK 以便于对齐。</li></ol> 
+<ul><li> <p>标记位相关宏：</p> <pre><code class="prism language-c"><span class="token comment">/* size field is or'ed with PREV_INUSE when previous adjacent chunk in use */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">PREV_INUSE</span> <span class="token expression"><span class="token number">0x1</span></span></span>
+
+<span class="token comment">/* extract inuse bit of previous chunk */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">prev_inuse</span><span class="token expression"><span class="token punctuation">(</span>p<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token operator">-&gt;</span>mchunk_size <span class="token operator">&amp;</span> PREV_INUSE<span class="token punctuation">)</span></span></span>
+
+<span class="token comment">/* size field is or'ed with IS_MMAPPED if the chunk was obtained with mmap() */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">IS_MMAPPED</span> <span class="token expression"><span class="token number">0x2</span></span></span>
+
+<span class="token comment">/* check for mmap()'ed chunk */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">chunk_is_mmapped</span><span class="token expression"><span class="token punctuation">(</span>p<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token operator">-&gt;</span>mchunk_size <span class="token operator">&amp;</span> IS_MMAPPED<span class="token punctuation">)</span></span></span>
+
+<span class="token comment">/* size field is or'ed with NON_MAIN_ARENA if the chunk was obtained
+   from a non-main arena.  This is only set immediately before handing
+   the chunk to the user, if necessary.  */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">NON_MAIN_ARENA</span> <span class="token expression"><span class="token number">0x4</span></span></span>
+
+<span class="token comment">/* Check for chunk from main arena.  */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">chunk_main_arena</span><span class="token expression"><span class="token punctuation">(</span>p<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token operator">-&gt;</span>mchunk_size <span class="token operator">&amp;</span> NON_MAIN_ARENA<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span></span></span>
+
+<span class="token comment">/* Mark a chunk as not being on the main arena.  */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">set_non_main_arena</span><span class="token expression"><span class="token punctuation">(</span>p<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token operator">-&gt;</span>mchunk_size <span class="token operator">|=</span> NON_MAIN_ARENA<span class="token punctuation">)</span></span></span>
+
+<span class="token comment">/*
+   Bits to mask off when extracting size
+   Note: IS_MMAPPED is intentionally not masked off from size field in
+   macros for which mmapped chunks should never be seen. This should
+   cause helpful core dumps to occur if it is tried by accident by
+   people extending or adapting this malloc.
+ */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">SIZE_BITS</span> <span class="token expression"><span class="token punctuation">(</span>PREV_INUSE <span class="token operator">|</span> IS_MMAPPED <span class="token operator">|</span> NON_MAIN_ARENA<span class="token punctuation">)</span></span></span>
+</code></pre> </li><li> <p>get chunk size</p> <pre><code class="prism language-c"><span class="token comment">/* Get size, ignoring use bits */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">chunksize</span><span class="token expression"><span class="token punctuation">(</span>p<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token function">chunksize_nomask</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span> <span class="token operator">&amp;</span> <span class="token operator">~</span><span class="token punctuation">(</span>SIZE_BITS<span class="token punctuation">)</span><span class="token punctuation">)</span></span></span>
+
+<span class="token comment">/* Like chunksize, but do not mask SIZE_BITS.  */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">chunksize_nomask</span><span class="token expression"><span class="token punctuation">(</span>p<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token operator">-&gt;</span>mchunk_size<span class="token punctuation">)</span></span></span>
+</code></pre> </li><li> <p>Get next chunk position which is physical adjacent to the current chunk</p> <pre><code class="prism language-c"><span class="token comment">/* Ptr to next physical malloc_chunk. */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">next_chunk</span><span class="token expression"><span class="token punctuation">(</span>p<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>mchunkptr<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token function">chunksize</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span></span></span>
+</code></pre> </li><li> <p>access info about previous chunk</p> <pre><code class="prism language-c"><span class="token comment">/* Size of the chunk below P.  Only valid if !prev_inuse (P).  */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">prev_size</span><span class="token expression"><span class="token punctuation">(</span>p<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token operator">-&gt;</span>mchunk_prev_size<span class="token punctuation">)</span></span></span>
+
+<span class="token comment">/* Set the size of the chunk below P.  Only valid if !prev_inuse (P).  */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">set_prev_size</span><span class="token expression"><span class="token punctuation">(</span>p<span class="token punctuation">,</span> sz<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token operator">-&gt;</span>mchunk_prev_size <span class="token operator">=</span> <span class="token punctuation">(</span>sz<span class="token punctuation">)</span><span class="token punctuation">)</span></span></span>
+
+<span class="token comment">/* Ptr to previous physical malloc_chunk.  Only valid if !prev_inuse (P).  */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">prev_chunk</span><span class="token expression"><span class="token punctuation">(</span>p<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>mchunkptr<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token function">prev_size</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span></span></span>
+</code></pre> </li><li> <p>操作chunk当前状态</p> <pre><code class="prism language-c"><span class="token comment">/* extract p's inuse bit */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">inuse</span><span class="token expression"><span class="token punctuation">(</span>p<span class="token punctuation">)</span>                                                               </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span>mchunkptr<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token function">chunksize</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token operator">-&gt;</span>mchunk_size<span class="token punctuation">)</span> <span class="token operator">&amp;</span> PREV_INUSE<span class="token punctuation">)</span></span></span>
+
+<span class="token comment">/* set/clear chunk as being inuse without otherwise disturbing */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">set_inuse</span><span class="token expression"><span class="token punctuation">(</span>p<span class="token punctuation">)</span>                                                           </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token punctuation">(</span><span class="token punctuation">(</span>mchunkptr<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token function">chunksize</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token operator">-&gt;</span>mchunk_size <span class="token operator">|=</span> PREV_INUSE</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">clear_inuse</span><span class="token expression"><span class="token punctuation">(</span>p<span class="token punctuation">)</span>                                                         </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token punctuation">(</span><span class="token punctuation">(</span>mchunkptr<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token function">chunksize</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token operator">-&gt;</span>mchunk_size <span class="token operator">&amp;=</span> <span class="token operator">~</span><span class="token punctuation">(</span>PREV_INUSE<span class="token punctuation">)</span></span></span>
+</code></pre> </li><li> <p>获取指定偏移的chunk</p> <pre><code class="prism language-c"><span class="token comment">/* Treat space at ptr + offset as a chunk */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">chunk_at_offset</span><span class="token expression"><span class="token punctuation">(</span>p<span class="token punctuation">,</span> s<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>mchunkptr<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token punctuation">(</span>s<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span></span></span>
+</code></pre> </li></ul> 
+<h4><a id="Top_chunk_338"></a>Top chunk</h4> 
+<p>位于arena 顶端的chunk</p> 
+<ul><li> <p>是内存分配中寻找的最后一个chunk，若前面的各个bin都无法满足要求，则从top chunk中split</p> </li><li> <p>如果位置不足，则调用sbrk进行扩容。</p> </li><li> <p>top chunk 只能split，<strong>不能直接被使用</strong></p> </li><li> <p><code>PREV_INUSE</code>标志位恒为1，避免前面的chunk合并到top chunk中</p> 
+  <ul><li>前面chunk consolidate时会进行检查，若为top chunk，则直接进行合并</li></ul> </li></ul> 
+<pre><code class="prism language-c"><span class="token comment">/*
+   Top
+
+    The top-most available chunk (i.e., the one bordering the end of
+    available memory) is treated specially. It is never included in
+    any bin, is used only if no other chunk is available, and is
+    released back to the system if it is very large (see
+    M_TRIM_THRESHOLD).  Because top initially
+    points to its own bin with initial zero size, thus forcing
+    extension on the first malloc request, we avoid having any special
+    code in malloc to check whether it even exists yet. But we still
+    need to do so when getting memory from system, so we make
+    initial_top treat the bin as a legal but unusable chunk during the
+    interval between initialization and the first call to
+    sysmalloc. (This is somewhat delicate, since it relies on
+    the 2 preceding words to be zero during this interval as well.)
+ */</span>
+
+<span class="token comment">/* Conveniently, the unsorted bin can be used as dummy top on first call */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">initial_top</span><span class="token expression"><span class="token punctuation">(</span>M<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token function">unsorted_chunks</span><span class="token punctuation">(</span>M<span class="token punctuation">)</span><span class="token punctuation">)</span></span></span>
+</code></pre> 
+<p>程序第一次进行malloc时，会初始化heap，剩余部分作为 top chunk。初始状态下，将unsorted chunk作为top chunk</p> 
+<h4><a id="Last_remainder_chunk_375"></a>Last remainder chunk</h4> 
+<p>是最近一次split产生的chunk。当当前chunk没有合适的大小时，会将一个大的chunk分为两部分，一部分给用户空间使用，另一部分作为last remainder chunk，该部分同样会存入unsorted bin中</p> 
+<h3><a id="bin_381"></a>bin</h3> 
+<p>用户释放的chunk不会马上归还给系统，ptmalloc会统一管理heap和mmap映射区域中的空闲chunk。</p> 
+<p>ptmalloc采用<strong>分箱方式</strong>进行chunk管理。根据chunk大小和使用状态对chunk进行分类：</p> 
+<ul><li>fast bins</li><li>Large bins</li><li>small bins</li><li>unsorted bins</li></ul> 
+<p>在每个bin中有<strong>更多细分</strong>，同类bin使用双向链表相连。</p> 
+<p>除了fast bin，ptmalloc将他们维护在同一个数组中，bin对应的数据结构存放在arrena header数据结构——<code>malloc_state</code>中。</p> 
+<pre><code class="prism language-c"><span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token class-name">malloc_chunk</span><span class="token operator">*</span> mchunkptr<span class="token punctuation">;</span> 
+<span class="token comment">/* Normal bins packed as described above */</span>
+mchunkptr bins<span class="token punctuation">[</span>NBINS <span class="token operator">*</span> <span class="token number">2</span> <span class="token operator">-</span> <span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+</code></pre> 
+<ul><li>每个bin使用两个指针描述，第一个记录bin的<code>HEAD</code>，即fd，第二个记录bin的<code>TAIL</code></li><li>整个bin<strong>使用<code>malloc_chunk</code>的结构体</strong>，也就是说，可以被当作chunk使用，这样就不需要单独处理header chunk。相邻的两个header chunk互相重叠，只使用<code>fd</code>, <code>bk</code>两个指针，offset通过下面宏中所提到的<code>bin_at</code>计算</li></ul> 
+<p>Fast bin 单独拥有一个维护数组：</p> 
+<pre><code class="prism language-c"><span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token class-name">malloc_chunk</span> <span class="token operator">*</span>mfastbinptr<span class="token punctuation">;</span>
+mfastbinptr fastbinsY<span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">;</span> <span class="token comment">// Array of pointers to chunks</span>
+</code></pre> 
+<p>bins组织如下：(<strong>序号为宏计算前的序号，非bins中的offset</strong>)</p> 
+<ol><li> <p>第 1 个为unsorted bin，chunk未排序，存储较为混乱。注意：<strong>没有0号bin</strong></p> </li><li> <p>共有62个small bins, index = 2 ~ 63，每一个small bin链表中chunk<strong>长度相同</strong>；相邻两个bins 大小<strong>相差两个字长 16B in 64-bit OS</strong>（即malloc），遵循队列分配（FIFO）</p> 
+  <ul><li>small bins 大小依次为：32, 48, …, 1008 共62个</li></ul> </li><li> <p>共有63个large bins，每个bin中的chunk size 为一个范围</p> 
+  <ol><li> <p>相邻两个bin间隔按照类似指数的规则排列</p> <pre><code class="prism language-c"><span class="token number">64</span> bins of size      <span class="token number">16</span>  <span class="token punctuation">[</span> Small bins<span class="token punctuation">]</span>	<span class="token comment">// 62 bins in deed</span>
+<span class="token number">32</span> bins of size      <span class="token number">64</span>  <span class="token punctuation">[</span> Large bins<span class="token punctuation">]</span>  <span class="token comment">// start from 1024</span>
+<span class="token number">16</span> bins of size     <span class="token number">512</span>  <span class="token punctuation">[</span> Large bins<span class="token punctuation">]</span>
+<span class="token number">8</span> bins of size     <span class="token number">4096</span>  <span class="token punctuation">[</span> <span class="token punctuation">.</span><span class="token punctuation">.</span>        <span class="token punctuation">]</span>
+<span class="token number">4</span> bins of size    <span class="token number">32768</span>
+<span class="token number">2</span> bins of size   <span class="token number">262144</span>
+<span class="token number">1</span> bin  of size what's left
+</code></pre> 
+    <ul><li>如上图所示，第一个large bin (index=64) 为: <code>1024~1087</code>, 第二个是<code>1088~1151</code></li></ul> </li><li> <p>最小的large bin 大小 <code>MIN_LARGE_SIZE=1024</code></p> </li><li> <p>large bin 内，相同size的chunk按照FIFO规划</p> </li></ol> </li></ol> 
+<ul><li>原则：任意两个物理相邻的空闲chunk不能在一起，物理相邻的两个chunk都free时会进行合并</li></ul> 
+<h4><a id="bin__441"></a>bin 相关宏</h4> 
+<pre><code class="prism language-c"><span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token class-name">malloc_chunk</span> <span class="token operator">*</span>mbinptr<span class="token punctuation">;</span>
+
+<span class="token comment">/* addressing -- note that bin_at(0) does not exist */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">bin_at</span><span class="token expression"><span class="token punctuation">(</span>m<span class="token punctuation">,</span> i<span class="token punctuation">)</span>                                                           </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token punctuation">(</span>mbinptr<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span> <span class="token operator">&amp;</span><span class="token punctuation">(</span><span class="token punctuation">(</span>m<span class="token punctuation">)</span><span class="token operator">-&gt;</span>bins<span class="token punctuation">[</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>i<span class="token punctuation">)</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token number">2</span> <span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">-</span>                        </span><span class="token punctuation">\</span>
+              <span class="token expression"><span class="token function">offsetof</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">malloc_chunk</span><span class="token punctuation">,</span> fd<span class="token punctuation">)</span><span class="token punctuation">)</span></span></span>
+
+<span class="token comment">/* analog of ++bin */</span>
+<span class="token comment">//获取下一个bin的地址</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">next_bin</span><span class="token expression"><span class="token punctuation">(</span>b<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>mbinptr<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>b<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token punctuation">(</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span>mchunkptr<span class="token punctuation">)</span> <span class="token operator">&lt;&lt;</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span></span></span>
+
+<span class="token comment">/* Reminders about list directionality within bins */</span>
+<span class="token comment">// 这两个宏可以用来遍历bin</span>
+<span class="token comment">// 获取 bin 的位于链表头的 chunk</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">first</span><span class="token expression"><span class="token punctuation">(</span>b<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>b<span class="token punctuation">)</span><span class="token operator">-&gt;</span>fd<span class="token punctuation">)</span></span></span>
+<span class="token comment">// 获取 bin 的位于链表尾的 chunk</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">last</span><span class="token expression"><span class="token punctuation">(</span>b<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>b<span class="token punctuation">)</span><span class="token operator">-&gt;</span>bk<span class="token punctuation">)</span></span></span>
+</code></pre> 
+<ul><li><code>bin_at</code>: 通过index查询到对应的bin，<em>其中减去offset是为了将header chunk作为chunk使用，同时完成空间压缩</em>，一个header chunk，我们只使用两个双向链表指针，其他位置是别的chunk的位置，<em>所以0号位置不能使用，否则继续使用offset将会OOB</em></li></ul> 
+<p>bin 的 组织如下：</p> 
+<blockquote> 
+ <p>To simplify use in double-linked lists, each bin header acts as a malloc_chunk. This avoids special-casing for headers. But to conserve space and improve locality, we allocate only the fd/bk pointers of bins, and then use repositioning tricks to treat these as the fields of a malloc_chunk*</p> 
+</blockquote> 
+<ul><li>一个bin 占用两个bins中的元素，一个代表fd，另一个为bk，为双向链表的两个指针，<strong>通过<code>bin_at</code>查询对应索引的bin</strong>，从而直接使用两个链表指针参数</li></ul> 
+<h4><a id="fast_bin_473"></a>fast bin</h4> 
+<p>由于大多数程序经常申请较小chunk，花费在split和merge上的时间过多，使用fast chunk缓解这个问题。使用<code>fastbinsY</code>数组进行储存</p> 
+<pre><code class="prism language-c"><span class="token comment">/*
+   Fastbins
+
+    An array of lists holding recently freed small chunks.  Fastbins
+    are not doubly linked.  It is faster to single-link them, and
+    since chunks are never removed from the middles of these lists,
+    double linking is not necessary. Also, unlike regular bins, they
+    are not even processed in FIFO order (they use faster LIFO) since
+    ordering doesn't much matter in the transient contexts in which
+    fastbins are normally used.
+
+    Chunks in fastbins keep their inuse bit set, so they cannot
+    be consolidated with other free chunks. malloc_consolidate
+    releases all chunks in fastbins and consolidates them with
+    other free chunks.
+ */</span>
+
+<span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token class-name">malloc_chunk</span> <span class="token operator">*</span>mfastbinptr<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">fastbin</span><span class="token expression"><span class="token punctuation">(</span>ar_ptr<span class="token punctuation">,</span> idx<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>ar_ptr<span class="token punctuation">)</span><span class="token operator">-&gt;</span>fastbinsY<span class="token punctuation">[</span>idx<span class="token punctuation">]</span><span class="token punctuation">)</span></span></span>
+
+<span class="token comment">// ...</span>
+
+<span class="token comment">/* The maximum fastbin request size we support */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">MAX_FAST_SIZE</span>     <span class="token expression"><span class="token punctuation">(</span><span class="token number">80</span> <span class="token operator">*</span> SIZE_SZ <span class="token operator">/</span> <span class="token number">4</span><span class="token punctuation">)</span></span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">NFASTBINS</span>  <span class="token expression"><span class="token punctuation">(</span><span class="token function">fastbin_index</span> <span class="token punctuation">(</span><span class="token function">request2size</span> <span class="token punctuation">(</span>MAX_FAST_SIZE<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span></span></span>
+
+mfastbinptr fastbinsY<span class="token punctuation">[</span>NFASTBINS<span class="token punctuation">]</span><span class="token punctuation">;</span>
+</code></pre> 
+<ul><li> <p><strong>fast bin 不进行合并操作</strong></p> </li><li> <p>每个fast bin中的chunk size相同</p> </li><li> <p>采用单链表存储结构，因为从不会从中间将chunk移除</p> </li><li> <p>使用FILO顺序进行管理，所有操作在头部进行</p> </li><li> <p>fast bins <strong>将IN_USE位始终置1</strong></p> </li></ul> 
+<pre><code class="prism language-c"><span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token class-name">malloc_chunk</span> <span class="token operator">*</span>mfastbinptr<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">fastbin</span><span class="token expression"><span class="token punctuation">(</span>ar_ptr<span class="token punctuation">,</span> idx<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>ar_ptr<span class="token punctuation">)</span><span class="token operator">-&gt;</span>fastbinsY<span class="token punctuation">[</span>idx<span class="token punctuation">]</span><span class="token punctuation">)</span></span></span>
+
+<span class="token comment">/* offset 2 to use otherwise unindexable first 2 bins */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">fastbin_index</span><span class="token expression"><span class="token punctuation">(</span>sz<span class="token punctuation">)</span> </span><span class="token punctuation">\</span>
+  <span class="token expression"><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">int</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>sz<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&gt;&gt;</span> <span class="token punctuation">(</span>SIZE_SZ <span class="token operator">==</span> <span class="token number">8</span> <span class="token operator">?</span> <span class="token number">4</span> <span class="token operator">:</span> <span class="token number">3</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token number">2</span><span class="token punctuation">)</span></span></span>
+
+<span class="token comment">/* The maximum fastbin request size we support */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">MAX_FAST_SIZE</span>     <span class="token expression"><span class="token punctuation">(</span><span class="token number">80</span> <span class="token operator">*</span> SIZE_SZ <span class="token operator">/</span> <span class="token number">4</span><span class="token punctuation">)</span></span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">NFASTBINS</span>  <span class="token expression"><span class="token punctuation">(</span><span class="token function">fastbin_index</span> <span class="token punctuation">(</span><span class="token function">request2size</span> <span class="token punctuation">(</span>MAX_FAST_SIZE<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span></span></span>
+</code></pre> 
+<ul><li>默认支持到128B，最多支持 <code>MAX_FAST_SIZE = 160B</code> in 64-bit OS 
+  <ul><li>通过<code>do_set_mxfast</code>修改最大支持fast bin 大小</li><li>初始化时设置为默认支持fast bin 大小</li></ul> </li><li>每个fast bin 间隔 16B 
+  <ul><li>共有10个fast bin，依次为32B, 48B…</li></ul> </li></ul> 
+<p>内存整理：</p> 
+<pre><code class="prism language-c"><span class="token comment">/*
+   FASTBIN_CONSOLIDATION_THRESHOLD is the size of a chunk in free()
+   that triggers automatic consolidation of possibly-surrounding
+   fastbin chunks. This is a heuristic, so the exact value should not
+   matter too much. It is defined at half the default trim threshold as a
+   compromise heuristic to only attempt consolidation if it is likely
+   to lead to trimming. However, it is not dynamically tunable, since
+   consolidation reduces fragmentation surrounding large chunks even
+   if trimming is not used.
+ */</span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">FASTBIN_CONSOLIDATION_THRESHOLD</span>  <span class="token expression"><span class="token punctuation">(</span><span class="token number">65536UL</span><span class="token punctuation">)</span></span></span>
+</code></pre> 
+<ul><li>当目前需要free的chunk size大于<code>fastbin_consolidation_threshold</code>时，该free chunk周围较多内存碎片，需要调用<code>malloc_consolidate</code>将fast bin中的chunk进行合并</li><li><code>malloc_consolidate</code>将所有fastbin释放，并合并为小块</li></ul> 
+<p><img src="https://images2.imgbox.com/52/eb/IKRIIjDZ_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="small_bin_558"></a>small bin</h4> 
+<p>small bin 相关宏：</p> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">NBINS</span>             <span class="token expression"><span class="token number">128</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">NSMALLBINS</span>         <span class="token expression"><span class="token number">64</span>		</span><span class="token comment">// is 63 in total, actually</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">SMALLBIN_WIDTH</span>    <span class="token expression">MALLOC_ALIGNMENT</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">SMALLBIN_CORRECTION</span> <span class="token expression"><span class="token punctuation">(</span>MALLOC_ALIGNMENT <span class="token operator">&gt;</span> <span class="token number">2</span> <span class="token operator">*</span> SIZE_SZ<span class="token punctuation">)</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">MIN_LARGE_SIZE</span>    <span class="token expression"><span class="token punctuation">(</span><span class="token punctuation">(</span>NSMALLBINS <span class="token operator">-</span> SMALLBIN_CORRECTION<span class="token punctuation">)</span> <span class="token operator">*</span> SMALLBIN_WIDTH<span class="token punctuation">)</span></span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">in_smallbin_range</span><span class="token expression"><span class="token punctuation">(</span>sz<span class="token punctuation">)</span>  </span><span class="token punctuation">\</span>
+  <span class="token expression"><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">long</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>sz<span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">long</span><span class="token punctuation">)</span> MIN_LARGE_SIZE<span class="token punctuation">)</span></span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">smallbin_index</span><span class="token expression"><span class="token punctuation">(</span>sz<span class="token punctuation">)</span> </span><span class="token punctuation">\</span>
+  <span class="token expression"><span class="token punctuation">(</span><span class="token punctuation">(</span>SMALLBIN_WIDTH <span class="token operator">==</span> <span class="token number">16</span> <span class="token operator">?</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>sz<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&gt;&gt;</span> <span class="token number">4</span><span class="token punctuation">)</span> <span class="token operator">:</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>sz<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&gt;&gt;</span> <span class="token number">3</span><span class="token punctuation">)</span><span class="token punctuation">)</span></span><span class="token punctuation">\</span>
+   <span class="token expression"><span class="token operator">+</span> SMALLBIN_CORRECTION<span class="token punctuation">)</span></span></span>
+</code></pre> 
+<ul><li> <p><code>smallbin_index</code> 用于计算chunk 位于 smallbin中的序号，当32B（最小chunk）被free时，将得到<code>idx=2</code>，在unsorted bin之后</p> </li><li> <p>small bin malloc使用队列分配，FIFO</p> </li><li> <p>small bin的free操作，需要<strong>检查物理相邻块，并将相邻free chunk合并</strong>，合并后的chunk加入unsorted chunk中</p> </li></ul> 
+<p><img src="https://images2.imgbox.com/3a/4a/rAcF43ut_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="large_bin_587"></a>large bin</h4> 
+<ul><li> <p>大于等于1024B的chunk都为large chunk，在largin bin中管理</p> </li><li> <p><strong>同一个bin中的chunk size可以不同</strong></p> </li><li> <p>large bin支持<strong>随机存取</strong></p> </li><li> <p>具体的size规范见<a href="#bin" rel="nofollow">bin概述</a></p> </li><li> <p>bin中chunk<strong>降序</strong>排列，HEAD上是最大的chunk</p> </li><li> <p><code>nextsize</code><strong>查找速度优化</strong></p> 
+  <ul><li> <p>对于large bin，每个bin中的size各不相同，也可能出现多个相同size的chunk</p> </li><li> <p>每次在large bin中查找chunk，若遍历所有chunk，可能效率低下</p> </li><li> <p>nextsize<strong>将相邻不同size的chunk组合成链表</strong>，如下图所示，会跳过相同size chunk(仍可以通过fd和bk查询到)</p> 
+    <ul><li>独立的chunk，两个<code>nextsize</code>指针<strong>为空</strong></li></ul> <p><img src="https://images2.imgbox.com/41/93/rWiNiI8T_o.jpg" alt="img"></p> </li></ul> </li></ul> 
+<p>malloc 操作：</p> 
+<ul><li>首先确定用户请求的大小属于哪个bin，再在bin中寻找可用的最小chunk 
+  <ul><li>若大于用户请求量，则拆分后返回给用户，剩余部分加入unsroted bin</li></ul> </li><li>若当前bin没有合适chunk，则依次向后寻找bin，否则向top chunk索取</li><li><strong>优化：Binmap</strong> 
+  <ul><li>motivation: 由于不同的bin较多，<strong>依次遍历将消耗较多时间</strong>，<em>特别是在warm-up阶段，绝大多数bin都是空的情况下</em></li><li>用于记录bin是否为空，使用bitmap映射</li><li><strong>偏否的蒙特卡洛算法</strong>，bit位置1，对应bin不一定非空，但若为0，则一定为空</li></ul> </li></ul> 
+<p><img src="https://images2.imgbox.com/88/73/ouk9nCTq_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="unsorted_bin_619"></a>unsorted bin</h4> 
+<pre><code class="prism language-c"><span class="token comment">/*
+   Unsorted chunks
+
+    All remainders from chunk splits, as well as all returned chunks,
+    are first placed in the "unsorted" bin. They are then placed
+    in regular bins after malloc gives them ONE chance to be used before
+    binning. So, basically, the unsorted_chunks list acts as a queue,
+    with chunks being placed on it in free (and malloc_consolidate),
+    and taken off (to be either used or placed in bins) in malloc.
+
+    The NON_MAIN_ARENA flag is never set for unsorted chunks, so it
+    does not have to be taken into account in size comparisons.
+ */</span>
+
+<span class="token comment">/* The otherwise unindexable 1-bin is used to hold unsorted chunks. */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">unsorted_chunks</span><span class="token expression"><span class="token punctuation">(</span>M<span class="token punctuation">)</span>          <span class="token punctuation">(</span><span class="token function">bin_at</span> <span class="token punctuation">(</span>M<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span></span></span>
+</code></pre> 
+<p>为chunk管理提供缓冲区</p> 
+<ul><li> <p>若free chunk过大，则放置到缓冲区中</p> </li><li> <p>split后的chunk也会放到unsroted bin中</p> </li><li> <p>循环双链表结构，FIFO管理</p> </li><li> <p>任何大小的chunk都可以放到unsroted bin中</p> </li><li> <p>unsorted bin 中的 non_main_arena一定为0</p> </li></ul> 
+<p><img src="https://images2.imgbox.com/c1/2e/5tiu3Oz5_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="bin__654"></a>bin 初始化</h4> 
+<p><code>malloc_init_state</code>过程：</p> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">void</span>
+<span class="token function">malloc_init_state</span> <span class="token punctuation">(</span>mstate av<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">int</span> i<span class="token punctuation">;</span>
+  mbinptr bin<span class="token punctuation">;</span>
+
+  <span class="token comment">/* Establish circular links for normal bins */</span>
+  <span class="token keyword">for</span> <span class="token punctuation">(</span>i <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> NBINS<span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+      bin <span class="token operator">=</span> <span class="token function">bin_at</span> <span class="token punctuation">(</span>av<span class="token punctuation">,</span> i<span class="token punctuation">)</span><span class="token punctuation">;</span>
+      bin<span class="token operator">-&gt;</span>fd <span class="token operator">=</span> bin<span class="token operator">-&gt;</span>bk <span class="token operator">=</span> bin<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression">MORECORE_CONTIGUOUS</span></span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>av <span class="token operator">!=</span> <span class="token operator">&amp;</span>main_arena<span class="token punctuation">)</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+  <span class="token function">set_noncontiguous</span> <span class="token punctuation">(</span>av<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>av <span class="token operator">==</span> <span class="token operator">&amp;</span>main_arena<span class="token punctuation">)</span>
+    <span class="token function">set_max_fast</span> <span class="token punctuation">(</span>DEFAULT_MXFAST<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token function">atomic_store_relaxed</span> <span class="token punctuation">(</span><span class="token operator">&amp;</span>av<span class="token operator">-&gt;</span>have_fastchunks<span class="token punctuation">,</span> false<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+  av<span class="token operator">-&gt;</span>top <span class="token operator">=</span> <span class="token function">initial_top</span> <span class="token punctuation">(</span>av<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>将各个bin中的链表头尾都指向header bin，初始化为空链表</li><li>设置<code>noncontiguous</code></li><li>初始化fast bin</li><li>初始化当前top chunk为unsorted bin，因为bin为空，所以第一次进行malloc时必然触发brk扩充</li></ul> 
+<h3><a id="arena__heap_691"></a>arena &amp; heap</h3> 
+<ul><li> <p>Arena 是glibc申请一次内存得到的空间，用于管理chunks</p> </li><li> <p><strong>每个线程至多有一个arena</strong></p> </li><li> <p>arena 最多数量为<code>8 * cores + 1</code> (in 64-bit system)</p> </li><li> <p>在2.31中，arena结构体大小为<code>0x898B</code></p> </li><li> <p>主线程的arena称为<code>main_arena</code>，只有它关联到程序的heap段；其余arena通过mmap分配，通过mmap分配的arena通过指针进行串联</p> <pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">struct</span> <span class="token class-name">malloc_state</span> main_arena <span class="token operator">=</span>
+<span class="token punctuation">{<!-- --></span>
+  <span class="token punctuation">.</span>mutex <span class="token operator">=</span> _LIBC_LOCK_INITIALIZER<span class="token punctuation">,</span>
+  <span class="token punctuation">.</span>next <span class="token operator">=</span> <span class="token operator">&amp;</span>main_arena<span class="token punctuation">,</span>
+  <span class="token punctuation">.</span>attached_threads <span class="token operator">=</span> <span class="token number">1</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> </li><li> <p>利用锁机制进行线程间共享，除了访问fastbin是原子性操作外，其他访问都需要获取mutex</p> </li><li> <p>首次调用malloc时，在不超过arena上限的情况下，会为其分配并初始化一个arena。否则将选择一个可用的arena提供给线程使用</p> </li></ul> 
+<p><img src="https://images2.imgbox.com/14/6d/lmD3ps3i_o.png" alt="在这里插入图片描述"></p> 
+<p>上图为一个arena的示意图，多个arena之间<strong>通过<code>arena-&gt;next</code>链接</strong></p> 
+<h4><a id="heap_info_720"></a>heap info</h4> 
+<p>对于非<code>main_arena</code>，其内存由mmap分配，每个mmap块称为heap，每个heap 拥有一个<code>heap_info</code>结构体，其中的<code>ar_ptr</code>均指向同一个arena，<strong>arena位于第一个mmap heap中</strong></p> 
+<pre><code class="prism language-c"><span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token class-name">_heap_info</span>
+<span class="token punctuation">{<!-- --></span>
+  mstate ar_ptr<span class="token punctuation">;</span> <span class="token comment">/* Arena for this heap. */</span>
+  <span class="token keyword">struct</span> <span class="token class-name">_heap_info</span> <span class="token operator">*</span>prev<span class="token punctuation">;</span> <span class="token comment">/* Previous heap. */</span>
+  <span class="token class-name">size_t</span> size<span class="token punctuation">;</span>   <span class="token comment">/* Current size in bytes. */</span>
+  <span class="token class-name">size_t</span> mprotect_size<span class="token punctuation">;</span> <span class="token comment">/* Size in bytes that has been mprotected
+                           PROT_READ|PROT_WRITE.  */</span>
+  <span class="token comment">/* Make sure the following data is properly aligned, particularly
+     that sizeof (heap_info) + 2 * SIZE_SZ is a multiple of
+     MALLOC_ALIGNMENT. */</span>
+  <span class="token keyword">char</span> pad<span class="token punctuation">[</span><span class="token operator">-</span><span class="token number">6</span> <span class="token operator">*</span> SIZE_SZ <span class="token operator">&amp;</span> MALLOC_ALIGN_MASK<span class="token punctuation">]</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span> heap_info<span class="token punctuation">;</span>
+</code></pre> 
+<ul><li>其中，pad将heap_info 对齐到<code>MALLOC_ALIGN_MASK</code></li></ul> 
+<h4><a id="data_structure_741"></a>data structure</h4> 
+<p>arena 通过<code>malloc_state</code>结构体实现</p> 
+<pre><code class="prism language-c"><span class="token keyword">struct</span> <span class="token class-name">malloc_state</span>
+<span class="token punctuation">{<!-- --></span>
+  <span class="token comment">/* Serialize access.  */</span>
+  <span class="token function">__libc_lock_define</span> <span class="token punctuation">(</span><span class="token punctuation">,</span> mutex<span class="token punctuation">)</span><span class="token punctuation">;</span>		<span class="token comment">// 并发锁</span>
+
+  <span class="token comment">/* Flags (formerly in max_fast).  */</span>
+  <span class="token keyword">int</span> flags<span class="token punctuation">;</span>		<span class="token comment">// for example, continuous bit</span>
+
+  <span class="token comment">/* Set if the fastbin chunks contain recently inserted free blocks.  */</span>
+  <span class="token comment">/* Note this is a bool but not all targets support atomics on booleans.  */</span>
+  <span class="token keyword">int</span> have_fastchunks<span class="token punctuation">;</span>
+
+  <span class="token comment">/* Fastbins */</span>
+  mfastbinptr fastbinsY<span class="token punctuation">[</span>NFASTBINS<span class="token punctuation">]</span><span class="token punctuation">;</span>
+
+  <span class="token comment">/* Base of the topmost chunk -- not otherwise kept in a bin */</span>
+  mchunkptr top<span class="token punctuation">;</span>								<span class="token comment">// top chunk ptr</span>
+
+  <span class="token comment">/* The remainder from the most recent split of a small request */</span>
+  mchunkptr last_remainder<span class="token punctuation">;</span>
+
+  <span class="token comment">/* Normal bins packed as described above */</span>
+  mchunkptr bins<span class="token punctuation">[</span>NBINS <span class="token operator">*</span> <span class="token number">2</span> <span class="token operator">-</span> <span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">;</span>	<span class="token comment">// bins header chunk (packed)</span>
+
+  <span class="token comment">/* Bitmap of bins */</span>
+  <span class="token keyword">unsigned</span> <span class="token keyword">int</span> binmap<span class="token punctuation">[</span>BINMAPSIZE<span class="token punctuation">]</span><span class="token punctuation">;</span>
+
+  <span class="token comment">/* Linked list */</span>
+  <span class="token keyword">struct</span> <span class="token class-name">malloc_state</span> <span class="token operator">*</span>next<span class="token punctuation">;</span>
+
+  <span class="token comment">/* Linked list for free arenas.  Access to this field is serialized
+     by free_list_lock in arena.c.  */</span>
+  <span class="token keyword">struct</span> <span class="token class-name">malloc_state</span> <span class="token operator">*</span>next_free<span class="token punctuation">;</span>
+
+  <span class="token comment">/* Number of threads attached to this arena.  0 if the arena is on
+     the free list.  Access to this field is serialized by
+     free_list_lock in arena.c.  */</span>
+  INTERNAL_SIZE_T attached_threads<span class="token punctuation">;</span>
+
+  <span class="token comment">/* Memory allocated from the system in this arena.  */</span>
+  INTERNAL_SIZE_T system_mem<span class="token punctuation">;</span>
+  INTERNAL_SIZE_T max_system_mem<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>main_arena的结构体数据保存在glibc的data segment中</li><li>Main_arena 初始化后的heap size为<strong>132KB</strong>（0x21000）</li><li>非main_arena的<code>malloc_state</code>结构体在heap的第一个块(0x290 size)的<code>0x20</code>偏移处，<em>前0x20 bytes为<code>heap_info</code></em></li></ul> 
+<p><img src="https://images2.imgbox.com/c0/5e/SihLXoAX_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="gdb_instructions_for_debugging_heap_802"></a>gdb instructions for debugging heap</h3> 
+<ul><li> <p><code>heap</code>: display heap chunk info <em>all</em></p> 
+  <ul><li><code>heapbase</code>: display base address of a heap</li><li><code>Parse heap</code>: display heap chunk in another way</li></ul> </li><li> <p><code>bins</code>: display bins on current thread <em>all</em></p> 
+  <ul><li>specifie bin type to diplay corresponding bin chunks</li></ul> </li><li> <p><code>arena</code>: display <strong>detailed info</strong> on current thread <em>all</em></p> 
+  <ul><li><code>arenas</code>: list all arenas of current process</li><li><code>arenainfo</code>: similar to <code>arena</code></li></ul> </li><li> <p>chunk</p> 
+  <ul><li><code>chunkinfo *victim</code> display chunk information</li><li><code>chunkptr *user_ptr</code> display chunk information by user pointer</li><li><code>Merge info *victim</code> display merge information of a chunk</li></ul> </li><li> <p><code>tcache</code>: display tcache info</p> 
+  <ul><li><code>tcache bins</code>: display bins in tcache</li></ul> </li><li> <p><code>bmemory</code> self-defined</p> 
+  <ul><li>break at malloc and free</li><li>cannot use “step” to trace those functions, probably because it doesn’t support indirect jump trace?</li></ul> </li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/16d3cbcbe64ab8b8c5274766f4fa5f5d/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Streamlit 讲解专栏（七）：解析数据元素</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/a9d7526f49d372e707faa3726281bbe4/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">【嵌入式环境下linux内核及驱动学习笔记-（19）LCD驱动框架2-FrameBuffer】</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

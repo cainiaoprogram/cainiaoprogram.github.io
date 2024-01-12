@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>k8s基础(12)之PV与PVC - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="k8s基础(12)之PV与PVC" />
+<meta property="og:description" content="k8s基础(12)之PV与PVC 在Kubernetes中，因为deployment默认使用的是hostpath，当我们pod重启或删除pod后数据会丢失。这时候我们就需要一个持久化存储来解决这个问题。 本次介绍的是kubernetes pv与pvc，同时使用nfs作为后端存储进行演示。 当然kubernetes pv 支持不同的volume，为了环境快速构建学习本次以NFS为主
+首先我们来了解一下什么是PV和PVC
+PV的全称是: PersistentVolume (持久化卷)，是对底层的共享存储的一种抽象，PV由管理员进行创建和配置，它和具体的底层的共享存储技术的实现方式有关，比如Ceph、GlusterFS、NFS等，都是通过插件机制完成与共享存储的对接
+PVC的全称是: PersistenVolumeClaim (持久化卷声明)，PVC是用户存储的一种声明，PVC和Pod比较类型，Pod是消耗节点，PVC消耗的是PV资源，Pod可以请求CPU的内存，而PVC可以请求特定的存储空间和访问模式。对于真正存储的用户不需要关心底层的存储实现细节，只需要直接使用PVC即可
+但是通过PVC请求一定的存储空间也很有可能不足以满足对于存储设备的各种需求，而且不同的应用程序对于存储性能的要求也能也不尽相同，比如读写速度、并发性能等，为了解决这一问题，Kubernetes又为我们引入了一个新的资源对象: StorageClass,通过StorageClass的定义，管理员可以将存储资源定义为某种类型的资源，比如快速存储、慢速存储等，用户根据StorageClass的描述就可以非常直观的知道各种存储资源特性了，这样就可以根据应用的特性去申请合适的存储资源了
+PV和PVC的生命周期 PV可以看作可用的存储资源，PVC则是对存储资源的需求，PV和PVC的互相关系遵循如下图
+1.资源供应 (Provisioning)
+Kubernetes支持两种资源的供应模式：静态模式(Staic)和动态模式(Dynamic)。资源供应的结果就是创建好的PV。
+静态模式：集群管理员手工创建许多PV，在定义PV时需要将后端存储的特性进行设置动态模式：集群管理员无须手工创建PV，而是通过StorageClass的设置对后端存储进行描述，标记为某种 “类型(Class)”。此时要求PVC对存储的类型进行声明，系统将自动完成PV的创建及PVC的绑定。PVC可以声明Class为””，说明该PVC禁止使用动态模式 2.资源绑定 (Binding)
+在用户定义好PVC后，系统将根据PVC对存储资源的请求 (存储空间和访问模式)在已存在的PV中选择一个满足PVC要求的PV，一旦找到，就将该PV与用户定义的PVC进行绑定，然后用户的应用就可以使用这个PVC了。如果系统中没有满足PVC要求的PV，PVC则会无限期处于Pending状态，直到等到系统管理员创建了一个符合要求的PV。PV一旦绑定在某个PVC上，就被这个PVC独占，不能再与其他PVC进行绑定了。在这种情况下，当PVC申请的存储空间比PV的少时，整个PV的空间都能够为PVC所用，可能会造成资源的浪费。如果资源供应使用的是动态模式，则系统在PVC找到合适的StorageClass后，将会自动创建PV并完成PVC的绑定
+3.资源使用 (Using)
+Pod 使用volume的定义，将PVC挂载到容器内的某个路径进行使用。volume的类型为persistentVoulumeClaim，在容器应用挂载了一个PVC后，就能被持续独占使用。不过，多个Pod可以挂载同一个PVC，应用程序需要考虑多个实例共同访问一块存储空间的问题
+4.资源释放 (Releasing)
+当用户对存储资源使用哪个完毕后，用户可以删除PVC，与该PVC绑定的PV将会被标记为已释放，但还不能立刻与其他PVC进行绑定。通过之前PVC写入的数据可能还留在存储设备上，只有在清除之后该PV才能继续使用
+5.资源回收 (Reclaiming)
+对于PV，管理员可以设定回收策略(Reclaim Policy)用于设置与之绑定的PVC释放资源之后，对于遗留数据如何处理。只有PV的存储空间完成回收，才能供新的PVC绑定和使用。
+1.静态资源下，通过PV和PVC完成绑定，并供Pod使用的存储管理机制
+2.动态资源下，通过StorageClass和PVC完成资源动态绑定 (系统自动生成PV，并供Pod使用的存储管理机制)
+使用NFS进行演示 首先我们需要安装NFS服务
+#这里我使用单独服务器进行演示，实际上顺便使用一台服务器安装nfs都可以 (建议和kubernetes集群分开，找单独一台机器) [root@nfs ~]# yum install nfs-utils -y rpcbind #接下来设置nfs存储目录 [root@nfs ~]# mkdir /data1/k8s-volume [root@nfs ~]# chmod 755 /data1/k8s-volume/ #编辑nfs配置文件 [root@nfs ~]# cat /etc/exports /data1/k8s-volume *(rw,no_root_squash,sync) #存储目录，*允许所有人连接，rw读写权限，sync文件同时写入硬盘及内存，no_root_squash 使用者root用户自动修改为普通用户 接下来启动rpcbind [root@nfs ~]# systemctl start rpcbind [root@nfs ~]# systemctl enable rpcbind [root@nfs ~]# systemctl status rpcbind ● rpcbind." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/38a1770f793858bc90243c83148b56cf/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-09-21T17:18:10+08:00" />
+<meta property="article:modified_time" content="2020-09-21T17:18:10+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">k8s基础(12)之PV与PVC</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="k8s12PVPVC_0"></a>k8s基础(12)之PV与PVC</h2> 
+<p><code>在Kubernetes中，因为deployment默认使用的是hostpath，当我们pod重启或删除pod后数据会丢失。这时候我们就需要一个持久化存储来解决这个问题。 本次介绍的是kubernetes pv与pvc，同时使用nfs作为后端存储进行演示。 当然kubernetes pv 支持不同的volume，为了环境快速构建学习本次以NFS为主</code></p> 
+<hr> 
+<p><strong>首先我们来了解一下什么是PV和PVC</strong></p> 
+<p>PV的全称是: <code>PersistentVolume</code> (持久化卷)，是对底层的共享存储的一种抽象，PV由管理员进行创建和配置，它和具体的底层的共享存储技术的实现方式有关，比如Ceph、GlusterFS、NFS等，都是通过插件机制完成与共享存储的对接</p> 
+<p>PVC的全称是: PersistenVolumeClaim (持久化卷声明)，PVC是用户存储的一种声明，PVC和Pod比较类型，Pod是消耗节点，PVC消耗的是PV资源，Pod可以请求CPU的内存，而PVC可以请求特定的存储空间和访问模式。对于真正存储的用户不需要关心底层的存储实现细节，只需要直接使用PVC即可</p> 
+<blockquote> 
+ <p>但是通过PVC请求一定的存储空间也很有可能不足以满足对于存储设备的各种需求，而且不同的应用程序对于存储性能的要求也能也不尽相同，比如读写速度、并发性能等，为了解决这一问题，Kubernetes又为我们引入了一个新的资源对象: StorageClass,通过StorageClass的定义，管理员可以将存储资源定义为某种类型的资源，比如快速存储、慢速存储等，用户根据StorageClass的描述就可以非常直观的知道各种存储资源特性了，这样就可以根据应用的特性去申请合适的存储资源了</p> 
+</blockquote> 
+<h3><a id="PVPVC_18"></a>PV和PVC的生命周期</h3> 
+<p>PV可以看作可用的存储资源，PVC则是对存储资源的需求，PV和PVC的互相关系遵循如下图</p> 
+<p><img src="https://images2.imgbox.com/8b/94/l2cF9EcW_o.png" alt="image_1dvtqslkqp898418s4mnv4e9.png-349.3kB"></p> 
+<p><strong>1.资源供应 (Provisioning)</strong></p> 
+<p>Kubernetes支持两种资源的供应模式：静态模式(Staic)和动态模式(Dynamic)。资源供应的结果就是创建好的PV。</p> 
+<ul><li>静态模式：集群管理员手工创建许多PV，在定义PV时需要将后端存储的特性进行设置</li><li>动态模式：集群管理员无须手工创建PV，而是通过StorageClass的设置对后端存储进行描述，标记为某种 “类型(Class)”。此时要求PVC对存储的类型进行声明，系统将自动完成PV的创建及PVC的绑定。PVC可以声明Class为””，说明该PVC禁止使用动态模式</li></ul> 
+<p><strong>2.资源绑定 (Binding)</strong></p> 
+<p>在用户定义好PVC后，系统将根据PVC对存储资源的请求 (存储空间和访问模式)在已存在的PV中选择一个满足PVC要求的PV，一旦找到，就将该PV与用户定义的PVC进行绑定，然后用户的应用就可以使用这个PVC了。如果系统中没有满足PVC要求的PV，PVC则会无限期处于Pending状态，直到等到系统管理员创建了一个符合要求的PV。PV一旦绑定在某个PVC上，就被这个PVC独占，不能再与其他PVC进行绑定了。在这种情况下，当PVC申请的存储空间比PV的少时，整个PV的空间都能够为PVC所用，可能会造成资源的浪费。如果资源供应使用的是动态模式，则系统在PVC找到合适的StorageClass后，将会自动创建PV并完成PVC的绑定</p> 
+<p><strong>3.资源使用 (Using)</strong></p> 
+<p>Pod 使用volume的定义，将PVC挂载到容器内的某个路径进行使用。volume的类型为persistentVoulumeClaim，在容器应用挂载了一个PVC后，就能被持续独占使用。不过，多个Pod可以挂载同一个PVC，应用程序需要考虑多个实例共同访问一块存储空间的问题</p> 
+<p><strong>4.资源释放 (Releasing)</strong></p> 
+<p>当用户对存储资源使用哪个完毕后，用户可以删除PVC，与该PVC绑定的PV将会被标记为已释放，但还不能立刻与其他PVC进行绑定。通过之前PVC写入的数据可能还留在存储设备上，只有在清除之后该PV才能继续使用</p> 
+<p><strong>5.资源回收 (Reclaiming)</strong></p> 
+<p>对于PV，管理员可以设定回收策略(Reclaim Policy)用于设置与之绑定的PVC释放资源之后，对于遗留数据如何处理。只有PV的存储空间完成回收，才能供新的PVC绑定和使用。</p> 
+<p>1.静态资源下，通过PV和PVC完成绑定，并供Pod使用的存储管理机制</p> 
+<p><img src="https://images2.imgbox.com/e1/38/ZWKNYHL4_o.png" alt="image_1dvtr0i7oi4k1l2id11ssneu2m.png-709.4kB"></p> 
+<p>2.动态资源下，通过StorageClass和PVC完成资源动态绑定 (系统自动生成PV，并供Pod使用的存储管理机制)</p> 
+<p><img src="https://images2.imgbox.com/f4/e2/F4kmxIqP_o.png" alt="image_1dvtr109s1c491iae10l1dj81kee13.png-716.7kB"></p> 
+<h3><a id="NFS_57"></a>使用NFS进行演示</h3> 
+<p>首先我们需要安装NFS服务</p> 
+<pre><code class="prism language-bash"><span class="token comment">#这里我使用单独服务器进行演示，实际上顺便使用一台服务器安装nfs都可以 (建议和kubernetes集群分开，找单独一台机器)</span>
+<span class="token punctuation">[</span>root@nfs ~<span class="token punctuation">]</span><span class="token comment"># yum install nfs-utils -y rpcbind</span>
+
+<span class="token comment">#接下来设置nfs存储目录</span>
+<span class="token punctuation">[</span>root@nfs ~<span class="token punctuation">]</span><span class="token comment"># mkdir /data1/k8s-volume</span>
+<span class="token punctuation">[</span>root@nfs ~<span class="token punctuation">]</span><span class="token comment"># chmod 755 /data1/k8s-volume/</span>
+
+<span class="token comment">#编辑nfs配置文件</span>
+<span class="token punctuation">[</span>root@nfs ~<span class="token punctuation">]</span><span class="token comment"># cat /etc/exports</span>
+/data1/k8s-volume  *<span class="token punctuation">(</span>rw,no_root_squash,sync<span class="token punctuation">)</span>
+<span class="token comment">#存储目录，*允许所有人连接，rw读写权限，sync文件同时写入硬盘及内存，no_root_squash 使用者root用户自动修改为普通用户</span>
+
+接下来启动rpcbind
+<span class="token punctuation">[</span>root@nfs ~<span class="token punctuation">]</span><span class="token comment"># systemctl start rpcbind</span>
+<span class="token punctuation">[</span>root@nfs ~<span class="token punctuation">]</span><span class="token comment"># systemctl enable rpcbind</span>
+<span class="token punctuation">[</span>root@nfs ~<span class="token punctuation">]</span><span class="token comment"># systemctl status rpcbind</span>
+● rpcbind.service - RPC bind <span class="token function">service</span>
+   Loaded: loaded <span class="token punctuation">(</span>/usr/lib/systemd/system/rpcbind.service<span class="token punctuation">;</span> enabled<span class="token punctuation">;</span> vendor preset: enabled<span class="token punctuation">)</span>
+   Active: active <span class="token punctuation">(</span>running<span class="token punctuation">)</span> since 四 2019-12-19 18:44:29 CST<span class="token punctuation">;</span> 11min ago
+ Main PID: 3126 <span class="token punctuation">(</span>rpcbind<span class="token punctuation">)</span>
+   CGroup: /system.slice/rpcbind.service
+           └─3126 /sbin/rpcbind -w
+
+12月 19 18:44:29 yzsjhl82-135.opi.com systemd<span class="token punctuation">[</span>1<span class="token punctuation">]</span>: Starting RPC bind service<span class="token punctuation">..</span>.
+12月 19 18:44:29 yzsjhl82-135.opi.com systemd<span class="token punctuation">[</span>1<span class="token punctuation">]</span>: Started RPC bind service.
+<span class="token comment">#由于nfs需要向rpcbind进行注册，所以我们需要优先启动rpcbind</span>
+
+<span class="token comment">#启动NFS</span>
+<span class="token punctuation">[</span>root@nfs ~<span class="token punctuation">]</span><span class="token comment"># systemctl restart nfs</span>
+<span class="token punctuation">[</span>root@nfs ~<span class="token punctuation">]</span><span class="token comment"># systemctl enable nfs</span>
+<span class="token punctuation">[</span>root@nfs ~<span class="token punctuation">]</span><span class="token comment"># systemctl status nfs</span>
+● nfs-server.service - NFS server and services
+   Loaded: loaded <span class="token punctuation">(</span>/usr/lib/systemd/system/nfs-server.service<span class="token punctuation">;</span> enabled<span class="token punctuation">;</span> vendor preset: disabled<span class="token punctuation">)</span>
+  Drop-In: /run/systemd/generator/nfs-server.service.d
+           └─order-with-mounts.conf
+   Active: active <span class="token punctuation">(</span>exited<span class="token punctuation">)</span> since 四 2019-12-19 18:44:30 CST<span class="token punctuation">;</span> 13min ago
+ Main PID: 3199 <span class="token punctuation">(</span>code<span class="token operator">=</span>exited, status<span class="token operator">=</span>0/SUCCESS<span class="token punctuation">)</span>
+   CGroup: /system.slice/nfs-server.service
+
+12月 19 18:44:30 yzsjhl82-135.opi.com systemd<span class="token punctuation">[</span>1<span class="token punctuation">]</span>: Starting NFS server and services<span class="token punctuation">..</span>.
+12月 19 18:44:30 yzsjhl82-135.opi.com systemd<span class="token punctuation">[</span>1<span class="token punctuation">]</span>: Started NFS server and services.
+
+
+<span class="token comment">#检查rpcbind及nfs是否正常</span>
+<span class="token punctuation">[</span>root@nfs ~<span class="token punctuation">]</span><span class="token comment"># rpcinfo |grep nfs</span>
+    100003    3    tcp       0.0.0.0.8.1            nfs        superuser
+    100003    4    tcp       0.0.0.0.8.1            nfs        superuser
+    100227    3    tcp       0.0.0.0.8.1            nfs_acl    superuser
+    100003    3    udp       0.0.0.0.8.1            nfs        superuser
+    100003    4    udp       0.0.0.0.8.1            nfs        superuser
+    100227    3    udp       0.0.0.0.8.1            nfs_acl    superuser
+    100003    3    tcp6      ::.8.1                 nfs        superuser
+    100003    4    tcp6      ::.8.1                 nfs        superuser
+    100227    3    tcp6      ::.8.1                 nfs_acl    superuser
+    100003    3    udp6      ::.8.1                 nfs        superuser
+    100003    4    udp6      ::.8.1                 nfs        superuser
+    100227    3    udp6      ::.8.1                 nfs_acl    superuser
+
+<span class="token comment">#查看nfs目录挂载权限</span>
+<span class="token punctuation">[</span>root@nfs ~<span class="token punctuation">]</span><span class="token comment"># cat /var/lib/nfs/etab</span>
+/data/k8s   *<span class="token punctuation">(</span>rw,sync,wdelay,hide,nocrossmnt,secure,no_root_squash,no_all_squash,no_subtree_check,secure_locks,acl,no_pnfs,anonuid<span class="token operator">=</span>65534,anongid<span class="token operator">=</span>65534,sec<span class="token operator">=</span>sys,rw,secure,no_root_squash,no_all_squash<span class="token punctuation">)</span>
+</code></pre> 
+<p><strong>我们nfs server端已经完毕，接下来在所有需要nfs挂载的集群节点安装以下</strong></p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>root@所有节点 ~<span class="token punctuation">]</span><span class="token comment"># yum install -y nfs-utils rpcbind</span>
+
+<span class="token punctuation">[</span>root@所有节点 ~<span class="token punctuation">]</span><span class="token comment"># systemctl start rpcbind</span>
+<span class="token punctuation">[</span>root@所有节点 ~<span class="token punctuation">]</span><span class="token comment"># systemctl enable rpcbind</span>
+<span class="token punctuation">[</span>root@所有节点 ~<span class="token punctuation">]</span><span class="token comment"># systemctl start nfs</span>
+<span class="token punctuation">[</span>root@所有节点 ~<span class="token punctuation">]</span><span class="token comment"># systemctl enable nfs</span>
+Created symlink from /etc/systemd/system/multi-user.target.wants/nfs-server.service to /usr/lib/systemd/system/nfs-server.service.
+</code></pre> 
+<p>客户端挂载测试</p> 
+<pre><code class="prism language-bash"><span class="token comment">#首先检查nfs挂载目录是否正常</span>
+<span class="token punctuation">[</span>root@nfs ~<span class="token punctuation">]</span><span class="token comment"># showmount -e localhost</span>
+Export list <span class="token keyword">for</span> localhost:
+/data1/k8s-volume *
+
+<span class="token comment">#现在进行节点挂载</span>
+<span class="token comment">#先在客户端创建数据目录（挂载点位置）</span>
+<span class="token punctuation">[</span>root@所有节点 ~<span class="token punctuation">]</span><span class="token comment"># mkdir -p /data1/k8s/</span>
+<span class="token punctuation">[</span>root@所有节点 ~<span class="token punctuation">]</span><span class="token comment"># mount -t nfs 10.4.82.118:/data1/k8s-volume /data1/k8s</span>
+<span class="token comment">#现在进行挂载 分别是ip:nfs目录  节点存储目录</span>
+<span class="token comment">#挂在完成后我们使用df -h 就可以看到挂载点</span>
+<span class="token punctuation">[</span>root@所有节点 ~<span class="token punctuation">]</span><span class="token comment"># df -h|grep 10.4.82.135</span>
+10.4.82.118:/data1/k8s-volume   50G   23G   27G   46% /data1/k8s
+
+<span class="token comment">#所有需要nfs节点这样挂载就可以</span>
+</code></pre> 
+<h4><a id="PV_157"></a>创建PV</h4> 
+<p>有了我们NFS共享存储，下面就可以来使用PV和PVC。PV作为存储资源，主要包括存储能力、访问模式、存储类型、回收策略等关键信息。这里使用nfs类型的后端存储，1g存储空间，访问模式为ReadWriteOnce，回收策略为Recyle，对应文件如下</p> 
+<pre><code class="prism language-yaml"><span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> PersistentVolume
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> pv1     <span class="token comment">#pv名称</span>
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">capacity</span><span class="token punctuation">:</span>          <span class="token comment">#存储能力，一个pv对象都要指定一个存储能力，目前仅支持存储空间的设置</span>
+    <span class="token key atrule">storage</span><span class="token punctuation">:</span> 1Gi    <span class="token comment">#存储空间</span>
+  <span class="token key atrule">accessModes</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> ReadWriteOnce       <span class="token comment">#访问模式</span>
+  <span class="token key atrule">persistentVolumeReclaimPolicy</span><span class="token punctuation">:</span> Recycle        <span class="token comment">#回收策略</span>
+  <span class="token key atrule">nfs</span><span class="token punctuation">:</span>          <span class="token comment">#服务模式 (nfs、ceph、hostpath等)</span>
+    <span class="token key atrule">path</span><span class="token punctuation">:</span> /data1/k8s<span class="token punctuation">-</span>volume      <span class="token comment">#共享数据目录挂载点</span>
+    <span class="token key atrule">server</span><span class="token punctuation">:</span> 10.4.82.118         <span class="token comment">#nfs服务器地址</span>
+</code></pre> 
+<p>创建pv</p> 
+<pre><code class="prism language-yaml"><span class="token punctuation">[</span>root@yzsjhl82<span class="token punctuation">-</span>135 pv<span class="token punctuation">]</span><span class="token comment"># kubectl apply -f  test-pv.yaml</span>
+persistentvolume/pv1 created
+<span class="token punctuation">[</span>root@yzsjhl82<span class="token punctuation">-</span>135 pv<span class="token punctuation">]</span><span class="token comment"># kubectl get pv</span>
+NAME    CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS        CLAIM              STORAGECLASS   REASON   AGE
+pv1     1Gi        RWO            Recycle          Available                                                5m40s
+
+<span class="token comment"># 参数解释</span>
+pv1 名称
+1Gi 代表存储空间大小
+RWO 访问模式(ReadWriteOnce缩写)
+Recycle 回收策略
+
+Available PV状态
+</code></pre> 
+<p><strong>PV相关配置说明</strong></p> 
+<p><code>Capacity</code> 存储能力</p> 
+<p>通过PV的capacity属性来设置存储空间，目前仅支持storage=数据大小，未来可能会加入IOPS、吞吐量等指标配置</p> 
+<p><code>AccessModes</code> 访问模式</p> 
+<p>AccessModes 是用来对PV进行访问模式的设置，用于描述用户应用对存储资源的访问权限</p> 
+<p>ReadWriteOnce (RWO):读写权限，但是只能被单个节点挂载</p> 
+<p>ReadOnlyMany (ROX):只读权限，可能被多个节点挂载</p> 
+<p>ReadWriteMany (RWX):读写权限，可以被多个节点挂载</p> 
+<blockquote> 
+ <p>注意:一些PV可能支持多种访问模式，但挂载的时候只可以使用一种访问模式，多种访问模式不会生效</p> 
+</blockquote> 
+<p>注意:一些PV可能支持多种访问模式，但是在挂载点时候只能使用一种访问模式，多种访问模式不生效</p> 
+<p>下面是一些常用的Volume插件支持的访问模式（需要根据我们配置的类型进行选择对应的访问模式）</p> 
+<p><img src="https://images2.imgbox.com/f6/de/UPVoxtkC_o.png" alt="image_1dvtekamc14e74s6btfn4hubc9.png-95.3kB"></p> 
+<p><code>persistentVolumeReclaimPolicy</code>回收策略</p> 
+<p>Retain (保留) 保留数据，需要管理员手动清理</p> 
+<p>Recycle (回收) 清除PV中的数据，效果相当于执行删除命令</p> 
+<p>Delete (删除) 与PV相连的后端存储完成volume的删除操作，常见于云服务商的存储服务</p> 
+<p>不过需要注意的是，目前只有NFS和HostPath两类支持回收策略，一般设置Retain比较保险</p> 
+<p><code>状态</code></p> 
+<p>1.Available (可用): 表示可用状态，还未被任何PVC绑定</p> 
+<p>2.Bound (已绑定)：已经绑定到某个PVC</p> 
+<p>3.Released (已释放)：对应的PVC已经删除,但资源还没有被集群收回</p> 
+<p>4.Failed：PV自动回收失败</p> 
+<h4><a id="PVC_241"></a>创建PVC</h4> 
+<p>前面说过，PV实际上没有创建存储，相当于我们node一样，还需要创建Pod进行消费，接下来我们进行PVC的创建与配置</p> 
+<pre><code class="prism language-bash"><span class="token comment">#前面我们已经在集群上都安装nfs客户端，并且进行挂载了。下面进行创建pvc</span>
+<span class="token punctuation">[</span>root@k8s-01 ~<span class="token punctuation">]</span><span class="token comment"># kubectl get node</span>
+NAME     STATUS   ROLES    AGE   VERSION
+k8s-01   Ready       15h   v1.14.2
+k8s-02   Ready       15h   v1.14.2
+k8s-03   Ready       15h   v1.14.2
+k8s-04   Ready       15h   v1.14.2
+</code></pre> 
+<p>新建pvc同样需要建立一个数据卷声明</p> 
+<pre><code class="prism language-yaml"><span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> PersistentVolumeClaim
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> pvc<span class="token punctuation">-</span>nfs
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">accessModes</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> ReadWriteOnce
+  <span class="token key atrule">resources</span><span class="token punctuation">:</span>
+    <span class="token key atrule">requests</span><span class="token punctuation">:</span>
+      <span class="token key atrule">storage</span><span class="token punctuation">:</span> 10Gi
+</code></pre> 
+<p>接下来我们进行创建，pvc的yaml文件基本上和pv相同，这里不过多解释。</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>root@k8s-01 test<span class="token punctuation">]</span><span class="token comment"># kubectl apply -f pvc-nfs.yaml</span>
+persistentvolumeclaim/pvc-nfs created
+<span class="token punctuation">[</span>root@k8s-01 test<span class="token punctuation">]</span><span class="token comment"># kubectl get pvc</span>
+NAME      STATUS   VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+pvc-nfs   Bound    pv1      10Gi       RWO                           9s
+<span class="token punctuation">[</span>root@k8s-01 test<span class="token punctuation">]</span><span class="token comment"># kubectl get pv</span>
+NAME   CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM             STORAGECLASS   REASON   AGE
+pv1    10Gi       RWO            Recycle          Bound    default/pvc-nfs                           10m
+
+<span class="token comment">#这里我们可以看到，当我们创建pvc之后，pv的状态变成了Bound绑定状态，并且和pvc的状态相同。并且可以看到pvc已经绑定到名称为pv1的volume上，同时在pv上可以看到绑定到名称为pvc-nfs的pvc中</span>
+</code></pre> 
+<p>我们也可以详细的查看pv和pvc的信息</p> 
+<p><img src="https://images2.imgbox.com/5d/e7/KQlCuFEU_o.png" alt="image_1dvtgltij7dm1ak7vksffi1r6gm.png-184.6kB"></p> 
+<p><img src="https://images2.imgbox.com/18/07/ed7ts1lZ_o.png" alt="image_1dvtgmf0oipo1dbo95f1jou10r813.png-152.4kB"></p> 
+<blockquote> 
+ <p>在Kubernetes中会自动帮我们查看pv状态为Available并且根据声明pvc容量storage的大小进行筛选匹配，同时还会根据AccessMode进行匹配。如果pvc匹配不到pv会一直处于pending状态。</p> 
+</blockquote> 
+<h4><a id="LabelsPVPVC_293"></a>使用Labels匹配PV与PVC</h4> 
+<p>同时，pv与pvc中间还可以通过label标签进行匹配，配置如下</p> 
+<pre><code class="prism language-yaml"><span class="token comment">#记得我们需要修改一下名字，名字是不可以重复的</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> PersistentVolume
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> pv2
+  <span class="token key atrule">labels</span><span class="token punctuation">:</span>           <span class="token comment">#这里将pv设置一个labels</span>
+    <span class="token key atrule">app</span><span class="token punctuation">:</span> nfs
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">capacity</span><span class="token punctuation">:</span>
+    <span class="token key atrule">storage</span><span class="token punctuation">:</span> 10Gi
+  <span class="token key atrule">accessModes</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> ReadWriteOnce
+  <span class="token key atrule">persistentVolumeReclaimPolicy</span><span class="token punctuation">:</span> Recycle
+  <span class="token key atrule">nfs</span><span class="token punctuation">:</span>
+    <span class="token key atrule">path</span><span class="token punctuation">:</span> /data1/k8s<span class="token punctuation">-</span>volume
+    <span class="token key atrule">server</span><span class="token punctuation">:</span> 192.168.0.14
+
+<span class="token punctuation">---</span>
+
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> PersistentVolumeClaim
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> pvc2<span class="token punctuation">-</span>nfs
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">accessModes</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> ReadWriteOnce
+  <span class="token key atrule">resources</span><span class="token punctuation">:</span>
+    <span class="token key atrule">requests</span><span class="token punctuation">:</span>
+      <span class="token key atrule">storage</span><span class="token punctuation">:</span> 10Gi
+  <span class="token key atrule">selector</span><span class="token punctuation">:</span>         <span class="token comment">##pvc匹配标签为app=nfs的pv</span>
+    <span class="token key atrule">matchLabels</span><span class="token punctuation">:</span>
+      <span class="token key atrule">app</span><span class="token punctuation">:</span> nfs
+
+
+<span class="token comment">##接下来进行创建</span>
+<span class="token punctuation">[</span>root@k8s<span class="token punctuation">-</span>01 test<span class="token punctuation">]</span><span class="token comment"># kubectl  apply -f test.yaml</span>
+persistentvolume/pv2 unchanged
+persistentvolumeclaim/pvc2<span class="token punctuation">-</span>nfs created
+
+<span class="token punctuation">[</span>root@k8s<span class="token punctuation">-</span>01 test<span class="token punctuation">]</span><span class="token comment"># kubectl get pv,pvc</span>
+NAME                   CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM              STORAGECLASS   REASON   AGE
+persistentvolume/pv1   10Gi       RWO            Recycle          Bound    default/pvc<span class="token punctuation">-</span>nfs                            26m
+persistentvolume/pv2   10Gi       RWO            Recycle          Bound    default/pvc2<span class="token punctuation">-</span>nfs                           62s
+
+NAME                             STATUS   VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+persistentvolumeclaim/pvc<span class="token punctuation">-</span>nfs    Bound    pv1      10Gi       RWO                           16m
+persistentvolumeclaim/pvc2<span class="token punctuation">-</span>nfs   Bound    pv2      10Gi       RWO                           18s
+
+<span class="token comment">#这里我们可以看到创建的名称为pv2何pv2-nfs已经进行绑定</span>
+</code></pre> 
+<blockquote> 
+ <p>有一点需要注意，当我们pvc申请的容量小于我们pv的容量是可以进行绑定的，当我们申请pvc的容量大于pv的容量是无法进行绑定的。 这里需要注意</p> 
+</blockquote> 
+<h4><a id="Deploymentpvc_353"></a>Deployment引用pvc</h4> 
+<pre><code class="prism language-yaml"><span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> extensions/v1beta1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Deployment
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> pv<span class="token punctuation">-</span>nfs<span class="token punctuation">-</span>nginx
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">replicas</span><span class="token punctuation">:</span> <span class="token number">3</span>
+  <span class="token key atrule">selector</span><span class="token punctuation">:</span>
+    <span class="token key atrule">matchLabels</span><span class="token punctuation">:</span>
+      <span class="token key atrule">app</span><span class="token punctuation">:</span> pv<span class="token punctuation">-</span>nfs<span class="token punctuation">-</span>nginx
+  <span class="token key atrule">template</span><span class="token punctuation">:</span>
+    <span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+      <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+        <span class="token key atrule">app</span><span class="token punctuation">:</span> pv<span class="token punctuation">-</span>nfs<span class="token punctuation">-</span>nginx
+    <span class="token key atrule">spec</span><span class="token punctuation">:</span>
+      <span class="token key atrule">containers</span><span class="token punctuation">:</span>
+      <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> pv<span class="token punctuation">-</span>nfs<span class="token punctuation">-</span>nginx
+        <span class="token key atrule">image</span><span class="token punctuation">:</span> nginx
+        <span class="token key atrule">ports</span><span class="token punctuation">:</span>
+        <span class="token punctuation">-</span> <span class="token key atrule">containerPort</span><span class="token punctuation">:</span> <span class="token number">80</span>
+        <span class="token key atrule">volumeMounts</span><span class="token punctuation">:</span>           <span class="token comment">#挂载，首先添加需要挂载的目录</span>
+        <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> pv<span class="token punctuation">-</span>nginx        <span class="token comment">#挂载点的名称</span>
+          <span class="token key atrule">mountPath</span><span class="token punctuation">:</span> /usr/share/nginx/html   <span class="token comment">#挂载点的路径</span>
+      <span class="token key atrule">volumes</span><span class="token punctuation">:</span>    <span class="token comment">#绑定</span>
+      <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> pv<span class="token punctuation">-</span>nginx
+        <span class="token key atrule">persistentVolumeClaim</span><span class="token punctuation">:</span>    <span class="token comment">#将镜像中的nginx目录挂载到下面名称的pvc中</span>
+          <span class="token key atrule">claimName</span><span class="token punctuation">:</span> pvc<span class="token punctuation">-</span>nfs   <span class="token comment">#pvc名称</span>
+<span class="token punctuation">---</span>
+
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Service
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> nfs<span class="token punctuation">-</span>pvc
+  <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+    <span class="token key atrule">app</span><span class="token punctuation">:</span> pv<span class="token punctuation">-</span>nfs<span class="token punctuation">-</span>nginx
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">type</span><span class="token punctuation">:</span> NodePort
+  <span class="token key atrule">ports</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">port</span><span class="token punctuation">:</span> <span class="token number">80</span>
+    <span class="token key atrule">targetPort</span><span class="token punctuation">:</span> <span class="token number">80</span>
+  <span class="token key atrule">selector</span><span class="token punctuation">:</span>
+    <span class="token key atrule">app</span><span class="token punctuation">:</span> pv<span class="token punctuation">-</span>nfs<span class="token punctuation">-</span>nginx
+</code></pre> 
+<p>接下来我们进行创建nginx deployment</p> 
+<pre><code class="prism language-bash"><span class="token comment">#创建nginx deployment</span>
+<span class="token punctuation">[</span>root@k8s-01 test<span class="token punctuation">]</span><span class="token comment"># kubectl apply -f pv-nginx.yaml</span>
+deployment.extensions/pv-nfs-nginx created
+service/nfs-pvc created
+</code></pre> 
+<p>检查pod和svc状态</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>root@k8s-01 test<span class="token punctuation">]</span><span class="token comment"># kubectl get pod,svc|grep pv</span>
+pod/pv-nfs-nginx-5c889ccd97-2772n   1/1     Running   0          102s
+pod/pv-nfs-nginx-5c889ccd97-hxb66   1/1     Running   0          102s
+pod/pv-nfs-nginx-5c889ccd97-rwmth   1/1     Running   0          102s
+service/nfs-pvc      NodePort    10.254.223.165           80:21322/TCP   102s
+
+<span class="token comment">#这里我们可以看到pod已经正常启动，并且svc也已经暴露端口了。</span>
+</code></pre> 
+<p>接下来我们直接访问nginx是无法访问的，因为在我们nfs挂载点的目录下面没有文件，所以无法访问</p> 
+<p><img src="https://images2.imgbox.com/b6/de/pCOp9nXP_o.png" alt="image_1dvtj4id915le1ljp1bf0ca17u41g.png-32.4kB"></p> 
+<p>接下来我们到nfs挂载点创建一个index.html</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>root@k8s-01 test<span class="token punctuation">]</span><span class="token comment">#  echo "I am abcdocker" &gt;&gt;/data1/k8s/index.html</span>
+</code></pre> 
+<p>然后我们在进行访问查看</p> 
+<p><img src="https://images2.imgbox.com/0a/dc/mlZJPSDw_o.png" alt="image_1dvtj74pcijqvi6ukgsob14jh1t.png-25.9kB"></p> 
+<p>由于我们的index.html直接挂在到了/data1/k8s目录下面，如果有很多个pod都使用pvc进行挂载，会造成我们数据目录的文件比较乱</p> 
+<p>这里我们添加一个<code>subpath</code>subPath的目的是为了在单一Pod中多次使用同一个volume而设计的。</p> 
+<p><img src="https://images2.imgbox.com/6f/a0/SVilLgKd_o.png" alt="image_1dvtp34bh1dcg133p1qiu1lbm10ss2a.png-227.4kB"></p> 
+<pre><code class="prism language-yaml"><span class="token comment">#deployment文件如下</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> extensions/v1beta1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Deployment
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> pv<span class="token punctuation">-</span>nfs<span class="token punctuation">-</span>nginx
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">replicas</span><span class="token punctuation">:</span> <span class="token number">3</span>
+  <span class="token key atrule">selector</span><span class="token punctuation">:</span>
+    <span class="token key atrule">matchLabels</span><span class="token punctuation">:</span>
+      <span class="token key atrule">app</span><span class="token punctuation">:</span> pv<span class="token punctuation">-</span>nfs<span class="token punctuation">-</span>nginx
+  <span class="token key atrule">template</span><span class="token punctuation">:</span>
+    <span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+      <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+        <span class="token key atrule">app</span><span class="token punctuation">:</span> pv<span class="token punctuation">-</span>nfs<span class="token punctuation">-</span>nginx
+    <span class="token key atrule">spec</span><span class="token punctuation">:</span>
+      <span class="token key atrule">containers</span><span class="token punctuation">:</span>
+      <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> pv<span class="token punctuation">-</span>nfs<span class="token punctuation">-</span>nginx
+        <span class="token key atrule">image</span><span class="token punctuation">:</span> nginx
+        <span class="token key atrule">ports</span><span class="token punctuation">:</span>
+        <span class="token punctuation">-</span> <span class="token key atrule">containerPort</span><span class="token punctuation">:</span> <span class="token number">80</span>
+        <span class="token key atrule">volumeMounts</span><span class="token punctuation">:</span>           <span class="token comment">#挂载，首先添加需要挂载的目录</span>
+        <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> pv<span class="token punctuation">-</span>nginx        <span class="token comment">#挂载点的名称</span>
+          <span class="token key atrule">mountPath</span><span class="token punctuation">:</span> /usr/share/nginx/html   <span class="token comment">#挂载点的路径</span>
+          <span class="token key atrule">subPath</span><span class="token punctuation">:</span> nginx<span class="token punctuation">-</span>pvc
+      <span class="token key atrule">volumes</span><span class="token punctuation">:</span>    <span class="token comment">#绑定</span>
+      <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> pv<span class="token punctuation">-</span>nginx
+        <span class="token key atrule">persistentVolumeClaim</span><span class="token punctuation">:</span>    <span class="token comment">#将镜像中的nginx目录挂载到下面名称的pvc中</span>
+          <span class="token key atrule">claimName</span><span class="token punctuation">:</span> pvc<span class="token punctuation">-</span>nfs   <span class="token comment">#pvc名称</span>
+<span class="token punctuation">---</span>
+
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Service
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> nfs<span class="token punctuation">-</span>pvc
+  <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+    <span class="token key atrule">app</span><span class="token punctuation">:</span> pv<span class="token punctuation">-</span>nfs<span class="token punctuation">-</span>nginx
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">type</span><span class="token punctuation">:</span> NodePort
+  <span class="token key atrule">ports</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">port</span><span class="token punctuation">:</span> <span class="token number">80</span>
+    <span class="token key atrule">targetPort</span><span class="token punctuation">:</span> <span class="token number">80</span>
+  <span class="token key atrule">selector</span><span class="token punctuation">:</span>
+    <span class="token key atrule">app</span><span class="token punctuation">:</span> pv<span class="token punctuation">-</span>nfs<span class="token punctuation">-</span>nginx
+</code></pre> 
+<p>当我们更新完pod之后，等pod正常启动。就可以看到在我们nfs存储目录下面单独创建了一个名称为nginx-pvc的目录，这个目录实际上就是我们subpath后面指定的名称</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>root@k8s-01 test<span class="token punctuation">]</span><span class="token comment"># kubectl apply -f pv-nginx.yaml</span>
+deployment.extensions/pv-nfs-nginx configured
+
+<span class="token punctuation">[</span>root@k8s-01 test<span class="token punctuation">]</span><span class="token comment"># ls /data1/k8s/</span>
+index.html  nginx-pvc  test.txt
+</code></pre> 
+<p>这个目录下面也是没有任何文件的，我们需要将原来index.html拷贝过去即可</p> 
+<blockquote> 
+ <p>现在我们删除deployment，下面的数据并不会删除。这样使用pv和pvc持久化就完成</p> 
+</blockquote> 
+<p><strong>如果我们直接删除或者有pod在使用pv或者pvc是无法直接删除的,当我们使用Recycle模式时，删除所有pv和pvc后，数据也会进行删除。所以删除pv和pvc请谨慎操作</strong></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e483214892055572b4d5882079bbc670/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">k8s基础(3)之RC</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/03c025e3ab45a292a2280164dab092e8/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">【总结】Apache Curator入门使用</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

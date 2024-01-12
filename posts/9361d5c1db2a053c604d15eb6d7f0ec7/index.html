@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>OVS&#43;DPDK - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="OVS&#43;DPDK" />
+<meta property="og:description" content="DPDK简介 DPDK是X86平台报文快速处理的库和驱动的集合，不是网络协议栈，不提供二层，三层转发功能，不具备防火墙ACL功能，但通过DPDK可以轻松的开发出上述功能。
+DPDK的优势在于，可以将用户态的数据，不经过内核直接转发到网卡，实现加速目的。主要架构如图所示：
+传统的socket方式与DPDK对比：
+DPDK关键技术点：
+使用大页缓存支持来提高内存访问效率。利用UIO支持，提供应用空间下驱动程序的支持，也就是说网卡驱动是运行在用户空间 的，减小了报文在用户空间和应用空间的多次拷贝。利用LINUX亲和性支持，把控制面线程及各个数据面线程绑定到不同的CPU核，节省了线程在各个CPU核来回调度。LOCKLESS， 提供无锁环形缓存管理，加快内存访问效率。收发包批处理 ，多个收发包集中到一个cache line，在内存池中实现，无需反复申请和释放。PMD驱动，用户态轮询驱动，可以减小上下文切换开销，方便实现虚拟机和主机零拷贝。 OVS&#43;DPDK OpenvSwitch 以其丰富的功能，作为多层虚拟交换机，已经广泛应用于云环境中。Open vSwitch的主要功能是为物理机上的VM提供二层网络接入，和云环境中的其它物理交换机并行工作在Layer 2。
+传统host ovs工作在内核态，与guest virtio的数据传输需要多次内核态和用户态的数据切换, 带来性能瓶颈. Ovs&#43;Dpdk和Ovs本身之间的区别可以由下图简单来表示：
+在早期OVS的版本中，为缓解多级流表查表慢的问题，OVS在内核态采用Microflow Cache方法。Microflow Cache是基于Hash的精确匹配查表（O(1)），表项缓存了多级查表的结果，维护的是每条链接粒度的状态。Microflow Cache减少了报文进用户态查多级表的次数。一条流的首报文进入用户态查表后，后续的报文都会命中内核中的Microflow Cache，加快了查表速度。但是对于大量短流的网络环境来说，Microflow Cache命中率很低，导致大部分报文仍然需要到用户态进行多级流表查找，因此转发性能提升有限。
+而后，为了解决Mircoflow Cache存在的问题，OVS采用Megaflow Cache代替了Mircoflow Cache。与Mircoflow Cache的精确Hash查表不同，Megaflow Cache支持带通配的查表，所以可减少报文至用户空间查表的次数。庾志辉的博客中当时分析的就是关于megaflow的数据结构和查表流程，相关内容不在此赘述，请看上文中的链接。但是，由于OVS采用元组空间搜索（下文介绍）实现Megaflow Cache的查找，所以平均查表次数为元组表的数量的一半。假设元组空间搜索的元组表链为m，那么平均查表开销为O(m/2)。Mircoflow Cache和Megaflow Cache查表开销对比为O(1)&lt; O(m/2)。因此，Megaflow Cache相比于Mircoflow Cache，尽管减少了报文进用户空间查表的次数，但是增加了报文在内核态查表的次数。
+为此，OVS当前版本采用Megaflow Cache&#43;Microflow Cache的流Cache组织形式，仍保留了Microflow Cache作为一级Cache，即报文进入后首先查这一级Cache。只不过这个Microflow Cache含义与原来的Microflow Cache不同。原来的Microflow Cache是一个实际存在的精确Hash表，但是最新版本中的Microflow Cache不是一个表，而是一个索引值，指向的是最近一次查Megaflow Cache表项。那么报文的首次查表就不需要进行线性地链式搜索，可直接对应到其中一张Megaflow的元组表。这三个阶段的查表开销如表所示。
+DPDK 高性能(user space) 网卡驱动、大页内存、无锁化结构设计，可以轻易实现万兆网卡线速的性能。ovs-dpdk使vm到vm和nic到vm的整个数据传输都工作在用户态，极大的提升了ovs的性能。
+另外，ovs-dpdk 结合了DPDK和vhost-user技术的优势。vhost-user是一个用户态的vhost-backend程序，从虚拟机到host上实现了数据零拷贝(zero copy)。
+原生ovs与ovs-dpdk比较 （1）原生ovs数据流处理过程如下：
+数据包到达网卡后，上传给Datapath；Datapath 会检查缓存中的精确流表是否可以直接转发这个包，如果在缓存中没有找到记录，内核通过netlink发送一个upcall给用户空间的vswitchd；vswitchd检查数据库以查看数据包的目的端口在哪里。这里要操作openflow流表，需要和ovsdb以及ovs-ofctl交互；刷新内核态流表内容；Reinject给datapath，重发数据包；再次查询流表，获取数据包精确转发规则后，按规则转发 （2）ovs-dpdk方式：
+用户态进程直接接管网卡收发数据，采用“IO独占核”技术，即每个端口分配一个核专门用于数据收发，轮询式处理方式代替中断式处理，显著提高IO性能。
+总结：
+比较原生ovsovs-dpdkhost收发包通过host的linux内核访问网卡通过dpdk高速数据通道收发包内部交换在内核态datapath进行交换基于ovs，提供dpdk datapath的交换能力vm后端驱动使用vni，基于开源tap进行优化vhost-uservm前端驱动标准virtio设备标准virtio设备交换路径2个线程：物理网卡(中断机制)-&gt;转发线程-&gt;放到tap设备队列-&gt;vhost_net取包送给vcpu1个线程：物理网卡(DPDK DPM)-&gt;转发线程-&gt;送给vcpu 使用ovs-dpdk 硬件要求
+网卡得支持DPDK，见：http://dpdk.org/doc/nics CPU得支持DPDK, 测试命令：cat /proc/cpuinfo |grep pdpe1gb 不一定非要支持DPDK硬件的网卡，因为DPDK也支持virtio dpdk driver." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/9361d5c1db2a053c604d15eb6d7f0ec7/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2017-09-07T22:41:45+08:00" />
+<meta property="article:modified_time" content="2017-09-07T22:41:45+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">OVS&#43;DPDK</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3 id="dpdk简介">DPDK简介</h3> 
+<p>DPDK是X86平台报文快速处理的库和驱动的集合，不是网络协议栈，不提供二层，三层转发功能，不具备防火墙ACL功能，但通过DPDK可以轻松的开发出上述功能。</p> 
+<p>DPDK的优势在于，可以将用户态的数据，不经过内核直接转发到网卡，实现加速目的。主要架构如图所示：</p> 
+<p><img src="https://images2.imgbox.com/af/35/aWwbiChU_o.jpg" alt="这里写图片描述" title=""></p> 
+<p><strong>传统的socket方式与DPDK对比：</strong></p> 
+<p><img src="https://images2.imgbox.com/77/46/O8V7YBBM_o.jpg" alt="这里写图片描述" title=""></p> 
+<p><strong>DPDK关键技术点：</strong></p> 
+<ol><li>使用<strong>大页</strong>缓存支持来提高内存访问效率。</li><li>利用UIO支持，提供应用空间下驱动程序的支持，也就是说<strong>网卡驱动是运行在用户空间</strong> 的，减小了报文在用户空间和应用空间的多次拷贝。</li><li>利用LINUX亲和性支持，把控制面线程及各个数据面<strong>线程绑定到不同的CPU核</strong>，节省了线程在各个CPU核来回调度。</li><li><strong>LOCKLESS</strong>， 提供无锁环形缓存管理，加快内存访问效率。</li><li>收发包批处理 ，多个收发包集中到一个cache line，在<strong>内存池</strong>中实现，无需反复申请和释放。</li><li><strong>PMD驱动</strong>，用户态<strong>轮询</strong>驱动，可以减小上下文切换开销，方便实现虚拟机和主机零拷贝。</li></ol> 
+<h3 id="ovsdpdk">OVS+DPDK</h3> 
+<p>OpenvSwitch 以其丰富的功能，作为多层虚拟交换机，已经广泛应用于云环境中。Open vSwitch的主要功能是为物理机上的VM提供二层网络接入，和云环境中的其它物理交换机并行工作在Layer 2。</p> 
+<p>传统host ovs工作在内核态，与guest virtio的数据传输需要多次内核态和用户态的数据切换, 带来性能瓶颈. </p> 
+<p>Ovs+Dpdk和Ovs本身之间的区别可以由下图简单来表示：</p> 
+<p><img src="https://images2.imgbox.com/86/03/HuOYAMzk_o.jpg" alt="这里写图片描述" title=""></p> 
+<p>在早期OVS的版本中，为缓解多级流表查表慢的问题，OVS在内核态采用Microflow Cache方法。Microflow Cache是基于Hash的精确匹配查表（O(1)），表项缓存了多级查表的结果，维护的是每条链接粒度的状态。Microflow Cache减少了报文进用户态查多级表的次数。一条流的首报文进入用户态查表后，后续的报文都会命中内核中的Microflow Cache，加快了查表速度。但是对于大量短流的网络环境来说，Microflow Cache命中率很低，导致大部分报文仍然需要到用户态进行多级流表查找，因此转发性能提升有限。</p> 
+<p>而后，为了解决Mircoflow Cache存在的问题，OVS采用Megaflow Cache代替了Mircoflow Cache。与Mircoflow Cache的精确Hash查表不同，Megaflow Cache支持带通配的查表，所以可减少报文至用户空间查表的次数。庾志辉的博客中当时分析的就是关于megaflow的数据结构和查表流程，相关内容不在此赘述，请看上文中的链接。但是，由于OVS采用元组空间搜索（下文介绍）实现Megaflow Cache的查找，所以平均查表次数为元组表的数量的一半。假设元组空间搜索的元组表链为m，那么平均查表开销为O(m/2)。Mircoflow Cache和Megaflow Cache查表开销对比为O(1)&lt; O(m/2)。因此，Megaflow Cache相比于Mircoflow Cache，尽管减少了报文进用户空间查表的次数，但是增加了报文在内核态查表的次数。</p> 
+<p>为此，OVS当前版本采用Megaflow Cache+Microflow Cache的流Cache组织形式，仍保留了Microflow Cache作为一级Cache，即报文进入后首先查这一级Cache。只不过这个Microflow Cache含义与原来的Microflow Cache不同。原来的Microflow Cache是一个实际存在的精确Hash表，但是最新版本中的Microflow Cache不是一个表，而是一个索引值，指向的是最近一次查Megaflow Cache表项。那么报文的首次查表就不需要进行线性地链式搜索，可直接对应到其中一张Megaflow的元组表。这三个阶段的查表开销如表所示。</p> 
+<p><img src="https://images2.imgbox.com/62/8e/CWMa9PTT_o.jpg" alt="这里写图片描述" title=""></p> 
+<p>DPDK 高性能(user space) 网卡驱动、大页内存、无锁化结构设计，可以轻易实现万兆网卡线速的性能。ovs-dpdk使vm到vm和nic到vm的整个数据传输都工作在用户态，极大的提升了ovs的性能。</p> 
+<p>另外，ovs-dpdk 结合了DPDK和vhost-user技术的优势。vhost-user是一个用户态的vhost-backend程序，从虚拟机到host上实现了数据零拷贝(zero copy)。</p> 
+<h3 id="原生ovs与ovs-dpdk比较">原生ovs与ovs-dpdk比较</h3> 
+<p><strong>（1）原生ovs数据流处理过程如下：</strong></p> 
+<p><img src="https://images2.imgbox.com/32/df/a9TFf1eb_o.jpg" alt="这里写图片描述" title=""></p> 
+<ol><li>数据包到达网卡后，上传给Datapath；</li><li>Datapath 会检查缓存中的精确流表是否可以直接转发这个包，如果在缓存中没有找到记录，内核通过netlink发送一个upcall给用户空间的vswitchd；</li><li>vswitchd检查数据库以查看数据包的目的端口在哪里。这里要操作openflow流表，需要和ovsdb以及ovs-ofctl交互；</li><li>刷新内核态流表内容；</li><li>Reinject给datapath，重发数据包；</li><li>再次查询流表，获取数据包精确转发规则后，按规则转发</li></ol> 
+<p><strong>（2）ovs-dpdk方式：</strong></p> 
+<p><img src="https://images2.imgbox.com/bb/59/kEjqS6It_o.jpg" alt="这里写图片描述" title=""></p> 
+<p>用户态进程直接接管网卡收发数据，采用“IO独占核”技术，即每个端口分配一个核专门用于数据收发，轮询式处理方式代替中断式处理，显著提高IO性能。</p> 
+<p><strong>总结：</strong></p> 
+<table><thead><tr><th>比较</th><th>原生ovs</th><th>ovs-dpdk</th></tr></thead><tbody><tr><td>host收发包</td><td>通过host的linux内核访问网卡</td><td>通过dpdk高速数据通道收发包</td></tr><tr><td>内部交换</td><td>在内核态datapath进行交换</td><td>基于ovs，提供dpdk datapath的交换能力</td></tr><tr><td>vm后端驱动</td><td>使用vni，基于开源tap进行优化</td><td>vhost-user</td></tr><tr><td>vm前端驱动</td><td>标准virtio设备</td><td>标准virtio设备</td></tr><tr><td>交换路径</td><td>2个线程：物理网卡(中断机制)-&gt;转发线程-&gt;放到tap设备队列-&gt;vhost_net取包送给vcpu</td><td>1个线程：物理网卡(DPDK DPM)-&gt;转发线程-&gt;送给vcpu</td></tr></tbody></table> 
+<h3 id="使用ovs-dpdk">使用ovs-dpdk</h3> 
+<p><img src="https://images2.imgbox.com/7c/2e/Do7dFUz4_o.jpg" alt="这里写图片描述" title=""></p> 
+<p>硬件要求</p> 
+<p>网卡得支持DPDK，见：<a href="http://dpdk.org/doc/nics" rel="nofollow">http://dpdk.org/doc/nics</a> <br> CPU得支持DPDK, 测试命令：cat /proc/cpuinfo |grep pdpe1gb <br> 不一定非要支持DPDK硬件的网卡，因为DPDK也支持virtio dpdk driver.</p> 
+<p><img src="https://images2.imgbox.com/11/e3/fWHRsYah_o.jpg" alt="这里写图片描述" title=""></p> 
+<p>打开大页支持</p> 
+<pre class="prettyprint"><code class=" hljs ruby">hua<span class="hljs-variable">@node1</span><span class="hljs-symbol">:~</span><span class="hljs-variable">$ </span>cat  /etc/default/grub |grep <span class="hljs-constant">GRUB_CMDLINE_LINUX</span>
+<span class="hljs-constant">GRUB_CMDLINE_LINUX_DEFAULT</span>=<span class="hljs-string">"quiet splash intel_iommu=on pci=assign-busses"</span>
+<span class="hljs-constant">GRUB_CMDLINE_LINUX</span>=<span class="hljs-string">"transparent_hugepage=never hugepagesz=2M hugepages=64 default_hugepagesz=2M"</span>
+
+hua<span class="hljs-variable">@node1</span><span class="hljs-symbol">:~</span><span class="hljs-variable">$ </span>mkdir /mnt/huge
+hua<span class="hljs-variable">@node1</span><span class="hljs-symbol">:~</span><span class="hljs-variable">$ </span>mount -t hugetlbfs nodev /mnt/huge
+hua<span class="hljs-variable">@node1</span><span class="hljs-symbol">:~</span><span class="hljs-variable">$ </span>echo <span class="hljs-number">8192</span> &gt; <span class="hljs-regexp">/sys/kernel</span><span class="hljs-regexp">/mm/hugepages</span><span class="hljs-regexp">/hugepages-2048kB/nr</span>_hugepages
+hua<span class="hljs-variable">@node1</span><span class="hljs-symbol">:~</span><span class="hljs-variable">$ </span>cat /proc/meminfo |grep <span class="hljs-constant">HugePages_</span>
+<span class="hljs-constant">HugePages_Total</span><span class="hljs-symbol">:</span>       <span class="hljs-number">8192</span>
+<span class="hljs-constant">HugePages_Free</span><span class="hljs-symbol">:</span>        <span class="hljs-number">8192</span>
+<span class="hljs-constant">HugePages_Rsvd</span><span class="hljs-symbol">:</span>        <span class="hljs-number">0</span>
+<span class="hljs-constant">HugePages_Surp</span><span class="hljs-symbol">:</span>        <span class="hljs-number">0</span>
+hua<span class="hljs-variable">@node1</span><span class="hljs-symbol">:~</span><span class="hljs-variable">$ </span>grep <span class="hljs-constant">Hugepagesize</span> /proc/meminfo
+<span class="hljs-constant">Hugepagesize</span><span class="hljs-symbol">:</span>       <span class="hljs-number">2048</span> kB</code></pre> 
+<p>配置网卡使用uio_pci_generic驱动, 虚机可以使用PF去做DPDK port，也可以直通方式使用VF：</p> 
+<p><img src="https://images2.imgbox.com/22/8b/nSRLr2zJ_o.jpg" alt="这里写图片描述" title=""></p> 
+<p>至于PF的驱动，可以使用ixgbe，也可以使用DPDK PF driver；对于VF的驱动，可以使用ixgbefv，也可以使用DPDK VF driver. 如果要使用DPDK PF driver需在grub中加上iommu=pt.</p> 
+<p>如下方式也可以通信：</p> 
+<p><img src="https://images2.imgbox.com/62/a9/Yea6l1Pe_o.jpg" alt="这里写图片描述" title=""></p> 
+<p>测试场景搭建</p> 
+<pre class="prettyprint"><code class=" hljs bash"><span class="hljs-built_in">sudo</span> ovs-vsctl ovsbr0 br-int
+<span class="hljs-built_in">sudo</span> ovs-vsctl <span class="hljs-keyword">set</span> bridge ovsbr0 datapath_<span class="hljs-built_in">type</span>=netdev
+<span class="hljs-built_in">sudo</span> ovs-vsctl add-port ovsbr0 dpdk0 -- <span class="hljs-keyword">set</span> Interface dpdk0 <span class="hljs-built_in">type</span>=dpdk  <span class="hljs-comment">#Port name shoud begin with dpdk</span>
+
+<span class="hljs-comment"># 给虚机创建普通ovs port:</span>
+<span class="hljs-built_in">sudo</span> ovs-vsctl add-port ovsbr0 intP1 -- <span class="hljs-keyword">set</span> Interface intP1 <span class="hljs-built_in">type</span>=internal
+<span class="hljs-built_in">sudo</span> ip addr add <span class="hljs-number">192.168</span>.<span class="hljs-number">10.129</span>/<span class="hljs-number">24</span> dev intP1
+<span class="hljs-built_in">sudo</span> ip link <span class="hljs-keyword">set</span> dev intP1 up
+<span class="hljs-built_in">sudo</span> tcpdump -i intP1​
+
+<span class="hljs-comment"># 或给虚机创建vhost-user port:</span>
+<span class="hljs-built_in">sudo</span> ovs-vsctl add-port ovsbr0 vhost-user2 -- <span class="hljs-keyword">set</span> Interface vhost-user2 <span class="hljs-built_in">type</span>=dpdkvhostuser
+
+<span class="hljs-comment"># 虚机使用vhost-user port</span>
+<span class="hljs-built_in">sudo</span> qemu-system-x86_64 -enable-kvm -m <span class="hljs-number">128</span> -smp <span class="hljs-number">2</span> \
+    -chardev socket,id=char0,path=/var/run/openvswitch/vhost-user1 \
+    -netdev <span class="hljs-built_in">type</span>=vhost-user,id=mynet1,chardev=char0,vhostforce \
+    -device virtio-net-pci,netdev=mynet1,mac=<span class="hljs-number">52</span>:<span class="hljs-number">54</span>:<span class="hljs-number">00</span>:<span class="hljs-number">02</span>:d9:<span class="hljs-number">01</span> \
+    -object memory-backend-file,id=mem,size=<span class="hljs-number">128</span>M,mem-path=/mnt/huge,share=on \
+    -numa node,memdev=mem -mem-prealloc \
+    -net user,hostfwd=tcp::<span class="hljs-number">10021</span>-:<span class="hljs-number">22</span> -net nic \
+    /bak/images/openstack_demo.img
+
+<span class="hljs-comment"># Inside VM: </span>
+<span class="hljs-built_in">sudo</span> ifconfig eth0 <span class="hljs-number">192.168</span>.<span class="hljs-number">9.108</span>/<span class="hljs-number">24</span></code></pre> 
+<p>使用vhost-user方式示意图如下：</p> 
+<p><img src="https://images2.imgbox.com/9e/6e/1KVgqMI2_o.png" alt="这里写图片描述" title=""></p> 
+<p>dpdk-virtio-net</p> 
+<p><img src="https://images2.imgbox.com/68/1e/rj3BwBYz_o.jpg" alt="这里写图片描述" title=""></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/ec97e0f81bcd308484a67de1fe75efae/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Resnet-18-训练实验-warm up操作</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/91c3ff383f489b3a86be44625e39189f/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">数学笔记——导数5（指数函数和对数函数的导数）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

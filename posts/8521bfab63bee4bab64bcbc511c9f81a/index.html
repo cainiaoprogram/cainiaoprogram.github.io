@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>模型自动压缩工具实战：YOLOv7模型缩小75%，部署加速163%！ - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="模型自动压缩工具实战：YOLOv7模型缩小75%，部署加速163%！" />
+<meta property="og:description" content="众所周知，YOLO系列算法在检测场景中获得了广泛应用，但是工程师追求“更准、更小、更快”的效率能力永无止境。本文为大家介绍一个低成本、高收益的AI模型自动压缩工具（ACT, Auto Compression Toolkit），在YOLO系列模型上利用基于知识蒸馏的量化训练方法，无需修改训练源代码，通过几十分钟量化训练，即可获得非常好的收益。举例来看：该方法在YOLOv7上模型体积降低75%，GPU上推理速度可提升163%。
+图1 自动压缩工具在YOLO系列模型上的模型压缩和速度提升
+【测试环境与补充说明】
+1.测试数据与指标：mAP的指标均在COCO val2017数据集中评测得到。
+2.测试环境：Tesla T4的GPU环境下开启TensorRT 8.4.1，batch_size=1测试获取
+3.测试模型输入图像尺寸：640*640；
+注：YOLOv6原论文精度Baseline是mAP43.1%，由于模型导出是固定shape，所以导成ONNX后有掉点(-0.7%)，实测精度42.4%；YOLOv7在原论文Baseline mAP 51.2%，导成ONNX后实测精度51.1%。
+本文将从以下五个方面进一步技术解读，全文大约2300字，预计阅读时长3分钟。
+模型自动压缩工具-动机和思考
+模型自动压缩工具-量化蒸馏训练技术解析
+模型自动压缩工具-量化蒸馏训练技术实战（以YOLOv7为例）
+模型自动压缩工具-推理部署
+未来工作展望
+传送门：
+https://github.com/PaddlePaddle/PaddleSlim/tree/develop/example/auto_compression/pytorch_yolo_series
+模型自动压缩工具
+动机与思考
+模型量化是提升模型推理速度的手段之一，实际使用中有如下几点困难：
+模型参数分布不均匀，导致量化误差大
+过度训练是导致参数分布不均匀的原因之一。例如在YOLOv6s迭代过程中，为了让模型更好地收敛，通常需要延长模型训练周期。但随之也会带来一些隐患，比如模型在COCO数据集上出现了过拟合，某些层的数值分布极端化，这些状况增加了量化的噪声，我们分析了YOLOvs6每层Conv的量化精度，发现某些层精度下降的特别严重，由此导致了YOLOv6s模型离线量化后在验证集上的精度下降了10%，无法达到业务要求。
+图2 YOLOv6s卷积层量化损失评估
+我们对比分析了YOLOv6s的权重分布情况，发现量化损失较小的层数值分布相对平稳，数值处于-0.25到0.25之间，而量化损失较大的层数值分布非常极端，绝大部分值趋近于0，且数值处于-0.1到0.1之间，尽管看上去都是正太分布，但大量数值为0不利于量化统计scale值。
+图3 权重数值分布对比
+任务复杂度高，模型精度受量化误差的影响大
+任务复杂度越高，模型量化带来的精度损失越大。目标检测融合了目标定位和目标分类两种任务，整体的复杂度相对较高，因此它的精度受量化的影响更大。普通的离线量化无法改变模型激活值的数值分布，只会让量化scale适应该分布。遇到数值分布不均匀的激活值，离线量化的量化误差会很大。
+量化训练需修改训练代码，难度大，技术门槛高
+相比离线量化（Post Training Quantization），量化训练能减少离线量化的精度掉点程度。量化训练方法在训练过程中，可以不断地调整激活的数值分布，使激活的分布更适合量化。但是，量化训练使用成本比较高，体现在以下两方面：一方面是人力成本高：为了实现量化训练，需要修改模型的组网和训练代码，插入模拟量化操作，另一方面时间成本高：训练时需要加载完整训练集做训练。
+量化蒸馏训练技术解析
+本文介绍的自动压缩工具（ACT）针对YOLO系列模型，利用知识蒸馏技术，自动为推理模型添加训练逻辑；无需修改训练代码，仅拿训练好的模型和部分无标注数据，训练几十分钟，即可达到预期效果。具体步骤包括如下3步，详细过程如下图所示。
+构造教师模型
+加载推理模型文件，并将推理模型在内存中复制一份，作为知识蒸馏中的教师模型，待量化模型则作为学生模型。
+添加loss
+自动地分析模型结构，寻找适合添加蒸馏loss的层，一般是最后一个带可训练参数的层。比如，检测模型head有多个分支的话，会将每个head最后一个conv作为蒸馏节点。
+蒸馏训练
+教师模型通过蒸馏loss监督原模型的稀疏训练或量化训练，完成模型压缩的过程。
+ACT还支持更多功能，包括离线量化超参搜索、算法自动组合和硬件感知等。功能详情以及ACT在更多场景的应用，请参加自动压缩工具首页介绍。
+近期我们会将自动压缩代码提到YOLOv5、YOLOv6、YOLOv7、PP-YOLOE的官方repo中，这样大家在原模型项目中也可使用该能力。
+量化蒸馏训练技术实战（以YOLOv7为例）
+准备预测模型 导出ONNX模型。
+git clone https://github.com/WongKinYiu/yolov7.git cd yolov7 python export.py --weights yolov7-tiny.pt --grid 准备训练数据&amp;定义DataLoader
+准备COCO或者VOC格式的数据。定义数据预处理模块，其中，数据预处理Reader的设置如下：
+class COCOValDataset(paddle.io.Dataset): def __init__(self, dataset_dir=None, image_dir=None, anno_path=None, img_size=[640, 640]): self." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/8521bfab63bee4bab64bcbc511c9f81a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-08-16T19:58:08+08:00" />
+<meta property="article:modified_time" content="2022-08-16T19:58:08+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">模型自动压缩工具实战：YOLOv7模型缩小75%，部署加速163%！</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div id="js_content"> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/ea/75/x7hJJXLk_o.gif" alt="50b552572ab383f1d2ba9d54eae77a59.gif"></p> 
+ <p>众所周知，YOLO系列算法在检测场景中获得了广泛应用，但是工程师追求“更准、更小、更快”的效率能力永无止境。本文为大家介绍一个<strong>低成本</strong><strong>、</strong><strong>高收益</strong>的AI模型自动压缩工具（ACT, Auto Compression Toolkit），在YOLO系列模型上利用<strong>基于知识蒸馏的量化训练方法</strong>，无需修改训练源代码，通过几十分钟量化训练，即可获得非常好的收益。举例来看：该方法在YOLOv7上模型体积<strong>降低</strong><strong>75%</strong>，GPU上<strong>推理速度</strong>可提升<strong>163%</strong>。</p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/e8/e1/U48KTjzd_o.png" alt="63fa527ced47d68ee23ad016559fbe30.png"><br></p> 
+ <p style="text-align:center;">图1 自动压缩工具在YOLO系列模型上的模型压缩和速度提升</p> 
+ <p><strong>【测试环境与补充说明】</strong></p> 
+ <p><strong>1.测试数据与指标</strong>：mAP的指标均在COCO val2017数据集中评测得到。</p> 
+ <p><strong>2.测试环境</strong>：Tesla T4的GPU环境下开启TensorRT 8.4.1，batch_size=1测试获取</p> 
+ <p><strong>3.测试模型输入图像尺寸</strong>：640*640；</p> 
+ <p>注：YOLOv6原论文精度Baseline是mAP43.1%，由于模型导出是固定shape，所以导成ONNX后有掉点(-0.7%)，实测精度42.4%；YOLOv7在原论文Baseline mAP 51.2%，导成ONNX后实测精度51.1%。</p> 
+ <p><strong>本文将从以下五个方面进一步技术解读，全文大约2300字，预计阅读时长3分钟。</strong><br></p> 
+ <ul><li><p>模型自动压缩工具-动机和思考</p></li><li><p>模型自动压缩工具-量化蒸馏训练技术解析</p></li><li><p>模型自动压缩工具-量化蒸馏训练技术实战（以YOLOv7为例）</p></li><li><p>模型自动压缩工具-推理部署</p></li><li><p>未来工作展望</p></li></ul> 
+ <p>传送门：</p> 
+ <p style="text-align:left;">https://github.com/PaddlePaddle/PaddleSlim/tree/develop/example/auto_compression/pytorch_yolo_series</p> 
+ <p><strong>模型自动压缩工具</strong></p> 
+ <p><strong>动机与思考</strong><strong></strong></p> 
+ <p>模型量化是提升模型推理速度的手段之一，实际使用中有如下几点困难：</p> 
+ <p><strong><strong>模型参数分布不均匀，导致量化误差大</strong></strong><strong><strong></strong></strong></p> 
+ <p>过度训练是导致<strong>参数</strong><strong>分布不均匀</strong>的原因之一。例如在YOLOv6s迭代过程中，为了让模型更好地收敛，通常需要延长模型训练周期。但随之也会带来一些隐患，比如模型在COCO数据集上出现了过拟合，某些层的数值分布极端化，这些状况增加了量化的噪声，我们分析了YOLOvs6每层Conv的量化精度，发现某些层精度下降的特别严重，由此导致了YOLOv6s模型离线量化后在验证集上的精度下降了10%，无法达到业务要求。<br></p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/86/9c/fZraNL2r_o.png" alt="0209f6cd549c11559f05a3c02991fd83.png">图2 YOLOv6s卷积层量化损失评估</p> 
+ <p>我们对比分析了YOLOv6s的权重分布情况，发现量化损失较小的层数值分布相对平稳，数值处于-0.25到0.25之间，而量化损失较大的层数值分布非常极端，绝大部分值趋近于0，且数值处于-0.1到0.1之间，尽管看上去都是正太分布，但大量数值为0不利于量化统计scale值。</p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/6e/70/OGh6xrId_o.png" alt="43b37c05d786af5a45fd80570f87b212.png">图3 权重数值分布对比</p> 
+ <p><strong><strong>任务复杂度高，模型精度受量化误差的影响大</strong></strong><strong><strong></strong></strong></p> 
+ <p>任务复杂度越高，模型量化带来的精度损失越大。目标检测融合了目标定位和目标分类两种任务，整体的复杂度相对较高，因此它的精度受量化的影响更大。普通的离线量化无法改变模型激活值的数值分布，只会让量化scale适应该分布。遇到数值分布不均匀的激活值，离线量化的量化误差会很大。<br></p> 
+ <p><strong><strong>量化训练需修改训练代码，难度大，技术门槛高</strong></strong></p> 
+ <p>相比离线量化（Post Training Quantization），量化训练能减少离线量化的精度掉点程度。量化训练方法在训练过程中，可以不断地调整激活的数值分布，使激活的分布更适合量化。但是，量化训练使用成本比较高，体现在以下两方面：一方面是人力成本高：为了实现量化训练，需要修改模型的组网和训练代码，插入模拟量化操作，另一方面时间成本高：训练时需要加载完整训练集做训练。</p> 
+ <p><strong>量化蒸馏训练技术解析</strong></p> 
+ <p>本文介绍的自动压缩工具（ACT）针对YOLO系列模型，利用知识蒸馏技术，自动为推理模型添加训练逻辑；无需修改训练代码，仅拿训练好的模型和部分无标注数据，训练几十分钟，即可达到预期效果。具体步骤包括如下3步，详细过程如下图所示。<br></p> 
+ <p><strong><strong>构造教师模型</strong></strong></p> 
+ <p>加载推理模型文件，并将推理模型在内存中复制一份，作为知识蒸馏中的教师模型，待量化模型则作为学生模型。<br></p> 
+ <p><strong><strong>添加loss</strong></strong></p> 
+ <p>自动地分析模型结构，寻找适合添加蒸馏loss的层，一般是最后一个带可训练参数的层。比如，检测模型head有多个分支的话，会将每个head最后一个conv作为蒸馏节点。<br></p> 
+ <p><strong><strong>蒸馏训练</strong></strong></p> 
+ <p>教师模型通过蒸馏loss监督原模型的稀疏训练或量化训练，完成模型压缩的过程。</p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/ac/69/GX3No6Jo_o.gif" alt="27fc7137464dca0f0d1d68ebe8037dcc.gif"></p> 
+ <p>ACT还支持更多功能，包括离线量化超参搜索、算法自动组合和硬件感知等。功能详情以及ACT在更多场景的应用，请参加自动压缩工具首页介绍。</p> 
+ <p><strong>近期我们会将自动压缩代码提到YOLOv5、YOLOv6、YOLOv7、PP-YOLOE的官方repo中，这样大家在原模型项目中也可使用该能力。</strong></p> 
+ <p><strong></strong><strong>量化蒸馏训练技术实战</strong><strong>（以YOLOv7为例）</strong><strong><strong></strong></strong></p> 
+ <p><strong><strong><strong>准备预测模型<strong> 导出ONNX模型。</strong></strong></strong></strong><strong></strong></p> 
+ <pre class="has"><code class="language-go">git clone https://github.com/WongKinYiu/yolov7.git
+cd yolov7
+python export.py --weights yolov7-tiny.pt --grid</code></pre> 
+ <p><strong><strong>准备训练数据&amp;定义DataLoader</strong></strong><strong><strong></strong></strong></p> 
+ <p>准备COCO或者VOC格式的数据。定义数据预处理模块，其中，数据预处理Reader的设置如下：</p> 
+ <pre class="has"><code class="language-go">class COCOValDataset(paddle.io.Dataset):
+    def  __init__(self, 
+                 dataset_dir=None,
+                 image_dir=None,
+                 anno_path=None,
+                 img_size=[640, 640]):
+        self.dataset_dir = dataset_dir
+        self.image_dir = image_dir
+        self.img_size = img_size
+        self.ann_file = os.path.join(dataset_dir, anno_path)
+        self.coco = COCO(self.ann_file)
+        self.ids = list(sorted(self.coco.imgs.keys()))
+
+    def __getitem__(self, idx):
+        img_id = self.ids[idx]
+        img = self._get_img_data_from_img_id(img_id)
+        img, scale_factor = self.image_preprocess(img, self.img_size)
+        return {'image': img, 'im_id': np.array([img_id]), 'scale_factor': scale_factor}
+
+    def __len__(self):
+        return len(self.ids)</code></pre> 
+ <p><strong><strong>定义评估接口</strong></strong></p> 
+ <p style="text-align:justify;">为了在压缩过程中实时评估量化模型的精度，需要定义一个eval_function来做模型推理效果评估。这一步是可选的，如果没有eval_function也不会影响量化训练的过程。</p> 
+ <pre class="has"><code class="language-go">def eval_function(exe, compiled_test_program, test_feed_names, test_fetch_list):
+    bboxes_list, bbox_nums_list, image_id_list = [], [], []
+    for data in val_loader:
+        data_all = {k: np.array(v) for k, v in data.items()}
+        outs = exe.run(compiled_test_program,
+                       feed={test_feed_names[0]: data_all['image']},
+                       fetch_list=test_fetch_list,
+                       return_numpy=False)
+        postprocess = YOLOv7PostProcess(
+            score_threshold=0.001, nms_threshold=0.65, multi_label=True)
+        res = postprocess(np.array(outs[0]), data_all['scale_factor'])
+        bboxes_list.append(res['bbox'])
+        bbox_nums_list.append(res['bbox_num'])
+        image_id_list.append(np.array(data_all['im_id']))
+    map_res = coco_metric(anno_file, bboxes_list, bbox_nums_list, image_id_list)
+    return map_res[0]</code></pre> 
+ <p><strong><strong>定义配置文件</strong></strong></p> 
+ <p>定义量化训练的配置文件，Distillation表示蒸馏参数配置，Quantization表示量化参数配置，TrainConfig表示训练时的训练轮数、优化器等设置。具体超参的设置可以参考<strong>ACT超参设置文档</strong>。</p> 
+ <pre class="has"><code class="language-go">Distillation: # 蒸馏参数设置
+  alpha: 1.0 # 蒸馏loss所占权重
+  loss: soft_label
+
+Quantization:  # 量化参数设置
+  use_pact: true  # 是否使用PACT量化算法
+  activation_quantize_type: 'moving_average_abs_max'   # 激活量化方式，选择'moving_average_abs_max'即可
+  quantize_op_types:   # 需要量化的OP类型，可以是conv2d、depthwise_conv2d、mul、matmul_v2等
+  - conv2d
+  - depthwise_conv2d
+
+TrainConfig:   # 训练的配置
+  train_iter: 3000   # 训练的轮数
+  eval_iter: 1000    # 训练中每次评估精度的间隔轮数
+  learning_rate: 0.00001  # 训练学习率
+  optimizer_builder:  # 优化器设置
+    optimizer: 
+      type: SGD
+    weight_decay: 4.0e-05</code></pre> 
+ <p><strong><strong>开始运行</strong></strong></p> 
+ <p>少量代码就可以开始ACT量化训练。启动ACT时，需要传入模型文件的路径(model_dir)、模型文件名（model_filename）、参数文件名称(params_filename)、压缩后模型存储路径(save_dir)、压缩配置文件(config)、dataloader和评估精度的eval_callback。</p> 
+ <pre class="has"><code class="language-go">from paddleslim.auto_compression import AutoCompression
+ac = AutoCompression(
+        model_dir=global_config["model_dir"],
+        model_filename=global_config["model_filename"],
+        params_filename=global_config["params_filename"],
+        save_dir=FLAGS.save_dir,
+        config=all_config,
+        train_dataloader=train_loader,
+        eval_callback=eval_function)
+ac.compress()</code></pre> 
+ <p>以上是精简后的关键代码，如果想快速体验，可以根据下方链接中的示例文档及代码进行体验：</p> 
+ <p>https://github.com/PaddlePaddle/PaddleSlim/tree/develop/example/auto_compression/pytorch_yolo_series</p> 
+ <p>训练完成后会在save_dir路径下产出model.pdmodel和model.pdiparams文件。至此，完成了模型训练压缩工作，推理部署参考下一节内容。</p> 
+ <p><strong></strong><strong>推理部署</strong><strong></strong></p> 
+ <p>完成量化训练后的模型，支持Paddle Inference TensorRT部署（以下简称Paddle TensorRT）。<br></p> 
+ <p>在YOLO系列模型上测试， Paddle TensorRT的性能与直接使用TensorRT基本持平，如下图所示（在YOLOv5s、PP-YOLOE-s、YOLOv7上，Paddle TensorRT性能优于TensorRT），相关推理部署代码已经集成到了自动压缩工具开源项目，可以直接下载体验。</p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/a9/a7/T22R2WhX_o.png" alt="d58c075340d9f6a1bd764e990e61d8c2.png"></p> 
+ <p style="text-align:center;">图4 YOLO系列模型在Paddle TensorRT和TensorRT上的速度对比</p> 
+ <pre class="has"><code class="language-go"># FP32
+./build/trt_run --model_file yolov7_infer/model.pdmodel --params_file yolov7_infer/model.pdiparams --run_mode=trt_fp32
+# FP16
+./build/trt_run --model_file yolov7_infer/model.pdmodel --params_file yolov7_infer/model.pdiparams --run_mode=trt_fp16
+# INT8
+./build/trt_run --model_file yolov7_quant/model.pdmodel --params_file yolov7_quant/model.pdiparams --run_mode=trt_int8</code></pre> 
+ <p style="text-align:center;"><strong><span lang="en-us">⭐</span></strong><strong><span lang="en-us">Star</span></strong><strong>收藏<strong><strong><span lang="en-us">⭐</span></strong></strong></strong></p> 
+ <p style="text-align:center;"><strong><span lang="en-us">这么好的项目，欢迎大家点star鼓励并前来体验！</span></strong><br></p> 
+ <p style="text-align:justify;"><strong><span lang="en-us">https://github.com/PaddlePaddle/PaddleSlim/tree/develop/example/auto_compression/pytorch_yolo_series</span></strong></p> 
+ <p><strong>未来工作展望</strong><strong></strong></p> 
+ <p>ACT自动化压缩工具将支持更多AI模型的压缩；支持YOLO系列模型剪枝、非结构化稀疏等压缩方法；升级ACT能力，加入更多前沿压缩算法；支持完善更多部署方法，包括ONNX Runtime、OpenVINO等，进一步助力AI模型工程落地。</p> 
+ <p><strong>直播预告</strong></p> 
+ <p>想了解YOLO系列模型压缩策略，了解更多自动压缩工具的算法和能力，快快扫码加群关注我们的直播间吧！</p> 
+ <p><strong>直播时间：</strong>2022.08.22（周一）19:00-20:00。</p> 
+ <p style="text-align:center;"><strong>欢迎大家扫码报名！</strong></p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/b3/1d/ieDpFo7t_o.png" alt="e13217c5e76fd5f1e0b83f5c720bf210.png"></p> 
+ <p><strong>项目地址</strong><br></p> 
+ <ul><li><p>GitHub:</p></li></ul> 
+ <p> https://github.com/PaddlePaddle/PaddleSlim</p> 
+ <ul><li><p>Gitee:</p></li></ul> 
+ <p>https://gitee.com/paddlepaddle/PaddleSlim</p> 
+ <p><strong>拓展阅读</strong><br></p> 
+ <p><a href="" rel="nofollow">汇集YOLO系列经典和前沿算法，实现高精度实时检测！</a><br></p> 
+ <p><img src="https://images2.imgbox.com/9b/c9/tUjqOcj7_o.gif" alt="9a16c164a15fd5a5410456d04f3b2f6f.gif"></p> 
+ <p style="text-align:center;">关注【飞桨PaddlePaddle】公众号</p> 
+ <p style="text-align:center;">获取更多技术内容~</p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/c4072043577271bd945e756cf34ad4da/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Redis（十） 布隆过滤器</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/8c94539cfc29100c94464241963d1ffb/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">HTTP状态码大全(常见 HTTP Status Code 含义查询)</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

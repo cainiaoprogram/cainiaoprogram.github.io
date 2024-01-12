@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>WKWebView 线程终止的原因——之 OOM 的控制逻辑 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="WKWebView 线程终止的原因——之 OOM 的控制逻辑" />
+<meta property="og:description" content="最近在 WKWebView 中展示三维图像渲染的功能时，经常遇到 WKWebView 莫名其妙的 reload 的现象。
+WKWebView 会在 APP 的进程外执行其所有的工作，并且 WKWebView 的内存使用量与 APP 的内存使用量分开计算。这样当 WKWebView 进程超出其内存限制时，就不会导致 APP 程序终止，最多也就是导致空白视图。
+为了定位具体的原因，先查看一下 WKWebView 的代理提供的回调方法。在 WKNavigationDelegate 中定义了回调方法 webViewWebContentProcessDidTerminate(_)：
+/** @abstract Invoked when the web view&#39;s web content process is terminated. @param webView The web view whose underlying web content process was terminated. */ @available(iOS 9.0, *) optional func webViewWebContentProcessDidTerminate(_ webView: WKWebView) 当 web 视图的内容进程终止时，将通过此回调通知 APP，然而并没有提供更多的错误信息。
+可以通过 https://github.com/WebKit/WebKit 看到 WKWebView 的源码。通过搜索 webViewWebContentProcessDidTerminate的方法，可以一步步知道 WKWebView 的异常流程。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/c4a2913f28c0ec47354bf334eab4560d/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-05-31T19:59:12+08:00" />
+<meta property="article:modified_time" content="2022-05-31T19:59:12+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">WKWebView 线程终止的原因——之 OOM 的控制逻辑</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>最近在 WKWebView 中展示三维图像渲染的功能时，经常遇到 WKWebView 莫名其妙的 reload 的现象。</p> 
+<blockquote> 
+ <p>WKWebView 会在 APP 的进程外执行其所有的工作，并且 WKWebView 的内存使用量与 APP 的内存使用量分开计算。这样当 WKWebView 进程超出其内存限制时，就不会导致 APP 程序终止，最多也就是导致空白视图。</p> 
+</blockquote> 
+<p>为了定位具体的原因，先查看一下 WKWebView 的代理提供的回调方法。在 <code>WKNavigationDelegate</code> 中定义了回调方法 <code>webViewWebContentProcessDidTerminate(_)</code>：</p> 
+<pre><code class="prism language-swift"><span class="token comment">/** @abstract Invoked when the web view's web content process is terminated.
+@param webView The web view whose underlying web content process was terminated.
+*/</span>
+<span class="token attribute atrule">@available</span><span class="token punctuation">(</span>iOS <span class="token number">9.0</span><span class="token punctuation">,</span> <span class="token operator">*</span><span class="token punctuation">)</span>
+<span class="token keyword">optional</span> <span class="token keyword">func</span> <span class="token function-definition function">webViewWebContentProcessDidTerminate</span><span class="token punctuation">(</span><span class="token omit keyword">_</span> webView<span class="token punctuation">:</span> <span class="token class-name">WKWebView</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>当 web 视图的内容进程终止时，将通过此回调通知 APP，然而并没有提供更多的错误信息。</p> 
+<p>可以通过 <a href="https://github.com/WebKit/WebKit">https://github.com/WebKit/WebKit</a> 看到 WKWebView 的源码。通过搜索 <code>webViewWebContentProcessDidTerminate</code>的方法，可以一步步知道 WKWebView 的异常流程。</p> 
+<h2><a id="WKWebView__18"></a>WKWebView 进程异常的流程</h2> 
+<h3><a id="WKWebView__20"></a>WKWebView 的终止代理流程</h3> 
+<p>在 WebKit 的 NavigationState.mm 文件中，调用了 <code>webViewWebContentProcessDidTerminate</code> 方法：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">bool</span> NavigationState<span class="token double-colon punctuation">::</span><span class="token class-name">NavigationClient</span><span class="token double-colon punctuation">::</span><span class="token function">processDidTerminate</span><span class="token punctuation">(</span>WebPageProxy<span class="token operator">&amp;</span> page<span class="token punctuation">,</span> ProcessTerminationReason reason<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>m_navigationState<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>m_navigationState<span class="token operator">-&gt;</span>m_navigationDelegateMethods<span class="token punctuation">.</span>webViewWebContentProcessDidTerminate
+        <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>m_navigationState<span class="token operator">-&gt;</span>m_navigationDelegateMethods<span class="token punctuation">.</span>webViewWebContentProcessDidTerminateWithReason
+        <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>m_navigationState<span class="token operator">-&gt;</span>m_navigationDelegateMethods<span class="token punctuation">.</span>webViewWebProcessDidCrash<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">auto</span> navigationDelegate <span class="token operator">=</span> m_navigationState<span class="token operator">-&gt;</span>m_navigationDelegate<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>navigationDelegate<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>m_navigationState<span class="token operator">-&gt;</span>m_navigationDelegateMethods<span class="token punctuation">.</span>webViewWebContentProcessDidTerminateWithReason<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token punctuation">[</span><span class="token generic-function"><span class="token function">static_cast</span><span class="token generic class-name"><span class="token operator">&lt;</span>id <span class="token operator">&lt;</span>WKNavigationDelegatePrivate<span class="token operator">&gt;&gt;</span></span></span><span class="token punctuation">(</span>navigationDelegate<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> _webView<span class="token operator">:</span>m_navigationState<span class="token operator">-&gt;</span>m_webView webContentProcessDidTerminateWithReason<span class="token operator">:</span><span class="token function">wkProcessTerminationReason</span><span class="token punctuation">(</span>reason<span class="token punctuation">)</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">// We prefer webViewWebContentProcessDidTerminate: over _webViewWebProcessDidCrash:.</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>m_navigationState<span class="token operator">-&gt;</span>m_navigationDelegateMethods<span class="token punctuation">.</span>webViewWebContentProcessDidTerminate<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token punctuation">[</span>navigationDelegate webViewWebContentProcessDidTerminate<span class="token operator">:</span>m_navigationState<span class="token operator">-&gt;</span>m_webView<span class="token punctuation">]</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token function">ASSERT</span><span class="token punctuation">(</span>m_navigationState<span class="token operator">-&gt;</span>m_navigationDelegateMethods<span class="token punctuation">.</span>webViewWebProcessDidCrash<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">[</span><span class="token generic-function"><span class="token function">static_cast</span><span class="token generic class-name"><span class="token operator">&lt;</span>id <span class="token operator">&lt;</span>WKNavigationDelegatePrivate<span class="token operator">&gt;&gt;</span></span></span><span class="token punctuation">(</span>navigationDelegate<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> _webViewWebProcessDidCrash<span class="token operator">:</span>m_navigationState<span class="token operator">-&gt;</span>m_webView<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>在 <code>processDidTerminate()</code> 方法中，当线程终止时的处理流程为：</p> 
+<ul><li>若未设置代理方法，则返回 false；</li><li>如果代理实现了 <code>_webView:webViewWebContentProcessDidTerminateWithReason:</code>，则回调，并返回 true；</li><li>如果代理实现了 <code>webViewWebContentProcessDidTerminate:</code>，则回调，并返回 true；</li><li>调用回调方法：<code>_webViewWebProcessDidCrash:</code>，并返回 true。</li></ul> 
+<p>代理方法的设置方法如下：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">void</span> <span class="token class-name">NavigationState</span><span class="token double-colon punctuation">::</span><span class="token function">setNavigationDelegate</span><span class="token punctuation">(</span>id <span class="token operator">&lt;</span>WKNavigationDelegate<span class="token operator">&gt;</span> delegate<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// ....</span>
+    m_navigationDelegateMethods<span class="token punctuation">.</span>webViewWebContentProcessDidTerminate <span class="token operator">=</span> <span class="token punctuation">[</span>delegate respondsToSelector<span class="token operator">:</span>@<span class="token function">selector</span><span class="token punctuation">(</span>webViewWebContentProcessDidTerminate<span class="token operator">:</span><span class="token punctuation">)</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+    m_navigationDelegateMethods<span class="token punctuation">.</span>webViewWebContentProcessDidTerminateWithReason <span class="token operator">=</span> <span class="token punctuation">[</span>delegate respondsToSelector<span class="token operator">:</span>@<span class="token function">selector</span><span class="token punctuation">(</span>_webView<span class="token operator">:</span>webContentProcessDidTerminateWithReason<span class="token operator">:</span><span class="token punctuation">)</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token comment">// ....</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>在 <code>processDidTerminate()</code> 方法中，参数 <code>reason</code>说明了异常原因，类型为 <code>ProcessTerminationReason</code>，定义如下：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">enum</span> <span class="token keyword">class</span> <span class="token class-name">ProcessTerminationReason</span> <span class="token punctuation">{<!-- --></span>
+    ExceededMemoryLimit<span class="token punctuation">,</span> <span class="token comment">// 超出内存限制</span>
+    ExceededCPULimit<span class="token punctuation">,</span>    <span class="token comment">// 超出CPU限制</span>
+    RequestedByClient<span class="token punctuation">,</span>   <span class="token comment">// 主动触发的terminate</span>
+    IdleExit<span class="token punctuation">,</span>
+    Unresponsive<span class="token punctuation">,</span>        <span class="token comment">// 无法响应</span>
+    Crash<span class="token punctuation">,</span>               <span class="token comment">// web进程自己发生了crash</span>
+    <span class="token comment">// Those below only relevant for the WebContent process.</span>
+    ExceededProcessCountLimit<span class="token punctuation">,</span>
+    NavigationSwap<span class="token punctuation">,</span>
+    RequestedByNetworkProcess<span class="token punctuation">,</span>
+    RequestedByGPUProcess
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<h3><a id="_92"></a>通过代理方法获取异常原因</h3> 
+<p>可以看到回调方法有两个：<code>webViewWebContentProcessDidTerminate:</code> 和<code>_webView:webContentProcessDidTerminateWithReason:</code>，一个不带 reason 参数，一个带有 reason 参数，并且带有 reason 参数的回调方法优先级更高。</p> 
+<p>在 WKWebView 的 <code>WKNavigationDelegate</code> 代理中，我们只看到了不带 reason 的回调方法，那 <code>_webView:webContentProcessDidTerminateWithReason:</code> 是怎么回事呢？</p> 
+<p>通过检索发现，它定义在 <code>WKNavigationDelegatePrivate</code> 在代理中：</p> 
+<pre><code>@protocol WKNavigationDelegatePrivate &lt;WKNavigationDelegate&gt;
+
+@optional
+
+// ...
+- (void)_webView:(WKWebView *)webView webContentProcessDidTerminateWithReason:(_WKProcessTerminationReason)reason WK_API_AVAILABLE(macos(10.14), ios(12.0));
+// ...
+@end
+</code></pre> 
+<p><strong><code>WKNavigationDelegatePrivate</code> 并没有公开让 App 使用。不过，我们依然可以通过实现上面的代理方法，获取到 reason 信息。</strong></p> 
+<p>不过需要注意：WebKit 内部的异常类型为：<code>ProcessTerminationReason</code>，而此处 reason 参数的类型为：<code>_WKProcessTerminationReason</code>：</p> 
+<pre><code class="prism language-c++">typedef NS_ENUM(NSInteger, _WKProcessTerminationReason) {
+    _WKProcessTerminationReasonExceededMemoryLimit,
+    _WKProcessTerminationReasonExceededCPULimit,
+    _WKProcessTerminationReasonRequestedByClient,
+    _WKProcessTerminationReasonCrash,
+} WK_API_AVAILABLE(macos(10.14), ios(12.0));
+</code></pre> 
+<p><code>_WKProcessTerminationReason</code> 和 <code>ProcessTerminationReason</code> 的转换关系如下：</p> 
+<pre><code class="prism language-c++">static _WKProcessTerminationReason wkProcessTerminationReason(ProcessTerminationReason reason)
+{
+    switch (reason) {
+    case ProcessTerminationReason::ExceededMemoryLimit:
+        return _WKProcessTerminationReasonExceededMemoryLimit;
+    case ProcessTerminationReason::ExceededCPULimit:
+        return _WKProcessTerminationReasonExceededCPULimit;
+    case ProcessTerminationReason::NavigationSwap:
+    case ProcessTerminationReason::IdleExit:
+        // We probably shouldn't bother coming up with a new API type for process-swapping.
+        // "Requested by client" seems like the best match for existing types.
+        FALLTHROUGH;
+    case ProcessTerminationReason::RequestedByClient:
+        return _WKProcessTerminationReasonRequestedByClient;
+    case ProcessTerminationReason::ExceededProcessCountLimit:
+    case ProcessTerminationReason::Unresponsive:
+    case ProcessTerminationReason::RequestedByNetworkProcess:
+    case ProcessTerminationReason::RequestedByGPUProcess:
+    case ProcessTerminationReason::Crash:
+        return _WKProcessTerminationReasonCrash;
+    }
+    ASSERT_NOT_REACHED();
+    return _WKProcessTerminationReasonCrash;
+}
+</code></pre> 
+<p>可以看出，在转换过程中，并不是一一对应的，会损失掉具体的 crash 类型。也就是，当我们实现<code>_webView:webContentProcessDidTerminateWithReason:</code>代理时，可以获取到一个相对笼统的 reason。</p> 
+<h3><a id="ExceededMemoryLimit_152"></a>内存超限的逻辑（ExceededMemoryLimit)</h3> 
+<p>下面先分析内存超限的逻辑。</p> 
+<p>初始化 web 线程的方法：<code>initializeWebProcess()</code>，实现如下：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">void</span> <span class="token class-name">WebProcess</span><span class="token double-colon punctuation">::</span><span class="token function">initializeWebProcess</span><span class="token punctuation">(</span>WebProcessCreationParameters<span class="token operator">&amp;&amp;</span> parameters<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>    
+    <span class="token comment">// ...</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>m_suppressMemoryPressureHandler<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// ...</span>
+        <span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression"><span class="token function">ENABLE</span><span class="token punctuation">(</span>PERIODIC_MEMORY_MONITOR<span class="token punctuation">)</span></span></span>
+        memoryPressureHandler<span class="token punctuation">.</span><span class="token function">setShouldUsePeriodicMemoryMonitor</span><span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        memoryPressureHandler<span class="token punctuation">.</span><span class="token function">setMemoryKillCallback</span><span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token keyword">this</span><span class="token punctuation">]</span> <span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">WebCore</span><span class="token double-colon punctuation">::</span><span class="token function">logMemoryStatistics</span><span class="token punctuation">(</span>LogMemoryStatisticsReason<span class="token double-colon punctuation">::</span>OutOfMemoryDeath<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token class-name">MemoryPressureHandler</span><span class="token double-colon punctuation">::</span><span class="token function">singleton</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">processState</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">==</span> WebsamProcessState<span class="token double-colon punctuation">::</span>Active<span class="token punctuation">)</span>
+                <span class="token function">parentProcessConnection</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">-&gt;</span><span class="token function">send</span><span class="token punctuation">(</span>Messages<span class="token double-colon punctuation">::</span><span class="token class-name">WebProcessProxy</span><span class="token double-colon punctuation">::</span><span class="token function">DidExceedActiveMemoryLimit</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">else</span>
+                <span class="token function">parentProcessConnection</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">-&gt;</span><span class="token function">send</span><span class="token punctuation">(</span>Messages<span class="token double-colon punctuation">::</span><span class="token class-name">WebProcessProxy</span><span class="token double-colon punctuation">::</span><span class="token function">DidExceedInactiveMemoryLimit</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// ...</span>
+        <span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+        <span class="token comment">// ...</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">// ...</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>其中：</p> 
+<ul><li><code>setShouldUsePeriodicMemoryMonitor()</code> 设置是否需要定期检测内存；</li><li><code>setMemoryKillCallback()</code> 设置内存超限后，被终止后的回调。</li></ul> 
+<h4><a id="_186"></a>定期内存检测</h4> 
+<p>设置定期内存检测的方法<code>setShouldUsePeriodicMemoryMonitor</code>的实现如下：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">void</span> <span class="token class-name">MemoryPressureHandler</span><span class="token double-colon punctuation">::</span><span class="token function">setShouldUsePeriodicMemoryMonitor</span><span class="token punctuation">(</span><span class="token keyword">bool</span> use<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">isFastMallocEnabled</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// If we're running with FastMalloc disabled, some kind of testing or debugging is probably happening.</span>
+        <span class="token comment">// Let's be nice and not enable the memory kill mechanism.</span>
+        <span class="token keyword">return</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>use<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        m_measurementTimer <span class="token operator">=</span> <span class="token generic-function"><span class="token function">makeUnique</span><span class="token generic class-name"><span class="token operator">&lt;</span>RunLoop<span class="token double-colon punctuation">::</span>Timer<span class="token operator">&lt;</span>MemoryPressureHandler<span class="token operator">&gt;&gt;</span></span></span><span class="token punctuation">(</span><span class="token class-name">RunLoop</span><span class="token double-colon punctuation">::</span><span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token keyword">this</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>MemoryPressureHandler<span class="token double-colon punctuation">::</span>measurementTimerFired<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        m_measurementTimer<span class="token operator">-&gt;</span><span class="token function">startRepeating</span><span class="token punctuation">(</span>m_configuration<span class="token punctuation">.</span>pollInterval<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span>
+        m_measurementTimer <span class="token operator">=</span> <span class="token keyword">nullptr</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>其中，初始化了一个 Timer，时间间隔为 m_configuration.pollInterval（pollInterval 的值为 30s），执行方法为 <code>measurementTimerFired()</code>。也就是每隔 30s 调用一次 <code>measurementTimerFired()</code> 对内存使用量进行一次检查。</p> 
+<p>内存检查的方法 <code>measurementTimerFired()</code> 定义如下：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">void</span> <span class="token class-name">MemoryPressureHandler</span><span class="token double-colon punctuation">::</span><span class="token function">measurementTimerFired</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    size_t footprint <span class="token operator">=</span> <span class="token function">memoryFootprint</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression"><span class="token function">PLATFORM</span><span class="token punctuation">(</span>COCOA<span class="token punctuation">)</span></span></span>
+    <span class="token function">RELEASE_LOG</span><span class="token punctuation">(</span>MemoryPressure<span class="token punctuation">,</span> <span class="token string">"Current memory footprint: %zu MB"</span><span class="token punctuation">,</span> footprint <span class="token operator">/</span> MB<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+    <span class="token keyword">auto</span> killThreshold <span class="token operator">=</span> <span class="token function">thresholdForMemoryKill</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>killThreshold <span class="token operator">&amp;&amp;</span> footprint <span class="token operator">&gt;=</span> <span class="token operator">*</span>killThreshold<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">shrinkOrDie</span><span class="token punctuation">(</span><span class="token operator">*</span>killThreshold<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token function">setMemoryUsagePolicyBasedOnFootprint</span><span class="token punctuation">(</span>footprint<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">switch</span> <span class="token punctuation">(</span>m_memoryUsagePolicy<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">case</span> MemoryUsagePolicy<span class="token double-colon punctuation">::</span>Unrestricted<span class="token operator">:</span>
+        <span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token keyword">case</span> MemoryUsagePolicy<span class="token double-colon punctuation">::</span>Conservative<span class="token operator">:</span>
+        <span class="token function">releaseMemory</span><span class="token punctuation">(</span>Critical<span class="token double-colon punctuation">::</span>No<span class="token punctuation">,</span> Synchronous<span class="token double-colon punctuation">::</span>No<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token keyword">case</span> MemoryUsagePolicy<span class="token double-colon punctuation">::</span>Strict<span class="token operator">:</span>
+        <span class="token function">releaseMemory</span><span class="token punctuation">(</span>Critical<span class="token double-colon punctuation">::</span>Yes<span class="token punctuation">,</span> Synchronous<span class="token double-colon punctuation">::</span>No<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">processState</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">==</span> WebsamProcessState<span class="token double-colon punctuation">::</span>Active <span class="token operator">&amp;&amp;</span> footprint <span class="token operator">&gt;</span> <span class="token function">thresholdForMemoryKillOfInactiveProcess</span><span class="token punctuation">(</span>m_pageCount<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token function">doesExceedInactiveLimitWhileActive</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">else</span>
+        <span class="token function">doesNotExceedInactiveLimitWhileActive</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<p>其中，<code>footprint</code>来为当前使用的内存量，<code>killThreshold</code>为内存的最大限制。如果 <code>killThreshold</code> 大于等于 <code>footprint</code>，则调用 <code>shrinkOrDie()</code>。</p> 
+<h4><a id="_247"></a>当前使用的内存量</h4> 
+<p>当前使用的内存量是通过 <code>memoryFootprint()</code>来获取的。定义如下：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">namespace</span> WTF <span class="token punctuation">{<!-- --></span>
+
+size_t <span class="token function">memoryFootprint</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    task_vm_info_data_t vmInfo<span class="token punctuation">;</span>
+    mach_msg_type_number_t count <span class="token operator">=</span> TASK_VM_INFO_COUNT<span class="token punctuation">;</span>
+    kern_return_t result <span class="token operator">=</span> <span class="token function">task_info</span><span class="token punctuation">(</span><span class="token function">mach_task_self</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> TASK_VM_INFO<span class="token punctuation">,</span> <span class="token punctuation">(</span>task_info_t<span class="token punctuation">)</span> <span class="token operator">&amp;</span>vmInfo<span class="token punctuation">,</span> <span class="token operator">&amp;</span>count<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>result <span class="token operator">!=</span> KERN_SUCCESS<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> <span class="token generic-function"><span class="token function">static_cast</span><span class="token generic class-name"><span class="token operator">&lt;</span>size_t<span class="token operator">&gt;</span></span></span><span class="token punctuation">(</span>vmInfo<span class="token punctuation">.</span>phys_footprint<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>其中，使用到了 <code>task_info</code>来获取线程的信息，传递的参数有：</p> 
+<ul><li>mach_task_self() ：获取当前进程</li><li>TASK_VM_INFO：取虚拟内存信息</li><li>vmInfo、count：两个参数传递的为引用地址，用于接收返回值。 
+  <ul><li>vmInfo：task_vm_info_data_t 里的 phys_footprint 就是进程的内存占用，以 byte 为单位。</li></ul> </li></ul> 
+<h4><a id="_274"></a>内存的最大限制</h4> 
+<p>内存最大的限制由 thresholdForMemoryKill() 方法实现，定义如下：</p> 
+<pre><code class="prism language-cpp">std<span class="token double-colon punctuation">::</span>optional<span class="token operator">&lt;</span>size_t<span class="token operator">&gt;</span> <span class="token class-name">MemoryPressureHandler</span><span class="token double-colon punctuation">::</span><span class="token function">thresholdForMemoryKill</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>m_configuration<span class="token punctuation">.</span>killThresholdFraction<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> m_configuration<span class="token punctuation">.</span>baseThreshold <span class="token operator">*</span> <span class="token punctuation">(</span><span class="token operator">*</span>m_configuration<span class="token punctuation">.</span>killThresholdFraction<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">switch</span> <span class="token punctuation">(</span>m_processState<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">case</span> WebsamProcessState<span class="token double-colon punctuation">::</span>Inactive<span class="token operator">:</span>
+        <span class="token keyword">return</span> <span class="token function">thresholdForMemoryKillOfInactiveProcess</span><span class="token punctuation">(</span>m_pageCount<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">case</span> WebsamProcessState<span class="token double-colon punctuation">::</span>Active<span class="token operator">:</span>
+        <span class="token keyword">return</span> <span class="token function">thresholdForMemoryKillOfActiveProcess</span><span class="token punctuation">(</span>m_pageCount<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">return</span> std<span class="token double-colon punctuation">::</span>nullopt<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">static</span> size_t <span class="token function">thresholdForMemoryKillOfActiveProcess</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> tabCount<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    size_t baseThreshold <span class="token operator">=</span> <span class="token function">ramSize</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">16</span> <span class="token operator">*</span> GB <span class="token operator">?</span> <span class="token number">15</span> <span class="token operator">*</span> GB <span class="token operator">:</span> <span class="token number">7</span> <span class="token operator">*</span> GB<span class="token punctuation">;</span>
+    <span class="token keyword">return</span> baseThreshold <span class="token operator">+</span> tabCount <span class="token operator">*</span> GB<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">static</span> size_t <span class="token function">thresholdForMemoryKillOfInactiveProcess</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> tabCount<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression"><span class="token function">CPU</span><span class="token punctuation">(</span>X86_64<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token function">CPU</span><span class="token punctuation">(</span>ARM64<span class="token punctuation">)</span></span></span>
+    size_t baseThreshold <span class="token operator">=</span> <span class="token number">3</span> <span class="token operator">*</span> GB <span class="token operator">+</span> tabCount <span class="token operator">*</span> GB<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+    size_t baseThreshold <span class="token operator">=</span> tabCount <span class="token operator">&gt;</span> <span class="token number">1</span> <span class="token operator">?</span> <span class="token number">3</span> <span class="token operator">*</span> GB <span class="token operator">:</span> <span class="token number">2</span> <span class="token operator">*</span> GB<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+    <span class="token keyword">return</span> std<span class="token double-colon punctuation">::</span><span class="token function">min</span><span class="token punctuation">(</span>baseThreshold<span class="token punctuation">,</span> <span class="token generic-function"><span class="token function">static_cast</span><span class="token generic class-name"><span class="token operator">&lt;</span>size_t<span class="token operator">&gt;</span></span></span><span class="token punctuation">(</span><span class="token function">ramSize</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token number">0.9</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>可以看出，最大的可用内存由：当前的 webview 的页数（m_pageCount），线程的状态（Inactive 和 Active）和 ramSize() 计算得来。</p> 
+<p>当前的页数和线程的状态比较易容理解，下面来看 ramSize() 的计算方法：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">namespace</span> WTF <span class="token punctuation">{<!-- --></span>
+
+size_t <span class="token function">ramSize</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">static</span> size_t ramSize<span class="token punctuation">;</span>
+    <span class="token keyword">static</span> std<span class="token double-colon punctuation">::</span>once_flag onceFlag<span class="token punctuation">;</span>
+    std<span class="token double-colon punctuation">::</span><span class="token function">call_once</span><span class="token punctuation">(</span>onceFlag<span class="token punctuation">,</span> <span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token punctuation">{<!-- --></span>
+        ramSize <span class="token operator">=</span> <span class="token function">computeRAMSize</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> ramSize<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token punctuation">}</span> <span class="token comment">// namespace WTF</span>
+</code></pre> 
+<p>ramSize 只会计算一次，由 <code>computeRAMSize()</code> 计算得来，定义如下：</p> 
+<pre><code class="prism language-cpp"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression"><span class="token function">OS</span><span class="token punctuation">(</span>WINDOWS<span class="token punctuation">)</span></span></span>
+<span class="token keyword">static</span> <span class="token keyword">constexpr</span> size_t ramSizeGuess <span class="token operator">=</span> <span class="token number">512</span> <span class="token operator">*</span> MB<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+
+<span class="token keyword">static</span> size_t <span class="token function">computeRAMSize</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression"><span class="token function">OS</span><span class="token punctuation">(</span>WINDOWS<span class="token punctuation">)</span></span></span>
+    MEMORYSTATUSEX status<span class="token punctuation">;</span>
+    status<span class="token punctuation">.</span>dwLength <span class="token operator">=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>status<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">bool</span> result <span class="token operator">=</span> <span class="token function">GlobalMemoryStatusEx</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>status<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>result<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> ramSizeGuess<span class="token punctuation">;</span>
+    <span class="token keyword">return</span> status<span class="token punctuation">.</span>ullTotalPhys<span class="token punctuation">;</span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">elif</span> <span class="token expression"><span class="token function">USE</span><span class="token punctuation">(</span>SYSTEM_MALLOC<span class="token punctuation">)</span></span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression"><span class="token function">OS</span><span class="token punctuation">(</span>LINUX<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token function">OS</span><span class="token punctuation">(</span>FREEBSD<span class="token punctuation">)</span></span></span>
+    <span class="token keyword">struct</span> <span class="token class-name">sysinfo</span> si<span class="token punctuation">;</span>
+    <span class="token function">sysinfo</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>si<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> si<span class="token punctuation">.</span>totalram <span class="token operator">*</span> si<span class="token punctuation">.</span>mem_unit<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">elif</span> <span class="token expression"><span class="token function">OS</span><span class="token punctuation">(</span>UNIX<span class="token punctuation">)</span></span></span>
+    <span class="token keyword">long</span> pages <span class="token operator">=</span> <span class="token function">sysconf</span><span class="token punctuation">(</span>_SC_PHYS_PAGES<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">long</span> pageSize <span class="token operator">=</span> <span class="token function">sysconf</span><span class="token punctuation">(</span>_SC_PAGE_SIZE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> pages <span class="token operator">*</span> pageSize<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">error</span> <span class="token string">"Missing a platform specific way of determining the available RAM"</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span> <span class="token comment">// OS(LINUX) || OS(FREEBSD) || OS(UNIX)</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+    <span class="token keyword">return</span> bmalloc<span class="token double-colon punctuation">::</span>api<span class="token double-colon punctuation">::</span><span class="token function">availableMemory</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><code>computeRAMSize()</code> 中，根据不同的操作系统（Windows，LINUX、Unix）和一个默认方式来计算。需要注意的是：虽然iOS是基于 Unix 的，但是这里的 Unix 不包括 iOS 系统。所以，在 iOS 系统中，会执行 <code>return bmalloc::api::availableMemory();</code>。定义如下：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">inline</span> size_t <span class="token function">availableMemory</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> bmalloc<span class="token double-colon punctuation">::</span><span class="token function">availableMemory</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>它只是简单的调用了 <code>bmalloc::availableMemory()</code>。再来看 <code>bmalloc::availableMemory()</code> 的实现：</p> 
+<pre><code class="prism language-cpp">size_t <span class="token function">availableMemory</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">static</span> size_t availableMemory<span class="token punctuation">;</span>
+    <span class="token keyword">static</span> std<span class="token double-colon punctuation">::</span>once_flag onceFlag<span class="token punctuation">;</span>
+    std<span class="token double-colon punctuation">::</span><span class="token function">call_once</span><span class="token punctuation">(</span>onceFlag<span class="token punctuation">,</span> <span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token punctuation">{<!-- --></span>
+        availableMemory <span class="token operator">=</span> <span class="token function">computeAvailableMemory</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> availableMemory<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><code>availableMemory()</code>方法中的 <code>availableMemory</code>只会计算一次，由 <code>computeAvailableMemory()</code>计算而来。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">static</span> <span class="token keyword">constexpr</span> size_t availableMemoryGuess <span class="token operator">=</span> <span class="token number">512</span> <span class="token operator">*</span> bmalloc<span class="token double-colon punctuation">::</span>MB<span class="token punctuation">;</span>
+
+<span class="token keyword">static</span> size_t <span class="token function">computeAvailableMemory</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression"><span class="token function">BOS</span><span class="token punctuation">(</span>DARWIN<span class="token punctuation">)</span></span></span>
+    size_t sizeAccordingToKernel <span class="token operator">=</span> <span class="token function">memorySizeAccordingToKernel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression"><span class="token function">BPLATFORM</span><span class="token punctuation">(</span>IOS_FAMILY<span class="token punctuation">)</span></span></span>
+    sizeAccordingToKernel <span class="token operator">=</span> std<span class="token double-colon punctuation">::</span><span class="token function">min</span><span class="token punctuation">(</span>sizeAccordingToKernel<span class="token punctuation">,</span> <span class="token function">jetsamLimit</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+    size_t multiple <span class="token operator">=</span> <span class="token number">128</span> <span class="token operator">*</span> bmalloc<span class="token double-colon punctuation">::</span>MB<span class="token punctuation">;</span>
+
+    <span class="token comment">// Round up the memory size to a multiple of 128MB because max_mem may not be exactly 512MB</span>
+    <span class="token comment">// (for example) and we have code that depends on those boundaries.</span>
+    <span class="token keyword">return</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>sizeAccordingToKernel <span class="token operator">+</span> multiple <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token operator">/</span> multiple<span class="token punctuation">)</span> <span class="token operator">*</span> multiple<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">elif</span> <span class="token expression"><span class="token function">BOS</span><span class="token punctuation">(</span>FREEBSD<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token function">BOS</span><span class="token punctuation">(</span>LINUX<span class="token punctuation">)</span></span></span>
+    <span class="token comment">//...</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">elif</span> <span class="token expression"><span class="token function">BOS</span><span class="token punctuation">(</span>UNIX<span class="token punctuation">)</span></span></span>
+    <span class="token comment">//...</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+    <span class="token keyword">return</span> availableMemoryGuess<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>在 <code>computeAvailableMemory()</code>方法中，</p> 
+<ol><li>先通过 <code>memorySizeAccordingToKernel()</code> 获取内核的内存大小；</li><li>如果是 iOS 系统，再获取 jetsam 的限制：<code>jetsamLimit()</code>，在内存大小和 jetsamLimit() 中取较小的值；</li><li>将结果向上取整为 128M 的倍数。</li></ol> 
+<p>所以，此处的结果依赖于 <code>memorySizeAccordingToKernel()</code> 和 <code>jetsamLimit()</code>。</p> 
+<p>先看 <code>memorySizeAccordingToKernel()</code>的实现：</p> 
+<pre><code class="prism language-cpp"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression"><span class="token function">BOS</span><span class="token punctuation">(</span>DARWIN<span class="token punctuation">)</span></span></span>
+<span class="token keyword">static</span> size_t <span class="token function">memorySizeAccordingToKernel</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression"><span class="token function">BPLATFORM</span><span class="token punctuation">(</span>IOS_FAMILY_SIMULATOR<span class="token punctuation">)</span></span></span>
+    <span class="token function">BUNUSED_PARAM</span><span class="token punctuation">(</span>availableMemoryGuess<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// Pretend we have 1024MB of memory to make cache sizes behave like on device.</span>
+    <span class="token keyword">return</span> <span class="token number">1024</span> <span class="token operator">*</span> bmalloc<span class="token double-colon punctuation">::</span>MB<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+    host_basic_info_data_t hostInfo<span class="token punctuation">;</span>
+
+    mach_port_t host <span class="token operator">=</span> <span class="token function">mach_host_self</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    mach_msg_type_number_t count <span class="token operator">=</span> HOST_BASIC_INFO_COUNT<span class="token punctuation">;</span>
+    kern_return_t r <span class="token operator">=</span> <span class="token function">host_info</span><span class="token punctuation">(</span>host<span class="token punctuation">,</span> HOST_BASIC_INFO<span class="token punctuation">,</span> <span class="token punctuation">(</span>host_info_t<span class="token punctuation">)</span><span class="token operator">&amp;</span>hostInfo<span class="token punctuation">,</span> <span class="token operator">&amp;</span>count<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">mach_port_deallocate</span><span class="token punctuation">(</span><span class="token function">mach_task_self</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> host<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>r <span class="token operator">!=</span> KERN_SUCCESS<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> availableMemoryGuess<span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>hostInfo<span class="token punctuation">.</span>max_mem <span class="token operator">&gt;</span> std<span class="token double-colon punctuation">::</span><span class="token class-name">numeric_limits</span><span class="token operator">&lt;</span>size_t<span class="token operator">&gt;</span><span class="token double-colon punctuation">::</span><span class="token function">max</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token keyword">return</span> std<span class="token double-colon punctuation">::</span><span class="token class-name">numeric_limits</span><span class="token operator">&lt;</span>size_t<span class="token operator">&gt;</span><span class="token double-colon punctuation">::</span><span class="token function">max</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token generic-function"><span class="token function">static_cast</span><span class="token generic class-name"><span class="token operator">&lt;</span>size_t<span class="token operator">&gt;</span></span></span><span class="token punctuation">(</span>hostInfo<span class="token punctuation">.</span>max_mem<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+<span class="token punctuation">}</span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+</code></pre> 
+<p>逻辑为：</p> 
+<ol><li>如果是模拟器，则内存设定为 1024M。</li><li>如果是真实设备，则通过 <code>host_info</code>获取结构体为 <code>host_basic_info_data_t</code> 的信息，读取 <code>max_mem</code>的数值，然后与 <code>std::numeric_limits&lt;size_t&gt;::max()</code>进行比较，取其中较小的值。其中 <code>std::numeric_limits&lt;size_t&gt;::max()</code> 为当前设备可以表示的最大值。</li><li>计算失败时，返回 availableMemoryGuess，即 512 M。</li></ol> 
+<p>再来看<code>jetsamLimit()</code>的实现：</p> 
+<pre><code class="prism language-cpp"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression"><span class="token function">BPLATFORM</span><span class="token punctuation">(</span>IOS_FAMILY<span class="token punctuation">)</span></span></span>
+<span class="token keyword">static</span> size_t <span class="token function">jetsamLimit</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    memorystatus_memlimit_properties_t properties<span class="token punctuation">;</span>
+    pid_t pid <span class="token operator">=</span> <span class="token function">getpid</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">memorystatus_control</span><span class="token punctuation">(</span>MEMORYSTATUS_CMD_GET_MEMLIMIT_PROPERTIES<span class="token punctuation">,</span> pid<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>properties<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>properties<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token keyword">return</span> <span class="token number">840</span> <span class="token operator">*</span> bmalloc<span class="token double-colon punctuation">::</span>MB<span class="token punctuation">;</span>
+        
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>properties<span class="token punctuation">.</span>memlimit_active <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+        <span class="token keyword">return</span> std<span class="token double-colon punctuation">::</span><span class="token class-name">numeric_limits</span><span class="token operator">&lt;</span>size_t<span class="token operator">&gt;</span><span class="token double-colon punctuation">::</span><span class="token function">max</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token generic-function"><span class="token function">static_cast</span><span class="token generic class-name"><span class="token operator">&lt;</span>size_t<span class="token operator">&gt;</span></span></span><span class="token punctuation">(</span>properties<span class="token punctuation">.</span>memlimit_active<span class="token punctuation">)</span> <span class="token operator">*</span> bmalloc<span class="token double-colon punctuation">::</span>MB<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+</code></pre> 
+<p>在 <code>jetsamLimit()</code>中，</p> 
+<ol><li>通过 <code>memorystatus_control()</code> 获取结构体为 <code>memorystatus_memlimit_properties_t</code> 的信息，返回值不为 0，则返回 840M；</li><li>如果获取的 memoryStatus 的限制属性 memlimit_active 小于 0 时，则返回当前设备可以表示的最大值；</li><li>如果运行正常，则返回系统返回的数值。</li></ol> 
+<p>至此，就看到了 <code>ramSize()</code> 的整个计算过程。</p> 
+<p>总结一下内存最大限制的计算方法：</p> 
+<ol><li>判断线程当前的状态： 
+  <ol><li>激活状态 
+    <ol><li>计算 ramSize()； 
+      <ol><li>计算内核的内存大小和 jetsam 的限制，取较小值，</li><li>向上取整为 128M 的倍数。</li></ol> </li><li>计算 <code>baseThreshold = ramSize() &gt; 16 * GB ? 15 * GB : 7 * GB；</code></li><li>最终结果为：baseThreshold + tabCount * <em>GB;</em></li></ol> </li><li>非激活状态： 
+    <ol><li>在 <code>CPU(X86_64) || CPU(ARM64)</code> 下，<code>baseThreshold = 3 * GB + tabCount * GB;</code>，否则 <code>baseThreshold = tabCount &gt; 1 ? 3 * GB : 2 * GB;</code>；</li><li>最终结果为：<code>smin(baseThreshold, (ramSize() * 0.9))</code>；</li></ol> </li></ol> </li></ol> 
+<h4><a id="_499"></a>内存超限的处理</h4> 
+<p>内存超限之后，就会调用 <code>shrinkOrDie()</code>，定义如下：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">void</span> <span class="token class-name">MemoryPressureHandler</span><span class="token double-colon punctuation">::</span><span class="token function">shrinkOrDie</span><span class="token punctuation">(</span>size_t killThreshold<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token function">RELEASE_LOG</span><span class="token punctuation">(</span>MemoryPressure<span class="token punctuation">,</span> <span class="token string">"Process is above the memory kill threshold. Trying to shrink down."</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">releaseMemory</span><span class="token punctuation">(</span>Critical<span class="token double-colon punctuation">::</span>Yes<span class="token punctuation">,</span> Synchronous<span class="token double-colon punctuation">::</span>Yes<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    size_t footprint <span class="token operator">=</span> <span class="token function">memoryFootprint</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">RELEASE_LOG</span><span class="token punctuation">(</span>MemoryPressure<span class="token punctuation">,</span> <span class="token string">"New memory footprint: %zu MB"</span><span class="token punctuation">,</span> footprint <span class="token operator">/</span> MB<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>footprint <span class="token operator">&lt;</span> killThreshold<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">RELEASE_LOG</span><span class="token punctuation">(</span>MemoryPressure<span class="token punctuation">,</span> <span class="token string">"Shrank below memory kill threshold. Process gets to live."</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">setMemoryUsagePolicyBasedOnFootprint</span><span class="token punctuation">(</span>footprint<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token function">WTFLogAlways</span><span class="token punctuation">(</span><span class="token string">"Unable to shrink memory footprint of process (%zu MB) below the kill thresold (%zu MB). Killed\n"</span><span class="token punctuation">,</span> footprint <span class="token operator">/</span> MB<span class="token punctuation">,</span> killThreshold <span class="token operator">/</span> MB<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">RELEASE_ASSERT</span><span class="token punctuation">(</span>m_memoryKillCallback<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">m_memoryKillCallback</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>其中，<code>m_memoryKillCallback</code> 就是在初始化 web 线程时设置的回调。</p> 
+<p><strong>由于 OOM 导致 reload/白屏，看起来并不是iOS的机制。从方法的调用关系进行全局检索，目前发现内存超出导致的白屏只有这么一条调用链。</strong></p> 
+<h3><a id="OOM__529"></a>OOM 之后的默认处理流程</h3> 
+<p>苹果对 WebContentProcessDidTerminate 的处理逻辑如下：</p> 
+<pre><code class="prism language-c++">void WebPageProxy::dispatchProcessDidTerminate(ProcessTerminationReason reason)
+{
+    bool handledByClient = false;
+    if (m_loaderClient)
+        handledByClient = reason != ProcessTerminationReason::RequestedByClient &amp;&amp; m_loaderClient-&gt;processDidCrash(***this**);
+    else
+        handledByClient = m_navigationClient-&gt;processDidTerminate(*this, reason);
+
+    if (!handledByClient &amp;&amp; shouldReloadAfterProcessTermination(reason)) {
+        // We delay the view reload until it becomes visible.
+        if (isViewVisible())
+            tryReloadAfterProcessTermination();
+        else {
+            WEBPAGEPROXY_RELEASE_LOG_ERROR(Loading, "dispatchProcessDidTerminate: Not eagerly reloading the view because it is not currently visible");
+            m_shouldReloadDueToCrashWhenVisible = true;
+        }
+    }
+}
+
+</code></pre> 
+<p>其中 m_loaderClient 只在苹果的单元测试中有使用，所以，正式版本的 iOS 下应该会执行:</p> 
+<pre><code>handledByClient = m_navigationClient-&gt;processDidTerminate(*this, reason);
+</code></pre> 
+<p>如果开发者未实现 <code>webViewWebContentProcessDidTerminate(_)</code> 的代理方法，将返回 false，进入苹果的默认处理逻辑：通过 <code>shouldReloadAfterProcessTermination()</code> 判断是否需要进行重新加载，如果需要则在适当时候进行重新加载。</p> 
+<p><code>shouldReloadAfterProcessTermination()</code> 根据终止原因来判断是否需要进行重新加载：</p> 
+<pre><code>static bool shouldReloadAfterProcessTermination(ProcessTerminationReason reason)
+{
+    switch (reason) {
+    case ProcessTerminationReason::ExceededMemoryLimit:
+    case ProcessTerminationReason::ExceededCPULimit:
+    case ProcessTerminationReason::RequestedByNetworkProcess:
+    case ProcessTerminationReason::RequestedByGPUProcess:
+    case ProcessTerminationReason::Crash:
+    case ProcessTerminationReason::Unresponsive:
+        return true;
+    case ProcessTerminationReason::ExceededProcessCountLimit:
+    case ProcessTerminationReason::NavigationSwap:
+    case ProcessTerminationReason::IdleExit:
+    case ProcessTerminationReason::RequestedByClient:
+        break;
+    }
+    return false;
+}
+</code></pre> 
+<p><code>tryReloadAfterProcessTermination()</code> 的刷新逻辑如下：</p> 
+<pre><code>static unsigned maximumWebProcessRelaunchAttempts = 1;
+
+void WebPageProxy::tryReloadAfterProcessTermination()
+{
+    m_resetRecentCrashCountTimer.stop();
+    if (++m_recentCrashCount &gt; maximumWebProcessRelaunchAttempts) {
+        WEBPAGEPROXY_RELEASE_LOG_ERROR(Process, "tryReloadAfterProcessTermination: process crashed and the client did not handle it, not reloading the page because we reached the maximum number of attempts");
+        m_recentCrashCount = 0;
+        return;
+    }
+    WEBPAGEPROXY_RELEASE_LOG(Process, "tryReloadAfterProcessTermination: process crashed and the client did not handle it, reloading the page");
+    reload(ReloadOption::ExpiredOnly);
+}
+</code></pre> 
+<p>每次 crash 后，苹果会给 crash 标识（m_recentCrashCount）进行 +1，在不超过最大限制（maximumWebProcessRelaunchAttempts = 1）时，系统会进行刷新，当最近 crash 的次数超过限制时，它便不会刷新，只是将标示归位为0，下次就可以刷新。</p> 
+<p>总结一下：如果开发者未实现 <code>webViewWebContentProcessDidTerminate(_)</code> 的代理方法：</p> 
+<ol><li>则根据 crash 的原因判断是否要重新刷新；</li><li>重新刷新有最大次数限制（一次），超过则不会进行刷新。</li></ol> 
+<blockquote> 
+ <p>后记：我们在iOS的Safari上测试了safari的白屏处理逻辑，当第一次发生白屏时Safari会默认重刷，第二次时safari会展示错误加载页，提示当前页面多次发生了错误。这个逻辑和上面webkit的默认处理逻辑时相似的。</p> 
+ <ul><li>摘自：https://www.twblogs.net/a/5cfe4bdfbd9eee14644ebba1/?lang=zh-cn</li></ul> 
+</blockquote> 
+<p>至此，就总结了 WKWebView 检测内存的方法，计算最大内存限制的方法和默认的处理方法。</p> 
+<h2><a id="_611"></a>参考</h2> 
+<ul><li><a href="https://developer.apple.com/forums/thread/21956" rel="nofollow">https://developer.apple.com/forums/thread/21956</a></li><li><a href="https://www.twblogs.net/a/5cfe4bdfbd9eee14644ebba1/?lang=zh-cn" rel="nofollow">https://www.twblogs.net/a/5cfe4bdfbd9eee14644ebba1/?lang=zh-cn</a></li><li><a href="https://justinyan.me/post/3982" rel="nofollow">https://justinyan.me/post/3982</a></li><li><a href="https://www.jianshu.com/p/22a077fd51f1" rel="nofollow">https://www.jianshu.com/p/22a077fd51f1</a></li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/36ecee9306dfb3932013337effae5635/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Android:shareUserId知多少</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/d07fee5a07222a0585e7a1d51baf25b0/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">分类评价指标（二分类）——f1score sensitivity specificity roc曲线 auc</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

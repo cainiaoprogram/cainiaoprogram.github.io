@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Kubernetes使用OkHttp客户端进行网络负载均衡 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Kubernetes使用OkHttp客户端进行网络负载均衡" />
+<meta property="og:description" content="在一次内部Java服务审计中，我们发现一些请求没有在Kubernetes（K8s）网络上正确地实现负载均衡。导致我们深入研究的问题是HTTP 5xx错误率的急剧上升，由于CPU使用率非常高，垃圾收集事件的数量很多以及超时，但这仅发生在一些特定的Pod中。这种情况并不在所有情况下都可见，因为它影响到多Pod服务，源Pod和目标Pod的数量不同。在本博文中，我将讨论我们采取的措施来负载均衡这组服务和Pod。
+在我们的部署中，请求在Pod之间是如何均衡的？ 两个源Pod向六个目标Pod发送请求。
+可以清楚地看到请求分布在目标Pod之间存在不均衡。
+但为什么会这样？ K8s负载均衡器（IPVS代理模式）的默认负载均衡调度程序设置为轮询（round robin）。IPVS提供了更多的选项来均衡流量到Pod后端。在测试这些选项时，我们发现当涉及到我们的服务时，不管配置如何，行为都相同，这些服务之间使用内部路由进行通信。
+到底发生了什么？K8s中的IPVS根据连接来平衡流量，这在大多数情况下都表现得相当不错。我们的服务使用OkHttp作为相互通信的HTTP客户端。我们的问题与这个HTTP客户端的行为方式有关。使用默认配置，它会创建到服务器的连接，如果您不想在代码中显式关闭连接，因为这太昂贵，那么它会保持并重新建立到先前合作伙伴的连接。这意味着客户端尝试保持与目标的连接，并通过该特定连接发送请求。通常情况下，它会创建1:1的连接，这在K8s方面没有均衡。
+该怎么办？ 如果您需要扩展或希望使您的服务得到适当的负载均衡，您需要在客户端端更新配置。OkHttp提供了ConnectionPool功能。当使用ConnectionPool选项时，连接将在有限的时间段内建立，然后重复设置一个新的连接，因此IPVS可以进行负载均衡，因为它有大量的新连接，应该根据IPVS调度程序路由到目标。基本上，它的工作方式类似于机关枪而不是激光束。
+我们在发布此更新后的效果如何？
+使用更新的HTTP客户端和默认IPVS调度程序在多Pod服务之间实现了负载均衡的连接
+到底做了什么改变？ 我们进行了大量的测试，使用各种配置来测量响应时间和性能开销，以确保负载均衡。下面是主要的代码更改，看起来没有明显的性能开销。
+代码更改示例
+有一个选项可以设置调度程序，以便能够并行发送更多的请求。在我们的情况下，这最终会建立一组最近关闭的连接，然后继续只使用一个连接。此外，我们试图防止过于频繁地打开新连接，因为执行请求比打开新连接要少要求得多。
+结果如何？ 网络和资源的使用现在比以前更加平衡 - 没有巨大或持续很长时间的峰值，也没有出现只影响部署中某些Pod的“嘈杂邻居”效应。现在几乎所有的Pod都以几乎相同的方式被利用，因此我们能够减少我们的部署中的Pod数量。我们知道这并不完美，但对于我们的用例来说已经足够好，因为它不会给服务或IPVS负载均衡器带来明显的性能开销。
+现在的Pod上的请求负载均衡
+结论 定期进行彻底的服务审计是有益的，因为它可以揭示出未来对所有服务有益的优化点，并在解决那些本应该立即运行的功能的奇怪症状时为您节省时间。此外，花些时间查看文档，测试，讨论并了解在使用客户端库时关于连接设置和处理的默认设置的影响，以确保它们将按照您的预期行事。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/11bf6a5cc87db544b39798ca46cb15f8/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-10-11T21:22:11+08:00" />
+<meta property="article:modified_time" content="2023-10-11T21:22:11+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Kubernetes使用OkHttp客户端进行网络负载均衡</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>在一次内部Java服务审计中，我们发现一些请求没有在Kubernetes（K8s）网络上正确地实现负载均衡。导致我们深入研究的问题是HTTP 5xx错误率的急剧上升，由于CPU使用率非常高，垃圾收集事件的数量很多以及超时，但这仅发生在一些特定的Pod中。这种情况并不在所有情况下都可见，因为它影响到多Pod服务，源Pod和目标Pod的数量不同。在本博文中，我将讨论我们采取的措施来负载均衡这组服务和Pod。</p> 
+<h3><a id="Pod_2"></a>在我们的部署中，请求在Pod之间是如何均衡的？</h3> 
+<p><img src="https://images2.imgbox.com/ad/f7/QRnOwpzR_o.png" alt="img"></p> 
+<p>两个源Pod向六个目标Pod发送请求。</p> 
+<p>可以清楚地看到请求分布在目标Pod之间存在不均衡。</p> 
+<h3><a id="_10"></a>但为什么会这样？</h3> 
+<p>K8s负载均衡器（<a href="https://kubernetes.io/blog/2018/07/09/ipvs-based-in-cluster-load-balancing-deep-dive/" rel="nofollow">IPVS代理模式</a>）的默认负载均衡调度程序设置为轮询（round robin）。IPVS提供了更多的选项来均衡流量到Pod后端。在测试这些选项时，我们发现当涉及到我们的服务时，不管配置如何，行为都相同，这些服务之间使用内部路由进行通信。</p> 
+<p>到底发生了什么？K8s中的IPVS根据连接来平衡流量，这在大多数情况下都表现得相当不错。我们的服务使用<a href="https://square.github.io/okhttp/" rel="nofollow">OkHttp</a>作为相互通信的HTTP客户端。我们的问题与这个HTTP客户端的行为方式有关。使用默认配置，它会创建到服务器的连接，如果您不想在代码中显式关闭连接，因为这太昂贵，那么它会保持并重新建立到先前合作伙伴的连接。这意味着客户端尝试保持与目标的连接，并通过该特定连接发送请求。通常情况下，它会创建1:1的连接，这在K8s方面没有均衡。</p> 
+<h3><a id="_16"></a>该怎么办？</h3> 
+<p>如果您需要扩展或希望使您的服务得到适当的负载均衡，您需要在客户端端更新配置。OkHttp提供了<a href="https://square.github.io/okhttp/3.x/okhttp/okhttp3/ConnectionPool.html" rel="nofollow">ConnectionPool</a>功能。当使用ConnectionPool选项时，连接将在有限的时间段内建立，然后重复设置一个新的连接，因此IPVS可以进行负载均衡，因为它有大量的新连接，应该根据IPVS调度程序路由到目标。基本上，它的工作方式类似于机关枪而不是激光束。</p> 
+<p><strong>我们在发布此更新后的效果如何？</strong></p> 
+<p><img src="https://images2.imgbox.com/36/2d/lIs6l3fl_o.png" alt="img"></p> 
+<p>使用更新的HTTP客户端和默认IPVS调度程序在多Pod服务之间实现了负载均衡的连接</p> 
+<h3><a id="_26"></a>到底做了什么改变？</h3> 
+<p>我们进行了大量的测试，使用各种配置来测量响应时间和性能开销，以确保负载均衡。下面是主要的代码更改，看起来没有明显的性能开销。</p> 
+<p><img src="https://images2.imgbox.com/bd/20/jzGDXQJ8_o.png" alt="img"></p> 
+<p>代码更改示例</p> 
+<p>有一个选项可以设置<a href="https://square.github.io/okhttp/3.x/okhttp/okhttp3/Dispatcher.html" rel="nofollow">调度程序</a>，以便能够并行发送更多的请求。在我们的情况下，这最终会建立一组最近关闭的连接，然后继续只使用一个连接。此外，我们试图防止过于频繁地打开新连接，因为执行请求比打开新连接要少要求得多。</p> 
+<h2><a id="_36"></a>结果如何？</h2> 
+<p>网络和资源的使用现在比以前更加平衡 - 没有巨大或持续很长时间的峰值，也没有出现只影响部署中某些Pod的“<a href="https://searchcloudcomputing.techtarget.com/definition/noisy-neighbor-cloud-computing-performance" rel="nofollow">嘈杂邻居</a>”效应。现在几乎所有的Pod都以几乎相同的方式被利用，因此我们能够减少我们的部署中的Pod数量。我们知道这并不完美，但对于我们的用例来说已经足够好，因为它不会给服务或IPVS负载均衡器带来明显的性能开销。</p> 
+<p><img src="https://images2.imgbox.com/cf/07/DGvSe1xF_o.png" alt="img"></p> 
+<p>现在的Pod上的请求负载均衡</p> 
+<h2><a id="_44"></a>结论</h2> 
+<p>定期进行彻底的服务审计是有益的，因为它可以揭示出未来对所有服务有益的优化点，并在解决那些本应该立即运行的功能的奇怪症状时为您节省时间。此外，花些时间查看文档，测试，讨论并了解在使用客户端库时关于连接设置和处理的默认设置的影响，以确保它们将按照您的预期行事。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/52a4f4538be4b9c1eff528725825765f/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Air实现Go程序实时热加载</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/61ad822dc863a5435634d2d88c42ca13/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">【IEEE】IEEE刊物（期刊/会议）投稿超详细流程官方讲座（2022讲座笔记）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

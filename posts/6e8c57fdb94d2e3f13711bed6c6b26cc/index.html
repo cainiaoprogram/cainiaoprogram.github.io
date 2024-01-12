@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>二、ovs-dpdk ——介绍及解析 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="二、ovs-dpdk ——介绍及解析" />
+<meta property="og:description" content="ovs-dpdk ovs-dpdk提供了用户态快速路径dpif-netdev替代了原来的内核datapath和用户态dpif-netlink。
+架构解析 dpif-netdev：用户态的快速通路，实现了基于netdev设备的dpif API。
+ofproto-dpif：实现了基于dpif层的ofproto API。
+netdev-dpdk：实现了基于DPDK的netdev API，其定义的几种网络接口如下：
+dpdk物理网口：其实现是采用高性能向量化DPDK PMD的驱动。
+dpdkvhostuser接口： vhost-user可以挂接到用户态的数据通道上，与虚拟机的virtio网口快速通信。为了性能，在vhost burst收发包个数上，需要和dpdk物理网口设置的burst收发包个数相同。
+dpdkr：其实现是基于DPDK librte_ring机制创建的DPDK ring接口。dpdkr接口挂接到用户态的数据通道上。（已经弃用）
+DPDK加速的OVS数据流转发的大致流程如下：
+1）OVS的ovs-vswitchd接收到从OVS连接的某个网络端口发来的数据包，从数据包中提取源/目的IP、源/目的MAC、端口等信息。
+2）OVS在用户态查看精确流表和模糊流表，如果命中，则直接转发。
+3）如果还不命中，在SDN控制器接入的情况下，经过OpenFlow协议，通告给控制器，由控制器处理。
+4）控制器下发新的流表，该数据包重新发起选路，匹配；报文转发，结束。
+DPDK加速的OVS与原始OVS的区别在于，从OVS连接的某个网络端口接收到的报文不需要openvswitch.ko内核态的处理，报文通过DPDK PMD驱动直接到达用户态ovs-vswitchd里。
+数据流向 从物理或虚拟接口进入OvS-DPDK的数据包会根据其标头字段接收唯一的标识符或哈希，然后将其与三个主要交换表之一中的条目进行匹配：精确匹配缓存（EMC），数据路径分类器（dpcls）或ofproto分类器。数据包的标识符将按顺序遍历这三个表中的每一个，除非找到匹配项，在这种情况下，将执行表中匹配规则指示的适当操作，并在完成所有操作后将数据包转发出交换机。
+这三个表具有不同的特性和相关的吞吐量性能/延迟。EMC为有限数量的表条目提供了最快的处理速度。数据包的标识符必须与该表中所有字段（源IP和端口，目标IP和端口以及协议的5元组）的条目完全匹配，以实现最快的处理，否则它将在EMC上“遗漏”并传递给dpcls。dpcls包含更多表条目（安排在多个子表中），并启用数据包标识符的通配符匹配（例如，指定了目标IP和端口，但允许任何源）。这大约提供了EMC吞吐量性能的一半，并且可以满足大量的表条目。
+dpcls上的未命中会导致将数据包标识符发送到ofproto分类器，以便OpenFlow控制器可以决定操作。该路径性能最低，比EMC慢10倍以上。ofproto分类器中的匹配导致在更快的交换表中建立新的表条目，以便可以更快地处理相同流中的后续数据包。
+EMC插入概率
+默认情况下，每100个流中有1个插入到精确匹配缓存（EMC）中。可以通过设置emc-insert-inv-prob选项改变此插入概率:
+ovs-vsctl --no-wait set Open_vSwitch . other_config:emc-insert-inv-prob=N
+EMC是以PMD为边界的，每个PMD拥有自己的EMC；dpcls是以端口为边界的，每个端口拥有自己的dpcls；ofproto classifier是以桥为边界的，每个桥拥有自己的ofproto classifier
+SMC 缓存 (实验性质)
+SMC缓存或签名匹配缓存是继EMC缓存之后的一个新的缓存级别。SMC和EMC的区别在于SMC只存储流的签名，因此它的内存效率要高得多。使用相同的内存空间，EMC可以存储8K流，而SMC可以存储1M流。当流量大于EMC的大小时，通常关闭EMC并打开SMC是有益的。当前SMC默认情况下是关闭的，并且还是一个实验功能。
+开启SMC:
+ovs-vsctl --no-wait set Open_vSwitch . other_config:smc-enable=true" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/6e8c57fdb94d2e3f13711bed6c6b26cc/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-01-24T18:37:41+08:00" />
+<meta property="article:modified_time" content="2021-01-24T18:37:41+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">二、ovs-dpdk ——介绍及解析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h3 style="margin-left:0cm;">ovs-dpdk</h3> 
+<p style="margin-left:0cm;">ovs-dpdk提供了用户态快速路径dpif-netdev替代了原来的内核datapath和用户态dpif-netlink。</p> 
+<h4 style="margin-left:0cm;">架构解析</h4> 
+<p style="margin-left:0cm;"><img alt="" height="285" src="https://images2.imgbox.com/9f/75/txW4Wdf1_o.png" width="561"></p> 
+<p style="margin-left:0cm;"><span style="color:#ff0000;">dpif-netdev</span>：用户态的快速通路，实现了基于netdev设备的dpif API。</p> 
+<p style="margin-left:0cm;">ofproto-dpif：实现了基于dpif层的ofproto API。</p> 
+<p style="margin-left:0cm;"><span style="color:#ff0000;">netdev-dpdk</span>：实现了基于DPDK的netdev API，其定义的几种网络接口如下：</p> 
+<p style="margin-left:0cm;">dpdk物理网口：其实现是采用高性能向量化DPDK PMD的驱动。</p> 
+<p style="margin-left:0cm;">dpdkvhostuser接口： vhost-user可以挂接到用户态的数据通道上，与虚拟机的virtio网口快速通信。为了性能，在vhost burst收发包个数上，需要和dpdk物理网口设置的burst收发包个数相同。</p> 
+<p style="margin-left:0cm;"><s>dpdkr：其实现是基于DPDK librte_ring机制创建的DPDK ring接口。dpdkr接口挂接到用户态的数据通道上。</s><strong><span style="color:#ff0000;">（已经弃用）</span></strong></p> 
+<p style="margin-left:0cm;"> DPDK加速的OVS数据流转发的大致流程如下：</p> 
+<p style="margin-left:0cm;">1）OVS的ovs-vswitchd接收到从OVS连接的某个网络端口发来的数据包，<span style="color:#ff0000;">从数据包中提取源/目的IP、源/目的MAC、端口等信息。</span></p> 
+<p style="margin-left:0cm;">2）OVS在用户态查看精确流表和模糊流表，如果命中，则直接转发。</p> 
+<p style="margin-left:0cm;">3）如果还不命中，在SDN控制器接入的情况下，经过OpenFlow协议，通告给控制器，由控制器处理。</p> 
+<p style="margin-left:0cm;">4）控制器下发新的流表，该数据包重新发起选路，匹配；报文转发，结束。</p> 
+<p style="margin-left:0cm;">DPDK加速的OVS与原始OVS的区别在于，从OVS连接的某个网络端口接收到的报文不需要openvswitch.ko内核态的处理，报文通过DPDK PMD驱动直接到达用户态ovs-vswitchd里。</p> 
+<h4 style="margin-left:0cm;">数据流向</h4> 
+<p style="margin-left:0cm;">从物理或虚拟接口进入OvS-DPDK的数据包会根据其标头字段接收唯一的标识符或哈希，然后将其与三个主要交换表之一中的条目进行匹配：精确匹配缓存（EMC），数据路径分类器（dpcls）或ofproto分类器。数据包的标识符将按顺序遍历这三个表中的每一个，除非找到匹配项，在这种情况下，将执行表中匹配规则指示的适当操作，并在完成所有操作后将数据包转发出交换机。</p> 
+<p style="margin-left:0cm;"><img alt="" height="242" src="https://images2.imgbox.com/10/84/q6sBbs9r_o.png" width="439"></p> 
+<p style="margin-left:0cm;">这三个表具有不同的特性和相关的吞吐量性能/延迟。EMC为有限数量的表条目提供了最快的处理速度。数据包的标识符必须与该表中所有字段（源IP和端口，目标IP和端口以及协议的5元组）的条目完全匹配，以实现最快的处理，否则它将在EMC上“遗漏”并传递给dpcls。dpcls包含更多表条目（安排在多个子表中），并启用数据包标识符的通配符匹配（例如，指定了目标IP和端口，但允许任何源）。这大约提供了EMC吞吐量性能的一半，并且可以满足大量的表条目。</p> 
+<p style="margin-left:0cm;">       dpcls上的未命中会导致将数据包标识符发送到ofproto分类器，以便OpenFlow控制器可以决定操作。该路径性能最低，比EMC慢10倍以上。ofproto分类器中的匹配导致在更快的交换表中建立新的表条目，以便可以更快地处理相同流中的后续数据包。</p> 
+<p style="margin-left:0cm;">EMC插入概率</p> 
+<p style="margin-left:0cm;">默认情况下，每100个流中有1个插入到精确匹配缓存（EMC）中。可以通过设置emc-insert-inv-prob选项改变此插入概率:</p> 
+<p style="margin-left:0cm;"><span style="color:#ff0000;">       ovs-vsctl --no-wait set Open_vSwitch . other_config:emc-insert-inv-prob=N</span></p> 
+<p style="margin-left:0cm;">       EMC是以PMD为边界的，每个PMD拥有自己的EMC；dpcls是以端口为边界的，每个端口拥有自己的dpcls；ofproto classifier是以桥为边界的，每个桥拥有自己的ofproto classifier</p> 
+<p style="margin-left:0cm;">SMC 缓存 (实验性质)</p> 
+<p style="margin-left:0cm;">SMC缓存或签名匹配缓存是继EMC缓存之后的一个新的缓存级别。SMC和EMC的区别在于SMC只存储流的签名，因此它的内存效率要高得多。使用相同的内存空间，<span style="color:#ff0000;">EMC</span><span style="color:#ff0000;">可以存储8K流，而SMC可以存储1M流。当流量大于EMC的大小时，通常关闭EMC并打开SMC是有益的。</span>当前SMC默认情况下是关闭的，并且还是一个实验功能。</p> 
+<p style="margin-left:0cm;">开启SMC:</p> 
+<p style="margin-left:0cm;"><span style="color:#ff0000;">ovs-vsctl --no-wait set Open_vSwitch . other_config:smc-enable=true</span></p> 
+<p style="margin-left:0cm;"> </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/20fb9669b115077e5c1aef37b174978b/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Ubuntu16.04桌面菜单栏移到屏幕下方</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/a2e1d599aedb051d3b5e0faef37b7d31/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">小程序网络请求</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

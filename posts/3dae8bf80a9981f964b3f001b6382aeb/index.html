@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Docker Swarm网络通讯过程详解 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Docker Swarm网络通讯过程详解" />
+<meta property="og:description" content="目录
+Overlay网络介绍
+什么是Overlay网络？
+Overlay 网络的基本架构组成
+Overlay 网络传输的基本规则
+Overlay 网络的技术标准
+Overlay网络解决的问题
+解决了L2的空间局限性
+解决了网络规模受限的问题
+解决了网络隔离问题
+Overlay的缺陷
+Swarm集群通讯过程讲解
+网络名词介绍
+服务样例
+Docker Swarm自带网络
+当前节点如何访问容器内服务
+跨机器访问（同一集群下任意机器可以访问某台机器上的服务）
+本文主要结合一个部署了nginx服务的swarm集群案例来分析其网络通讯的整个过程。
+在分析整个网络通讯过程之前，首先得对overlay网络有一定的认识。
+Overlay网络介绍 什么是Overlay网络？ Overlay 网络的基本架构组成 Overlay 网络技术是指在传统 网络架构 之上 叠加的虚拟化技术模式 。也就是说它是依托于传统网络架构的前提条件下， 实现 了 应用 与其虚拟网络的捆绑而忽略底层物理网络的传输模式及技术 。简而言之，就是overlay在L2(数据链路层)网络互通的前提下，基于L3(网络层)实现了虚拟化网络。在该层网络环境下，可以为不同容器分配固定的局域网ip，并通过该ip进行通讯交互。
+要了解 Overlay 网络架构体系，首先我们需要知道它的组成架构及元素，具体如下图所示
+这里可以看到，凌驾于物理通讯层面之上构建了一层虚拟化网络，通过逻辑抽象的方式与物理网络上的边缘设备建立了一套虚拟的传输通道。
+那么如何基于这个通道传输数据到执行容器呢？
+在建立虚拟网络通道时，还定义了相应的传输报文协议，应用传输的数据报文必须以虚拟网络可以识别的数据报文为基础进行数据报文的发送和传输，同时必须遵照虚拟网络当中的通道控制标准来传输。
+但是报文的物理传输过程我们又不得不依靠传统物理网络来实现，这样的话就涉及到报文的封装和解封、逻辑通道的维护、数据的逻辑转发和物理转发等问题。这就涉及到Overlay 网络的三类核心元素：
+边缘设备：与虚拟网络直接关联的网络设备，数据报文的封装/解封场所，同时它也是形成虚拟网络的物理节点，如图中所示的物理交换机（必须是支持Overlay协议的交换机）。控制平面：框架当中的虚拟实体，负责虚拟网络传输当中的服务发现、地址通告和映射、虚拟网络通道建立和维护等，如图中虚拟层当中的控制流。数据平面：框架当中的虚拟实体，主要负责数据报文在虚拟层的转发，如图中虚拟层的数据流。 Overlay 网络传输的基本规则 传统网络在数据传输的时候，遵循的基本规则就是网络的七层模型。也就是说数据需要经过源的封包和目的端的解包过程，封包的时候是从应用层信息逐步封装到物理层，解包的时候是从物理层分解到应用层。在物理网络环境当中的基本寻址规则是靠 IP地址信息和MAC地址信息来进行路由转发。那么在Overlay网络当中，它也是会遵循这一基本规则，但是区别在哪里呢？
+首先我们来看Overlay网络的边缘设备ABC三个点，这三个点是支撑Overlay虚拟网络的核心设备，我们称之为VTEP。服务器的数据包在经过这些边缘设备的时候，会对数据包进行二次封装，会把发送端VTEP和目的端VTEP的地址或标识信息封装到数据包，然后通过VTEP的控制平面将数据在两个VTEP之间完成传输，然后再目的端的VTEP上将数据包再进行解封，最终发送到目的服务器上。这里大家可能会有几个问题：
+如果是L3的传输，这么做不是多此一举么？如果是L2的传输，源端VTEP如何知道目的MAC、IP对应的VTEP信息？VTEP之间的传输不也得依赖物理网络么？它是如何从源端传递到目的端的？ 首先，针对第一个问题，如果是L3的传输，这么做确实有些多此一举，所以源端VTEP会判断是否是真实的L3传输，如果是的话，那么可以抛开VTEP信息，按照传统方式传输。
+接着，针对第二个问题，所有VTEP节点所辖设备的MAC信息都会在VTEP上有保留，同时其他VTEP上的MAC地址映射信息也会相互同步过来，所以一旦获取数据包中目的地址信息，VTEP就可以判断目的地属于哪一个VTEP管辖范围，然后就可以通过控制器转发。也就是说，VTEP之间会广播同步支持VTEP报文的设备之间的ip和mac地址
+最后，从一个VTEP到另外VTEP的传输，完全是靠着VTEP本身的IP、MAC地址信息来进行传输。
+由此可见，无论是L2还是L3的传输，均涉及到查表转发、报文的解封装和封装操作。从转发效率和执行性能来看，都只能在物理网络设备（Overlay边缘设备）上实现，并且传统设备无法支持，必须通过新的硬件形式来实现。
+Overlay 网络的技术标准 目前在 Overlay 技术领域有如下三大技术路线正在讨论：
+(1). VXLAN
+VXLAN是将以太网报文封装在UDP传输层上的一种隧道转发模式。为了使VXLAN充分利用承载网络路由的均衡性，VXLAN通过将原始以太网数据头(MAC、IP、四层端口号等)的HASH值作为UDP的号；采用24比特标识L2网络分段标识，称为VNI(VXLAN Network Identifier)；未知目的、广播、组播等网络流量均被封装为组播转发，物理网络要求支持任意源组播(ASM)。
+(2). NVGRE" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/3dae8bf80a9981f964b3f001b6382aeb/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-03-23T11:01:54+08:00" />
+<meta property="article:modified_time" content="2022-03-23T11:01:54+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Docker Swarm网络通讯过程详解</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p id="main-toc"><strong>目录</strong></p> 
+<p id="Overlay%E7%BD%91%E7%BB%9C%E4%BB%8B%E7%BB%8D-toc" style="margin-left:0px;"><a href="#Overlay%E7%BD%91%E7%BB%9C%E4%BB%8B%E7%BB%8D" rel="nofollow">Overlay网络介绍</a></p> 
+<p id="%E4%BB%80%E4%B9%88%E6%98%AFOverlay%E7%BD%91%E7%BB%9C%EF%BC%9F-toc" style="margin-left:40px;"><a href="#%E4%BB%80%E4%B9%88%E6%98%AFOverlay%E7%BD%91%E7%BB%9C%EF%BC%9F" rel="nofollow">什么是Overlay网络？</a></p> 
+<p id="Overlay%20%E7%BD%91%E7%BB%9C%E7%9A%84%E5%9F%BA%E6%9C%AC%E6%9E%B6%E6%9E%84%E7%BB%84%E6%88%90-toc" style="margin-left:80px;"><a href="#Overlay%20%E7%BD%91%E7%BB%9C%E7%9A%84%E5%9F%BA%E6%9C%AC%E6%9E%B6%E6%9E%84%E7%BB%84%E6%88%90" rel="nofollow">Overlay 网络的基本架构组成</a></p> 
+<p id="Overlay%20%E7%BD%91%E7%BB%9C%E4%BC%A0%E8%BE%93%E7%9A%84%E5%9F%BA%E6%9C%AC%E8%A7%84%E5%88%99-toc" style="margin-left:80px;"><a href="#Overlay%20%E7%BD%91%E7%BB%9C%E4%BC%A0%E8%BE%93%E7%9A%84%E5%9F%BA%E6%9C%AC%E8%A7%84%E5%88%99" rel="nofollow">Overlay 网络传输的基本规则</a></p> 
+<p id="Overlay%20%E7%BD%91%E7%BB%9C%E7%9A%84%E6%8A%80%E6%9C%AF%E6%A0%87%E5%87%86-toc" style="margin-left:80px;"><a href="#Overlay%20%E7%BD%91%E7%BB%9C%E7%9A%84%E6%8A%80%E6%9C%AF%E6%A0%87%E5%87%86" rel="nofollow">Overlay 网络的技术标准</a></p> 
+<p id="%C2%A0Overlay%E7%BD%91%E7%BB%9C%E8%A7%A3%E5%86%B3%E7%9A%84%E9%97%AE%E9%A2%98-toc" style="margin-left:40px;"><a href="#%C2%A0Overlay%E7%BD%91%E7%BB%9C%E8%A7%A3%E5%86%B3%E7%9A%84%E9%97%AE%E9%A2%98" rel="nofollow"> Overlay网络解决的问题</a></p> 
+<p id="%E8%A7%A3%E5%86%B3%E4%BA%86L2%E7%9A%84%E7%A9%BA%E9%97%B4%E5%B1%80%E9%99%90%E6%80%A7-toc" style="margin-left:80px;"><a href="#%E8%A7%A3%E5%86%B3%E4%BA%86L2%E7%9A%84%E7%A9%BA%E9%97%B4%E5%B1%80%E9%99%90%E6%80%A7" rel="nofollow">解决了L2的空间局限性</a></p> 
+<p id="%C2%A0%E8%A7%A3%E5%86%B3%E4%BA%86%E7%BD%91%E7%BB%9C%E8%A7%84%E6%A8%A1%E5%8F%97%E9%99%90%E7%9A%84%E9%97%AE%E9%A2%98-toc" style="margin-left:80px;"><a href="#%C2%A0%E8%A7%A3%E5%86%B3%E4%BA%86%E7%BD%91%E7%BB%9C%E8%A7%84%E6%A8%A1%E5%8F%97%E9%99%90%E7%9A%84%E9%97%AE%E9%A2%98" rel="nofollow"> 解决了网络规模受限的问题</a></p> 
+<p id="%E8%A7%A3%E5%86%B3%E4%BA%86%E7%BD%91%E7%BB%9C%E9%9A%94%E7%A6%BB%E9%97%AE%E9%A2%98-toc" style="margin-left:80px;"><a href="#%E8%A7%A3%E5%86%B3%E4%BA%86%E7%BD%91%E7%BB%9C%E9%9A%94%E7%A6%BB%E9%97%AE%E9%A2%98" rel="nofollow">解决了网络隔离问题</a></p> 
+<p id="Overlay%E7%9A%84%E7%BC%BA%E9%99%B7-toc" style="margin-left:40px;"><a href="#Overlay%E7%9A%84%E7%BC%BA%E9%99%B7" rel="nofollow">Overlay的缺陷</a></p> 
+<p id="Swarm%E9%9B%86%E7%BE%A4%E9%80%9A%E8%AE%AF%E8%BF%87%E7%A8%8B%E8%AE%B2%E8%A7%A3-toc" style="margin-left:0px;"><a href="#Swarm%E9%9B%86%E7%BE%A4%E9%80%9A%E8%AE%AF%E8%BF%87%E7%A8%8B%E8%AE%B2%E8%A7%A3" rel="nofollow">Swarm集群通讯过程讲解</a></p> 
+<p id="%E7%BD%91%E7%BB%9C%E5%90%8D%E8%AF%8D%E4%BB%8B%E7%BB%8D-toc" style="margin-left:40px;"><a href="#%E7%BD%91%E7%BB%9C%E5%90%8D%E8%AF%8D%E4%BB%8B%E7%BB%8D" rel="nofollow">网络名词介绍</a></p> 
+<p id="%E6%9C%8D%E5%8A%A1%E6%A0%B7%E4%BE%8B-toc" style="margin-left:40px;"><a href="#%E6%9C%8D%E5%8A%A1%E6%A0%B7%E4%BE%8B" rel="nofollow">服务样例</a></p> 
+<p id="%C2%A0Docker%20Swarm%E8%87%AA%E5%B8%A6%E7%BD%91%E7%BB%9C-toc" style="margin-left:80px;"><a href="#%C2%A0Docker%20Swarm%E8%87%AA%E5%B8%A6%E7%BD%91%E7%BB%9C" rel="nofollow"> Docker Swarm自带网络</a></p> 
+<p id="%E5%BD%93%E5%89%8D%E8%8A%82%E7%82%B9%E5%A6%82%E4%BD%95%E8%AE%BF%E9%97%AE%E5%AE%B9%E5%99%A8%E5%86%85%E6%9C%8D%E5%8A%A1-toc" style="margin-left:80px;"><a href="#%E5%BD%93%E5%89%8D%E8%8A%82%E7%82%B9%E5%A6%82%E4%BD%95%E8%AE%BF%E9%97%AE%E5%AE%B9%E5%99%A8%E5%86%85%E6%9C%8D%E5%8A%A1" rel="nofollow">当前节点如何访问容器内服务</a></p> 
+<p id="%E8%B7%A8%E6%9C%BA%E5%99%A8%E8%AE%BF%E9%97%AE%EF%BC%88%E5%90%8C%E4%B8%80%E9%9B%86%E7%BE%A4%E4%B8%8B%E4%BB%BB%E6%84%8F%E6%9C%BA%E5%99%A8%E5%8F%AF%E4%BB%A5%E8%AE%BF%E9%97%AE%E6%9F%90%E5%8F%B0%E6%9C%BA%E5%99%A8%E4%B8%8A%E7%9A%84%E6%9C%8D%E5%8A%A1%EF%BC%89-toc" style="margin-left:80px;"><a href="#%E8%B7%A8%E6%9C%BA%E5%99%A8%E8%AE%BF%E9%97%AE%EF%BC%88%E5%90%8C%E4%B8%80%E9%9B%86%E7%BE%A4%E4%B8%8B%E4%BB%BB%E6%84%8F%E6%9C%BA%E5%99%A8%E5%8F%AF%E4%BB%A5%E8%AE%BF%E9%97%AE%E6%9F%90%E5%8F%B0%E6%9C%BA%E5%99%A8%E4%B8%8A%E7%9A%84%E6%9C%8D%E5%8A%A1%EF%BC%89" rel="nofollow">跨机器访问（同一集群下任意机器可以访问某台机器上的服务）</a></p> 
+<hr id="hr-toc"> 
+<p>本文主要结合一个部署了nginx服务的swarm集群案例来分析其网络通讯的整个过程。</p> 
+<p>在分析整个网络通讯过程之前，首先得对overlay网络有一定的认识。</p> 
+<h2 id="Overlay%E7%BD%91%E7%BB%9C%E4%BB%8B%E7%BB%8D">Overlay网络介绍</h2> 
+<h3 id="%E4%BB%80%E4%B9%88%E6%98%AFOverlay%E7%BD%91%E7%BB%9C%EF%BC%9F">什么是Overlay网络？</h3> 
+<h4 id="Overlay%20%E7%BD%91%E7%BB%9C%E7%9A%84%E5%9F%BA%E6%9C%AC%E6%9E%B6%E6%9E%84%E7%BB%84%E6%88%90">Overlay 网络的基本架构组成</h4> 
+<p>Overlay 网络技术是指在传统 网络架构 之上 叠加的虚拟化技术模式 。也就是说它是依托于传统网络架构的前提条件下， 实现 了 应用 与其虚拟网络的捆绑而忽略底层物理网络的传输模式及技术 。简而言之，就是overlay在L2(数据链路层)网络互通的前提下，基于L3(网络层)实现了虚拟化网络。在该层网络环境下，可以为不同容器分配固定的局域网ip，并通过该ip进行通讯交互。</p> 
+<p>要了解 Overlay 网络架构体系，首先我们需要知道它的组成架构及元素，具体如下图所示</p> 
+<p><img alt="" height="259" src="https://images2.imgbox.com/a5/94/HJE5nS5j_o.png" width="635"></p> 
+<p>这里可以看到，凌驾于物理通讯层面之上构建了一层虚拟化网络，通过逻辑抽象的方式与物理网络上的边缘设备建立了一套虚拟的传输通道。</p> 
+<p>那么如何基于这个通道传输数据到执行容器呢？</p> 
+<p>在建立虚拟网络通道时，还定义了相应的传输报文协议，应用传输的数据报文必须以虚拟网络可以识别的数据报文为基础进行数据报文的发送和传输，同时必须遵照虚拟网络当中的通道控制标准来传输。</p> 
+<p>但是报文的物理传输过程我们又不得不依靠传统物理网络来实现，这样的话就涉及到报文的封装和解封、逻辑通道的维护、数据的逻辑转发和物理转发等问题。这就涉及到Overlay 网络的三类核心元素：</p> 
+<ul><li>边缘设备：与虚拟网络直接关联的网络设备，数据报文的封装/解封场所，同时它也是形成虚拟网络的物理节点，如图中所示的物理交换机（<strong>必须是支持Overlay协议的交换机</strong>）。</li><li>控制平面：框架当中的虚拟实体，负责虚拟网络传输当中的服务发现、地址通告和映射、虚拟网络通道建立和维护等，如图中虚拟层当中的控制流。</li><li>数据平面：框架当中的虚拟实体，主要负责数据报文在虚拟层的转发，如图中虚拟层的数据流。</li></ul> 
+<h4 id="Overlay%20%E7%BD%91%E7%BB%9C%E4%BC%A0%E8%BE%93%E7%9A%84%E5%9F%BA%E6%9C%AC%E8%A7%84%E5%88%99">Overlay 网络传输的基本规则</h4> 
+<p>传统网络在数据传输的时候，遵循的基本规则就是网络的七层模型。也就是说数据需要经过源的封包和目的端的解包过程，封包的时候是从应用层信息逐步封装到物理层，解包的时候是从物理层分解到应用层。在物理网络环境当中的基本寻址规则是靠 IP地址信息和MAC地址信息来进行路由转发。那么在Overlay网络当中，它也是会遵循这一基本规则，但是区别在哪里呢？</p> 
+<p><img alt="" height="262" src="https://images2.imgbox.com/3f/a1/A6YtwGRv_o.png" width="632"></p> 
+<p></p> 
+<p>首先我们来看Overlay网络的边缘设备ABC三个点，这三个点是支撑Overlay虚拟网络的核心设备，我们称之为<strong>VTEP</strong>。服务器的数据包在经过这些边缘设备的时候，会对数据包进行二次封装，会把发送端<strong>VTEP</strong>和目的端<strong>VTEP</strong>的地址或标识信息封装到数据包，然后通过<strong>VTEP</strong>的控制平面将数据在两个<strong>VTEP</strong>之间完成传输，然后再目的端的<strong>VTEP</strong>上将数据包再进行解封，最终发送到目的服务器上。这里大家可能会有几个问题：</p> 
+<ol><li>如果是L3的传输，这么做不是多此一举么？</li><li>如果是L2的传输，源端VTEP如何知道目的MAC、IP对应的VTEP信息？</li><li>VTEP之间的传输不也得依赖物理网络么？它是如何从源端传递到目的端的？</li></ol> 
+<p>首先，针对第一个问题，如果是L3的传输，这么做确实有些多此一举，所以源端VTEP会判断是否是真实的L3传输，如果是的话，那么可以抛开VTEP信息，按照传统方式传输。</p> 
+<p>接着，针对第二个问题，所有VTEP节点所辖设备的MAC信息都会在VTEP上有保留，同时其他VTEP上的MAC地址映射信息也会相互同步过来，所以一旦获取数据包中目的地址信息，VTEP就可以判断目的地属于哪一个VTEP管辖范围，然后就可以通过控制器转发。也就是说，<strong>VTEP之间会广播同步支持VTEP报文的设备之间的ip和mac地址</strong></p> 
+<p>最后，从<strong>一个VTEP到另外VTEP的传输，完全是靠着VTEP本身的IP、MAC地址信息来进行传输</strong>。</p> 
+<p>由此可见，无论是L2还是L3的传输，均涉及到查表转发、报文的解封装和封装操作。从转发效率和执行性能来看，都只能在物理网络设备（Overlay边缘设备）上实现，并且传统设备无法支持，必须通过新的硬件形式来实现。</p> 
+<h4 id="Overlay%20%E7%BD%91%E7%BB%9C%E7%9A%84%E6%8A%80%E6%9C%AF%E6%A0%87%E5%87%86">Overlay 网络的技术标准</h4> 
+<p>目前在 Overlay 技术领域有如下三大技术路线正在讨论：<br> (1). VXLAN<br> VXLAN是将以太网报文封装在UDP传输层上的一种隧道转发模式。为了使VXLAN充分利用承载网络路由的均衡性，VXLAN通过将原始以太网数据头(MAC、IP、四层端口号等)的HASH值作为UDP的号；采用24比特标识L2网络分段标识，称为VNI(VXLAN Network Identifier)；未知目的、广播、组播等网络流量均被封装为组播转发，物理网络要求支持任意源组播(ASM)。</p> 
+<p>(2). NVGRE<br> NVGRE是借助通用路由封装协议进行报文封装的一种隧道转发模式。它使用GRE头部的低24位作为租户网络标识符（TNI）。为了提供描述带宽利用率粒度的流，传输网络需要使用GRE头，但是这导致NVGRE不能兼容传统负载均衡，这是NVGRE与VXLAN相比最大的区别也是最大的不足。NVGRE不需要依赖泛洪和IP组播进行学习，而是以一种更灵活的方式进行广播，但是这需要依赖硬件。NVGRE支持减小数据包MTU以减小内部虚拟网络数据包大小。</p> 
+<p>(3). STT<br> STT 是借助 TCP 对报文封装的一种隧道转发模式 ， 它 改造了TCP的传输机制，是 一种 全新定义的无状态机制，将TCP各字段意义重新定义，无需三次握手建立TCP连接， 亦 称 之 为无状态TCP 。 以太网数据封装在无状态TCP；采用64比特标识 L2 网络分段；通过将原始以太网数据头(MAC、IP、 L4 端口号等)HASH值作为无状态TCP的源端口号 进行网络负载均衡 。</p> 
+<p>这三种Overlay技术， 共同的技术模式都是 将以太网报文 进行改造封装 承载到 逻辑 隧道层面 进行转发 ， 差异的技术特性 在于 封装 和构造隧道的不同，而底层均是IP转发。VXLAN和STT对于现网设备对流量均衡要求较低，即负载链路负载分担适应性好，一般的网络设备都能对L2-L4的数据内容参数进行链路聚合或等价路由的流量均衡 。 而NVGRE则需要网络设备对GRE扩展头感知并对flow ID进行 哈希计算 ，需要硬件 支持 ；因此，较为常用的是VXLAN标准</p> 
+<p>表 1. 1 Overlay 技术标准对比</p> 
+<table><thead><tr><th></th><th></th><th></th><th></th><th></th></tr></thead><tbody><tr><td>技术标准</td><td>支持方式</td><td>虚拟化方式</td><td>封装报文</td><td>链路负载能力</td></tr><tr><td>VXLAN</td><td>UDP</td><td>24 bit VNI</td><td>50Byte</td><td>L2-L4 HASH</td></tr><tr><td>NVGRE</td><td>GRE</td><td>24 bit VSI</td><td>42Byte</td><td>N/A</td></tr><tr><td>STT</td><td>无状态TCP</td><td>64 bit CID</td><td>58~76Byte</td><td>L2-L4 HASH</td></tr></tbody></table> 
+<h3 id="%C2%A0Overlay%E7%BD%91%E7%BB%9C%E8%A7%A3%E5%86%B3%E7%9A%84%E9%97%AE%E9%A2%98"> Overlay网络解决的问题</h3> 
+<p>总结起来主要有三个，都跟大规模的云数据中心应用场景有关系。</p> 
+<h4 id="%E8%A7%A3%E5%86%B3%E4%BA%86L2%E7%9A%84%E7%A9%BA%E9%97%B4%E5%B1%80%E9%99%90%E6%80%A7">解决了L2的空间局限性</h4> 
+<p>时至当下，越来越多的计算任务已经跑在虚拟机以及容器上，Kuberentes 目前已经是容器编排领域的事实标准了。因为日常的更新维护以及突发的故障，集群中的大规模虚拟机及容器迁移是比较常见的事情。</p> 
+<p>当虚拟机所在的宿主机因为维护或者其他原因宕机时，当前实例就需要迁移到其他的宿主机上，为了保证业务不中断，我们需要保证迁移过程中的IP 地址不变。而Overlay 是在网络层实现L2网络，所以多个物理机之间只要网络层可达就能组建虚拟的局域网，虚拟机或者容器迁移后仍然处于同一个二层网络，也就不需要改变 IP地址。这样使得资源调度变得更加容易，大大提高了节点的可移植性。</p> 
+<p><img alt="" height="371" src="https://images2.imgbox.com/5c/13/1aJ8IBBe_o.png" width="745">如上图所示，迁移后的虚拟机与其他的虚拟机虽然位于不同的数据中心，但是由于上述两个数据中心之间可以通过IP 协议连通，所以迁移后的虚拟机仍然可以通过 Overlay 网络与原集群的虚拟机组成L2网络，对于应用来讲，它对外发布的地址没有变化，对于虚拟机来讲，它只知道远方的主机与本地的主机是可以组成L2互通局域网的。但是，真正的数据迁移确在底层经历了传统网络设备的L3传输。无论底层做了什么样的传输转换，只要上层协议达到应用要求的迁移条件即可。这样跨地域的L2资源迁移就不再成为不可解决的难题了。没有这种技术的支撑，恐怕就算是裸光纤连接也解决不了这个问题，毕竟光纤的距离是受限的。 </p> 
+<h4 id="%C2%A0%E8%A7%A3%E5%86%B3%E4%BA%86%E7%BD%91%E7%BB%9C%E8%A7%84%E6%A8%A1%E5%8F%97%E9%99%90%E7%9A%84%E9%97%AE%E9%A2%98"> 解决了网络规模受限的问题</h4> 
+<p>Kuberentes 官方支持的最大集群为 5000节点，通常每个节点上会有很多容器，所以整个集群的资源规模可以达到几万甚至几十万。当某个容器向集群中发送 ARP 请求，集群中的全部容器都会收到ARP请求，这时会带来极高的网络负载，传统网络技术是无法容忍这种规模的网络请求。在使用 VxLAN 搭建的 Overlay 网络中，网络会将发送的数据重新封装成 IP数据包，这样网络只需要知道不同 VTEP 的 MAC 地址，由此可以将 MAC 地址表项中的几十万条数据降低到几千条，ARP 请求也只会在集群中的 VTEP 之间扩散，远端的 VTEP 将数据拆包后也仅会在本地广播，不会影响其他的 VTEP，虽然这对于集群中的网络设备仍然有较高的要求，但是已经极大地降低了核心网络设备的压力。</p> 
+<p>另外， 在 L2 网络环境下，数据流均需要通过明确的网络寻址以保证准确到达目的地，因此网络设备的MAC地址表，成为决定了云计算环境下虚拟机的规模的上限，并且因为表项并非百分之百的有效性，使得可用的虚机数量进一步降低，特别是对于低成本的接入设备而言，因其表项一般规格较小，限制了整个云计算数据中心的虚拟机数量 。使用了 Overlay技术之后，这个MAC地址表的存储转移到了VTEP设备之上， 虽然核心或网关设备的MAC与ARP规格会随着虚拟机增长也面临挑战，但对于此层次设备能力而言，大规格是不可避免的业务支撑要求。减小接入设备规格压力的做法可以是分离网关能力，采用多个网关来分担虚机的终结和承载。</p> 
+<h4 id="%E8%A7%A3%E5%86%B3%E4%BA%86%E7%BD%91%E7%BB%9C%E9%9A%94%E7%A6%BB%E9%97%AE%E9%A2%98">解决了网络隔离问题</h4> 
+<p>大规模的数据中心往往都会对外提供云计算服务，同一个物理集群可能会被拆分成多个小块分配给不同的租户，因为 L2 网络的数据帧可能会进行广播，所以出于安全的考虑这些不同的租户之间需要进行网络隔离，避免租户之间的流量互相影响甚至恶意攻击。当前的主流网络隔离技术为VLAN，在大规模虚拟化环境部署会有两大限制：</p> 
+<p>首先， VLAN数量在标准定义中只有12个比特单位，即可用的数量为4000个左右，这样的数量级对于公有云或大型虚拟化云计算应用而言微不足道 。其次， VLAN技术当前为静态配置型技术（只有EVB/VEPA的802.1Qbg技术可以在接入层动态部署VLAN，但也主要是在交换机接主机的端口为常规部署，上行口依然为所有VLAN配置通过)，这样使得整个数据中心的网络几乎为所有VLAN被允许通过，导致未知目的广播数据会在整网泛滥，无节制消耗网络交换能力与带宽。</p> 
+<p>如果采用了 Overlay网络技术，那么就会避免上述问题，以VXLAN为例：</p> 
+<p>首先，VxLAN 会使用 24 比特的 VNI 表示虚拟网络个数，总共可以表示 16,777,216 个虚拟网络，远远超过了VLAN的4000个，这个数量足以满足今天云计算数据中心的大规模集群要求。其次，VXLAN在L2传输的时候是在VTEP节点把数据进行封装，使得更多的L2广播在VTEP节点处转化为有目的的L3传输，从而避免了无节制的网络资源消耗。既满足了大规模集群网络隔离问题，同时也提高了这种情况下的网络传输安全性。</p> 
+<h3 id="Overlay%E7%9A%84%E7%BC%BA%E9%99%B7">Overlay的缺陷</h3> 
+<p>Overlay网络与传统网络相比而言，性能可能会是它的问题所在，因为Overlay网络无论是哪一种技术标准，都会经历数据包再次封装和再次解封的问题，这个无疑会给数据传输带来性能上的延时</p> 
+<p><img alt="" height="303" src="https://images2.imgbox.com/3a/77/FT9LzEbt_o.png" width="893"></p> 
+<p> 从图中试验结果 判断，在VXLAN环境下，无论虚拟机如何变化，其传输的吞吐量都会低于我们正常网络配置下的指标。</p> 
+<p>因此，在对网络性能要求非常高的场景下，也需要酌情斟酌是否采用Overlay网络。</p> 
+<hr> 
+<p>在对Overlay网络进行了基础的介绍后，紧接着就开始我们对于swarm集群案例下的网络通讯过程的讲解。</p> 
+<h2 id="Swarm%E9%9B%86%E7%BE%A4%E9%80%9A%E8%AE%AF%E8%BF%87%E7%A8%8B%E8%AE%B2%E8%A7%A3">Swarm集群通讯过程讲解</h2> 
+<h3 id="%E7%BD%91%E7%BB%9C%E5%90%8D%E8%AF%8D%E4%BB%8B%E7%BB%8D">网络名词介绍</h3> 
+<ul><li><strong>网络命名空间（namespace）：</strong>Linux在网络栈中引入网络命名空间，将独立的网络协议栈隔离到不同的命令空间中，彼此间无法通信；docker利用这一特性，实现不容器间的网络隔离。</li><li><strong>Veth设备对：</strong>Veth设备对的引入是为了实现在不同网络命名空间的通信。</li><li><strong>Iptables/Netfilter：</strong>Netfilter负责在内核中执行各种挂接的规则(过滤、修改、丢弃等)，运行在内核模式中；Iptables模式是在用户模式下运行的进程，负责协助维护内核中Netfilter的各种规则表；通过二者的配合来实现整个Linux网络协议栈中灵活的数据包处理机制。</li><li><strong>网桥：</strong>网桥是一个二层网络设备，通过网桥可以将linux支持的不同的端口连接起来,并实现类似交换机那样的多对多的通信。</li><li><strong>路由：</strong>Linux系统包含一个完整的路由功能，当IP层在处理数据发送或转发的时候，会使用路由表来决定发往哪里。</li></ul> 
+<h3 id="%E6%9C%8D%E5%8A%A1%E6%A0%B7%E4%BE%8B">服务样例</h3> 
+<p>本文主要结合一个部署了单个nginx服务和redis服务的swarm集群来分析网络通讯过程。</p> 
+<p>环境如下：其中nginx服务随机部署在了manager节点上面，redis服务随机部署在work1节点上</p> 
+<table><thead><tr><th>角色</th><th>IP</th><th>HOSTNAME</th><th></th></tr></thead><tbody><tr><td>Manager</td><td>192.168.174.159</td><td>docker1</td><td></td></tr><tr><td>Worker</td><td>192.168.174.162</td><td>worker1</td><td></td></tr><tr><td>Worker</td><td>192.168.174.163</td><td>worker2</td></tr></tbody></table> 
+<h4 id="%C2%A0Docker%20Swarm%E8%87%AA%E5%B8%A6%E7%BD%91%E7%BB%9C"> Docker Swarm自带网络</h4> 
+<p>首先，在manager节点上，查看一下docker 的网络信息</p> 
+<p><img alt="" height="211" src="https://images2.imgbox.com/61/47/Eq3OdyBS_o.png" width="758"></p> 
+<p> docker swarm在启动的过程中会创建两个默认的网络：docker_gwbridge和ingress.</p> 
+<ul><li><strong>docker_gwbridge</strong>：通过这个网络，容器可以连接到宿主机。</li><li><strong>ingress：</strong>由docker swarm创建的overlay网络，这个网络用于将服务暴露给外部访问，docker swarm就是通过它实现的routing mesh（将外部请求路由到不同主机的容器）。</li></ul> 
+<h4 id="%E5%BD%93%E5%89%8D%E8%8A%82%E7%82%B9%E5%A6%82%E4%BD%95%E8%AE%BF%E9%97%AE%E5%AE%B9%E5%99%A8%E5%86%85%E6%9C%8D%E5%8A%A1">当前节点如何访问容器内服务</h4> 
+<p>首先进入<strong>/run/docker/netns</strong>路径下，该目录保存了docker创建的网络信息</p> 
+<p><img alt="" height="121" src="https://images2.imgbox.com/a7/fc/LZNd563H_o.png" width="549"></p> 
+<p> 可以看到这里包含三个网络，其中一个是ingress_sbox(一端连接docker_gwbridge网桥，另一端连接ingress这个覆盖网络，方便宿主机通过docker_gwbridge访问ingress网络的sandbox，由此进去到overlay网络当中，然后连接到ingress网络的这一端口会进行负载转发数据包，即ipvs，将数据包转发到某个容器的虚拟ip)，还有两个中，一个是创建的nginx服务使用的网络，还有一个就是swarm创建的ingress网络。</p> 
+<p>这里我们通过<strong>docker inspect 服务名|服务id | grep -i networkid</strong>可以获取到服务在ingress网络上分配到的虚拟ip对应的overlay网络id号</p> 
+<p><img alt="" height="45" src="https://images2.imgbox.com/7a/7c/HRrL8H4B_o.png" width="675"></p> 
+<p> 通过这个id，我们就可以知道上述两个网卡中<strong>1-spw8f3820k</strong>是ingress网络，而<strong>022b0b1d1cae</strong>是nginx使用的网络</p> 
+<p>接下来，通过<strong>ip link</strong>来查看我们各个网络的接口信息，其中docker下的三个网络需要通过<strong>nsenter</strong>指令进入容器的命令空间去执行相关命令，指令如下：<strong>nsenter --net=网络id ip link</strong></p> 
+<p><img alt="" height="969" src="https://images2.imgbox.com/ad/c6/IoBLKAP2_o.png" width="1200"></p> 
+<p>其中主机网络中末尾的两个接口尚不明确其归属，这里我们猜测是docker_gwbridge上的两个接口，可以通过 <strong>brctl show</strong>查看网桥的信息</p> 
+<p><img alt="" height="177" src="https://images2.imgbox.com/c6/12/0p1uz2Pa_o.png" width="828"></p> 
+<p> 可以看到这里的两个接口确实归属于docker_gwbridge网桥。</p> 
+<p>同时，我们可以看到每个接口前缀都由数字组成，且接口名称末尾也同样由数字组成，如<strong>44: eth0@if45</strong>，其代表两个接口是相互绑定通讯的。</p> 
+<p>例如：下图中mynginx服务的eth0接口就和ingress网络的veth2接口相互绑定</p> 
+<p><img alt="" height="422" src="https://images2.imgbox.com/e3/d0/H2FQtw1q_o.png" width="1200"></p> 
+<p> 因此，我们可以得出一张网络的拓扑图，如下所示</p> 
+<p><img alt="" height="1191" src="https://images2.imgbox.com/ec/3a/SF4PADuk_o.png" width="1200"></p> 
+<p> 紧接着，我们需要知道每个接口绑定的ip，然后才能通过iptables获取的路由表来分析整个通讯过程。这里我们使用<strong>ip address</strong>指令来获取所有接口的ip信息，同样的，docker容器内的几个网络需要通过nsenter进入到容器进程内的命名空间，然后使用<strong>nsenter --net=网络id ip address</strong>指令输出接口的ip信息</p> 
+<p><strong>宿主机</strong>：</p> 
+<p><img alt="" height="872" src="https://images2.imgbox.com/96/52/FTp0RB95_o.png" width="1200"></p> 
+<p><strong> mynginx服务</strong>：</p> 
+<p><img alt="" height="307" src="https://images2.imgbox.com/0d/d7/h7lcbZHm_o.png" width="986"></p> 
+<p><strong> ingress网络</strong>：</p> 
+<p><img alt="" height="350" src="https://images2.imgbox.com/92/d0/PqSlZXEY_o.png" width="1147"></p> 
+<p><strong> ingress_sbox</strong>:</p> 
+<p><img alt="" height="398" src="https://images2.imgbox.com/87/25/bEVlFUHa_o.png" width="1004"></p> 
+<p> 同时，swarm集群下部署的服务mynginx也会分配到自己的一个虚拟网络ip，可以通过<strong>docker inspect 服务名|服务id | grep -i addr</strong>获取</p> 
+<p><img alt="" height="53" src="https://images2.imgbox.com/b8/89/cU7PPNSB_o.png" width="655"></p> 
+<p> 在获取到上述信息后，我们就可以得出以下这张更为详细的网络拓扑图</p> 
+<p><img alt="" height="1191" src="https://images2.imgbox.com/30/d4/6ZoGgIOb_o.png" width="1200"></p> 
+<p> 在有了完整的网络拓扑图后，我们就可以通过<strong>iptables</strong>查看网络路由</p> 
+<p>iptables规则链及相关指令解析请参见：<a href="https://blog.csdn.net/weixin_43762303/article/details/123679060" title="https://blog.csdn.net/weixin_43762303/article/details/123679060">https://blog.csdn.net/weixin_43762303/article/details/123679060</a></p> 
+<p>数据传输流经规则链过程如下图所示</p> 
+<p><img alt="" height="833" src="https://images2.imgbox.com/20/5c/GUf4wpoq_o.png" width="787"></p> 
+<p>首先，查看宿主机的nat表</p> 
+<pre><code class="language-bash">iptables -t nat -L -n -v</code></pre> 
+<p> 当访问宿主机的80端口时，会走到raw表的PREROUTING规则链中，但是，由于raw表中没有任何特殊的规则，可以忽略，后续也不在展示，如需查看raw表，可以通过<strong>iptables -t raw -L -n -v</strong></p> 
+<p>接下来继续查看mangle表，同样的宿主机中的mangle表也未定义特殊的规则链，故跳过，可以通过<strong>iptables -t mangle -L -n -v </strong>查看。</p> 
+<p><img alt="" height="959" src="https://images2.imgbox.com/ea/7d/QgkCDU8z_o.png" width="1200"></p> 
+<p>最后来到nat表的PREROUTING规则链中，由于访问的是主机的ip，因此会走第一条链路，进入DOCKER-INGRESS，其会将目的端口80的流量转发到172.18.0.2:80</p> 
+<p><img alt="" height="203" src="https://images2.imgbox.com/a5/d3/MuKuHSu8_o.png" width="1200"></p> 
+<p><img alt="" height="171" src="https://images2.imgbox.com/3c/41/NmEvtF7P_o.png" width="1200"></p> 
+<p> 此时，我们的请求由192.168.174.159:80 -&gt; 172.18.0.2:80</p> 
+<p>故，后续会走FORWARD转发规则链</p> 
+<p>由于转发ip属于172.18.0.0/24网段，因此会路由到docker_gwbridge网桥(172.18.0.1)，然后在filter表中的FORWARD规则链中发送到非docker_gwbridge的目的地(ingress_sbox的eth1接口)</p> 
+<p><img alt="" height="956" src="https://images2.imgbox.com/2f/64/d5AEbRSR_o.png" width="1200"></p> 
+<p>最后，就来到了POSTROUTING规则链，mangle表中无特殊规则，直接查看nat表</p> 
+<p><img alt="" height="668" src="https://images2.imgbox.com/fb/d9/KtcFurqN_o.png" width="1200">可以看到nat表中，做了一个MASQUERADE操作，即将数据包来源改为当前及其网卡分配到的ip，即192.168.174.159。 </p> 
+<p>至此，我们的数据包就从宿主机来到了docker-gwbridge网桥（172.18.0.1/24），并通过接口<strong>vetha2e4eb5</strong>流向了我们的<strong>ingress_sbox</strong>的<strong>eth1</strong>接口(172.18.0.2)。</p> 
+<p>接下来就要分析来到ingress_sbox后的路由情况，因此，需要通过nsenter访问docker容器的命令空间，获取ingress_sbox的网络路由信息</p> 
+<pre><code>#在/run/docker/netns下执行以下命令,查看nat表
+nsenter --net=ingress_sbox iptables -t nat -L -n -v
+#在/run/docker/netns下执行以下命令,查看mangle表
+nsenter --net=ingress_sbox iptables -t mangle -L -n -v
+#在/run/docker/netns下执行以下命令,查看filter表
+nsenter --net=ingress_sbox iptables -t filter -L -n -v</code></pre> 
+<p><strong>nat表</strong>：</p> 
+<p><img alt="" height="651" src="https://images2.imgbox.com/4e/96/3w4yyLPH_o.png" width="1199"></p> 
+<p><strong> mangle表</strong>：</p> 
+<p><img alt="" height="441" src="https://images2.imgbox.com/04/bd/bIxzOSzj_o.png" width="1200"></p> 
+<p> 首先，查看mangle表的PREROUTING规则链，可以看到发往80端口的数据包已经被修改，且标记位0x106，换算成十进制为262；而nat表中PREROUTING未定义任何规则。因此，其会继续走到INPUT规则链，其将目的ip为10.0.0.13的ip同样标记为了262.</p> 
+<p>由于ingress_sbox会通过ipvs负载转发数据包到某个容器的虚拟ip上（即Routing Mesh路由转发），故需要通过<strong>ipvsadm</strong>指令查看对应的路由结果。</p> 
+<p>此时，我们查看<strong>ipvs</strong>负载路由，通过命令<strong>ipvsadm</strong>可以发现标记位262已经将数据包路由到了<strong>10.0.0.14</strong>（对应着mynginx服务的eth1接口的ip）</p> 
+<p><img alt="" height="192" src="https://images2.imgbox.com/35/8e/y371sG1W_o.png" width="738"></p> 
+<p>此时，数据包已经流向<strong>10.0.0.14</strong>，而在nat表的POSTROUTING链中，定义了流向10.0.0.0/24网络的数据，会通过ipvs路由到10.0.0.2上，即ingress_sbox的接口eth0。</p> 
+<p>基于这个eth0接口，可以将数据包经由ingress网络的接口veth0进行传输。</p> 
+<p><img alt="" height="259" src="https://images2.imgbox.com/5d/d1/51LFy3JI_o.png" width="1200"></p> 
+<p><img alt="" height="473" src="https://images2.imgbox.com/69/49/hWZ2u5Nw_o.png" width="575"></p> 
+<p></p> 
+<p> 最后来到ingress网络，这里ingress会对数据包的发送地址进行判断。若目的地址就在本机所在的容器环境的话，就会发往对应的网络接口；若目的地址不在当前网络环境下，则会通过vxlan将数据包发送到边缘设备交换机，在这一步骤会封装发起ip、mac和目的ip、mac，再由交换机发往对应VTEP报文中的ip和mac地址所在的交换机，然后再传输回对应的ingress网络层，并发往对应的网络接口。</p> 
+<p>发往的目的ip就在当前机器构建的虚拟网络层中，因此会由接口veth2发往mynginx容器服务的eth0接口（10.0.0.14）</p> 
+<p><img alt="" height="477" src="https://images2.imgbox.com/5b/f6/IcXeCrC8_o.png" width="1054"></p> 
+<p>最后，数据包流量就成功到达了mynginx服务内。</p> 
+<h4 id="%E8%B7%A8%E6%9C%BA%E5%99%A8%E8%AE%BF%E9%97%AE%EF%BC%88%E5%90%8C%E4%B8%80%E9%9B%86%E7%BE%A4%E4%B8%8B%E4%BB%BB%E6%84%8F%E6%9C%BA%E5%99%A8%E5%8F%AF%E4%BB%A5%E8%AE%BF%E9%97%AE%E6%9F%90%E5%8F%B0%E6%9C%BA%E5%99%A8%E4%B8%8A%E7%9A%84%E6%9C%8D%E5%8A%A1%EF%BC%89">跨机器访问（同一集群下任意机器可以访问某台机器上的服务）</h4> 
+<p>这里我们可以登录worker1节点，去查看对应的网络信息</p> 
+<p><img alt="" height="1191" src="https://images2.imgbox.com/3c/e8/Tq9y0ZDB_o.png" width="1200"></p> 
+<p> 前面的分析同前面分析过程一直，这里直接看到数据包从ingress_sbox来到ingress网络这一部分</p> 
+<p><img alt="" height="652" src="https://images2.imgbox.com/6f/7c/T7cIxZbt_o.png" width="1200"></p> 
+<p>这里可以看到访问192.168.174.162机器的80端口，最后会路由到10.0.0.14。通过</p> 
+<p>接口来到ingress虚拟网络后，会判断该ip10.0.0.14是否是当前机器中的虚拟ip。非当前机器所在的ip就会发往交换机；此时交换机取到了目的虚拟ip地址后，就会广播发送udp请求到所有交换机，等待某个交换机响应后，就会缓存响应的交换机的ip和mac地址，然后将发往对方的交换机，并传输回ingress网络，最终到达nginx服务。</p> 
+<p><img alt="" height="562" src="https://images2.imgbox.com/96/0f/ZuS0YWa6_o.png" width="1200"></p> 
+<p>通过nsenter进入到worker1宿主机下docker的ingress网络命名空间，执行<strong>bridge fdb</strong> （fdb即forward database，其缓存了在overlay网络下，vxlan设备需要转发的mac地址及其映射的物理ip，我们的交换机也就是通过查询fdb表获取到要发往的交换机ip和mac地址）</p> 
+<p>同时，还需要执行<strong>ip neigh</strong> ,该指令效果等同于arp，即其会将ip地址解析成mac网卡地址。</p> 
+<pre><code>#查询fdb缓存中mac地址转发情况
+bridge fdb
+#进入指定进程命名空间的网络(这里对应ingress覆盖网络)查询fdb表
+nsenter --net=网络id bridge fdb
+
+#解析ip映射的网卡地址，作用同arp一致
+ip neigh
+#进入指定进程命名空间的网络(这里对应ingress覆盖网络)解析ip
+nsenter --net=网络id ip neigh
+
+#为什么要在ingress覆盖网络这层去查询arp和fdb呢？
+因为overlay在L3层构建了一个L2的虚拟网络，其会传输数据包到链路层的交换机，
+由交换机进行广播，然后获取响应的交换机所在的ip和mac地址，并传输回overlay网络，进行缓存。
+因此，我们需要在这里去查询目的服务所在容器的网络ip，然后解析出其对应的mac地址；
+最后，查询fdb表获取到其宿主机的真实ip，将其一并告知交换机，发往指定的宿主机连接的交换机。
+这样就达到了虚拟网络之间的跨机访问
+</code></pre> 
+<p><img alt="" height="441" src="https://images2.imgbox.com/fe/bb/jdZjsvY6_o.png" width="885"></p> 
+<p>通过上述两个指令获取到对应结果信息后，我们的ingress网络需要发送数据包到10.0.0.14，根据arp解析后得知其发送的mac地址，然后在fdb表中又得知了其映射的ip地址，那么交换机就可以将这两个信息和数据包封装成VTEP包，发往指定交换机。</p> 
+<p>当封装的VTEP包来到192.168.174.159宿主机连接的交换机后，就会进行解析。然后将数据包传输回ingress网络，后续过程同前面分析类似，只需分析对应的iptables信息，查看其数据流向即可，最终，会到达192.168.174.159主机上的nginx服务容器。</p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/8eeeb963be72de748a2f5ea77ddca507/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">prometheus常用表达式</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/59a8b717837a508b88a78730a9fd09cd/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">全面&amp;详细的面试指南：计算机网络篇 (附答案)</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

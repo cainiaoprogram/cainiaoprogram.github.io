@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【Linux】企业实战项目rsync&#43;inotify实现实时同步（inotify安装及介绍、rsync &#43; inotify 实现实时同步、rsync &#43; inotify实现开机自启 ） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【Linux】企业实战项目rsync&#43;inotify实现实时同步（inotify安装及介绍、rsync &#43; inotify 实现实时同步、rsync &#43; inotify实现开机自启 ）" />
+<meta property="og:description" content="一、企业实战项目rsync&#43;inotify实现实时同步 rsync与传统的cp、tar备份方式相比，rsync具有安全性高、备份迅速、支持增量备份等优点，通过rsync可以解决对实时性要求不高的数据备份需求，例如定期的备份文件服务器数据到远端服务器，对本地磁盘定期做数据镜像等。
+随着应用系统规模的不断扩大，对数据的安全性和可靠性也提出的更好的要求，rsync在高端业务系统中也逐渐暴露出了很多不足，首先，rsync同步数据时，需要扫描所有文件后进行比对，进行差量传输。如果文件数量达到了百万甚至千万量级，扫描所有文件将是非常耗时的。而且正在发生变化的往往是其中很少的一部分，这是非常低效的方式。其次，rsync不能实时的去监测、同步数据，虽然它可以通过linux守护进程的方式进行触发同步，但是两次触发动作一定会有时间差，这样就导致了服务端和客户端数据可能出现不一致，无法在应用故障时完全的恢复数据。基于以上原因，rsync&#43;inotify组合出现了
+何为 inotify Inotify是一种强大的、细粒度的、异步的文件系统事件监控机制，linux内核从2.6.13起，加入了Inotify支持，通过Inotify可以监控文件系统中添加、删除，修改、移动等各种细微事件，利用这个内核接口，第三方软件就可以监控文件系统下文件的各种变化情况，而inotify-tools就是这样的一个第三方软件。
+Inotify 监控文件系统操作，比如读取、写入和创建，基于事件驱动，可以做到对事件的实时响应，高效，而且没有轮询造成的系统资源消耗。
+在前面有讲到，rsync可以实现触发式的文件同步，但是通过crontab守护进程方式进行触发，同步的数据和实际数据会有差异，而inotify可以监控文件系统的各种变化，当文件有任何变动时，就触发rsync同步，这样刚好解决了同步数据的实时性问题。
+inotify能监控非常多的文件系统事件，通过监控这些事件来监控文件是否发生变更，然后通过rsync来更新发生变更的文件 inotify安装及介绍 安装 ①检查当前系统内核是否支持 inotify
+方法一：
+若内核版本大于 2.6.13 则支持；
+uname -r 方法二：
+若输出 CONFIG_INOTIFY_USER=y，则支持；
+grep INOTIFY_USER /boot/config-$(uname -r) ②安装
+yum install epel-release -y yum install inotify-tools -y 命令 inotify-tools 包含了两个命令：inotifywait 与 inotifywatch。
+inotifywait：在被监控的文件或目录上等待特定文件系统事件发生，执行后处于阻塞状态，适合在shell脚本中使用。
+阻塞状态 (Blocked):阻塞状态是线程因为某种原因放弃CPU的使用权，暂时停止运行。 inotifywatch：用于收集文件系统的统计数据，例如发生了多少次 inotify 事件，某文件被访问了多少次等等。
+内核参数 /proc/sys/fs/inotify/ 目录下包含三个文件，分别设置 inotify 相关的三个内核参数。
+max_queued_events：inotify 事件队列可容纳的事件数量，超出的事件被丢弃，但会触发队列溢出Q_OVERFLOW事件。
+max_user_instances：每个用户可运行的 inotifywait 或 inotifywatch 命令的进程数。
+max_user_watches：每个 inotifywait 或 inotifywatch 命令可以监控的文件数量。如果监控的文件数目巨大，需要根据情况适当增加此值。
+默认设置：
+事件 inotify 监控的文件系统事件：
+access：文件被访问。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/47e70cb5114e84c275ddf8d2aebb15c1/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-02-13T09:24:34+08:00" />
+<meta property="article:modified_time" content="2023-02-13T09:24:34+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【Linux】企业实战项目rsync&#43;inotify实现实时同步（inotify安装及介绍、rsync &#43; inotify 实现实时同步、rsync &#43; inotify实现开机自启 ）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div class="kdocs-document"> 
+ <h2 style="text-align:left;">一、企业实战项目rsync+inotify实现实时同步</h2> 
+ <p style="text-indent:1.4em;text-align:left;">rsync与传统的cp、tar备份方式相比，rsync具有安全性高、备份迅速、支持增量备份等优点，通过rsync可以解决对实时性要求不高的数据备份需求，例如定期的备份文件服务器数据到远端服务器，对本地磁盘定期做数据镜像等。</p> 
+ <p style="text-indent:1.4em;text-align:left;">随着应用系统规模的不断扩大，对数据的安全性和可靠性也提出的更好的要求，rsync在高端业务系统中也逐渐暴露出了很多不足，首先，rsync同步数据时，需要扫描所有文件后进行比对，进行差量传输。如果文件数量达到了百万甚至千万量级，扫描所有文件将是非常耗时的。而且正在发生变化的往往是其中很少的一部分，这是非常低效的方式。其次，rsync不能实时的去监测、同步数据，虽然它可以通过linux守护进程的方式进行触发同步，但是两次触发动作一定会有时间差，这样就导致了服务端和客户端数据可能出现不一致，无法在应用故障时完全的恢复数据。基于以上原因，rsync+inotify组合出现了</p> 
+ <h3 style="text-align:left;">何为 inotify</h3> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left;"><p>Inotify是一种强大的、细粒度的、异步的文件系统事件监控机制，linux内核从2.6.13起，加入了Inotify支持，通过Inotify可以监控文件系统中添加、删除，修改、移动等各种细微事件，利用这个内核接口，第三方软件就可以监控文件系统下文件的各种变化情况，而inotify-tools就是这样的一个第三方软件。</p></li></ul> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left;"><p>Inotify 监控文件系统操作，比如读取、写入和创建，<span class="kdocs-color" style="background-color:#F8D7B7;"><span class="kdocs-bold" style="font-weight:bold;">基于事件驱动，可以做到对事件的实时响应，高效，而且没有轮询造成的系统资源消耗</span></span>。</p></li></ul> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left;"><p>在前面有讲到，rsync可以实现触发式的文件同步，但是通过crontab守护进程方式进行触发，同步的数据和实际数据会有差异，而inotify可以监控文件系统的各种变化，当文件有任何变动时，就触发rsync同步，这样刚好解决了同步数据的实时性问题。</p></li></ul> 
+ <pre class="kdocs-cmake"><code class="language-cmake">inotify能监控非常多的文件系统事件，通过监控这些事件来监控文件是否发生变更，然后通过rsync来更新发生变更的文件</code></pre> 
+ <h3 style="text-align:left;">inotify安装及介绍</h3> 
+ <h4 style="text-align:left;">安装</h4> 
+ <p style="text-align:left;">①检查当前系统内核是否支持 inotify</p> 
+ <p style="text-align:left;">方法一：</p> 
+ <p style="text-align:left;">若内核版本大于 2.6.13 则支持；</p> 
+ <pre class="kdocs-bash"><code class="language-bash">uname -r</code></pre> 
+ <p style="text-align:left;">方法二：</p> 
+ <p style="text-align:left;">若输出 CONFIG_INOTIFY_USER=y，则支持；</p> 
+ <pre class="kdocs-bash"><code class="language-bash">grep INOTIFY_USER /boot/config-$(uname -r)</code></pre> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:739px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:11.096075%;height:0;"> 
+    <img src="https://images2.imgbox.com/5c/3b/6KH18cEo_o.png" style="margin-left:;display:block;width:739px;margin-top:-11.096075%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:left;">②安装</p> 
+ <pre class="kdocs-cmake"><code class="language-cmake">yum install epel-release -y
+yum install inotify-tools -y</code></pre> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:599px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:76.46077%;height:0;"> 
+    <img src="https://images2.imgbox.com/6e/31/EXH3a6fY_o.png" style="margin-left:;display:block;width:599px;margin-top:-76.46077%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <h4 style="text-align:left;">命令</h4> 
+ <p style="text-align:left;">inotify-tools 包含了两个命令：inotifywait 与 inotifywatch。</p> 
+ <ol start="1"><li style="margin-left:1.4em;list-style-type:decimal;text-indent:0;text-align:left;"><p><span class="kdocs-color" style="background-color:#F8D7B7;">inotifywait</span>：在被监控的文件或目录上等待特定文件系统事件发生，执行后处于阻塞状态，<span class="kdocs-color" style="background-color:#F8D7B7;">适合在shell脚本中使用。</span></p></li></ol> 
+ <pre class="kdocs-cmake"><code class="language-cmake">阻塞状态 (Blocked):阻塞状态是线程因为某种原因放弃CPU的使用权，暂时停止运行。</code></pre> 
+ <ol start="2"><li style="margin-left:1.4em;list-style-type:decimal;text-indent:0;text-align:left;"><p>inotifywatch：用于收集文件系统的统计数据，例如发生了多少次 inotify 事件，某文件被访问了多少次等等。</p></li></ol> 
+ <h4 style="text-align:left;">内核参数</h4> 
+ <p style="text-align:left;">/proc/sys/fs/inotify/ 目录下包含三个文件，分别设置 inotify 相关的三个内核参数。</p> 
+ <ol start="1"><li style="margin-left:1.4em;list-style-type:decimal;text-indent:0;text-align:left;"><p>max_queued_events：inotify 事件队列可容纳的事件数量，超出的事件被丢弃，但会触发队列溢出Q_OVERFLOW事件。</p></li></ol> 
+ <ol start="2"><li style="margin-left:1.4em;list-style-type:decimal;text-indent:0;text-align:left;"><p>max_user_instances：每个用户可运行的 inotifywait 或 inotifywatch 命令的进程数。</p></li></ol> 
+ <ol start="3"><li style="margin-left:1.4em;list-style-type:decimal;text-indent:0;text-align:left;"><p>max_user_watches：每个 inotifywait 或 inotifywatch 命令可以监控的文件数量。如果监控的文件数目巨大，需要根据情况适当增加此值。</p></li></ol> 
+ <p style="text-align:left;">默认设置：</p> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:706px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:16.855524%;height:0;"> 
+    <img src="https://images2.imgbox.com/9b/9a/UizcPYA0_o.png" style="margin-left:;display:block;width:706px;margin-top:-16.855524%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <h4 style="text-align:left;">事件</h4> 
+ <p style="text-align:left;">inotify 监控的文件系统事件：</p> 
+ <ol start="1"><li style="margin-left:1.4em;list-style-type:decimal;text-indent:0;text-align:left;"><p>access：文件被访问。</p></li></ol> 
+ <ol start="2"><li style="margin-left:1.4em;list-style-type:decimal;text-indent:0;text-align:left;"><p>modify：文件被修改。</p></li></ol> 
+ <ol start="3"><li style="margin-left:1.4em;list-style-type:decimal;text-indent:0;text-align:left;"><p>attrib：文件元数据被修改。</p></li></ol> 
+ <ol start="4"><li style="margin-left:1.4em;list-style-type:decimal;text-indent:0;text-align:left;"><p>open：文件被打开。</p></li></ol> 
+ <ol start="5"><li style="margin-left:1.4em;list-style-type:decimal;text-indent:0;text-align:left;"><p>create：在被监控的目录中创建了文件或目录。</p></li></ol> 
+ <ol start="6"><li style="margin-left:1.4em;list-style-type:decimal;text-indent:0;text-align:left;"><p>delete：删除了被监控目录中的某个文件或目录。</p></li></ol> 
+ <ol start="7"><li style="margin-left:1.4em;list-style-type:decimal;text-indent:0;text-align:left;"><p>......（还有更多事件）</p></li></ol> 
+ <p style="text-align:left;"><span class="kdocs-fontSize" style="font-size:15pt;"><span class="kdocs-color" style="color:#C21C13;">注意：对文件的某个操作往往会触发多个事件，用户应用程序需要自己防止做出重复响应。</span></span></p> 
+ <h4 style="text-align:left;">实践</h4> 
+ <p style="text-align:left;">不指定监控事件，分别打开两个 shell 窗口，使用 inotifywait 和 inotifywatch 监控某个目录：</p> 
+ <pre class="kdocs-cmake"><code class="language-cmake">mkdir /var/inotify-test
+inotifywait -m /var/inotify-test
+#监控这个文件有没有发生变化
+
+inotifywatch -v /var/inotify-test
+#显示目录的详细信息</code></pre> 
+ <p style="text-align:left;">在此目录下创建两个文件：</p> 
+ <pre class="kdocs-cmake"><code class="language-cmake">touch /var/inotify-test/file1
+touch /var/inotify-test/file2</code></pre> 
+ <p style="text-align:left;">看看 inotify 监控发生了什么：</p> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:701px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:34.950073%;height:0;"> 
+    <img src="https://images2.imgbox.com/03/25/ImxbOaMS_o.png" style="margin-left:;display:block;width:701px;margin-top:-34.950073%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:707px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:19.094767%;height:0;"> 
+    <img src="https://images2.imgbox.com/eb/4f/mjKe92cI_o.png" style="margin-left:;display:block;width:707px;margin-top:-19.094767%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:left;">其中 inotifywait 的信息是在进程运行过程中输出的，而 inotifywatch 的信息是在进程结束时输出的。</p> 
+ <p style="text-align:left;">　以上测试没有指定监听事件，所以监听的是所有的事件，可以通过 -e 选项来指定监听事件，如：</p> 
+ <pre class="kdocs-cmake"><code class="language-cmake">inotifywait -m -e create,modify,delete /var/inotify-test</code></pre> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:704px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:13.068182%;height:0;"> 
+    <img src="https://images2.imgbox.com/c6/04/ckcQcTpM_o.png" style="margin-left:;display:block;width:704px;margin-top:-13.068182%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <h3 style="text-align:left;"> rsync + inotify 实践 </h3> 
+ <h4 style="text-align:left;">项目环境规划</h4> 
+ <p style="text-align:left;">客户端服务器（运行业务应用，rsync工具包需要安装，但不需要启动服务，需要使用inotify监控事件）；</p> 
+ <p style="text-align:left;">服务端服务器（备份服务器，<span class="kdocs-color" style="background-color:#DFF0C4;"><span class="kdocs-bold" style="font-weight:bold;">rsync安装并启动后台进程服务</span></span>，不需要运行inotify）；</p> 
+ <p style="text-align:left;"></p> 
+ <p style="text-align:left;">部署sync+inotify同步/runtime目录至目标服务器的/ysd/下；</p> 
+ <p style="text-align:left;"><span class="kdocs-color" style="background-color:#DFF0C4;"><span class="kdocs-bold" style="font-weight:bold;">目标服务器rsync配置，也可以使用之前的</span></span>；</p> 
+ <p style=""><span class="kdocs-fontSize" style="font-size:19pt;"><span class="kdocs-color" style="color:#C21C13;"><span class="kdocs-bold" style="font-weight:bold;">【注意！配置所有文件时最好手敲一遍，不然会报莫名其妙的错误！！不要直接粘贴！！！亲测有效！！！！】</span></span></span></p> 
+ <h4 style="text-align:left;">不使用之前的，现配：</h4> 
+ <pre class="kdocs-cmake"><code class="language-cmake">#目标服务器rsync配置
+
+
+vi /etc/rsyncd.conf
+
+log file = /var/log/rsyncd.log # 日志文件位置，启动rsync后自动产生这
+个文件，无需提前创建
+pidfile = /var/run/rsyncd.pid # pid文件的存放位置
+lock file = /var/run/rsync.lock # 支持max connections参数的锁文件
+secrets file = /etc/rsync.pass # 用户认证配置文件，里面保存用户名称和密码，必须手动创建这个文件
+
+[etc_from_client] # 自定义同步名称
+path = /ysd/ # rsync服务端数据存放路径，客户端的数据将同步至此目录
+comment = sync etc from client
+uid = root # 设置rsync运行权限为root
+gid = root # 设置rsync运行权限为root
+port = 873 # 默认端口
+ignore errors # 表示出现错误忽略错误
+use chroot = no # 默认为true，修改为no，增加对目录文件软连接的备份
+read only = no # 设置rsync服务端为读写权限
+list = no # 不显示rsync服务端资源列表
+max connections = 200 # 最大连接数
+timeout = 600 # 设置超时时间
+auth users = admin # 执行数据同步的用户名，可以设置多个，用英文状态下逗号隔开
+hosts allow = 172.16.12.128 # 允许进行数据同步的客户端IP地址，可以设置多个，用英文状态下逗号隔开
+hosts deny = 192.168.1.1 # 禁止数据同步的客户端IP地址，可以设置多个，用英文状态下逗号隔开</code></pre> 
+ <pre class="kdocs-cmake"><code class="language-cmake">//创建用户认证文件
+[root@131 ~]# echo 'admin:123456' &gt; /etc/rsync.pass
+[root@131 ~]# cat /etc/rsync.pass
+admin:123456
+[root@131 ~]# chmod 600 /etc/rsync*</code></pre> 
+ <p style="text-align:left;">在源服务器（客户端）</p> 
+ <pre class="kdocs-cmake"><code class="language-cmake">[root@60 ~]# echo '123456' &gt; /etc/rsync.pass
+[root@60 ~]# chmod 600 /etc/rsync.pass</code></pre> 
+ <p style="text-align:left;"><span class="kdocs-fontSize" style="font-size:13pt;">inotify.sh</span></p> 
+ <pre class="kdocs-bash"><code class="language-bash">#!/bin/bash
+
+host=192.168.42.195 # 目标服务器的ip(备份服务器)
+src=/runtime # 在源服务器上所要监控的备份目录（此处可以自定义，但是要保证存在）
+des=etc_from_client # 自定义的模块名，需要与目标服务器上定义的同步名称一致
+password=/etc/rsync.pass # 执行数据同步的密码文件
+user=admin # 执行数据同步的用户名
+inotifywait=/usr/bin/inotifywait
+$inotifywait -mrq --timefmt '%Y%m%d %H:%M' --format '%T %w%f%e' -e modify,delete,create,attrib $src \
+| while read files;do
+rsync -avzP --delete --timeout=100 --passwordfile=${password} $src $user@$host::$des
+echo "${files} was rsynced" &gt;&gt;/tmp/rsync.log 2&gt;&amp;1
+done
+
+//让其在后台运行，并开机自启
+[root@60 ~]# chmod +x /etc/rc.d/rc.local
+[root@60 ~]# ll /etc/rc.
+rc.d/ rc.local
+[root@60 ~]# ll /etc/rc.d/rc.local
+-rwxr-xr-x. 1 root root 474 3月 24 2020 /etc/rc.d/rc.local
+[root@60 ~]# vim /etc/rc.d/rc.local
+# that this script will be executed during boot.
+nohup /root/inotify.sh &amp;
+touch /var/lock/subsys/local
+########################
+用你的脚本绝对路径替换/root/inotify.sh
+########################
+[root@NAT1 ~]# chmod 755 /root/sh/inotify_rsync.sh
+************************
+一定要给脚本也加上执行权限
+************************
+
+[root@localhost ~]# ps -ef|grep inotify
+root 1077 1 0 20:37 ? 00:00:00 /bin/sh
+/scripts/inotify.sh
+root 1085 1077 0 20:37 ? 00:00:00
+/usr/bin/inotifywait -mrq --timefmt %Y%m%d %H:%M --format %T
+%w%f%e -e modify,delete,create,attrib /runtime
+root 1086 1077 0 20:37 ? 00:00:00 /bin/sh
+/scripts/inotify.sh
+root 6283 3995 0 20:37 pts/0 00:00:00 grep --
+color=auto inotify
+
+</code></pre> 
+ <blockquote class="kdocs-blockquote" style="text-align:left;">
+   inotify的相关参数说明： 
+  <br>-m 监视器 永远监听事件。没有此选项，inotifywait 将在一个后退出事件已接收。 
+  <br> -r 递归监视目录递归。 
+  <br> -q 安静 少打印（仅打印事件）。 
+  <br> 
+ </blockquote> 
+ <h4 style="text-align:left;"><span class="kdocs-color" style="background-color:#DFF0C4;"><span class="kdocs-bold" style="font-weight:bold;">这里我使用之前的配置</span></span></h4> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:704px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:86.36364%;height:0;"> 
+    <img src="https://images2.imgbox.com/9d/52/snl5S1dY_o.png" style="margin-left:;display:block;width:704px;margin-top:-86.36364%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:left;"><span class="kdocs-bold" style="font-weight:bold;">部署rsync+inotify同步/root/full目录至目标服务器的/backup/下；</span></p> 
+ <pre class="kdocs-bash"><code class="language-bash">#!/bin/bash
+
+host=192.168.198.140
+src=/root/full
+dest=backup
+password=/etc/rsync.password
+user=rsync_backup
+inotifywait=/usr/bin/inotifywait
+
+$inotifywait -mrq --timefmt '%Y%m%d %H:%M' --format '%T %w%f%e' -e 'modify,delete,create,attrib' $src |while read files;do rsync -avzP --delete --timeout=100 --password-file=${password} $src $user@$host::$dest;echo "${files} was rsynced!" &gt;&gt; /tmp/rsync.log 2&gt;&amp;1;done
+</code></pre> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:882px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:26.757368%;height:0;"> 
+    <img src="https://images2.imgbox.com/b9/2d/EVEtOBjn_o.png" style="margin-left:;display:block;width:882px;margin-top:-26.757368%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:left;"><span class="kdocs-fontSize" style="font-size:19pt;"><span class="kdocs-color" style="color:#C21C13;"><span class="kdocs-bold" style="font-weight:bold;">【注意】下图所示高亮部分必须相同；</span></span></span></p> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:846px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:79.31442%;height:0;"> 
+    <img src="https://images2.imgbox.com/31/c0/p35m2RVE_o.png" style="margin-left:;display:block;width:846px;margin-top:-79.31442%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:1176px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:27.806124%;height:0;"> 
+    <img src="https://images2.imgbox.com/ce/63/rgkyxd9D_o.png" style="margin-left:;display:block;width:1176px;margin-top:-27.806124%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <hr> 
+ <p style="text-align:left;">举例：</p> 
+ <p style="text-align:left;">①首先在客户端上运行上面运行的shell脚本，使它进入监控状态：</p> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:868px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:27.995392%;height:0;"> 
+    <img src="https://images2.imgbox.com/bd/c3/2V6JD5BG_o.png" style="margin-left:;display:block;width:868px;margin-top:-27.995392%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:left;">②重开一个客户端创建一个文件（为什么要重开一个客户端？因为客户端在进入到监听状态时就不能在进行操作了）</p> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:666px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:24.474476%;height:0;"> 
+    <img src="https://images2.imgbox.com/c8/8c/ohweId8R_o.png" style="margin-left:;display:block;width:666px;margin-top:-24.474476%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:left;">③执行脚本的客户端变成了蓝色，说明运行成功了，监听到了；我们点开查看一下；如图所示显示了有一个新文件1.txt</p> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:870px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:42.18391%;height:0;"> 
+    <img src="https://images2.imgbox.com/e4/53/0iLXfAwT_o.png" style="margin-left:;display:block;width:870px;margin-top:-42.18391%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:left;">④我们到实时同步目录/backup下查看；有一个full目录，列出目录看到下面有一个1.txt文件</p> 
+ <p style="text-align:left;"> 我们当时对客户端下/root/full目录进行了实时同步，同步到了服务端192.168.198.140上的/backup 目录下</p> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:862px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:27.4942%;height:0;"> 
+    <img src="https://images2.imgbox.com/b6/75/eyudiyj4_o.png" style="margin-left:;display:block;width:862px;margin-top:-27.4942%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:left;">⑤查案客户端下的日志</p> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:849px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:85.15901%;height:0;"> 
+    <img src="https://images2.imgbox.com/45/53/zshcEXex_o.png" style="margin-left:;display:block;width:849px;margin-top:-85.15901%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <h4 style="text-align:left;">⑥实现开机自启</h4> 
+ <p style="">1）给客户端/etc/rc.d/rc.local文件执行权限x</p> 
+ <pre class="kdocs-cpp"><code class="language-cpp">[root@60 ~]# chmod +x /etc/rc.d/rc.local</code></pre> 
+ <p style="">2）在客户端/etc/rc.d/rc.local文件添加脚本信息</p> 
+ <pre class="kdocs-cpp"><code class="language-cpp">[root@60 ~]# vim /etc/rc.d/rc.local</code></pre> 
+ <pre class="kdocs-bash"><code class="language-bash">#!/bin/bash
+# THIS FILE IS ADDED FOR COMPATIBILITY PURPOSES
+#
+# It is highly advisable to create own systemd services or udev rules
+# to run scripts during boot instead of using this file.
+#
+# In contrast to previous versions due to parallel execution during boot
+# this script will NOT be run after all other services.
+#
+# Please note that you must run 'chmod +x /etc/rc.d/rc.local' to ensure
+# that this script will be executed during boot.
+
+nohup /root/sh/inotify_rsync.sh &amp;
+touch /var/lock/subsys/local</code></pre> 
+ <p style="">########################</p> 
+ <p style="">用你的脚本绝对路径替换 /root/sh/inotify_rsync.sh</p> 
+ <p style="">########################</p> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:994px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:50.603622%;height:0;"> 
+    <img src="https://images2.imgbox.com/5d/f5/RCAS9KZq_o.png" style="margin-left:;display:block;width:994px;margin-top:-50.603622%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="">3）给客户端上的脚本也加上执行权限x</p> 
+ <pre class="kdocs-cpp"><code class="language-cpp">[root@NAT1 ~]# chmod 755 /root/sh/inotify_rsync.sh</code></pre> 
+ <p style="">4）查看是否为可执行文件</p> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:793px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:13.871375%;height:0;"> 
+    <img src="https://images2.imgbox.com/8d/da/hCd0mZSd_o.png" style="margin-left:;display:block;width:793px;margin-top:-13.871375%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="">5）重启客户端</p> 
+ <p style="">6）如果你之前在服务端<span class="kdocs-bold" style="font-weight:bold;">基于rsync-daemon认证</span>认证了rsync就使用下面的命令开启守护模式;</p> 
+ <p style=""> (如果没有认证可以参考我的博客：<a class="kdocs-link" style="color:#0A6CFF;" href="https://blog.csdn.net/weixin_65690979/article/details/128975375?spm=1001.2014.3001.5501" target="_blank" rel="noopener noreferrer">【Linux】Rsync基于rsync-daemon认证的使用（rsync服务端与客户端发配置、排错思路、使用示例、优缺点及使用场景）_滨河四季的博客-CSDN博客</a>)</p> 
+ <pre class="kdocs-cpp"><code class="language-cpp">[root@NAT-139 ~]# rsync --deamon</code></pre> 
+ <p style="">7）查看rsync是否开启守护模式，如下图所示则已经开启；</p> 
+ <pre class="kdocs-cpp"><code class="language-cpp">[root@NAT-139 ~]# ps -ef |grep rsync</code></pre> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:1110px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:5.4054055%;height:0;"> 
+    <img src="https://images2.imgbox.com/c8/e7/1yot1x38_o.png" style="margin-left:;display:block;width:1110px;margin-top:-5.4054055%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="">8）关闭服务端上的防火墙；避免客户端连接不上；</p> 
+ <pre class="kdocs-cpp"><code class="language-cpp">[root@NAT-139 ~]# iptables -F
+[root@NAT-139 ~]# systemctl stop firewalld
+[root@NAT-139 ~]# setenforce 0
+</code></pre> 
+ <p style="">9）在客户端实时同步目录下创建新文件；</p> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:859px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:15.599535%;height:0;"> 
+    <img src="https://images2.imgbox.com/6f/a8/qWh1KdS8_o.png" style="margin-left:;display:block;width:859px;margin-top:-15.599535%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="">10）查看服务端背负目录，可以看到它是有了一个文件1.txt</p> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:867px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:30.449825%;height:0;"> 
+    <img src="https://images2.imgbox.com/23/f8/8jcOsl3r_o.png" style="margin-left:;display:block;width:867px;margin-top:-30.449825%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style=""></p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/970144a8aa4f09aff269cc5eb8a9e19f/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">信噪比的概念</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/b4d357cf9134ef672ce37d530c4c5434/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">20个 Git 命令玩转版本控制</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

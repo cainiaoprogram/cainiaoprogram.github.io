@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【TDA4系列】硬件分析与刷写程序的几种方式 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【TDA4系列】硬件分析与刷写程序的几种方式" />
+<meta property="og:description" content="TDA4 硬件分析 TDA4是AMP架构，AMP即非对称多处理器结构，简单理解为将好几种处理器集成在一块硅片上，并且不同的核运行不同的操作系统。TDA4一共有6个Cortex-R5F核，2个Cortex-A72核，2个C66核，1个C71核。如果把所有核都利用起来，需要写：
+处于2个A72的Linux或者QNX的1份程序（其中openvx可以调用其他其他核的资源，OpenGL可以调用gpu的资源，2个A72是SMP架构，这里不做展开）处于6个R5F核的5份程序（mcu1_0核mcu1_1互为lockstep核），处于2个C66的2份程序，处于1个C71的1份程序。 一共10份不同的程序，不同的程序为了完成同样目标，程序之间的数据交互就非常重要了。
+一个核间通信的关注点：TDA4的所有核不管在硬件上还是软件上，在内存上都是互联互通的。A72核把需要传输数据放在指定地址上，mcu1_0到指定的地址上取出数据，便完成了核间的数据交互，逻辑上非常简单，而且数据传输的时候甚至都没有经过拷贝。实现共享内存首先得找到一块合适的内存用来交互数据，因为TDA4为了提高效率，大部分内存做了缓存（cacheable），如果做了缓存，因为内存的访问速度远远比cpu的高速缓存低，修改了变量的值后，并不会马上写入到内存上，而是先写入本地cpu的高速缓存中。“因为cpu架构不同，R5F是32位处理器，A72是64位处理器，因此注意结构体中不要有类似指针这样在不同架构中长度不同的成员。”
+参考链接：https://blog.csdn.net/lyp90h/article/details/121231514
+刷写程序 官方写了详细的教程：https://www.ti.com.cn/cn/lit/an/spracy5/spracy5.pdf?ts=1633654253207&amp;ref_url=https%253A%252F%252Fwww.ti.com.cn%252Fproduct%252Fcn%252FTDA4VM-Q1
+我总结一下
+1 Flash Devices on TDA4 TDA4 板上使用的 OSPI 和 eMMC 闪存。图 2-1 描述了 SDK 中 flash 的默认布局
+刷写 OSPI flash / eMMC boot partitions 补充一个知识点：
+一个嵌入式 Linux 系统从软件的角度，通常可以分为四个层次。
+（1） 引导加载程序。包括固化在固件(firmware)中的 boot 代码(可选)，和 BootLoader
+两大部分。
+（2） Linux 内核。特定于目标板的定制内核以及内核的启动参数。
+（3） 文件系统。包括根文件系统和建立于 Flash 内存设备之上的文件系统。
+（4） 用户应用程序。特定于用户的应用程序。有时在用户应用程序和内核层之间可能还
+会包括一个嵌入式图形用户界面。
+最为熟知的分区方式同时也是最主流的主要有两种：MBR（Master Boot Record）和GPT（GUID PartitionTable）。前者应用于绝大多数使用BIOS引导的PC设备（苹果使用EFI的方式），而后者主要是针对MBR的一些缺点进行了改进同时还可以兼容MBR并且支持2TB以上的存储（MBR不支持2TB以上的存储设备）。
+Android 4.0版本以后就是使用的GPT分区方式。注意，不管是MBR还是GPT，他们的分区都是指“逻辑上”的！！！即通过软件实现的，文件系统级别的。而我现在要说明的是eMMC本身自己的分区，即物理上的，不是通过软件就能实现的分区。
+EMMC的分区有一些是AP不能修改的（如BOOT1、BOOT2和RPMB分区），有一些是可以通过特定的命令和寄存器就可以修改的（如Enhanced Partition和GPAP）。
+EMMC的UDA 分区（User Data Area）就是AP及用户可以进行读写存储的区域，通常其大小为整块EMMC表示大小的93%左右，即4GB的eMMC UDA的区域只有4GB*93%=3809MB。
+Flashing eMMC User Partition 刷写 eMMC 用户分区中的文件系统" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/fd4276bb60436722f2817a27345b2061/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-11-29T09:27:06+08:00" />
+<meta property="article:modified_time" content="2021-11-29T09:27:06+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【TDA4系列】硬件分析与刷写程序的几种方式</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night-eighties">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="TDA4__0"></a>TDA4 硬件分析</h2> 
+<p>TDA4是AMP架构，AMP即非对称多处理器结构，简单理解为将好几种处理器集成在一块硅片上，并且不同的核运行不同的操作系统。TDA4一共有6个Cortex-R5F核，2个Cortex-A72核，2个C66核，1个C71核。如果把所有核都利用起来，需要写：</p> 
+<ul><li>处于2个A72的Linux或者QNX的1份程序（其中openvx可以调用其他其他核的资源，OpenGL可以调用gpu的资源，2个A72是SMP架构，这里不做展开）</li><li>处于6个R5F核的5份程序（mcu1_0核mcu1_1互为lockstep核），</li><li>处于2个C66的2份程序，</li><li>处于1个C71的1份程序。</li></ul> 
+<p>一共10份不同的程序，不同的程序为了完成同样目标，程序之间的数据交互就非常重要了。</p> 
+<p>一个核间通信的关注点：TDA4的所有核不管在硬件上还是软件上，在内存上都是互联互通的。A72核把需要传输数据放在指定地址上，mcu1_0到指定的地址上取出数据，便完成了核间的数据交互，逻辑上非常简单，而且数据传输的时候甚至都没有经过拷贝。实现共享内存首先得找到一块合适的内存用来交互数据，因为TDA4为了提高效率，大部分内存做了缓存（cacheable），如果做了缓存，因为内存的访问速度远远比cpu的高速缓存低，修改了变量的值后，并不会马上写入到内存上，而是先写入本地cpu的高速缓存中。“因为cpu架构不同，R5F是32位处理器，A72是64位处理器，因此注意结构体中不要有类似指针这样在不同架构中长度不同的成员。”</p> 
+<p>参考链接：https://blog.csdn.net/lyp90h/article/details/121231514</p> 
+<h2><a id="_16"></a>刷写程序</h2> 
+<p>官方写了详细的教程：https://www.ti.com.cn/cn/lit/an/spracy5/spracy5.pdf?ts=1633654253207&amp;ref_url=https%253A%252F%252Fwww.ti.com.cn%252Fproduct%252Fcn%252FTDA4VM-Q1</p> 
+<p>我总结一下</p> 
+<h3><a id="1_Flash_Devices_on_TDA4_23"></a>1 Flash Devices on TDA4</h3> 
+<p>TDA4 板上使用的 OSPI 和 eMMC 闪存。图 2-1 描述了 SDK 中 flash 的默认布局</p> 
+<p><img src="https://images2.imgbox.com/e5/8c/6otrhFnf_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="_OSPI_flash__eMMC_boot_partitions_29"></a>刷写 OSPI flash / eMMC boot partitions</h2> 
+<p>补充一个知识点：<br> 一个嵌入式 Linux 系统从软件的角度，通常可以分为四个层次。<br> （1） 引导加载程序。包括固化在固件(firmware)中的 boot 代码(可选)，和 BootLoader<br> 两大部分。<br> （2） Linux 内核。特定于目标板的定制内核以及内核的启动参数。<br> （3） 文件系统。包括根文件系统和建立于 Flash 内存设备之上的文件系统。<br> （4） 用户应用程序。特定于用户的应用程序。有时在用户应用程序和内核层之间可能还<br> 会包括一个嵌入式图形用户界面。</p> 
+<p>最为熟知的分区方式同时也是最主流的主要有两种：MBR（Master Boot Record）和GPT（GUID PartitionTable）。前者应用于绝大多数使用BIOS引导的PC设备（苹果使用EFI的方式），而后者主要是针对MBR的一些缺点进行了改进同时还可以兼容MBR并且支持2TB以上的存储（MBR不支持2TB以上的存储设备）。</p> 
+<p>Android 4.0版本以后就是使用的GPT分区方式。注意，不管是MBR还是GPT，他们的分区都是指“逻辑上”的！！！即通过软件实现的，文件系统级别的。而我现在要说明的是eMMC本身自己的分区，即物理上的，不是通过软件就能实现的分区。</p> 
+<p>EMMC的分区有一些是AP不能修改的（如BOOT1、BOOT2和RPMB分区），有一些是可以通过特定的命令和寄存器就可以修改的（如Enhanced Partition和GPAP）。<br> EMMC的UDA 分区（User Data Area）就是AP及用户可以进行读写存储的区域，通常其大小为整块EMMC表示大小的93%左右，即4GB的eMMC UDA的区域只有4GB*93%=3809MB。</p> 
+<p><img src="https://images2.imgbox.com/c4/ee/W6GyvcBQ_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="Flashing_eMMC_User_Partition_49"></a>Flashing eMMC User Partition</h2> 
+<p>刷写 eMMC 用户分区中的文件系统</p> 
+<p><img src="https://images2.imgbox.com/4f/79/eTtFrynz_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="2_OSPI__eMMC__57"></a>2 可选工具进行OSPI 和 eMMC 闪存刷写</h3> 
+<ul><li>Lauterbach（需要JTAG 接口）</li><li>CCS-Based Flash Writer（需要JTAG 接口）</li><li>UNIFLASH（需要UART接口）</li><li>dfu-util（需要USB）</li><li>U-boot（可以UART, MMCSD,Ethernet, DFU boot，JTAG）</li></ul> 
+<h3><a id="_65"></a>补充一下硬件启动开关（不是很重要）</h3> 
+<p><img src="https://images2.imgbox.com/a3/fb/UTRuDELr_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="UARTboot_68"></a>UART-boot</h4> 
+<p>UART-boot是 TDA4VM 上支持的外设启动模式之一。 当 SD 接口等主要启动媒体不可用时，它非常有用。</p> 
+<p>ROM 支持通过 X-Modem 协议从 MCU_UART0 启动。</p> 
+<p>整个基于 UART 的启动 U-Boot，经历不同的阶段并使用不同的UART外设如下</p> 
+<p><img src="https://images2.imgbox.com/b7/7c/Kkh48BVC_o.png" alt="在这里插入图片描述"></p> 
+<p>这个细节有个ppt：https://e2e.ti.com/cfs-file/__key/communityserver-discussions-components-files/791/TDA4VM_2D00_UART_2D00_Boot_2D00_faq.pdf</p> 
+<h4><a id="DFUBoot_79"></a>DFU-Boot</h4> 
+<p>DFU-Boot 可用于将映像传输到 TDA4 板以引导至 u-boot</p> 
+<p>1.将启动模式改为DFU启动模式并开机。<br> 2. 在 HOST PC 上，运行以下命令</p> 
+<pre><code>HOST $ sudo dfu-util -l
+HOST $ sudo dfu-util -R -a bootloader -D &lt;PATH_TO_BIN&gt;/tiboot3.bin
+HOST $ sudo dfu-util -R -a sysfw.itb -D &lt;PATH_TO_BIN&gt;/sysfw.itb
+HOST $ sudo dfu-util -R -a tispl.bin -D &lt;PATH_TO_BIN&gt;/tispl.bin
+HOST $ sudo dfu-util -R -a u-boot.img -D &lt;PATH_TO_BIN&gt;/u-boot.img
+ 
+# At this point, the u-boot will start executing. Halt at the u-boot prompt (u-boot logs will 
+appear on the MAIN UART 1st instance)
+</code></pre> 
+<p>3 这时候你就u-boot了，你可以按任意键停止</p> 
+<h3><a id="SD_Boot_or_any_Other_Boot_Mode_97"></a>SD Boot or any Other Boot Mode</h3> 
+<p>如果板上有 SD 引导或任何其他引导模式功能，只需使用它来引导直到 u-boot，然后您就可以使用所有 u-boot 实用程序</p> 
+<h3><a id="Boot0eMMC_100"></a>配置Boot0分区和分区eMMC</h3> 
+<p>需要进行一次性配置以允许 ROM 访问 eMMC 的 boot0 分区</p> 
+<pre><code># Run the below from u-boot prompt
+# Write partition table to eMMC
+setenv mmcdev 0
+gpt write mmc 0 ${partitions}
+ 
+#one time only per board, to give ROM access to the boot partition, the following commands must be 
+used for the first time
+mmc partconf 0 1 1 1
+mmc bootbus 0 2 0 0
+</code></pre> 
+<h2><a id="OSPI_116"></a>刷写OSPI</h2> 
+<p>https://blog.csdn.net/Allen_Spring/article/details/120652422</p> 
+<p><img src="https://images2.imgbox.com/89/58/ER0hSTCn_o.png" alt="在这里插入图片描述"></p> 
+<p>Linux Boot Binaries</p> 
+<pre><code># Flash R5 SPL
+/home/karan/sdk7_3/board-support/prebuiltimages/tiboot3.bin -d 3 -o 0
+# Flash A72 SPL
+ /home/karan/sdk7_3/board-support/prebuiltimages/tispl.bin -d 3 -o 80000
+# Flash u-boot
+/home/karan/sdk7_3/board-support/prebuiltimages/u-boot.img -d 3 -o 280000
+# Flash sysfw.itb
+ /home/karan/sdk7_3/board-support/prebuiltimages/sysfw.itb -d 3 -o 6C0000
+# Flash phy training data
+/home/karan/sdk7_3/ti-processor-sdk-rtos-j721e-evm-07_03_00_07/pdk_jacinto_07_03_00_29/
+packages/ti/board/src/flash/nor/ospi/nor_spi_patterns.bin -d 3 -o 3FE0000
+
+</code></pre> 
+<p><img src="https://images2.imgbox.com/dc/dc/bMfk0ok3_o.png" alt="在这里插入图片描述"></p> 
+<p>RTOS Boot Binaries</p> 
+<pre><code># Flash R5 SPL
+/home/karan/sdk7_3/board-support/prebuiltimages/tiboot3.bin -d 3 -o 0
+# Flash A72 SPL
+/home/karan/sdk7_3/board-support/prebuiltimages/tispl.bin -d 3 -o 80000
+# Flash u-boot
+/home/karan/sdk7_3/board-support/prebuiltimages/u-boot.img -d 3 -o 280000
+# Flash sysfw.itb
+/home/karan/sdk7_3/board-support/prebuiltimages/sysfw.itb -d 3 -o 6C0000
+# Flash phy training data(增强spi数据读取性能)
+/home/karan/sdk7_3/ti-processor-sdk-rtos-j721e-evm-07_03_00_07/pdk_jacinto_07_03_00_29/
+packages/ti/board/src/flash/nor/ospi/nor_spi_patterns.bin -d 3 -o 3FE0000
+</code></pre> 
+<h4><a id="tips_boot_158"></a>tips 分析下几个boot文件的调用顺序</h4> 
+<p><img src="https://images2.imgbox.com/ac/9f/HzVpwKIq_o.png" alt="在这里插入图片描述"><br> https://software-dl.ti.com/jacinto7/esd/processor-sdk-linux-jacinto7/latest/exports/docs/linux/Foundational_Components/U-Boot/UG-General-Info.html</p> 
+<p>在基于 K3 架构的设备上，ROM 仅支持通过 MCU(R5) 启动。 这意味着引导加载程序必须在 R5 内核上运行。 为了满足这个约束，保证安全并有更快的启动时间，软件启动架构设计如下：</p> 
+<pre><code>+------------------------------------------------------------------------+
+|        DMSC            |         R5            |        ARM64          |
++------------------------------------------------------------------------+
+|    +--------+          |                       |                       |
+|    |  Reset |          |                       |                       |
+|    +--------+          |                       |                       |
+|         :              |                       |                       |
+|    +--------+          |   +-----------+       |                       |
+|    | *ROM*  |----------|--&gt;| Reset rls |       |                       |
+|    +--------+          |   +-----------+       |                       |
+|    |        |          |         :             |                       |
+|    |  ROM   |          |         :             |                       |
+|    |services|          |         :             |                       |
+|    |        |          |   +-------------+     |                       |
+|    |        |          |   |  *R5 ROM*   |     |                       |
+|    |        |          |   +-------------+     |                       |
+|    |        |&lt;---------|---|Load and auth|     |                       |
+|    |        |          |   | tiboot3.bin |     |                       |
+|    |        |          |   +-------------+     |                       |
+|    |        |          |         :             |                       |
+|    |        |          |         :             |                       |
+|    |        |          |         :             |                       |
+|    |        |          |   +-------------+     |                       |
+|    |        |          |   |  *R5 SPL*   |     |                       |
+|    |        |          |   +-------------+     |                       |
+|    |        |          |   |    Load     |     |                       |
+|    |        |          |   |  sysfw.itb  |     |                       |
+|    | Start  |          |   +-------------+     |                       |
+|    | System |&lt;---------|---|    Start    |     |                       |
+|    |Firmware|          |   |    SYSFW    |     |                       |
+|    +--------+          |   +-------------+     |                       |
+|        :               |   |             |     |                       |
+|    +---------+         |   |   Load      |     |                       |
+|    | *SYSFW* |         |   |   system    |     |                       |
+|    +---------+         |   | Config data |     |                       |
+|    |         |&lt;--------|---|             |     |                       |
+|    |         |         |   +-------------+     |                       |
+|    |         |         |   |             |     |                       |
+|    |         |         |   |    DDR      |     |                       |
+|    |         |         |   |   config    |     |                       |
+|    |         |         |   +-------------+     |                       |
+|    |         |         |   |             |     |                       |
+|    |         |&lt;--------|---| Start A53   |     |                       |
+|    |         |         |   |  and Reset  |     |                       |
+|    |         |         |   +-------------+     |                       |
+|    |         |         |                       |     +-----------+     |
+|    |         |---------|-----------------------|----&gt;| Reset rls |     |
+|    |         |         |                       |     +-----------+     |
+|    |  DMSC   |         |                       |          :            |
+|    |Services |         |                       |     +-----------+     |
+|    |         |&lt;--------|-----------------------|----&gt;|*ATF/OPTEE*|     |
+|    |         |         |                       |     +-----------+     |
+|    |         |         |                       |          :            |
+|    |         |         |                       |     +-----------+     |
+|    |         |&lt;--------|-----------------------|----&gt;| *A53 SPL* |     |
+|    |         |         |                       |     +-----------+     |
+|    |         |         |                       |     |   Load    |     |
+|    |         |         |                       |     | u-boot.img|     |
+|    |         |         |                       |     +-----------+     |
+|    |         |         |                       |          :            |
+|    |         |         |                       |     +-----------+     |
+|    |         |&lt;--------|-----------------------|----&gt;| *U-Boot*  |     |
+|    |         |         |                       |     +-----------+     |
+|    |         |         |                       |     |  prompt   |     |
+|    |         |         |                       |     +-----------+     |
+|    +---------+         |                       |                       |
+|                        |                       |                       |
++------------------------------------------------------------------------+
+</code></pre> 
+<h2><a id="_emmc_RAW_238"></a>刷写 emmc RAW</h2> 
+<pre><code>/home/karan/sdk7_3/board-support/prebuiltimages/tiboot3.bin -d 4 -o 0
+/home/karan/sdk7_3/board-support/prebuiltimages/tispl.bin -d 4 -o 80000
+/home/karan/sdk7_3/board-support/prebuiltimages/u-boot.img -d 4 -o 280000
+/home/karan/sdk7_3/board-support/prebuiltimages/sysfw.itb -d 4 -o 6C0000
+</code></pre> 
+<h2><a id="eMMC_UDA_Partition_Flashing_With_tinyrootfs_248"></a>刷写eMMC UDA Partition Flashing With tinyrootfs</h2> 
+<p>1、在u-boot等待<br> 2、连接 CCS，使用 XDS110/XDS560v2 ，并使用适当的目标 ccxml（不包括 GEL 文件）<br> 3、将tisdk-tiny-image.img加载到DDR地址0x80080000。 ext4文件</p> 
+<pre><code>a. 启动目标 ccxml ，并连接到 CortexA72_0_0。
+b. 打开内存浏览器并加载内存：查看 -&gt; 内存浏览器 -&gt; 加载内存。
+c. 选择文件tisdk-tiny-image.img，文件类型选择二进制，点击下一步。
+d. 设置起始地址为0x80080000，点击完成。
+e. 根据所使用的 JTAG，加载它所花费的时间会有所不同。 预计 XDS110 为 1 小时，XDS560v2 为 20 分钟。
+</code></pre> 
+<p>4、像加载到 RAM 中，使用 u-boot 刷入。</p> 
+<p>u-boot + CCS/JTAG</p> 
+<pre><code># Run the below command from u-boot prompt
+=&gt; part start mmc 0 rootfs
+ 
+# what ever the above command outputs, use that below (eg - 0x22)
+=&gt; mmc write 0x80080000 0x22 0x32000
+# after the above completes
+=&gt; boot
+
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/07ced2a6bc2b25bdd047fa5c1cff49c4/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">深度强化学习(DRL)基础</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/6ed2fd85f67a9972e06ce5651bdb6c80/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">第五章实程教训作业</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

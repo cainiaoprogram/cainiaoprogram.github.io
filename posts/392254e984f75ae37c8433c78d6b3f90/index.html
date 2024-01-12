@@ -1,0 +1,809 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Trino: 基于时间片的Split数据处理模型 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Trino: 基于时间片的Split数据处理模型" />
+<meta property="og:description" content="两种线程调度模型 其它一些主流的分布式计算引擎，如StarRocks，实现的数据处理模型也是基于时间片。
+基于任务 JAVA库的线程池中的调度&amp;执行模型就是典型地、基于任务的。
+一般地，通过实现Runnable接口，我们可以定义一个任务的执行逻辑，然后通过ExecutorService::submit(FutureTask)方法提交执行，一旦Runnable::run()方法执行结束，也就意味着与之绑定的线程的结束。
+沿用Trino中的Split概念，在此模型下，run()方法负责处理一个完整的Split，才会返回处理结果，然后线程由执行态进入就绪态，等待新的任务。
+一个简单的任务调度模型（So easy, but out of control）样例代码如下：
+ExecutorService executor = Executors.newFixedThreadPool(1); CompletableFuture&lt;Void&gt; future = CompletableFuture.runAsync(() -&gt; processing(split)), executor); future.join(); 优点：设计实现简单。
+缺点：线程执行时间无法预估，例如执行过程中的某个操作被阻塞，则整个线程阻塞；线程中断逻辑复杂，想要实现中止线程的功能，需要考虑许多情况，并且中断时间延迟无法估计；线程状态的切换开销不可忽略。
+基于时间片 类似操作系统中的CPU时间片的调度和执行模型。
+沿用Trino中的Split概念，在此模型下，run()方法可以负责处理一个完整的Split，并且为这个线程分配一个时间片，例如1s，则如果1秒后这个Split没有处理完，当前线程就主动挂起这个Split，转而处理另外一个优先级更高的Split，而不会切换自己的状态为就绪态或阻塞态；同样地，如果在处理Split的过程中的某个操作被阻塞，则这个线程可以及时地挂起Split，转而去处理其它的Split。
+优点：没有线程状态的切换开销；能够充分利用CPU资源，避免阻塞或等待；能够更好地基于权重处理Split；
+缺点：实现复杂，不仅需要考虑如何释放任务，还需要考虑如何恢复任务。
+Trino基于时间片的线程执行模型 相关概念 Split 由Coordinator调度分发给Worker执行，是对要读取的数据的描述
+Page 是对Split的更细粒度的切分，是数据处理的最小单元，是Operator一次处理的数据集合。
+Operator 作用于Split之上的执行单元，可以认为就是一个方法，对Page处理后产生一个新的Page。
+Driver 绑定唯一一个Split及一组Operators，负责Split的数据上能够正确地流经Operators。
+DriverSplitRunner Worker结点上执行Split的实体，它封装了Driver和Split。
+PriorityDriverSplitRunner Worker结点上调度Split时的调度对象，它封装了DriverSplitRunner实例，同时带有权重指标。
+Split调度&amp;执行流程图 Coordinator ---分发---&gt; Split ---&gt; Worker Worker ---接收---&gt; Split ---&gt; DiverSplitRunner ---&gt; PriorityDriverSplitRunner ---&gt; WaitingQueue TaskExecutor ---调度---&gt; WaitingQueue ---&gt; PriorityDriverSplitRunner PriorityDriverSplitRunner ---运行---&gt; Driver Driver ---处理---&gt; Operators ---&gt; Page ---&gt; BlockedFuture BlockedFuture ---阻塞---&gt; BlockingQueue BlockedFuture ---不阻---&gt; 时间片结束 ---&gt; WaitingQueue PriorityDriverSplitRunner ---完成---&gt; Driver ---完成---&gt; Operator ---完成---&gt; Worker创建工作线程池 Worker结点启动时，会通过Google Inject库，初始化工作线程池，这个线程池就是处理Split的。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/392254e984f75ae37c8433c78d6b3f90/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-05T20:05:13+08:00" />
+<meta property="article:modified_time" content="2024-01-05T20:05:13+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Trino: 基于时间片的Split数据处理模型</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="_0"></a>两种线程调度模型</h2> 
+<blockquote> 
+ <p>其它一些主流的分布式计算引擎，如StarRocks，实现的数据处理模型也是基于时间片。</p> 
+</blockquote> 
+<h3><a id="_2"></a>基于任务</h3> 
+<p>JAVA库的线程池中的调度&amp;执行模型就是典型地、基于任务的。</p> 
+<p>一般地，通过实现<code>Runnable</code>接口，我们可以定义一个任务的执行逻辑，然后通过<code>ExecutorService::submit(FutureTask)</code>方法提交执行，一旦<code>Runnable::run()</code>方法执行结束，也就意味着与之绑定的线程的结束。</p> 
+<p>沿用Trino中的Split概念，在此模型下，<code>run()</code>方法负责处理一个完整的Split，才会返回处理结果，然后线程由<code>执行态</code>进入<code>就绪态</code>，等待新的任务。</p> 
+<p>一个简单的任务调度模型（So easy, but out of control）样例代码如下：</p> 
+<pre><code class="prism language-java"><span class="token class-name">ExecutorService</span> executor <span class="token operator">=</span> <span class="token class-name">Executors</span><span class="token punctuation">.</span><span class="token function">newFixedThreadPool</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token class-name">CompletableFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span></span> future <span class="token operator">=</span> <span class="token class-name">CompletableFuture</span><span class="token punctuation">.</span><span class="token function">runAsync</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-&gt;</span> <span class="token function">processing</span><span class="token punctuation">(</span>split<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span> executor<span class="token punctuation">)</span><span class="token punctuation">;</span>
+future<span class="token punctuation">.</span><span class="token function">join</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><strong>优点</strong>：设计实现简单。<br> <strong>缺点</strong>：线程执行时间无法预估，例如执行过程中的某个操作被阻塞，则整个<code>线程阻塞</code>；线程中断逻辑复杂，想要实现中止线程的功能，需要考虑许多情况，并且中断时间延迟无法估计；线程状态的切换开销不可忽略。</p> 
+<h3><a id="_18"></a>基于时间片</h3> 
+<p>类似操作系统中的CPU时间片的调度和执行模型。</p> 
+<p>沿用Trino中的Split概念，在此模型下，<code>run()</code>方法可以负责处理一个完整的Split，并且为这个线程分配一个时间片，例如1s，则如果1秒后这个Split没有处理完，当前线程就主动挂起这个Split，转而处理另外一个优先级更高的Split，而<code>不会切换自己的状态为就绪态或阻塞态</code>；同样地，如果在处理Split的过程中的某个操作被阻塞，则这个线程可以及时地挂起Split，转而去处理其它的Split。</p> 
+<p><strong>优点</strong>：没有线程状态的切换开销；能够充分利用CPU资源，避免阻塞或等待；能够更好地基于权重处理Split；<br> <strong>缺点</strong>：实现复杂，不仅需要考虑如何释放任务，还需要考虑如何恢复任务。</p> 
+<h2><a id="Trino_25"></a>Trino基于时间片的线程执行模型</h2> 
+<h3><a id="_26"></a>相关概念</h3> 
+<h4><a id="Split_27"></a>Split</h4> 
+<blockquote> 
+ <p>由Coordinator调度分发给Worker执行，是对要读取的数据的描述</p> 
+</blockquote> 
+<h4><a id="Page_29"></a>Page</h4> 
+<blockquote> 
+ <p>是对Split的更细粒度的切分，是数据处理的最小单元，是Operator一次处理的数据集合。</p> 
+</blockquote> 
+<h4><a id="Operator_31"></a>Operator</h4> 
+<blockquote> 
+ <p>作用于Split之上的执行单元，可以认为就是一个方法，对Page处理后产生一个新的Page。</p> 
+</blockquote> 
+<h4><a id="Driver_33"></a>Driver</h4> 
+<blockquote> 
+ <p>绑定唯一一个Split及一组Operators，负责Split的数据上能够正确地流经Operators。</p> 
+</blockquote> 
+<h4><a id="DriverSplitRunner_35"></a>DriverSplitRunner</h4> 
+<blockquote> 
+ <p>Worker结点上执行Split的实体，它封装了Driver和Split。</p> 
+</blockquote> 
+<h4><a id="PriorityDriverSplitRunner_37"></a>PriorityDriverSplitRunner</h4> 
+<blockquote> 
+ <p>Worker结点上调度Split时的调度对象，它封装了DriverSplitRunner实例，同时带有权重指标。</p> 
+</blockquote> 
+<h3><a id="Split_40"></a>Split调度&amp;执行流程图</h3> 
+<pre><code class="prism language-shell">Coordinator               ---分发---<span class="token operator">&gt;</span> Split ---<span class="token operator">&gt;</span> Worker
+Worker                    ---接收---<span class="token operator">&gt;</span> Split ---<span class="token operator">&gt;</span> DiverSplitRunner ---<span class="token operator">&gt;</span> PriorityDriverSplitRunner ---<span class="token operator">&gt;</span> WaitingQueue
+TaskExecutor              ---调度---<span class="token operator">&gt;</span> WaitingQueue ---<span class="token operator">&gt;</span> PriorityDriverSplitRunner
+PriorityDriverSplitRunner ---运行---<span class="token operator">&gt;</span> Driver
+    Driver                ---处理---<span class="token operator">&gt;</span> Operators ---<span class="token operator">&gt;</span> Page ---<span class="token operator">&gt;</span> BlockedFuture
+    BlockedFuture         ---阻塞---<span class="token operator">&gt;</span> BlockingQueue
+    BlockedFuture         ---不阻---<span class="token operator">&gt;</span> 时间片结束 ---<span class="token operator">&gt;</span> WaitingQueue
+PriorityDriverSplitRunner ---完成---<span class="token operator">&gt;</span>
+    Driver                ---完成---<span class="token operator">&gt;</span>
+        Operator          ---完成---<span class="token operator">&gt;</span>
+</code></pre> 
+<h3><a id="Worker_53"></a>Worker创建工作线程池</h3> 
+<blockquote> 
+ <p>Worker结点启动时，会通过Google Inject库，初始化工作线程池，这个线程池就是处理Split的。</p> 
+</blockquote> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@ThreadSafe</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">TaskExecutor</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token comment">/**
+     * 这个方法被标记为PostConstruct，意味着在TaskExecutor类的实例构造完成后，就调用此方法。
+     */</span> 
+    <span class="token annotation punctuation">@PostConstruct</span>
+    <span class="token keyword">public</span> <span class="token keyword">synchronized</span> <span class="token keyword">void</span> <span class="token function">start</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token function">checkState</span><span class="token punctuation">(</span><span class="token operator">!</span>closed<span class="token punctuation">,</span> <span class="token string">"TaskExecutor is closed"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 创建runnerThreads个线程，如果没有显示配置这个参数，则其默认值为：</span>
+        <span class="token comment">//  Runtime.getRuntime().availableProcessors() * 2</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> runnerThreads<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">addRunnerThread</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    
+    <span class="token keyword">private</span> <span class="token keyword">synchronized</span> <span class="token keyword">void</span> <span class="token function">addRunnerThread</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// executor是一个工作线程池，可以认为它有runnerThreads个线程，</span>
+            <span class="token comment">// 而每一个线程会通过execute方法，绑定一个TaskRunner实例，它会一直Looping，负责处理Splits，见下文。</span>
+            executor<span class="token punctuation">.</span><span class="token function">execute</span><span class="token punctuation">(</span>versionEmbedder<span class="token punctuation">.</span><span class="token function">embedVersion</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">TaskRunner</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">RejectedExecutionException</span> ignored<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="TaskRunner_87"></a>TaskRunner的创建及运行</h4> 
+<pre><code class="prism language-java">    <span class="token keyword">private</span> <span class="token keyword">class</span> <span class="token class-name">TaskRunner</span>
+            <span class="token keyword">implements</span> <span class="token class-name">Runnable</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token keyword">long</span> runnerId <span class="token operator">=</span> <span class="token constant">NEXT_RUNNER_ID</span><span class="token punctuation">.</span><span class="token function">getAndIncrement</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token annotation punctuation">@Override</span>
+        <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">try</span> <span class="token punctuation">(</span><span class="token class-name">SetThreadName</span> runnerName <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">SetThreadName</span><span class="token punctuation">(</span><span class="token string">"SplitRunner-%s"</span><span class="token punctuation">,</span> runnerId<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token operator">!</span>closed <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span><span class="token class-name">Thread</span><span class="token punctuation">.</span><span class="token function">currentThread</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">isInterrupted</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token comment">// 一直Looping，直到显示地中止此任务，或是被中断</span>
+                    <span class="token comment">// select next worker</span>
+                    <span class="token class-name">PrioritizedSplitRunner</span> split<span class="token punctuation">;</span>
+                    <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token comment">// 从Split等待队列中，取出一个要被处理的Split。</span>
+                        <span class="token comment">// waitingSplits是一个MultilevelSplitQueue类型的实例对象，支持基于权重排列Splits。</span>
+                        split <span class="token operator">=</span> waitingSplits<span class="token punctuation">.</span><span class="token function">take</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                    <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">InterruptedException</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token class-name">Thread</span><span class="token punctuation">.</span><span class="token function">currentThread</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">interrupt</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        <span class="token keyword">return</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+
+                    <span class="token class-name">String</span> threadId <span class="token operator">=</span> split<span class="token punctuation">.</span><span class="token function">getTaskHandle</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getTaskId</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">"-"</span> <span class="token operator">+</span> split<span class="token punctuation">.</span><span class="token function">getSplitId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">try</span> <span class="token punctuation">(</span><span class="token class-name">SetThreadName</span> splitName <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">SetThreadName</span><span class="token punctuation">(</span>threadId<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token comment">// 创建一个RunningSplitInfo实例对象，记录当前线程的计时器</span>
+                        <span class="token class-name">RunningSplitInfo</span> splitInfo <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">RunningSplitInfo</span><span class="token punctuation">(</span>ticker<span class="token punctuation">.</span><span class="token function">read</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> threadId<span class="token punctuation">,</span> <span class="token class-name">Thread</span><span class="token punctuation">.</span><span class="token function">currentThread</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        runningSplitInfos<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>splitInfo<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        runningSplits<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>split<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                        <span class="token class-name">ListenableFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span></span> blocked<span class="token punctuation">;</span> <span class="token comment">// 定义一个Future类型的变量，用于获取Split被Blocked或挂起的原因</span>
+                        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                            <span class="token comment">// split.process是一个异步</span>
+                            blocked <span class="token operator">=</span> split<span class="token punctuation">.</span><span class="token function">process</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        <span class="token punctuation">}</span>
+                        <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+                            <span class="token comment">// 当前的Split处理完成，或是被BLOCKED时，就从运行队列中移除相关信息</span>
+                            runningSplitInfos<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>splitInfo<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            runningSplits<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>split<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        <span class="token punctuation">}</span>
+
+                        <span class="token keyword">if</span> <span class="token punctuation">(</span>split<span class="token punctuation">.</span><span class="token function">isFinished</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                            log<span class="token punctuation">.</span><span class="token function">debug</span><span class="token punctuation">(</span><span class="token string">"%s is finished"</span><span class="token punctuation">,</span> split<span class="token punctuation">.</span><span class="token function">getInfo</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token function">splitFinished</span><span class="token punctuation">(</span>split<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        <span class="token punctuation">}</span>
+                        <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                            <span class="token comment">// 如果当前的Split由于某种原因被阻塞</span>
+                            <span class="token keyword">if</span> <span class="token punctuation">(</span>blocked<span class="token punctuation">.</span><span class="token function">isDone</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                                <span class="token comment">// 同时阻塞状态已经被重置，一般地是由于上一次时间片用完了，因此可以被放置到等队列中</span>
+                                <span class="token comment">// 等待被调度执行</span>
+                                waitingSplits<span class="token punctuation">.</span><span class="token function">offer</span><span class="token punctuation">(</span>split<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token punctuation">}</span>
+                            <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                                <span class="token comment">// 当前Split依然被阻塞，则将这个Split添加到BLOCKED Map中，并添加一个回调方法，一旦发现BLOCKED状态被重围，</span>
+                                <span class="token comment">// 就重新将其放入等待队列中</span>
+                                blockedSplits<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>split<span class="token punctuation">,</span> blocked<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                                blocked<span class="token punctuation">.</span><span class="token function">addListener</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-&gt;</span> <span class="token punctuation">{<!-- --></span>
+                                    blockedSplits<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>split<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                                    <span class="token comment">// reset the level priority to prevent previously-blocked splits from starving existing splits</span>
+                                    split<span class="token punctuation">.</span><span class="token function">resetLevelPriority</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                                    waitingSplits<span class="token punctuation">.</span><span class="token function">offer</span><span class="token punctuation">(</span>split<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                                <span class="token punctuation">}</span><span class="token punctuation">,</span> executor<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token punctuation">}</span>
+                        <span class="token punctuation">}</span>
+                    <span class="token punctuation">}</span>
+                    <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Throwable</span> t<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token comment">// ignore random errors due to driver thread interruption</span>
+                        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>split<span class="token punctuation">.</span><span class="token function">isDestroyed</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                            <span class="token keyword">if</span> <span class="token punctuation">(</span>t <span class="token keyword">instanceof</span> <span class="token class-name">TrinoException</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                                <span class="token class-name">TrinoException</span> e <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token class-name">TrinoException</span><span class="token punctuation">)</span> t<span class="token punctuation">;</span>
+                                log<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span>t<span class="token punctuation">,</span> <span class="token string">"Error processing %s: %s: %s"</span><span class="token punctuation">,</span> split<span class="token punctuation">.</span><span class="token function">getInfo</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> e<span class="token punctuation">.</span><span class="token function">getErrorCode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> e<span class="token punctuation">.</span><span class="token function">getMessage</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token punctuation">}</span>
+                            <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                                log<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span>t<span class="token punctuation">,</span> <span class="token string">"Error processing %s"</span><span class="token punctuation">,</span> split<span class="token punctuation">.</span><span class="token function">getInfo</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token punctuation">}</span>
+                        <span class="token punctuation">}</span>
+                        <span class="token function">splitFinished</span><span class="token punctuation">(</span>split<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+            <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// unless we have been closed, we need to replace this thread</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>closed<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token function">addRunnerThread</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="WorkerSplit_178"></a>Worker接收Split</h3> 
+<h4><a id="SqlTaskExecutionSplitDriverSplitRunner_179"></a>SqlTaskExecution接收新的Split，并创建DriverSplitRunner实例</h4> 
+<blockquote> 
+ <p>在之前的文章中，我们知道<code>SqlTaskExecution</code>是SqlTask的执行实现，负责接收并执行由Coordinator分发的Split。<br> 下面以调度Source Splits的流程来分析如何为每一个新的Split创建执行实例。</p> 
+</blockquote> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">SqlTaskExecution</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">private</span> <span class="token keyword">synchronized</span> <span class="token keyword">void</span> <span class="token function">schedulePartitionedSource</span><span class="token punctuation">(</span><span class="token class-name">TaskSource</span> sourceUpdate<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token function">mergeIntoPendingSplits</span><span class="token punctuation">(</span>sourceUpdate<span class="token punctuation">.</span><span class="token function">getPlanNodeId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> sourceUpdate<span class="token punctuation">.</span><span class="token function">getSplits</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> sourceUpdate<span class="token punctuation">.</span><span class="token function">getNoMoreSplitsForLifespan</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> sourceUpdate<span class="token punctuation">.</span><span class="token function">isNoMoreSplits</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">Iterator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">SchedulingLifespan</span><span class="token punctuation">&gt;</span></span> activeLifespans <span class="token operator">=</span> schedulingLifespanManager<span class="token punctuation">.</span><span class="token function">getActiveLifespans</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">boolean</span> madeProgress <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+
+            <span class="token keyword">while</span> <span class="token punctuation">(</span>activeLifespans<span class="token punctuation">.</span><span class="token function">hasNext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token class-name">SchedulingLifespan</span> schedulingLifespan <span class="token operator">=</span> activeLifespans<span class="token punctuation">.</span><span class="token function">next</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token class-name">Lifespan</span> lifespan <span class="token operator">=</span> schedulingLifespan<span class="token punctuation">.</span><span class="token function">getLifespan</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                
+                <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token class-name">Optional</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">PlanNodeId</span><span class="token punctuation">&gt;</span></span> optionalSchedulingPlanNode <span class="token operator">=</span> schedulingLifespan<span class="token punctuation">.</span><span class="token function">getSchedulingPlanNode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span>optionalSchedulingPlanNode<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token keyword">break</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                    <span class="token class-name">PlanNodeId</span> schedulingPlanNode <span class="token operator">=</span> optionalSchedulingPlanNode<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                    <span class="token class-name">DriverSplitRunnerFactory</span> partitionedDriverRunnerFactory <span class="token operator">=</span> driverRunnerFactoriesWithSplitLifeCycle<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>schedulingPlanNode<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                    <span class="token class-name">PendingSplits</span> pendingSplits <span class="token operator">=</span> pendingSplitsByPlanNode<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>schedulingPlanNode<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getLifespan</span><span class="token punctuation">(</span>lifespan<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                    <span class="token comment">// Enqueue driver runners with driver group lifecycle for this driver life cycle, if not already enqueued.</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>lifespan<span class="token punctuation">.</span><span class="token function">isTaskWide</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>schedulingLifespan<span class="token punctuation">.</span><span class="token function">getAndSetDriversForDriverGroupLifeCycleScheduled</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token function">scheduleDriversForDriverGroupLifeCycle</span><span class="token punctuation">(</span>lifespan<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+
+                    <span class="token comment">// Enqueue driver runners with split lifecycle for this plan node and driver life cycle combination.</span>
+                    <span class="token class-name">ImmutableList<span class="token punctuation">.</span>Builder</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">DriverSplitRunner</span><span class="token punctuation">&gt;</span></span> runners <span class="token operator">=</span> <span class="token class-name">ImmutableList</span><span class="token punctuation">.</span><span class="token function">builder</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token comment">// pendingSplits保存了所有来自Coordinator分发过来的、新的Splits，</span>
+                    <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">ScheduledSplit</span> scheduledSplit <span class="token operator">:</span> pendingSplits<span class="token punctuation">.</span><span class="token function">removeAllSplits</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token comment">// create a new driver for the split</span>
+                        runners<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>partitionedDriverRunnerFactory<span class="token punctuation">.</span><span class="token function">createDriverRunner</span><span class="token punctuation">(</span>scheduledSplit<span class="token punctuation">,</span> lifespan<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                    <span class="token comment">// 将所有的DriverSplitRunner添加到等待队列中，内部会调用下面的方法将其添加到TaskExecutor对象中</span>
+                    <span class="token comment">// taskExecutor.enqueueSplits(taskHandle, forceRunSplit, runners);</span>
+                    <span class="token function">enqueueDriverSplitRunner</span><span class="token punctuation">(</span><span class="token boolean">false</span><span class="token punctuation">,</span> runners<span class="token punctuation">.</span><span class="token function">build</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                    <span class="token comment">// If all driver runners have been enqueued for this plan node and driver life cycle combination,</span>
+                    <span class="token comment">// move on to the next plan node.</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span>pendingSplits<span class="token punctuation">.</span><span class="token function">getState</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token constant">NO_MORE_SPLITS</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token keyword">break</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                    partitionedDriverRunnerFactory<span class="token punctuation">.</span><span class="token function">noMoreDriverRunner</span><span class="token punctuation">(</span><span class="token class-name">ImmutableList</span><span class="token punctuation">.</span><span class="token function">of</span><span class="token punctuation">(</span>lifespan<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    pendingSplits<span class="token punctuation">.</span><span class="token function">markAsCleanedUp</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                    schedulingLifespan<span class="token punctuation">.</span><span class="token function">nextPlanNode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    madeProgress <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span>schedulingLifespan<span class="token punctuation">.</span><span class="token function">isDone</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token keyword">break</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>madeProgress<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>sourceUpdate<span class="token punctuation">.</span><span class="token function">isNoMoreSplits</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            schedulingLifespanManager<span class="token punctuation">.</span><span class="token function">noMoreSplits</span><span class="token punctuation">(</span>sourceUpdate<span class="token punctuation">.</span><span class="token function">getPlanNodeId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="TaskExecutorenqueueSplits_252"></a>TaskExecutor::enqueueSplits</h4> 
+<pre><code class="prism language-java">    <span class="token keyword">public</span> <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ListenableFuture</span><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> <span class="token function">enqueueSplits</span><span class="token punctuation">(</span><span class="token class-name">TaskHandle</span> taskHandle<span class="token punctuation">,</span> <span class="token keyword">boolean</span> intermediate<span class="token punctuation">,</span> <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token operator">?</span> <span class="token keyword">extends</span> <span class="token class-name">SplitRunner</span><span class="token punctuation">&gt;</span></span> taskSplits<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">PrioritizedSplitRunner</span><span class="token punctuation">&gt;</span></span> splitsToDestroy <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ListenableFuture</span><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> finishedFutures <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>taskSplits<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">synchronized</span> <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">SplitRunner</span> taskSplit <span class="token operator">:</span> taskSplits<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// 封装所有新的SplitRunner实例为PrioritizedSplitRunner。</span>
+                <span class="token comment">// PrioritizedSplitRunner顾名思义，带有权重，因此在被调度执行时，会按权重决定下一个要执行的Runner</span>
+                <span class="token class-name">PrioritizedSplitRunner</span> prioritizedSplitRunner <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">PrioritizedSplitRunner</span><span class="token punctuation">(</span>
+                        taskHandle<span class="token punctuation">,</span>
+                        taskSplit<span class="token punctuation">,</span>
+                        ticker<span class="token punctuation">,</span>
+                        globalCpuTimeMicros<span class="token punctuation">,</span>
+                        globalScheduledTimeMicros<span class="token punctuation">,</span>
+                        blockedQuantaWallTime<span class="token punctuation">,</span>
+                        unblockedQuantaWallTime<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>taskHandle<span class="token punctuation">.</span><span class="token function">isDestroyed</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token comment">// If the handle is destroyed, we destroy the task splits to complete the future</span>
+                    splitsToDestroy<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>prioritizedSplitRunner<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>intermediate<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token comment">// Note: we do not record queued time for intermediate splits</span>
+                    <span class="token function">startIntermediateSplit</span><span class="token punctuation">(</span>prioritizedSplitRunner<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token comment">// add the runner to the handle so it can be destroyed if the task is canceled</span>
+                    taskHandle<span class="token punctuation">.</span><span class="token function">recordIntermediateSplit</span><span class="token punctuation">(</span>prioritizedSplitRunner<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token comment">// 对于Source Splits来说，会走这里</span>
+                    <span class="token comment">// add this to the work queue for the task</span>
+                    <span class="token comment">// taskHandle负责维护所有的Source Splits与Itermediate Splits，只是为了调度时更方便</span>
+                    taskHandle<span class="token punctuation">.</span><span class="token function">enqueueSplit</span><span class="token punctuation">(</span>prioritizedSplitRunner<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token comment">// if task is under the limit for guaranteed splits, start one</span>
+                    <span class="token comment">// 这个方法，才会真正地调度Splits执行</span>
+                    <span class="token function">scheduleTaskIfNecessary</span><span class="token punctuation">(</span>taskHandle<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token comment">// if globally we have more resources, start more</span>
+                    <span class="token function">addNewEntrants</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+
+                finishedFutures<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>prioritizedSplitRunner<span class="token punctuation">.</span><span class="token function">getFinishedFuture</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">PrioritizedSplitRunner</span> split <span class="token operator">:</span> splitsToDestroy<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            split<span class="token punctuation">.</span><span class="token function">destroy</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">return</span> finishedFutures<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="WorkerSplit_303"></a>Worker调度Split</h3> 
+<blockquote> 
+ <p>从前面的章节知道，一个新的Split到Worker接收，会被封装成一个PrioritizedSplitRunner实例，而PrioritizedSplitRunner就是处理Split的实体。</p> 
+</blockquote> 
+<h4><a id="TaskExecutorscheduleTaskIfNecessary_305"></a>TaskExecutor::scheduleTaskIfNecessary</h4> 
+<pre><code class="prism language-java">    <span class="token keyword">private</span> <span class="token keyword">synchronized</span> <span class="token keyword">void</span> <span class="token function">scheduleTaskIfNecessary</span><span class="token punctuation">(</span><span class="token class-name">TaskHandle</span> taskHandle<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// if task has less than the minimum guaranteed splits running,</span>
+        <span class="token comment">// immediately schedule new splits for this task.  This assures</span>
+        <span class="token comment">// that a task gets its fair amount of consideration (you have to</span>
+        <span class="token comment">// have splits to be considered for running on a thread).</span>
+        <span class="token comment">// 获取当前能够调度的Splits的最大数量</span>
+        <span class="token keyword">int</span> splitsToSchedule <span class="token operator">=</span> <span class="token function">min</span><span class="token punctuation">(</span>guaranteedNumberOfDriversPerTask<span class="token punctuation">,</span> taskHandle<span class="token punctuation">.</span><span class="token function">getMaxDriversPerTask</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">orElse</span><span class="token punctuation">(</span><span class="token class-name">Integer</span><span class="token punctuation">.</span><span class="token constant">MAX_VALUE</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">-</span> taskHandle<span class="token punctuation">.</span><span class="token function">getRunningLeafSplits</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> splitsToSchedule<span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// 从taskHandle里面拿到下一个PrioritizedSplitRunner的实例，就是简单从队列中的取出队首元素</span>
+            <span class="token class-name">PrioritizedSplitRunner</span> split <span class="token operator">=</span> taskHandle<span class="token punctuation">.</span><span class="token function">pollNextSplit</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>split <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// no more splits to schedule</span>
+                <span class="token keyword">return</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">// 执行PrioritizedSplitRunner实例</span>
+            <span class="token function">startSplit</span><span class="token punctuation">(</span>split<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            splitQueuedTime<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span><span class="token class-name">Duration</span><span class="token punctuation">.</span><span class="token function">nanosSince</span><span class="token punctuation">(</span>split<span class="token punctuation">.</span><span class="token function">getCreatedNanos</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="TaskExecutorstartSplit_328"></a>TaskExecutor::startSplit</h4> 
+<pre><code class="prism language-java">    <span class="token keyword">private</span> <span class="token keyword">synchronized</span> <span class="token keyword">void</span> <span class="token function">startSplit</span><span class="token punctuation">(</span><span class="token class-name">PrioritizedSplitRunner</span> split<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// 将待执行的split首先添加到等待队列中，即waitingSplits中</span>
+        allSplits<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>split<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        waitingSplits<span class="token punctuation">.</span><span class="token function">offer</span><span class="token punctuation">(</span>split<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="WorkerSplit_338"></a>Worker执行Split</h3> 
+<blockquote> 
+ <p>从<code>Worker调度Split</code>章节知道，Split对应的<code>PrioritizedSplitRunner</code>实例会被添加进TaskExecutor对象的<code>waitingSplits</code>成员变量中，而<code>waitingSplits</code>会在<code>TaskExecution::run()</code>方法中被访问。</p> 
+</blockquote> 
+<h4><a id="PrioritizedSplitRunnerprocess_341"></a>PrioritizedSplitRunner::process</h4> 
+<pre><code class="prism language-java">    <span class="token keyword">public</span> <span class="token class-name">ListenableFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span></span> <span class="token function">process</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// 当前的Split被调度执行了，因此计时开始</span>
+            <span class="token keyword">long</span> startNanos <span class="token operator">=</span> ticker<span class="token punctuation">.</span><span class="token function">read</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            start<span class="token punctuation">.</span><span class="token function">compareAndSet</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> startNanos<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            lastReady<span class="token punctuation">.</span><span class="token function">compareAndSet</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> startNanos<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            processCalls<span class="token punctuation">.</span><span class="token function">incrementAndGet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            waitNanos<span class="token punctuation">.</span><span class="token function">getAndAdd</span><span class="token punctuation">(</span>startNanos <span class="token operator">-</span> lastReady<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 由于Trino中的Split执行时基于时间片调度模型的，因此这里需要创建一个CpuTimer实例来计时</span>
+            <span class="token class-name">CpuTimer</span> timer <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">CpuTimer</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// SPLIT_RUN_QUANTA限定了当前Split允许的一个时间片的长度，其取值默认为</span>
+            <span class="token comment">//     SPLIT_RUN_QUANTA = new Duration(1, TimeUnit.SECONDS);</span>
+            <span class="token comment">// split.processFor(SPLIT_RUN_QUANTA)方法返回一个Future实例，它记录了当前Split被阻塞时的上下文信息</span>
+            <span class="token class-name">ListenableFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span></span> blocked <span class="token operator">=</span> split<span class="token punctuation">.</span><span class="token function">processFor</span><span class="token punctuation">(</span><span class="token constant">SPLIT_RUN_QUANTA</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token class-name">CpuTimer<span class="token punctuation">.</span>CpuDuration</span> elapsed <span class="token operator">=</span> timer<span class="token punctuation">.</span><span class="token function">elapsedTime</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token keyword">long</span> quantaScheduledNanos <span class="token operator">=</span> ticker<span class="token punctuation">.</span><span class="token function">read</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> startNanos<span class="token punctuation">;</span>
+            scheduledNanos<span class="token punctuation">.</span><span class="token function">addAndGet</span><span class="token punctuation">(</span>quantaScheduledNanos<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            priority<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>taskHandle<span class="token punctuation">.</span><span class="token function">addScheduledNanos</span><span class="token punctuation">(</span>quantaScheduledNanos<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            lastRun<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>ticker<span class="token punctuation">.</span><span class="token function">read</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>blocked <span class="token operator">==</span> <span class="token constant">NOT_BLOCKED</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// 如果当前的Split是静态对象NOT_BLOCKED，意味着一个完整的时间片执行完了，因此累计非阻塞时长</span>
+                unblockedQuantaWallTime<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>elapsed<span class="token punctuation">.</span><span class="token function">getWall</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// 否则意味着一个完整的时间片没有执行用完，因此累计阻塞时长</span>
+                blockedQuantaWallTime<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>elapsed<span class="token punctuation">.</span><span class="token function">getWall</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token keyword">long</span> quantaCpuNanos <span class="token operator">=</span> elapsed<span class="token punctuation">.</span><span class="token function">getCpu</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">roundTo</span><span class="token punctuation">(</span><span class="token constant">NANOSECONDS</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            cpuTimeNanos<span class="token punctuation">.</span><span class="token function">addAndGet</span><span class="token punctuation">(</span>quantaCpuNanos<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            globalCpuTimeMicros<span class="token punctuation">.</span><span class="token function">update</span><span class="token punctuation">(</span>quantaCpuNanos <span class="token operator">/</span> <span class="token number">1000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            globalScheduledTimeMicros<span class="token punctuation">.</span><span class="token function">update</span><span class="token punctuation">(</span>quantaScheduledNanos <span class="token operator">/</span> <span class="token number">1000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 返回当前Split的阻塞信息给上层</span>
+            <span class="token keyword">return</span> blocked<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Throwable</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            finishedFuture<span class="token punctuation">.</span><span class="token function">setException</span><span class="token punctuation">(</span>e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">throw</span> e<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="DriverSplitRunnerprocessFor1s_390"></a>DriverSplitRunner::processFor(1s)</h4> 
+<pre><code class="prism language-java">        <span class="token annotation punctuation">@Override</span>
+        <span class="token keyword">public</span> <span class="token class-name">ListenableFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span></span> <span class="token function">processFor</span><span class="token punctuation">(</span><span class="token class-name">Duration</span> duration<span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">Driver</span> driver<span class="token punctuation">;</span>
+            <span class="token keyword">synchronized</span> <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// if close() was called before we get here, there's not point in even creating the driver</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>closed<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token keyword">return</span> <span class="token function">immediateVoidFuture</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+
+                <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span>driver <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token comment">// 如果是第一次执行当前的Split，则driver == null，因此需要创建一个Driver实例，负责将一组Operators应用到当前的Split上</span>
+                    <span class="token keyword">this</span><span class="token punctuation">.</span>driver <span class="token operator">=</span> driverSplitRunnerFactory<span class="token punctuation">.</span><span class="token function">createDriver</span><span class="token punctuation">(</span>driverContext<span class="token punctuation">,</span> partitionedSplit<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+
+                driver <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>driver<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">// 最终由Driver实现处理逻辑</span>
+            <span class="token keyword">return</span> driver<span class="token punctuation">.</span><span class="token function">processFor</span><span class="token punctuation">(</span>duration<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="DriverprocessFor1s_413"></a>Driver::processFor(1s)</h4> 
+<blockquote> 
+ <p>Driver的一次处理，最多会<code>占用1秒的CPU时间片</code>，在非阻塞的情况下，一旦时间片耗尽，就会主动退出当前Driver的执行，并返回<code>NOT_BLOCKED</code>对象，期望能够被上层调度器继续调度执行。<br> 另外一个需要注意的点是，<code>Driver内部处理数据的最小单元是Page，除非这个Page被处理完成，否则当前线程/Driver不会由于执行时间超过时间片的规定，而强制中止处理</code>，故这里的1秒钟是一种软限制。</p> 
+</blockquote> 
+<pre><code class="prism language-java">    <span class="token keyword">public</span> <span class="token class-name">ListenableFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span></span> <span class="token function">processFor</span><span class="token punctuation">(</span><span class="token class-name">Duration</span> duration<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token function">checkLockNotHeld</span><span class="token punctuation">(</span><span class="token string">"Cannot process for a duration while holding the driver lock"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token function">requireNonNull</span><span class="token punctuation">(</span>duration<span class="token punctuation">,</span> <span class="token string">"duration is null"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// if the driver is blocked we don't need to continue</span>
+        <span class="token class-name">SettableFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span></span> blockedFuture <span class="token operator">=</span> driverBlockedFuture<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>blockedFuture<span class="token punctuation">.</span><span class="token function">isDone</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span> blockedFuture<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token keyword">long</span> maxRuntime <span class="token operator">=</span> duration<span class="token punctuation">.</span><span class="token function">roundTo</span><span class="token punctuation">(</span><span class="token class-name">TimeUnit</span><span class="token punctuation">.</span><span class="token constant">NANOSECONDS</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token class-name">Optional</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ListenableFuture</span><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> result <span class="token operator">=</span> <span class="token function">tryWithLock</span><span class="token punctuation">(</span><span class="token number">100</span><span class="token punctuation">,</span> <span class="token class-name">TimeUnit</span><span class="token punctuation">.</span><span class="token constant">MILLISECONDS</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-&gt;</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// driverContext维护的当前Driver实例运行时的上下文信息</span>
+            <span class="token class-name">OperationTimer</span> operationTimer <span class="token operator">=</span> <span class="token function">createTimer</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            driverContext<span class="token punctuation">.</span><span class="token function">startProcessTimer</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// DriverContext中有一个成员变量DriverYieldSignal，可以认为它是一个带有定时功能的监听器，因此在这里</span>
+            <span class="token comment">// 告诉DriverYieldSignal，在经过最大运行时间之后（1秒），就触发一个Yield信号，主动放弃当前Driver的执行。</span>
+            driverContext<span class="token punctuation">.</span><span class="token function">getYieldSignal</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">setWithDelay</span><span class="token punctuation">(</span>maxRuntime<span class="token punctuation">,</span> driverContext<span class="token punctuation">.</span><span class="token function">getYieldExecutor</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">long</span> start <span class="token operator">=</span> <span class="token class-name">System</span><span class="token punctuation">.</span><span class="token function">nanoTime</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">do</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token comment">// processInternal(operationTimer)方法的一次调用，只会处理绑定的Split中的一个数据页Page，</span>
+                    <span class="token comment">// 因此Page可以认为是数据处理的最小单元。</span>
+                    <span class="token class-name">ListenableFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span></span> future <span class="token operator">=</span> <span class="token function">processInternal</span><span class="token punctuation">(</span>operationTimer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>future<span class="token punctuation">.</span><span class="token function">isDone</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token comment">// 走到这里意味着，当前的Driver执行被阻塞/挂起了，因此强制限制循环</span>
+                        <span class="token comment">// 被挂起的原因可能是：内存不足、等待RPC返回等。</span>
+                        <span class="token keyword">return</span> <span class="token function">updateDriverBlockedFuture</span><span class="token punctuation">(</span>future<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span>
+                <span class="token comment">// 循环执行当前的Driver，直到完成，但如果当前Driver执行完成时，会退出；或者是最大的时间片被用完，也会退出</span>
+                <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token class-name">System</span><span class="token punctuation">.</span><span class="token function">nanoTime</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> start <span class="token operator">&lt;</span> maxRuntime <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span><span class="token function">isFinishedInternal</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// 方法完成退出，总是会重置DriverYieldSignal的状态，</span>
+                driverContext<span class="token punctuation">.</span><span class="token function">getYieldSignal</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">reset</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                driverContext<span class="token punctuation">.</span><span class="token function">recordProcessed</span><span class="token punctuation">(</span>operationTimer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">// 只有当前Driver没有被阻塞/挂起时，才会走这里，返回静态常量</span>
+            <span class="token keyword">return</span> <span class="token constant">NOT_BLOCKED</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> result<span class="token punctuation">.</span><span class="token function">orElse</span><span class="token punctuation">(</span><span class="token constant">NOT_BLOCKED</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="DriverprocessInternal_465"></a>Driver::processInternal</h4> 
+<pre><code class="prism language-java">    <span class="token annotation punctuation">@GuardedBy</span><span class="token punctuation">(</span><span class="token string">"exclusiveLock"</span><span class="token punctuation">)</span>
+    <span class="token keyword">private</span> <span class="token class-name">ListenableFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span></span> <span class="token function">processInternal</span><span class="token punctuation">(</span><span class="token class-name">OperationTimer</span> operationTimer<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token function">checkLockHeld</span><span class="token punctuation">(</span><span class="token string">"Lock must be held to call processInternal"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 尝试回收可以被强扭回收的内存资源</span>
+        <span class="token function">handleMemoryRevoke</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// 此方法会尝试辨别出新接收的Splits</span>
+            <span class="token function">processNewSources</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token comment">// If there is only one operator, finish it</span>
+            <span class="token comment">// Some operators (LookupJoinOperator and HashBuildOperator) are broken and requires finish to be called continuously</span>
+            <span class="token comment">// TODO remove the second part of the if statement, when these operators are fixed</span>
+            <span class="token comment">// Note: finish should not be called on the natural source of the pipeline as this could cause the task to finish early</span>
+            <span class="token comment">// 如果只有一个Operator时，直接标记其为完成状态</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>activeOperators<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> activeOperators<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">!=</span> allOperators<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token class-name">Operator</span> rootOperator <span class="token operator">=</span> activeOperators<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                rootOperator<span class="token punctuation">.</span><span class="token function">finish</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                rootOperator<span class="token punctuation">.</span><span class="token function">getOperatorContext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">recordFinish</span><span class="token punctuation">(</span>operationTimer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token keyword">boolean</span> movedPage <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span> <span class="token comment">// 标记，记录是否处理过数据页</span>
+            <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> activeOperators<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token number">1</span> <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>driverContext<span class="token punctuation">.</span><span class="token function">isDone</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token comment">// 遍历所有还没有完成的Operator实例</span>
+                <span class="token class-name">Operator</span> current <span class="token operator">=</span> activeOperators<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>i<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">// 获取下游Operator实例</span>
+                <span class="token class-name">Operator</span> next <span class="token operator">=</span> activeOperators<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>i <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                <span class="token comment">// skip blocked operator</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">getBlockedFuture</span><span class="token punctuation">(</span>current<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">isPresent</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token comment">// 如果当前Operator实例处理BLOCKED状态，则后续的处理，遍历下一个Operator</span>
+                    <span class="token keyword">continue</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+
+                <span class="token comment">// if the current operator is not finished and next operator isn't blocked and needs input...</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>current<span class="token punctuation">.</span><span class="token function">isFinished</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> <span class="token function">getBlockedFuture</span><span class="token punctuation">(</span>next<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> next<span class="token punctuation">.</span><span class="token function">needsInput</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token comment">// 如果当前的Operator还没有完成，同时下游的Operator没有被阻塞，那么就将通过current.getOutput()方法计算并产出一个数据页，</span>
+                    <span class="token comment">// 并传递给下游的Operator实例</span>
+                    <span class="token comment">// get an output page from current operator</span>
+                    <span class="token class-name">Page</span> page <span class="token operator">=</span> current<span class="token punctuation">.</span><span class="token function">getOutput</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    current<span class="token punctuation">.</span><span class="token function">getOperatorContext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">recordGetOutput</span><span class="token punctuation">(</span>operationTimer<span class="token punctuation">,</span> page<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                    <span class="token comment">// if we got an output page, add it to the next operator</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span>page <span class="token operator">!=</span> <span class="token keyword">null</span> <span class="token operator">&amp;&amp;</span> page<span class="token punctuation">.</span><span class="token function">getPositionCount</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token comment">// 如果当前Operator实例产出的数据页，且有数据时，才会传递全下游Operator实例，并更新标记</span>
+                        next<span class="token punctuation">.</span><span class="token function">addInput</span><span class="token punctuation">(</span>page<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        next<span class="token punctuation">.</span><span class="token function">getOperatorContext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">recordAddInput</span><span class="token punctuation">(</span>operationTimer<span class="token punctuation">,</span> page<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        movedPage <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span>current <span class="token keyword">instanceof</span> <span class="token class-name">SourceOperator</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token comment">// 如果当前的Operator实例，是一个SourceOperator，即从remote source/table/file读取了数据时，总是更新标记</span>
+                        movedPage <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span>
+
+                <span class="token comment">// if current operator is finished...</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>current<span class="token punctuation">.</span><span class="token function">isFinished</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token comment">// let next operator know there will be no more data</span>
+                    next<span class="token punctuation">.</span><span class="token function">finish</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    next<span class="token punctuation">.</span><span class="token function">getOperatorContext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">recordFinish</span><span class="token punctuation">(</span>operationTimer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> index <span class="token operator">=</span> activeOperators<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">;</span> index <span class="token operator">&gt;=</span> <span class="token number">0</span><span class="token punctuation">;</span> index<span class="token operator">--</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>activeOperators<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>index<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">isFinished</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token comment">// 从后向前遍历还在运行的Operator实例，如果发现了一个处理完成状态的Operator实例时，需要保证在其之前（上游）的Operator实例，也都已经完成了</span>
+                    <span class="token comment">// close and remove this operator and all source operators</span>
+                    <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Operator</span><span class="token punctuation">&gt;</span></span> finishedOperators <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>activeOperators<span class="token punctuation">.</span><span class="token function">subList</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> index <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token class-name">Throwable</span> throwable <span class="token operator">=</span> <span class="token function">closeAndDestroyOperators</span><span class="token punctuation">(</span>finishedOperators<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    finishedOperators<span class="token punctuation">.</span><span class="token function">clear</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span>throwable <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token function">throwIfUnchecked</span><span class="token punctuation">(</span>throwable<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">RuntimeException</span><span class="token punctuation">(</span>throwable<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                    <span class="token comment">// Finish the next operator, which is now the first operator.</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>activeOperators<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token class-name">Operator</span> newRootOperator <span class="token operator">=</span> activeOperators<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        newRootOperator<span class="token punctuation">.</span><span class="token function">finish</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        newRootOperator<span class="token punctuation">.</span><span class="token function">getOperatorContext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">recordFinish</span><span class="token punctuation">(</span>operationTimer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                    <span class="token keyword">break</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token comment">// if we did not move any pages, check if we are blocked</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>movedPage<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// 走到这里，说明没有新的数据生成，因此需要判断是由于阻塞导致的，还是由其它原因导致的</span>
+                <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Operator</span><span class="token punctuation">&gt;</span></span> blockedOperators <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ListenableFuture</span><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> blockedFutures <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">// 收集所有可能被阻塞的Operator的信息</span>
+                <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">Operator</span> operator <span class="token operator">:</span> activeOperators<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token class-name">Optional</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ListenableFuture</span><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> blocked <span class="token operator">=</span> <span class="token function">getBlockedFuture</span><span class="token punctuation">(</span>operator<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span>blocked<span class="token punctuation">.</span><span class="token function">isPresent</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        blockedOperators<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>operator<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        blockedFutures<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>blocked<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span>
+
+                <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>blockedFutures<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token comment">// 如果发现了确实有某些Operators被阻塞了，那么就返回给上层一个新的ListenableFuture实例，</span>
+                    <span class="token comment">// 用于监听被阻塞的Operators，可以交由上层决定一旦有一个Operator的状态被重置时的行为。</span>
+                    <span class="token comment">// unblock when the first future is complete</span>
+                    <span class="token class-name">ListenableFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span></span> blocked <span class="token operator">=</span> <span class="token function">firstFinishedFuture</span><span class="token punctuation">(</span>blockedFutures<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token comment">// driver records serial blocked time</span>
+                    driverContext<span class="token punctuation">.</span><span class="token function">recordBlocked</span><span class="token punctuation">(</span>blocked<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token comment">// each blocked operator is responsible for blocking the execution</span>
+                    <span class="token comment">// until one of the operators can continue</span>
+                    <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">Operator</span> operator <span class="token operator">:</span> blockedOperators<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        operator<span class="token punctuation">.</span><span class="token function">getOperatorContext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">recordBlocked</span><span class="token punctuation">(</span>blocked<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                    <span class="token keyword">return</span> blocked<span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">// 到这里，说明没有数据页生成，那就是所有的数据都被过滤掉了，没有BLOCKING行为</span>
+            <span class="token keyword">return</span> <span class="token constant">NOT_BLOCKED</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Throwable</span> t<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// 如果当前Driver的执行过程中产生了非预期的错误时，就标记当前Driver实例的状态为失败</span>
+            <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">StackTraceElement</span><span class="token punctuation">&gt;</span></span> interrupterStack <span class="token operator">=</span> exclusiveLock<span class="token punctuation">.</span><span class="token function">getInterrupterStack</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>interrupterStack <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                driverContext<span class="token punctuation">.</span><span class="token function">failed</span><span class="token punctuation">(</span>t<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">throw</span> t<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token comment">// Driver thread was interrupted which should only happen if the task is already finished.</span>
+            <span class="token comment">// If this becomes the actual cause of a failed query there is a bug in the task state machine.</span>
+            <span class="token class-name">Exception</span> exception <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Exception</span><span class="token punctuation">(</span><span class="token string">"Interrupted By"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            exception<span class="token punctuation">.</span><span class="token function">setStackTrace</span><span class="token punctuation">(</span>interrupterStack<span class="token punctuation">.</span><span class="token function">stream</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">toArray</span><span class="token punctuation">(</span><span class="token class-name">StackTraceElement</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token operator">::</span><span class="token keyword">new</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token class-name">TrinoException</span> newException <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">TrinoException</span><span class="token punctuation">(</span><span class="token constant">GENERIC_INTERNAL_ERROR</span><span class="token punctuation">,</span> <span class="token string">"Driver was interrupted"</span><span class="token punctuation">,</span> exception<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            newException<span class="token punctuation">.</span><span class="token function">addSuppressed</span><span class="token punctuation">(</span>t<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            driverContext<span class="token punctuation">.</span><span class="token function">failed</span><span class="token punctuation">(</span>newException<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">throw</span> newException<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="WorkerSplit_603"></a>Worker调度等待中的Split</h3> 
+<blockquote> 
+ <p>通过<code>TaskRunner的创建及运行</code>章节的分析可以知道，一个TaskRunner同一时间，只会执行一个PrioritizedSplitRunner实例；而一个PrioritizedSplitRunner在执行期间会由于时间片的耗尽，而被主动挂起，将自己重新添加进等待队列（一个MultilevelSplitQueue类型的实例对象）中。<br> 因此为了能够更加合理地选择，哪些重新入进等待队列的SplitRunner能够首先被调度执行，就需要一定的策略。</p> 
+</blockquote> 
+<h4><a id="MultilevelSplitQueuetakeSplitRunner_607"></a>MultilevelSplitQueue::take，返回一个最高优先级的SplitRunner</h4> 
+<blockquote> 
+ <p>MultilevelSplitQueue::take方法返回优先级最高的SplitRunner时，会考虑两个层面的因素，即等待队列权重、SplitRunner（任务）权重。<br> <strong>等待队列的优先级定义</strong>：<br> MultilevelSplitQueue定义了五个不同的权重队列，它们各自绑定了一个固定的时间阈值，即[0, 1, 10, 60, 300]。<br> 例如第一个权重队列，它对应的时间阈值为0，即0秒，表示如果此队列中的SplitRunner被调度过，且调度&amp;执行时间为T时，那么这个队列被选择调度的权重ratio = T / 0 = 0。因此在Trino的调度策略里，简单来说，ration的值越大，说明这个队列被选择调度的次数越少/时间越少，因此应该越被优先选择。<br> <strong>SplitRunner的优先级定义</strong>：<br> 当确认了一个最高优先级的等待队列调度时，还需要从这个队列中选择一个优先级最高的SplitRunner返回给上层调度器。而每一个SplitRunner拥有一个成员变量，<code>AtomicReference&lt;Priority&gt; priority;</code>，它存储了当前SplitRunner相对于当前队列的权重，可以简单地看成是执行时间的长短，如果SplitRunner的已执行时间越短，那么它的权重越大，越被优先选择，但并不意味着它就是最终被调度的，还需要看它是否被提升到更高的等待队列中，因此还需要注意<code>result.updateLevelPriority()</code>的逻辑。</p> 
+</blockquote> 
+<pre><code class="prism language-java">    <span class="token keyword">public</span> <span class="token class-name">PrioritizedSplitRunner</span> <span class="token function">take</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+            <span class="token keyword">throws</span> <span class="token class-name">InterruptedException</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            lock<span class="token punctuation">.</span><span class="token function">lockInterruptibly</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token class-name">PrioritizedSplitRunner</span> result<span class="token punctuation">;</span>
+                <span class="token comment">// 通过pollSplit()方法，返回一个权重（Priority)最低，即优先级最高的SplitRunner实例</span>
+                <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>result <span class="token operator">=</span> <span class="token function">pollSplit</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    notEmpty<span class="token punctuation">.</span><span class="token function">await</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                <span class="token comment">// 如果这个SplitRunner发生了队列变更，需要将其添加到正确的等待队列，并重新选择新的SplitRunner实例</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>result<span class="token punctuation">.</span><span class="token function">updateLevelPriority</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token function">offer</span><span class="token punctuation">(</span>result<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">continue</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                <span class="token comment">//到这里，result就是要被选择执行的SplitRunner，那么就重置相关的标记变量，并更新计数</span>
+                <span class="token keyword">int</span> selectedLevel <span class="token operator">=</span> result<span class="token punctuation">.</span><span class="token function">getPriority</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getLevel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                levelMinPriority<span class="token punctuation">[</span>selectedLevel<span class="token punctuation">]</span><span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>result<span class="token punctuation">.</span><span class="token function">getPriority</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getLevelPriority</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                selectedLevelCounters<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>selectedLevel<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">update</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">// 返回给调用者</span>
+                <span class="token keyword">return</span> result<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// 总是是释放本地锁</span>
+                lock<span class="token punctuation">.</span><span class="token function">unlock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h2><a id="SplitRunner_646"></a>SplitRunner挂起的情形分析</h2> 
+<blockquote> 
+ <p>SplitRunner的挂起，可以认为就是某个Operator被BLOCKED导致的，因此只需要分析Operator被BLOCKED的情况即可。<br> 在SplitRunner执行的过程中，会存在两类BLOCKED的情况：<br> <strong>Revoking Memory（Operator的预计算过程）</strong>：执行一个Operator执行之前，需要检查当前Operator正在回收内存，如果正处于这个状态，意味着不能触发它的计算，否则会导致内存混乱，这个过程不细说了，需要结合<code>内存管理</code>相关的内容进行分析。<br> <strong>Operator的计算过程</strong>：一个Operator实例的计算过程，就是对Input Page的处理过程，通过<code>getOutput()</code>方法触发。因此在这个过程中可能会导致链路上的某个Operator实例处理Blocked的状态，表示Page数据还有没准备好。</p> 
+</blockquote> 
+<h3><a id="ExchangeOperator_652"></a>ExchangeOperator的执行与挂起</h3> 
+<h4><a id="ExchangeOperatorgetOutput_653"></a>ExchangeOperator::getOutput触发计算</h4> 
+<pre><code class="prism language-java">    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">addInput</span><span class="token punctuation">(</span><span class="token class-name">Page</span> page<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">UnsupportedOperationException</span><span class="token punctuation">(</span><span class="token function">getClass</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getName</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">" cannot take input"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token class-name">Page</span> <span class="token function">getOutput</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// 这个算子是一个intermediate stage的最上游操作子，负责从无端拉取数据。</span>
+        <span class="token comment">// 因此它的addInput(Page)方法是不需要实现的，并且通过exhcangeClient拉取数据。</span>
+        <span class="token comment">// 从下面的代码可以看到，exchangeClient.pollPage()肯定是异步的，它返回null，也就意味着此实例处于BLOCKED的状态。</span>
+        <span class="token class-name">SerializedPage</span> page <span class="token operator">=</span> exchangeClient<span class="token punctuation">.</span><span class="token function">pollPage</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>page <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        operatorContext<span class="token punctuation">.</span><span class="token function">recordNetworkInput</span><span class="token punctuation">(</span>page<span class="token punctuation">.</span><span class="token function">getSizeInBytes</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> page<span class="token punctuation">.</span><span class="token function">getPositionCount</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 反序列化数据页的内容，数据交互时，数据面是被压缩的</span>
+        <span class="token class-name">Page</span> deserializedPage <span class="token operator">=</span> serde<span class="token punctuation">.</span><span class="token function">deserialize</span><span class="token punctuation">(</span>page<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        operatorContext<span class="token punctuation">.</span><span class="token function">recordProcessedInput</span><span class="token punctuation">(</span>deserializedPage<span class="token punctuation">.</span><span class="token function">getSizeInBytes</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> page<span class="token punctuation">.</span><span class="token function">getPositionCount</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">return</span> deserializedPage<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+</code></pre> 
+<h4><a id="ExchangeOperatorisBlocked_681"></a>ExchangeOperator::isBlocked</h4> 
+<blockquote> 
+ <p>ExchangeOperator的BLOCKED状态就是ExchangeClient是否拉到一个Page的数据的状态。</p> 
+</blockquote> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">ExchangeOperator</span>
+        <span class="token keyword">implements</span> <span class="token class-name">SourceOperator</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">private</span> <span class="token class-name">ListenableFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span></span> isBlocked <span class="token operator">=</span> <span class="token constant">NOT_BLOCKED</span><span class="token punctuation">;</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token class-name">ListenableFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span></span> <span class="token function">isBlocked</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// Avoid registering a new callback in the ExchangeClient when one is already pending</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>isBlocked<span class="token punctuation">.</span><span class="token function">isDone</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// 可以看到，Operator是不是处于BBLOCKED的状态，实际上取决于exchangeClient是否拉取完成一个Page的数据。</span>
+            isBlocked <span class="token operator">=</span> exchangeClient<span class="token punctuation">.</span><span class="token function">isBlocked</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>isBlocked<span class="token punctuation">.</span><span class="token function">isDone</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                isBlocked <span class="token operator">=</span> <span class="token constant">NOT_BLOCKED</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">return</span> isBlocked<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/c8ed24f7adf0780af99d8b4cc3b1c71a/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【android开发-07】android中ImageView的用法介绍</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/f64ae52cf73e4ac0b277c43a93233dba/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Iceberg: 列式读取Parquet数据</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

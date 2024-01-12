@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>mysql热备工具_MySQL开源热备工具XtraBackup的原理与程序说明 | 旺旺知识库 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="mysql热备工具_MySQL开源热备工具XtraBackup的原理与程序说明 | 旺旺知识库" />
+<meta property="og:description" content="XtraBackup是Percona发布的MySQL开源热备工具，可以在尽量不影响线上读写的情况下进行快速全备、增备。支持InnoDB, XtraDB, 和MyISAM引擎。
+一.运行原理
+1.权限
+XtraBackup需要连接到数据库服务器，能够在服务器以及datadir目录下执行一些操作。
+涉及两类用户，应该满足适当权限要求：
+1)操作系统用户，需要datadir目录的READ, WRITE和EXECUTE权限。
+2)数据库系统用户，需要如下权限
+a.RELOAD、LOCK TABLES，为了执行FLUSH TABLES WITH READ LOCK
+b.REPLICATION CLIENT，为了获取二进制日志的位置
+c.CREATE TABLESPACE，为实现独立表空间表的导入导出功能，目前只支持Percona Server导入。
+d.SUPER，为在复制环境下启停slave线程
+所以，创建最小权限的数据库用户，需要:
+mysql&gt;grant reload,lock tables,replication client,super on *.* to ‘backup’@&#39;localhost’;
+2.名词解释
+redo——对于已提交的事务，重做，确保数据的更新同步到数据文件中，而不仅仅在日志文件中。
+rollback——对于未提交的事务，回滚，确保数据一致性。
+prepare——使用innobackupex创建的备份文件，其实可以看做是数据文件在某个时间点上的一个快照，其中可能有未提交的事务，也可能包括已提交到日志文件但是没有提交到数据文件的信息。所以要使备份文件处于一致的状态，需要对未提交的事务rollback，对已提交但未写入数据文件的事务redo! 对备份文件执行rollback和redo使其转化到一致状态的操作，这里就称为prepare。
+3.备份原理
+XtraBackup基于InnoDB的crash-recovery功能。它会复制innodb的data file，由于不锁表，复制出来的数据是不一致的，在恢复的时候使用crash-recovery，使得数据恢复一致。
+InnoDB维护了一个redo log，又称为transaction log，事务日志，它包含了innodb数据的所有改动情况。XtraBackup在备份的时候， 一页一页地复制innodb的数据，而且不锁定表，与此同时，XtraBackup还有另外一个线程监视着transactions log，一旦log发生变化，就把变化过的log pages复制走。为什么要急着复制走呢？ 因为transactions log文件大小有限(循环日志)，写满之后，就会从头再开始写，所以新数据可能会覆盖到旧的数据。
+而使用备份文件进行恢复是基于：InnoDB启动时会先去检查data file和transaction log，查看两者的一致性，然后进行crash recovery，即rollback和redo！这一步可以在InnoDB启动时执行，也可以让xtrabackup执行prepare，手动触发该过程，这样备份文件已准备就绪，在需要恢复时，可以直接使用，节省时间。
+增量备份的原理：
+(1)首先完成一个完全备份，并记录下此时检查点的LSN(Log Sequence Number，记录在事务日志文件中的位置。日志信息是顺序记录的，所以LSN是随时间递增的)。
+(2)在进程增量备份时，比较表空间中每个页的LSN是否大于上次备份时的LSN，如果是(说明自上次备份以来有过更新)，则备份该页，同时记录当前检查点的LSN。
+首先，在logfile中找到并记录最后一个checkpoint(“last checkpoint LSN”)，然后开始从LSN的位置开始拷贝InnoDB的logfile到xtrabackup_logfile；接着，开始拷贝全部的数据文件.ibd；在拷贝全部数据文件结束之后，才停止拷贝logfile。
+因为logfile里面记录全部的数据修改情况，所以，即时在备份过程中数据文件被修改过了，恢复时仍然能够通过解析xtrabackup_logfile保持数据的一致。
+注：以上说明只是针对XtraDB或InnoDB，针对其他如MyISAM，即使增备也会进行完整的拷贝。
+实现细节：
+XtraBackup以read-write模式打开innodb的数据文件，然后对其进行复制。其实它不会修改此文件。也就是说，运行XtraBackup的用户，必须对innodb的数据文件具有读写权限。之所以采用read-write模式是因为XtraBackup采用了其内置的 innodb库来打开文件，而innodb库打开文件的时候就是rw的。
+XtraBackup要从文件系统中复制大量的数据，所以它尽可能地使用posix_fadvise()，来告诉OS不要缓存读取到的数据，从而提升性能。因为这些数据不会重用到了，OS却没有这么聪明。如果要缓存一下的话，几个G的数据，会对OS的虚拟内存造成很大的压力，其它进程，比如 mysqld很有可能被swap出去，这样系统就会受到很大影响了。
+在备份innodb page的过程中，XtraBackup每次读写1MB的数据，1MB/16KB=64个page。这个不可配置。读1MB数据之后，XtraBackup一页一页地遍历这1MB数据，使用innodb的buf_page_is_corrupted()函数检查此页的数据是否正常，如果数据不正常，就重新读取这一页，最多重新读取10次，如果还是失败，备份就失败了，退出。在复制transactions log的时候，每次读写512KB的数据。同样不可以配置。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/7c15565f1b53ff76fd54e0e1f482ecda/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-02-02T14:22:32+08:00" />
+<meta property="article:modified_time" content="2021-02-02T14:22:32+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">mysql热备工具_MySQL开源热备工具XtraBackup的原理与程序说明 | 旺旺知识库</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div style="font-size:16px;"> 
+ <p>XtraBackup是Percona发布的MySQL开源热备工具，可以在尽量不影响线上读写的情况下进行快速全备、增备。支持InnoDB, XtraDB, 和MyISAM引擎。</p> 
+ <p>一.运行原理</p> 
+ <p>1.权限</p> 
+ <p>XtraBackup需要连接到数据库服务器，能够在服务器以及datadir目录下执行一些操作。</p> 
+ <p>涉及两类用户，应该满足适当权限要求：</p> 
+ <p>1)操作系统用户，需要datadir目录的READ, WRITE和EXECUTE权限。</p> 
+ <p>2)数据库系统用户，需要如下权限</p> 
+ <p>a.RELOAD、LOCK TABLES，为了执行FLUSH TABLES WITH READ LOCK</p> 
+ <p>b.REPLICATION CLIENT，为了获取二进制日志的位置</p> 
+ <p>c.CREATE TABLESPACE，为实现独立表空间表的导入导出功能，目前只支持Percona Server导入。</p> 
+ <p>d.SUPER，为在复制环境下启停slave线程</p> 
+ <p>所以，创建最小权限的数据库用户，需要:</p> 
+ <p>mysql&gt;grant reload,lock tables,replication client,super on *.* to ‘backup’@'localhost’;</p> 
+ <p>2.名词解释</p> 
+ <p>redo——对于已提交的事务，重做，确保数据的更新同步到数据文件中，而不仅仅在日志文件中。</p> 
+ <p>rollback——对于未提交的事务，回滚，确保数据一致性。</p> 
+ <p>prepare——使用innobackupex创建的备份文件，其实可以看做是数据文件在某个时间点上的一个快照，其中可能有未提交的事务，也可能包括已提交到日志文件但是没有提交到数据文件的信息。所以要使备份文件处于一致的状态，需要对未提交的事务rollback，对已提交但未写入数据文件的事务redo! 对备份文件执行rollback和redo使其转化到一致状态的操作，这里就称为prepare。</p> 
+ <p>3.备份原理</p> 
+ <p>XtraBackup基于InnoDB的crash-recovery功能。它会复制innodb的data file，由于不锁表，复制出来的数据是不一致的，在恢复的时候使用crash-recovery，使得数据恢复一致。</p> 
+ <p>InnoDB维护了一个redo log，又称为transaction log，事务日志，它包含了innodb数据的所有改动情况。XtraBackup在备份的时候， 一页一页地复制innodb的数据，而且不锁定表，与此同时，XtraBackup还有另外一个线程监视着transactions log，一旦log发生变化，就把变化过的log pages复制走。为什么要急着复制走呢？ 因为transactions log文件大小有限(循环日志)，写满之后，就会从头再开始写，所以新数据可能会覆盖到旧的数据。</p> 
+ <p>而使用备份文件进行恢复是基于：InnoDB启动时会先去检查data file和transaction log，查看两者的一致性，然后进行crash recovery，即rollback和redo！这一步可以在InnoDB启动时执行，也可以让xtrabackup执行prepare，手动触发该过程，这样备份文件已准备就绪，在需要恢复时，可以直接使用，节省时间。</p> 
+ <p>增量备份的原理：</p> 
+ <p>(1)首先完成一个完全备份，并记录下此时检查点的LSN(Log Sequence Number，记录在事务日志文件中的位置。日志信息是顺序记录的，所以LSN是随时间递增的)。</p> 
+ <p>(2)在进程增量备份时，比较表空间中每个页的LSN是否大于上次备份时的LSN，如果是(说明自上次备份以来有过更新)，则备份该页，同时记录当前检查点的LSN。</p> 
+ <p>首先，在logfile中找到并记录最后一个checkpoint(“last checkpoint LSN”)，然后开始从LSN的位置开始拷贝InnoDB的logfile到xtrabackup_logfile；接着，开始拷贝全部的数据文件.ibd；在拷贝全部数据文件结束之后，才停止拷贝logfile。</p> 
+ <p>因为logfile里面记录全部的数据修改情况，所以，即时在备份过程中数据文件被修改过了，恢复时仍然能够通过解析xtrabackup_logfile保持数据的一致。</p> 
+ <p>注：以上说明只是针对XtraDB或InnoDB，针对其他如MyISAM，即使增备也会进行完整的拷贝。</p> 
+ <p>实现细节：</p> 
+ <p>XtraBackup以read-write模式打开innodb的数据文件，然后对其进行复制。其实它不会修改此文件。也就是说，运行XtraBackup的用户，必须对innodb的数据文件具有读写权限。之所以采用read-write模式是因为XtraBackup采用了其内置的 innodb库来打开文件，而innodb库打开文件的时候就是rw的。</p> 
+ <p>XtraBackup要从文件系统中复制大量的数据，所以它尽可能地使用posix_fadvise()，来告诉OS不要缓存读取到的数据，从而提升性能。因为这些数据不会重用到了，OS却没有这么聪明。如果要缓存一下的话，几个G的数据，会对OS的虚拟内存造成很大的压力，其它进程，比如 mysqld很有可能被swap出去，这样系统就会受到很大影响了。</p> 
+ <p>在备份innodb page的过程中，XtraBackup每次读写1MB的数据，1MB/16KB=64个page。这个不可配置。读1MB数据之后，XtraBackup一页一页地遍历这1MB数据，使用innodb的buf_page_is_corrupted()函数检查此页的数据是否正常，如果数据不正常，就重新读取这一页，最多重新读取10次，如果还是失败，备份就失败了，退出。在复制transactions log的时候，每次读写512KB的数据。同样不可以配置。</p> 
+ <p>二、程序说明</p> 
+ <p>XtraBackup主要包括两个程序：</p> 
+ <p>innobackupex: 一个perl脚本，封装了 xtrabackup、tar4idb 程序，执行一些无关效率的零碎任务和调用主程序以及MySQL工具。它提供了一个方便且完整的功能，可以应对各种场景下的需求。可以备份MyISAM、InnoDB和XtraDB引擎数据。</p> 
+ <p>xtrabackup: 主程序，C实现，提供主要功能，负责备份InnoDB和XtraDB引擎数据。</p> 
+ <p>通常使用innobackupex进行备份，方便易操作，语法：</p> 
+ <p>innobackupex [options] BACKUP-DIR</p> 
+ <p>常用参数如下：</p> 
+ <p>–host=</p> 
+ <p>–port=</p> 
+ <p>–user=</p> 
+ <p>–password= 上述为连接数据库的参数</p> 
+ <p>–apply-log 对指定backup目录下的备份文件根据事务日志进行一致性处理，即进行prepare操作。</p> 
+ <p>–ibbackup= 指定使用哪个可执行程序作为主程序。默认会连接到数据库服务器后判断应使用哪个版本的xtrabackup。根据数据库版本不同可以指定xtrabackup_51或xtrabackup_55，或绝对路径(如果PATH中找不到的话)。</p> 
+ <p>–safe-slave-backup 停止slave线程，直到show global status中Slave_open_temp_tables为0时再进行备份操作。这样可以避免基于会话的临时表的数据因slave被中断而丢失导致数据不一致。备份结束后会重新启动slave。</p> 
+ <p>–no-lock 指定不执行flush privileges with read lock。如果能够确保没有DDL操作，没有针对非innodb表的更新(如mysql权限表)，那么可以启用本选项，以避免锁定导致的服务中断。</p> 
+ <p>–no-timestamp 不会在指定backup目录下生成时间戳命名的子目录，而是直接生成到指定backup目录。</p> 
+ <p>–redo-only 设置只针对备份文件做redo操作，而不执行rollback。这样可以支持全备文件和后续的增备文件的合并。此选项会传递为xtrabackup的–apply-log-only选项。</p> 
+ <p>–slave-info 备份从库时比较有用，可以自动生成针对主库的change master命令，保存至xtrabackup_slave_info文件中。</p> 
+ <p>–copy-back 将已备份好的文件，从备份目录拷贝至原始目录(–defaults-file中datadir)</p> 
+ <p>–move-back 将已备份好的文件，从备份目录移动至原始目录(–defaults-file中datadir)</p> 
+ <p>–databases=LIST 指定innobackupex要备份的库表，LIST格式为：”dbname1[.tbnam1] dbname2[.tbnam2] …”。如果不指定，则会备份所有包括MyISAM和InnoDB表的库。可以将清单写入文件，参考–tables-file。</p> 
+ <p>–include=REGEXP 正则表达式来匹配databasename.tablename格式。传递给xtrabackup的–tables选项。</p> 
+ <p>–incremental 指定进行增量备份。同时需要指定–incremental-lsn或–incremental-basedir来定义增量的起点。如果都没指定，则会配置为backup目录下的第一个时间戳的目录。</p> 
+ <p>–incremental-basedir=DIRECTORY 设定增量备份的起始全备所在目录。与–incremental合用。</p> 
+ <p>–incremental-dir=DIRECTORY 在增备与全备进行合并时设置增备所在目录，与–apply-log合用。</p> 
+ <p>–incremental-lsn=LSN 设定增量备份的起始LSN。LSN是一个64位的整数。</p> 
+ <p>–use-memory=2GB 指定xtrabackup工具在prepare备份文件时可以使用的内存量，只与apply-log合用。</p> 
+ <p>与备份至远程主机相关的选项：</p> 
+ <p>–rsync 使用rsync工具来优化文件传输。会拷贝所有的非InnoDB文件，而不是一个个拷贝单独文件。不能与–stream合用。</p> 
+ <p>–stream=STREAMNAME 指定流备份的方式，当前可选tar和xbstream。该选项直接传给xtrabackup的–stream选项。</p> 
+ <p>–tmpdir=DIRECTORY 与stream配合使用。事务日志在传输到远程主机前会先保存在临时文件中，默认为MySQL服务器配置文件中的tmpdir。</p> 
+ <p>很多参数innobackupex会直接传递给xtrabackup，常用的包括：</p> 
+ <p>–suspend-at-end 默认选项。xtrabackup执行完成后会生成xtrabackup_suspended文件，等待，直到该文件被删除，才结束。往往等待过程时，innobackupex工具执行FLUSH TABLES WITH READ LOCK，拷贝剩余的文件。</p> 
+ <p>–parallel=NUMBER-OF-THREADS 用于拷贝的并发线程数</p> 
+ <p>–tables-file=FILE 指定文件路径，该文件中记录需要备份的库和表</p> 
+ <p>–compress 压缩InnoDB数据文件</p> 
+ <p>–compress-threads=N 指定并行压缩的线程数</p> 
+ <p>–defaults-file=[MY.CNF] 指定MySQL选项文件。如果指定，必须是xtrabackup的第一个参数</p> 
+ <p>–throttle=IOS 设定每秒IO数。</p> 
+ <p>–export 支持单独表的导出和导入，必须是独立表空间，而且当前支持导入的只有Percona Server。这里指的是可以export出来，移动到任意实例任意库，要求Percona Server开启innodb_file_per_table和innodb_expand_import选项。不指定该选项，也可以通过alter table xxx discard/import tables 来实现对原实例、原库</p> 
+ <p>–extra-lsndir=DIRECTORY 指定额外的xtrabackup_checkpoints的文件的目录。</p> 
+ <p>三、备份脚本示例</p> 
+ <p>备份脚本：</p> 
+ <p>#!/bin/bash</p> 
+ <p>##作者：Barlow##</p> 
+ <p>##最后修订：2018-09-08##</p> 
+ <p>#脚本作用：备份MySQL数据库</p> 
+ <p>#</p> 
+ <p>IP=192.168.1.11</p> 
+ <p>#设定备份保留天数K</p> 
+ <p>K=30</p> 
+ <p>#</p> 
+ <p>user=backup</p> 
+ <p>passwd=123456</p> 
+ <p>#</p> 
+ <p>TODAY=`date '+%Y%m%d'`</p> 
+ <p>KDAY=`date -d "$TODAY - $K day" '+%Y%m%d'`</p> 
+ <p>BACKDIR=/dbbackup/full</p> 
+ <p>#判断相关软件是否安装,没有安装则在线安装，进redhat或centos，Ubuntu则更换下命令即可</p> 
+ <p>check_depend() {<!-- --></p> 
+ <p>if! [ -x"$(command -v pigz)" ];then</p> 
+ <p>yum install pigz -y</p> 
+ <p>fi</p> 
+ <p>if! [ -x"$(command -v innobackupex)" ];then</p> 
+ <p>yum install http://www.percona.com/downloads/percona-release/redhat/0.1-6/percona-release-0.1-6.noarch.rpm -y</p> 
+ <p>yum install percona-xtrabackup -y</p> 
+ <p>fi</p> 
+ <p>}</p> 
+ <p>#</p> 
+ <p>backup() {<!-- --></p> 
+ <p># start backup</p> 
+ <p>[ -d $BACKDIR ] || mkdir -p $BACKDIR</p> 
+ <p>#使用pigz压缩可以充分利用多核CPU，大幅提升性能</p> 
+ <p>innobackupex --user=${user} --password=${passwd} --stream=tar /tmp | pigz &gt; ${BACKDIR}/${TODAY}.tar.gz</p> 
+ <p>BAKSTATS=$?</p> 
+ <p>cp -rf /etc/my.cnf $BACKDIR/${TODAY}_my.cnf</p> 
+ <p>SIZE=`ls -l ${BACKDIR}/${TODAY}.tar.gz |awk '{print $5}'`</p> 
+ <p>}</p> 
+ <p>pushstats() {<!-- --></p> 
+ <p>#推送告警到prometheus pushgateway实现告警 by 2018-09-08 更新</p> 
+ <p>cat &lt;</p> 
+ <p># HELP dbbackup_status 0 is ok, 1 is faild</p> 
+ <p># TYPE dbbackup_status gauge</p> 
+ <p>dbbackup_status{type="full"} $BAKSTATS</p> 
+ <p># HELP dbbackup_size byte</p> 
+ <p># TYPE dbbackup_size gauge</p> 
+ <p>dbbackup_size{type="full"} $SIZE</p> 
+ <p>EOF</p> 
+ <p>}</p> 
+ <p>check_depend</p> 
+ <p>backup</p> 
+ <p>pushstats</p> 
+ <p>rm -f ${BACKDIR}/${KDAY}.tar.gz</p> 
+ <p>计划任务：</p> 
+ <p>00 22 * * * /home/bak/mysqlbak.sh &amp;&gt;/dev/null</p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/8b5046dbc6c56989ef86ae34a0c20bd2/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">.net C# EF CodeFirst 新增表和字段</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/3035415bce9f6ca99dfe1a0207468416/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">onnx加速变慢</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

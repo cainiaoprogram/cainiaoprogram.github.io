@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>IIC驱动理论与实例分析 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="IIC驱动理论与实例分析" />
+<meta property="og:description" content="文章目录 前言IIC 驱动框架总线驱动设备驱动设备和驱动的匹配过程主机（控制器/适配器）驱动节选设备驱动编写 实例1：读取IIC接口传感器的数据实例2：RK3568触摸屏驱动 前言 `
+不啰嗦，直接从驱动开讲，需要学习IIC协议基础知识的可以先看这篇文章：https://www.rstk.cn/news/369263.html?action=onClick
+提示：需要了解 IIC 的帧格式、读写/命令模式才能彻底了解 i2c_msg 的使用。不想进半导体厂的驱动工程师直接看 设备驱动和设备驱动编写 ！！！
+IIC 驱动框架 IIC 驱动分为主机驱动、设备驱动，主机驱动是 SOC 上IIC控制器驱动，主机驱动由原厂BSP工程师编写；设备驱动是通过调用主机驱动提供的API从而驱动从机上的IIC设备。这个思维很重要，后面的 SPI、USB、以太网都是这样的。
+总线驱动 类似 platform 总线，总线就是用来挂载设备的；但是又不同于 platform ，因为 IIC 总线是真实的总线。
+IIC 总线驱动的重点就是完成 IIC 适配器（也叫IIC控制器）的驱动。
+/* include/linux/i2c.h */ struct i2c_adapter { struct module *owner; unsigned int class; /* classes to allow probing for */ const struct i2c_algorithm *algo; /* 总线访问算法，读写操作 */ void *algo_data; /* data fields that are valid for all devices */ struct rt_mutex bus_lock; int timeout; /* 单位为 jiffies */ int retries; struct device dev; int nr; /*i2c bus 编号， 若置为-1， 则代表动态分配*/ char name[48]; struct completion dev_released; struct mutex userspace_clients_lock; struct list_head userspace_clients; }; struct i2c_algorithm { /* 如果adapter不能支持i2c访问， 则置 master_xfer 为NULL */ int (*master_xfer)(struct i2c_adapter *adap, struct i2c_msg *msgs, int num); /* 如果adapter支持SMBus访问， 则设置smbus_xfer, 若 smbus_xfer 为NULL， 则使用I2C访问来模拟SMBus访问 */ int (*smbus_xfer) (struct i2c_adapter *adap, u16 addr, unsigned short flags, char read_write, u8 command, int size, union i2c_smbus_data *data); u32 (*functionality) (struct i2c_adapter *); /* 用于查询i2c adapter支持那些function */ }; /* i2c_algorithm 中的通信函数以 ic2_msg 为通信的基本单位 */ struct i2c_msg { __u16 addr; /* slave address */ __u16 flags; #define I2C_M_TEN 0x0010 /* this is a ten bit chip address */ #define I2C_M_RD 0x0001 /* read data, from slave to master */ #define I2C_M_NOSTART 0x4000 /* if I2C_FUNC_PROTOCOL_MANGLING */ #define I2C_M_REV_DIR_ADDR 0x2000 /* if I2C_FUNC_PROTOCOL_MANGLING */ #define I2C_M_IGNORE_NAK 0x1000 /* if I2C_FUNC_PROTOCOL_MANGLING */ #define I2C_M_NO_RD_ACK 0x0800 /* if I2C_FUNC_PROTOCOL_MANGLING */ #define I2C_M_RECV_LEN 0x0400 /* length will be first received byte */ #define I2C_M_NEED_DELAY 0x0020 // add by kfx #define I2C_M_REG8_DIRECT 0x0040 // add by kfx __u16 len; /* msg length */ __u8 *buf; /* pointer to msg data */ }; 注册 i2c_adapter 的方法：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/0fcb724c9975c3b464214ddef151f6d5/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-09-01T02:45:51+08:00" />
+<meta property="article:modified_time" content="2023-09-01T02:45:51+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">IIC驱动理论与实例分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><a href="#_4" rel="nofollow">前言</a></li><li><a href="#IIC__11" rel="nofollow">IIC 驱动框架</a></li><li><ul><li><a href="#_15" rel="nofollow">总线驱动</a></li><li><a href="#_86" rel="nofollow">设备驱动</a></li><li><a href="#_191" rel="nofollow">设备和驱动的匹配过程</a></li><li><a href="#_297" rel="nofollow">主机（控制器/适配器）驱动节选</a></li><li><a href="#_438" rel="nofollow">设备驱动编写</a></li></ul> 
+  </li><li><a href="#1IIC_543" rel="nofollow">实例1：读取IIC接口传感器的数据</a></li><li><a href="#2RK3568_778" rel="nofollow">实例2：RK3568触摸屏驱动</a></li></ul> 
+</div> 
+<p></p> 
+<hr> 
+<h2><a id="_4"></a>前言</h2> 
+<p>`<br> 不啰嗦，直接从驱动开讲，需要学习IIC协议基础知识的可以先看这篇文章：https://www.rstk.cn/news/369263.html?action=onClick</p> 
+<p>提示：需要了解 IIC 的帧格式、读写/命令模式才能彻底了解 i2c_msg 的使用。不想进半导体厂的驱动工程师直接看 设备驱动和设备驱动编写 ！！！</p> 
+<h2><a id="IIC__11"></a>IIC 驱动框架</h2> 
+<p>IIC 驱动分为主机驱动、设备驱动，主机驱动是 SOC 上IIC控制器驱动，主机驱动由原厂BSP工程师编写；设备驱动是通过调用主机驱动提供的API从而驱动从机上的IIC设备。这个思维很重要，后面的 SPI、USB、以太网都是这样的。</p> 
+<h3><a id="_15"></a>总线驱动</h3> 
+<p>类似 platform 总线，总线就是用来挂载设备的；但是又不同于 platform ，因为 IIC 总线是真实的总线。<br> IIC 总线驱动的重点就是完成 IIC 适配器（也叫IIC控制器）的驱动。</p> 
+<pre><code class="prism language-c"><span class="token comment">/* include/linux/i2c.h */</span>
+<span class="token keyword">struct</span> <span class="token class-name">i2c_adapter</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">struct</span> <span class="token class-name">module</span> <span class="token operator">*</span>owner<span class="token punctuation">;</span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">int</span> class<span class="token punctuation">;</span>                       <span class="token comment">/* classes to allow probing for */</span>
+    <span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">i2c_algorithm</span> <span class="token operator">*</span>algo<span class="token punctuation">;</span>         <span class="token comment">/* 总线访问算法，读写操作 */</span>
+    <span class="token keyword">void</span> <span class="token operator">*</span>algo_data<span class="token punctuation">;</span>
+
+    <span class="token comment">/* data fields that are valid for all devices */</span>
+    <span class="token keyword">struct</span> <span class="token class-name">rt_mutex</span> bus_lock<span class="token punctuation">;</span>
+
+    <span class="token keyword">int</span> timeout<span class="token punctuation">;</span>                            <span class="token comment">/* 单位为 jiffies */</span>
+    <span class="token keyword">int</span> retries<span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> <span class="token class-name">device</span> dev<span class="token punctuation">;</span>
+
+    <span class="token keyword">int</span> nr<span class="token punctuation">;</span>                                <span class="token comment">/*i2c bus 编号， 若置为-1， 则代表动态分配*/</span>
+    <span class="token keyword">char</span> name<span class="token punctuation">[</span><span class="token number">48</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> <span class="token class-name">completion</span> dev_released<span class="token punctuation">;</span>
+
+    <span class="token keyword">struct</span> <span class="token class-name">mutex</span> userspace_clients_lock<span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> <span class="token class-name">list_head</span> userspace_clients<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token keyword">struct</span> <span class="token class-name">i2c_algorithm</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">/* 如果adapter不能支持i2c访问， 则置 master_xfer 为NULL */</span>
+    <span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>master_xfer<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_adapter</span> <span class="token operator">*</span>adap<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">i2c_msg</span> <span class="token operator">*</span>msgs<span class="token punctuation">,</span> <span class="token keyword">int</span> num<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/* 如果adapter支持SMBus访问， 则设置smbus_xfer, 若 smbus_xfer 为NULL， 则使用I2C访问来模拟SMBus访问 */</span>
+    <span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>smbus_xfer<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_adapter</span> <span class="token operator">*</span>adap<span class="token punctuation">,</span> u16 addr<span class="token punctuation">,</span>
+                    <span class="token keyword">unsigned</span> <span class="token keyword">short</span> flags<span class="token punctuation">,</span> <span class="token keyword">char</span> read_write<span class="token punctuation">,</span>
+                    u8 command<span class="token punctuation">,</span> <span class="token keyword">int</span> size<span class="token punctuation">,</span> <span class="token keyword">union</span> i2c_smbus_data <span class="token operator">*</span>data<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    
+    <span class="token function">u32</span> <span class="token punctuation">(</span><span class="token operator">*</span>functionality<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_adapter</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">/* 用于查询i2c adapter支持那些function */</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token comment">/* i2c_algorithm 中的通信函数以 ic2_msg 为通信的基本单位 */</span>
+<span class="token keyword">struct</span> <span class="token class-name">i2c_msg</span> <span class="token punctuation">{<!-- --></span>
+    __u16 addr<span class="token punctuation">;</span>     <span class="token comment">/* slave address                        */</span>
+    __u16 flags<span class="token punctuation">;</span>
+        <span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">I2C_M_TEN</span>               <span class="token expression"><span class="token number">0x0010</span>  </span><span class="token comment">/* this is a ten bit chip address */</span></span>
+        <span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">I2C_M_RD</span>                <span class="token expression"><span class="token number">0x0001</span>  </span><span class="token comment">/* read data, from slave to master */</span></span>
+        <span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">I2C_M_NOSTART</span>           <span class="token expression"><span class="token number">0x4000</span>  </span><span class="token comment">/* if I2C_FUNC_PROTOCOL_MANGLING */</span></span>
+        <span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">I2C_M_REV_DIR_ADDR</span>      <span class="token expression"><span class="token number">0x2000</span>  </span><span class="token comment">/* if I2C_FUNC_PROTOCOL_MANGLING */</span></span>
+        <span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">I2C_M_IGNORE_NAK</span>        <span class="token expression"><span class="token number">0x1000</span>  </span><span class="token comment">/* if I2C_FUNC_PROTOCOL_MANGLING */</span></span>
+        <span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">I2C_M_NO_RD_ACK</span>         <span class="token expression"><span class="token number">0x0800</span>  </span><span class="token comment">/* if I2C_FUNC_PROTOCOL_MANGLING */</span></span>
+        <span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">I2C_M_RECV_LEN</span>          <span class="token expression"><span class="token number">0x0400</span>  </span><span class="token comment">/* length will be first received byte */</span></span>
+        <span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">I2C_M_NEED_DELAY</span>        <span class="token expression"><span class="token number">0x0020</span>  </span><span class="token comment">// add by kfx</span></span>
+        <span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">I2C_M_REG8_DIRECT</span>       <span class="token expression"><span class="token number">0x0040</span>  </span><span class="token comment">// add by kfx</span></span>
+        __u16 len<span class="token punctuation">;</span>              <span class="token comment">/* msg length                           */</span>
+        __u8 <span class="token operator">*</span>buf<span class="token punctuation">;</span>              <span class="token comment">/* pointer to msg data                  */</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>注册 i2c_adapter 的方法：</p> 
+<pre><code class="prism language-c"><span class="token keyword">int</span> <span class="token function">i2c_add_numbered_adapter</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_adapter</span> <span class="token operator">*</span>adap<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//使用竞态的总线号</span>
+<span class="token keyword">int</span> <span class="token function">i2c_add_adapter</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_adapter</span> <span class="token operator">*</span>adapter<span class="token punctuation">)</span><span class="token punctuation">;</span>        <span class="token comment">//使用动态的总线号</span>
+<span class="token comment">/* 返回值：0，成功；负值，失败。*/</span>
+</code></pre> 
+<p>删除 i2c_adapter 的方法：</p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token function">i2c_del_adapter</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_adapter</span> <span class="token operator">*</span>adap<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<h3><a id="_86"></a>设备驱动</h3> 
+<p>i2c_client 就是描述设备信息的，i2c_driver 描述驱动内容。<br> i2c_client 对应真实的物理设备，每一个 i2c 设备都需要一个 i2c_client 来表示。</p> 
+<pre><code class="prism language-c"><span class="token comment">/* include/linux/i2c.h */</span>
+<span class="token keyword">struct</span> <span class="token class-name">i2c_client</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">short</span> flags<span class="token punctuation">;</span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">short</span> addr<span class="token punctuation">;</span>            <span class="token comment">//设备地址</span>
+    <span class="token keyword">char</span> name<span class="token punctuation">[</span>I2C_NAME_SIZE<span class="token punctuation">]</span><span class="token punctuation">;</span>        <span class="token comment">//设备名称</span>
+    <span class="token keyword">struct</span> <span class="token class-name">i2c_adapter</span> <span class="token operator">*</span> adapter<span class="token punctuation">;</span>  <span class="token comment">//设备所在的i2c总线的adapter</span>
+    <span class="token keyword">struct</span> <span class="token class-name">i2c_driver</span> <span class="token operator">*</span> driver<span class="token punctuation">;</span>    <span class="token comment">//绑定的driver</span>
+    <span class="token keyword">struct</span> <span class="token class-name">device</span> dev<span class="token punctuation">;</span>            
+    <span class="token keyword">int</span> irq<span class="token punctuation">;</span>                        <span class="token comment">//设备的irq号</span>
+    <span class="token keyword">struct</span> <span class="token class-name">list_head</span> detected<span class="token punctuation">;</span>        <span class="token comment">//用于将同一个i2c_driver所驱动的i2c_client形成链表</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>i2c_driver 对应一个驱动的方法，不对应任何的物理实体。</p> 
+<pre><code class="prism language-c"><span class="token comment">/* include/linux/i2c.h */</span>
+<span class="token keyword">struct</span> <span class="token class-name">i2c_driver</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">int</span> class<span class="token punctuation">;</span>
+    <span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span> attach_adapter<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_adapter</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">;</span>    <span class="token comment">/* 旧式i2c driver的方法， 不要再使用 */</span>
+    <span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span> probe<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_client</span> <span class="token operator">*</span><span class="token punctuation">,</span> <span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">i2c_device_id</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span> remove<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_client</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">void</span> <span class="token punctuation">(</span><span class="token operator">*</span> shutdown<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_client</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span> suspend<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_client</span> <span class="token operator">*</span><span class="token punctuation">,</span> <span class="token class-name">pm_message_t</span> mesg<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span> resume<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_client</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">void</span> <span class="token punctuation">(</span><span class="token operator">*</span> alert<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_client</span> <span class="token operator">*</span><span class="token punctuation">,</span> <span class="token keyword">unsigned</span> <span class="token keyword">int</span> data<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span> command<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_client</span> <span class="token operator">*</span>client<span class="token punctuation">,</span> <span class="token keyword">unsigned</span> <span class="token keyword">int</span> cmd<span class="token punctuation">,</span> <span class="token keyword">void</span> <span class="token operator">*</span>arg<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> <span class="token class-name">device_driver</span> driver<span class="token punctuation">;</span>            <span class="token comment">/* 若使用设备树，需要设置 device_driver 的 of_match_table 成员兼容 compatible 属性 */</span>
+    <span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">i2c_device_id</span> <span class="token operator">*</span> id_table<span class="token punctuation">;</span>  <span class="token comment">/* 未使用设备树之前的设备匹配ID表 */</span>
+    <span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span> detect<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_client</span> <span class="token operator">*</span><span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">i2c_board_info</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">const</span> <span class="token keyword">unsigned</span> <span class="token keyword">short</span> <span class="token operator">*</span> address_list<span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> <span class="token class-name">list_head</span> clients<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>i2c_device_id 用于描述 ic2_driver 和 i2c_client 匹配的条件。</p> 
+<pre><code class="prism language-c"><span class="token keyword">struct</span> <span class="token class-name">i2c_device_id</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">char</span> name<span class="token punctuation">[</span>I2C_NAME_SIZE<span class="token punctuation">]</span><span class="token punctuation">;</span>     <span class="token comment">//该name和i2c_client.name相同，则i2c_client和i2c_driver匹配成功， 进行后续的probe过程</span>
+ <span class="token class-name">kernel_ulong_t</span> driver_data<span class="token punctuation">;</span>    <span class="token comment">//传递给driver的私有数据， 不使用则置0</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>例如：</p> 
+<pre><code class="prism language-c"><span class="token keyword">struct</span> <span class="token class-name">i2c_device_id</span> kxtj2_id<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token punctuation">{<!-- --></span> <span class="token string">"kxtj2"</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token punctuation">}</span>
+    <span class="token punctuation">{<!-- --></span> <span class="token string">"kxtj9"</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token punctuation">}</span>
+    <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>    <span class="token comment">/*空成员， 用于标识结尾*/</span>  
+<span class="token punctuation">}</span><span class="token punctuation">;</span>  
+
+<span class="token keyword">struct</span> <span class="token class-name">i2c_driver</span> kxtj2_driver <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token punctuation">.</span>driver <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token punctuation">.</span>name <span class="token operator">=</span> <span class="token string">"gsensor-kxtj2"</span><span class="token punctuation">,</span>      <span class="token comment">/* "gsensor-kxtj2" 用于匹配设备树 */</span>
+        <span class="token punctuation">.</span>owner <span class="token operator">=</span> THIS_MODULE<span class="token punctuation">,</span>  
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>  
+    <span class="token punctuation">.</span>id_table <span class="token operator">=</span> kxtj2_id<span class="token punctuation">,</span>                <span class="token comment">/* 即上面的 kxtj2_id[] */</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>注册 i2c_driver 的方法：</p> 
+<pre><code class="prism language-c"><span class="token keyword">int</span> <span class="token function">i2c_register_driver</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">module</span> <span class="token operator">*</span>owner<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">i2c_driver</span> <span class="token operator">*</span>driver<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">i2c_add_driver</span><span class="token expression"><span class="token punctuation">(</span>driver<span class="token punctuation">)</span>  <span class="token function">i2c_register_driver</span><span class="token punctuation">(</span>THIS_MODULE<span class="token punctuation">,</span> driver<span class="token punctuation">)</span></span></span>
+<span class="token keyword">int</span> <span class="token function">i2c_add_driver</span><span class="token punctuation">(</span>driver<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">/* 返回值：0，成功；负值，失败. */</span>
+</code></pre> 
+<p>注销 i2c_driver 的方法：</p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token function">i2c_del_driver</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_driver</span> <span class="token operator">*</span>driver<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>设备匹配方式：</p> 
+<pre><code class="prism language-c"><span class="token comment">/* 传统匹配方式 ID 列表 */</span>
+<span class="token keyword">static</span> <span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">i2c_device_id</span> xxx_id<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token punctuation">{<!-- --></span><span class="token string">"xxx"</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">}</span><span class="token punctuation">,</span> 
+    <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token comment">/* 设备树匹配列表 */</span>
+<span class="token keyword">static</span> <span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">of_device_id</span> xxx_of_match<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token punctuation">{<!-- --></span> <span class="token punctuation">.</span>compatible <span class="token operator">=</span> <span class="token string">"xxx"</span> <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token comment">/* i2c 驱动结构体 */</span>
+<span class="token keyword">static</span> <span class="token keyword">struct</span> <span class="token class-name">i2c_driver</span> xxx_driver <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token punctuation">.</span>probe <span class="token operator">=</span> xxx_probe<span class="token punctuation">,</span>
+    <span class="token punctuation">.</span>remove <span class="token operator">=</span> xxx_remove<span class="token punctuation">,</span>
+    <span class="token punctuation">.</span>driver <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token punctuation">.</span>owner <span class="token operator">=</span> THIS_MODULE<span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>name <span class="token operator">=</span> <span class="token string">"xxx"</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>of_match_table <span class="token operator">=</span> xxx_of_match<span class="token punctuation">,</span>    <span class="token comment">//上面的设备树匹配列表</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">.</span>id_table <span class="token operator">=</span> xxx_id<span class="token punctuation">,</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<h3><a id="_191"></a>设备和驱动的匹配过程</h3> 
+<p>I2C 设备和驱动的匹配过程是由 I2C 核心来完成的，drivers/i2c/i2c-core.c 就是 I2C 的核心<br> 部分，I2C 核心提供了一些与具体硬件无关的 API 函数。<br> I2C 总线的数据结构为 i2c_bus_type：</p> 
+<pre><code class="prism language-c"><span class="token comment">/* drivers/i2c/i2c-core.c */</span>
+<span class="token keyword">struct</span> <span class="token class-name">bus_type</span> i2c_bus_type <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token punctuation">.</span>name <span class="token operator">=</span> <span class="token string">"i2c"</span><span class="token punctuation">,</span>
+    <span class="token punctuation">.</span>match <span class="token operator">=</span> i2c_device_match<span class="token punctuation">,</span>
+    <span class="token punctuation">.</span>probe <span class="token operator">=</span> i2c_device_probe<span class="token punctuation">,</span>
+    <span class="token punctuation">.</span>remove <span class="token operator">=</span> i2c_device_remove<span class="token punctuation">,</span>
+    <span class="token punctuation">.</span>shutdown <span class="token operator">=</span> i2c_device_shutdown<span class="token punctuation">,</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>i2c_device_match() 是总线上设备和驱动的匹配函数：</p> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">i2c_device_match</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>dev<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">device_driver</span> <span class="token operator">*</span>drv<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">struct</span> <span class="token class-name">i2c_client</span> <span class="token operator">*</span>client <span class="token operator">=</span> <span class="token function">i2c_verify_client</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> <span class="token class-name">i2c_driver</span> <span class="token operator">*</span>driver<span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>client<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token comment">/* Attempt an OF style match */</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">of_driver_match_device</span><span class="token punctuation">(</span>dev<span class="token punctuation">,</span> drv<span class="token punctuation">)</span><span class="token punctuation">)</span>         <span class="token comment">/* 设备树的匹配方式 */</span>
+        <span class="token keyword">return</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token comment">/* Then ACPI style match */</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">acpi_driver_match_device</span><span class="token punctuation">(</span>dev<span class="token punctuation">,</span> drv<span class="token punctuation">)</span><span class="token punctuation">)</span>        <span class="token comment">/* 这个不用了 */</span>
+        <span class="token keyword">return</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    driver <span class="token operator">=</span> <span class="token function">to_i2c_driver</span><span class="token punctuation">(</span>drv<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">/* match on an id table if there is one */</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>driver<span class="token operator">-&gt;</span>id_table<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> <span class="token function">i2c_match_id</span><span class="token punctuation">(</span>driver<span class="token operator">-&gt;</span>id_table<span class="token punctuation">,</span> client<span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>    <span class="token comment">/*传统的匹配方式*/</span>
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>看到这里已经和之前讲过的 platform 总线的设备驱动匹配过程没有差别了。</p> 
+<p>下面引用正点原子的 I.MX6U 的 I2C 适配器驱动分析，更好的理解 IIC 设备树的匹配过程。</p> 
+<pre><code class="prism language-powershell">i2c1: i2c@021a0000 <span class="token punctuation">{<!-- --></span>
+ <span class="token comment">#address-cells = &lt;1&gt;;</span>
+ <span class="token comment">#size-cells = &lt;0&gt;;</span>
+ compatible = <span class="token string">"fsl,imx21-i2c"</span><span class="token punctuation">;</span>
+ reg = &lt;0x021a0000 0x4000&gt;<span class="token punctuation">;</span>    <span class="token operator">/</span><span class="token operator">/</span>控制器基址为 0X021A0000
+ interrupts = &lt;GIC_SPI 36 IRQ_TYPE_LEVEL_HIGH&gt;<span class="token punctuation">;</span>
+ clocks = &lt;&amp;clks IMX6UL_CLK_I2C1&gt;<span class="token punctuation">;</span>
+ status = <span class="token string">"disabled"</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>适配器驱动源码：</p> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">struct</span> <span class="token class-name">platform_device_id</span> imx_i2c_devtype<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>    <span class="token comment">//平台设备匹配表，听我的，不要用了</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token punctuation">,</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token punctuation">.</span>name <span class="token operator">=</span> <span class="token string">"imx21-i2c"</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>driver_data <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token class-name">kernel_ulong_t</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>imx21_i2c_hwdata<span class="token punctuation">,</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">/* sentinel */</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+<span class="token function">MODULE_DEVICE_TABLE</span><span class="token punctuation">(</span>platform<span class="token punctuation">,</span> imx_i2c_devtype<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token keyword">static</span> <span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">of_device_id</span> i2c_imx_dt_ids<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>    <span class="token comment">//设备树匹配列表</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token punctuation">.</span>compatible <span class="token operator">=</span> <span class="token string">"fsl,imx21-i2c"</span><span class="token punctuation">,</span>    <span class="token comment">// "fsl,imx21-i2c" 必须对应设备树上 compatible 属性</span>
+        <span class="token punctuation">.</span>data <span class="token operator">=</span> <span class="token operator">&amp;</span>imx21_i2c_hwdata<span class="token punctuation">,</span>        <span class="token comment">//硬件数据，这里不讨论，后面实例分析的时候会讲</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+<span class="token function">MODULE_DEVICE_TABLE</span><span class="token punctuation">(</span>of<span class="token punctuation">,</span> i2c_imx_dt_ids<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token keyword">static</span> <span class="token keyword">struct</span> <span class="token class-name">platform_driver</span> i2c_imx_driver <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+ <span class="token punctuation">.</span>probe <span class="token operator">=</span> i2c_imx_probe<span class="token punctuation">,</span>
+ <span class="token punctuation">.</span>remove <span class="token operator">=</span> i2c_imx_remove<span class="token punctuation">,</span>
+ <span class="token punctuation">.</span>driver <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+     <span class="token punctuation">.</span>name <span class="token operator">=</span> DRIVER_NAME<span class="token punctuation">,</span>
+     <span class="token punctuation">.</span>owner <span class="token operator">=</span> THIS_MODULE<span class="token punctuation">,</span>
+     <span class="token punctuation">.</span>of_match_table <span class="token operator">=</span> i2c_imx_dt_ids<span class="token punctuation">,</span>    <span class="token comment">//设备树匹配的</span>
+     <span class="token punctuation">.</span>pm <span class="token operator">=</span> IMX_I2C_PM<span class="token punctuation">,</span>
+ <span class="token punctuation">}</span><span class="token punctuation">,</span>
+ <span class="token punctuation">.</span>id_table <span class="token operator">=</span> imx_i2c_devtype<span class="token punctuation">,</span>             <span class="token comment">//听我的，这个直接 NULL 就好了</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token keyword">static</span> <span class="token keyword">int</span> __init <span class="token function">i2c_adap_imx_init</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+ <span class="token keyword">return</span> <span class="token function">platform_driver_register</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>i2c_imx_driver<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token function">subsys_initcall</span><span class="token punctuation">(</span>i2c_adap_imx_init<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token keyword">static</span> <span class="token keyword">void</span> __exit <span class="token function">i2c_adap_imx_exit</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+ <span class="token function">platform_driver_unregister</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>i2c_imx_driver<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token function">module_exit</span><span class="token punctuation">(</span>i2c_adap_imx_exit<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>可以看到实际上 IIC 总线是外壳，实际上工作的是 platform 总线。<br> 当设备和驱动匹配成功就会调用 i2c_imx_probe 函数，i2c_imx_probe 函数<br> 就会完成 I2C 适配器初始化工作。<br> 控制器驱动的 probe 非常地精彩，使用到了很多设备驱动不常用的高级驱动知识。</p> 
+<h3><a id="_297"></a>主机（控制器/适配器）驱动节选</h3> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">i2c_imx_probe</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">platform_device</span> <span class="token operator">*</span>pdev<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+ <span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">of_device_id</span> <span class="token operator">*</span>of_id <span class="token operator">=</span> <span class="token function">of_match_device</span><span class="token punctuation">(</span>i2c_imx_dt_ids<span class="token punctuation">,</span> <span class="token operator">&amp;</span>pdev<span class="token operator">-&gt;</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//一上来就匹配设备树上的设备</span>
+ <span class="token keyword">struct</span> <span class="token class-name">imx_i2c_struct</span> <span class="token operator">*</span>i2c_imx<span class="token punctuation">;</span>    <span class="token comment">//NXP 公司封装了厂商信息的 i2c_adapter</span>
+ <span class="token keyword">struct</span> <span class="token class-name">resource</span> <span class="token operator">*</span>res<span class="token punctuation">;</span>   <span class="token comment">//硬件资源</span>
+ <span class="token keyword">struct</span> <span class="token class-name">imxi2c_platform_data</span> <span class="token operator">*</span>pdata <span class="token operator">=</span> <span class="token function">dev_get_platdata</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pdev<span class="token operator">-&gt;</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ <span class="token keyword">void</span> __iomem <span class="token operator">*</span>base<span class="token punctuation">;</span>     <span class="token comment">//IO地址的基址</span>
+ <span class="token keyword">int</span> irq<span class="token punctuation">,</span> ret<span class="token punctuation">;</span>           <span class="token comment">//中断号和...emmm...</span>
+ <span class="token class-name">dma_addr_t</span> phy_addr<span class="token punctuation">;</span>    <span class="token comment">//使用 DMA 的映射地址</span>
+ irq <span class="token operator">=</span> <span class="token function">platform_get_irq</span><span class="token punctuation">(</span>pdev<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>    <span class="token comment">//申请中断号</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+ res <span class="token operator">=</span> <span class="token function">platform_get_resource</span><span class="token punctuation">(</span>pdev<span class="token punctuation">,</span> IORESOURCE_MEM<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>    <span class="token comment">//获取平台设备资源</span>
+ base <span class="token operator">=</span> <span class="token function">devm_ioremap_resource</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pdev<span class="token operator">-&gt;</span>dev<span class="token punctuation">,</span> res<span class="token punctuation">)</span><span class="token punctuation">;</span>           <span class="token comment">//直接对IO基址转换为虚拟地址</span>
+ <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">IS_ERR</span><span class="token punctuation">(</span>base<span class="token punctuation">)</span><span class="token punctuation">)</span>
+     <span class="token keyword">return</span> <span class="token function">PTR_ERR</span><span class="token punctuation">(</span>base<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ 
+ phy_addr <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token class-name">dma_addr_t</span><span class="token punctuation">)</span>res<span class="token operator">-&gt;</span>start<span class="token punctuation">;</span>                       <span class="token comment">//设置 DMA 映射的地址</span>
+ i2c_imx <span class="token operator">=</span> <span class="token function">devm_kzalloc</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pdev<span class="token operator">-&gt;</span>dev<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token operator">*</span>i2c_imx<span class="token punctuation">)</span><span class="token punctuation">,</span> GFP_KERNEL<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//给控制器申请内存</span>
+ <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>i2c_imx<span class="token punctuation">)</span>
+     <span class="token keyword">return</span> <span class="token operator">-</span>ENOMEM<span class="token punctuation">;</span>
+ <span class="token keyword">if</span> <span class="token punctuation">(</span>of_id<span class="token punctuation">)</span>
+     i2c_imx<span class="token operator">-&gt;</span>hwdata <span class="token operator">=</span> of_id<span class="token operator">-&gt;</span>data<span class="token punctuation">;</span>
+ <span class="token keyword">else</span>
+     i2c_imx<span class="token operator">-&gt;</span>hwdata <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">imx_i2c_hwdata</span> <span class="token operator">*</span><span class="token punctuation">)</span>
+ <span class="token function">platform_get_device_id</span><span class="token punctuation">(</span>pdev<span class="token punctuation">)</span><span class="token operator">-&gt;</span>driver_data<span class="token punctuation">;</span>
+
+ <span class="token comment">/* 初始化 i2c_adapter 的各个成员 */</span>
+ <span class="token function">strlcpy</span><span class="token punctuation">(</span>i2c_imx<span class="token operator">-&gt;</span>adapter<span class="token punctuation">.</span>name<span class="token punctuation">,</span> pdev<span class="token operator">-&gt;</span>name<span class="token punctuation">,</span>
+ <span class="token keyword">sizeof</span><span class="token punctuation">(</span>i2c_imx<span class="token operator">-&gt;</span>adapter<span class="token punctuation">.</span>name<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+ i2c_imx<span class="token operator">-&gt;</span>adapter<span class="token punctuation">.</span>owner <span class="token operator">=</span> THIS_MODULE<span class="token punctuation">;</span>
+ i2c_imx<span class="token operator">-&gt;</span>adapter<span class="token punctuation">.</span>algo <span class="token operator">=</span> <span class="token operator">&amp;</span>i2c_imx_algo<span class="token punctuation">;</span>
+ i2c_imx<span class="token operator">-&gt;</span>adapter<span class="token punctuation">.</span>dev<span class="token punctuation">.</span>parent <span class="token operator">=</span> <span class="token operator">&amp;</span>pdev<span class="token operator">-&gt;</span>dev<span class="token punctuation">;</span>
+ i2c_imx<span class="token operator">-&gt;</span>adapter<span class="token punctuation">.</span>nr <span class="token operator">=</span> pdev<span class="token operator">-&gt;</span>id<span class="token punctuation">;</span>
+ i2c_imx<span class="token operator">-&gt;</span>adapter<span class="token punctuation">.</span>dev<span class="token punctuation">.</span>of_node <span class="token operator">=</span> pdev<span class="token operator">-&gt;</span>dev<span class="token punctuation">.</span>of_node<span class="token punctuation">;</span>
+ i2c_imx<span class="token operator">-&gt;</span>base <span class="token operator">=</span> base<span class="token punctuation">;</span>
+
+ <span class="token comment">/* 获取 IIC 时钟 */</span>
+ i2c_imx<span class="token operator">-&gt;</span>clk <span class="token operator">=</span> <span class="token function">devm_clk_get</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pdev<span class="token operator">-&gt;</span>dev<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+ ret <span class="token operator">=</span> <span class="token function">clk_prepare_enable</span><span class="token punctuation">(</span>i2c_imx<span class="token operator">-&gt;</span>clk<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+ <span class="token comment">/* 设置控制器中断，中断服务函数为 i2c_imx_isr() */</span>
+ ret <span class="token operator">=</span> <span class="token function">devm_request_irq</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pdev<span class="token operator">-&gt;</span>dev<span class="token punctuation">,</span> irq<span class="token punctuation">,</span> i2c_imx_isr<span class="token punctuation">,</span> IRQF_NO_SUSPEND<span class="token punctuation">,</span> pdev<span class="token operator">-&gt;</span>name<span class="token punctuation">,</span> i2c_imx<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+ <span class="token comment">/* 初始化等待队列 */</span>
+ <span class="token function">init_waitqueue_head</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>i2c_imx<span class="token operator">-&gt;</span>queue<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ <span class="token comment">/* Set up adapter data */</span>
+ <span class="token function">i2c_set_adapdata</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>i2c_imx<span class="token operator">-&gt;</span>adapter<span class="token punctuation">,</span> i2c_imx<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ <span class="token comment">/* Set up clock divider */</span>
+ i2c_imx<span class="token operator">-&gt;</span>bitrate <span class="token operator">=</span> IMX_I2C_BIT_RATE<span class="token punctuation">;</span>    <span class="token comment">//IMX_I2C_BIT_RATE=100KHz，即频率为100KHZ</span>
+ ret <span class="token operator">=</span> <span class="token function">of_property_read_u32</span><span class="token punctuation">(</span>pdev<span class="token operator">-&gt;</span>dev<span class="token punctuation">.</span>of_node<span class="token punctuation">,</span> <span class="token string">"clock-frequency"</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>i2c_imx<span class="token operator">-&gt;</span>bitrate<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">/*如果设备树上有时钟频率，就用设备树的*/</span>
+ <span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span> <span class="token operator">&amp;&amp;</span> pdata <span class="token operator">&amp;&amp;</span> pdata<span class="token operator">-&gt;</span>bitrate<span class="token punctuation">)</span>
+     i2c_imx<span class="token operator">-&gt;</span>bitrate <span class="token operator">=</span> pdata<span class="token operator">-&gt;</span>bitrate<span class="token punctuation">;</span>
+
+ <span class="token comment">/* Set up chip registers to defaults，I2C1 控制器的 I2CR 和 I2SR 寄存器 */</span>
+ <span class="token function">imx_i2c_write_reg</span><span class="token punctuation">(</span>i2c_imx<span class="token operator">-&gt;</span>hwdata<span class="token operator">-&gt;</span>i2cr_ien_opcode <span class="token operator">^</span> I2CR_IEN<span class="token punctuation">,</span> i2c_imx<span class="token punctuation">,</span> IMX_I2C_I2CR<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ <span class="token function">imx_i2c_write_reg</span><span class="token punctuation">(</span>i2c_imx<span class="token operator">-&gt;</span>hwdata<span class="token operator">-&gt;</span>i2sr_clr_opcode<span class="token punctuation">,</span> i2c_imx<span class="token punctuation">,</span> IMX_I2C_I2SR<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ <span class="token comment">/* Add I2C adapter */</span>
+ ret <span class="token operator">=</span> <span class="token function">i2c_add_numbered_adapter</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>i2c_imx<span class="token operator">-&gt;</span>adapter<span class="token punctuation">)</span><span class="token punctuation">;</span>    <span class="token comment">//向内核注册 i2c_adapter</span>
+ <span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+     <span class="token function">dev_err</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pdev<span class="token operator">-&gt;</span>dev<span class="token punctuation">,</span> <span class="token string">"registration failed\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+     <span class="token keyword">goto</span> clk_disable<span class="token punctuation">;</span>
+ <span class="token punctuation">}</span>
+ <span class="token comment">/* Set up platform driver data */</span>
+ <span class="token function">platform_set_drvdata</span><span class="token punctuation">(</span>pdev<span class="token punctuation">,</span> i2c_imx<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ <span class="token function">clk_disable_unprepare</span><span class="token punctuation">(</span>i2c_imx<span class="token operator">-&gt;</span>clk<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+ <span class="token comment">/* Init DMA config if supported */</span>
+ <span class="token function">i2c_imx_dma_request</span><span class="token punctuation">(</span>i2c_imx<span class="token punctuation">,</span> phy_addr<span class="token punctuation">)</span><span class="token punctuation">;</span>    <span class="token comment">//申请DMA</span>
+
+ <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span> <span class="token comment">/* Return OK */</span>
+
+ clk_disable<span class="token operator">:</span>
+ <span class="token function">clk_disable_unprepare</span><span class="token punctuation">(</span>i2c_imx<span class="token operator">-&gt;</span>clk<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ <span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>传输函数：</p> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">struct</span> <span class="token class-name">i2c_algorithm</span> i2c_imx_algo <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+ <span class="token punctuation">.</span>master_xfer <span class="token operator">=</span> i2c_imx_xfer<span class="token punctuation">,</span>      <span class="token comment">//IIC适配器和从机通信的函数</span>
+ <span class="token punctuation">.</span>functionality <span class="token operator">=</span> i2c_imx_func<span class="token punctuation">,</span>    <span class="token comment">//返回此I2C适配器支持的通信协议</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token keyword">static</span> u32 <span class="token function">i2c_imx_func</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_adapter</span> <span class="token operator">*</span>adapter<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+ <span class="token keyword">return</span> I2C_FUNC_I2C <span class="token operator">|</span> I2C_FUNC_SMBUS_EMUL <span class="token operator">|</span> I2C_FUNC_SMBUS_READ_BLOCK_DATA<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">i2c_imx_xfer</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_adapter</span> <span class="token operator">*</span>adapter<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">i2c_msg</span> <span class="token operator">*</span>msgs<span class="token punctuation">,</span> <span class="token keyword">int</span> num<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+ <span class="token keyword">unsigned</span> <span class="token keyword">int</span> i<span class="token punctuation">,</span> temp<span class="token punctuation">;</span>
+ <span class="token keyword">int</span> result<span class="token punctuation">;</span>
+ bool is_lastmsg <span class="token operator">=</span> false<span class="token punctuation">;</span>
+ <span class="token keyword">struct</span> <span class="token class-name">imx_i2c_struct</span> <span class="token operator">*</span>i2c_imx <span class="token operator">=</span> <span class="token function">i2c_get_adapdata</span><span class="token punctuation">(</span>adapter<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ <span class="token function">dev_dbg</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>i2c_imx<span class="token operator">-&gt;</span>adapter<span class="token punctuation">.</span>dev<span class="token punctuation">,</span> <span class="token string">"&lt;%s&gt;\n"</span><span class="token punctuation">,</span> <span class="token constant">__func__</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+ <span class="token comment">/* Start I2C transfer */</span>
+ result <span class="token operator">=</span> <span class="token function">i2c_imx_start</span><span class="token punctuation">(</span>i2c_imx<span class="token punctuation">)</span><span class="token punctuation">;</span>    <span class="token comment">//开启I2C通信</span>
+ <span class="token keyword">if</span> <span class="token punctuation">(</span>result<span class="token punctuation">)</span>
+     <span class="token keyword">goto</span> fail0<span class="token punctuation">;</span>
+ <span class="token comment">/* read/write data */</span>
+ <span class="token keyword">for</span> <span class="token punctuation">(</span>i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> num<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+     <span class="token keyword">if</span> <span class="token punctuation">(</span>i <span class="token operator">==</span> num <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">)</span>
+         is_lastmsg <span class="token operator">=</span> true<span class="token punctuation">;</span>
+     <span class="token keyword">if</span> <span class="token punctuation">(</span>i<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+         <span class="token function">dev_dbg</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>i2c_imx<span class="token operator">-&gt;</span>adapter<span class="token punctuation">.</span>dev<span class="token punctuation">,</span> <span class="token string">"&lt;%s&gt; repeated start\n"</span><span class="token punctuation">,</span> <span class="token constant">__func__</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+         temp <span class="token operator">=</span> <span class="token function">imx_i2c_read_reg</span><span class="token punctuation">(</span>i2c_imx<span class="token punctuation">,</span> IMX_I2C_I2CR<span class="token punctuation">)</span><span class="token punctuation">;</span>
+         temp <span class="token operator">|=</span> I2CR_RSTA<span class="token punctuation">;</span>
+         <span class="token function">imx_i2c_write_reg</span><span class="token punctuation">(</span>temp<span class="token punctuation">,</span> i2c_imx<span class="token punctuation">,</span> IMX_I2C_I2CR<span class="token punctuation">)</span><span class="token punctuation">;</span>
+         result <span class="token operator">=</span> <span class="token function">i2c_imx_bus_busy</span><span class="token punctuation">(</span>i2c_imx<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+         <span class="token keyword">if</span> <span class="token punctuation">(</span>result<span class="token punctuation">)</span>
+             <span class="token keyword">goto</span> fail0<span class="token punctuation">;</span>
+     <span class="token punctuation">}</span>
+     <span class="token function">dev_dbg</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>i2c_imx<span class="token operator">-&gt;</span>adapter<span class="token punctuation">.</span>dev<span class="token punctuation">,</span> <span class="token string">"&lt;%s&gt; transfer message: %d\n"</span><span class="token punctuation">,</span> <span class="token constant">__func__</span><span class="token punctuation">,</span> i<span class="token punctuation">)</span><span class="token punctuation">;</span>
+     <span class="token comment">/* write/read data */</span>
+ <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+     <span class="token keyword">if</span> <span class="token punctuation">(</span>msgs<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>flags <span class="token operator">&amp;</span> I2C_M_RD<span class="token punctuation">)</span>
+         result <span class="token operator">=</span> <span class="token function">i2c_imx_read</span><span class="token punctuation">(</span>i2c_imx<span class="token punctuation">,</span> <span class="token operator">&amp;</span>msgs<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">,</span> is_lastmsg<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">/* 如果是从 I2C 设备读数据的话就调用 i2c_imx_read 函数 */</span>
+     <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+         <span class="token keyword">if</span> <span class="token punctuation">(</span>i2c_imx<span class="token operator">-&gt;</span>dma <span class="token operator">&amp;&amp;</span> msgs<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>len <span class="token operator">&gt;=</span> DMA_THRESHOLD<span class="token punctuation">)</span>    <span class="token comment">/* 如果有使用 DMA，就用 DMA 完成 write 操作 */</span>
+             result <span class="token operator">=</span> <span class="token function">i2c_imx_dma_write</span><span class="token punctuation">(</span>i2c_imx<span class="token punctuation">,</span> <span class="token operator">&amp;</span>msgs<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+         <span class="token keyword">else</span>
+             result <span class="token operator">=</span> <span class="token function">i2c_imx_write</span><span class="token punctuation">(</span>i2c_imx<span class="token punctuation">,</span> <span class="token operator">&amp;</span>msgs<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+     <span class="token punctuation">}</span>
+     <span class="token keyword">if</span> <span class="token punctuation">(</span>result<span class="token punctuation">)</span>
+         <span class="token keyword">goto</span> fail0<span class="token punctuation">;</span>
+ <span class="token punctuation">}</span>
+ fail0<span class="token operator">:</span>
+ <span class="token comment">/* Stop I2C transfer */</span>
+ <span class="token function">i2c_imx_stop</span><span class="token punctuation">(</span>i2c_imx<span class="token punctuation">)</span><span class="token punctuation">;</span>    <span class="token comment">//停止 I2C 通信</span>
+ <span class="token function">dev_dbg</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>i2c_imx<span class="token operator">-&gt;</span>adapter<span class="token punctuation">.</span>dev<span class="token punctuation">,</span> <span class="token string">"&lt;%s&gt; exit with: %s: %d\n"</span><span class="token punctuation">,</span> <span class="token constant">__func__</span><span class="token punctuation">,</span> <span class="token punctuation">(</span>result <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token string">"error"</span> <span class="token operator">:</span> <span class="token string">"success msg"</span><span class="token punctuation">,</span> <span class="token punctuation">(</span>result <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token operator">?</span> result <span class="token operator">:</span> num<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ <span class="token keyword">return</span> <span class="token punctuation">(</span>result <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token operator">?</span> result <span class="token operator">:</span> num<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>i2c_imx_start、i2c_imx_read、i2c_imx_write 和 i2c_imx_stop 这些函数就是 I2C 寄存器的具<br> 体操作函数，函数内容基本就是裸机操作 IIC 读写，但是是通过寄存器的，不是管脚模拟的。</p> 
+<h3><a id="_438"></a>设备驱动编写</h3> 
+<p>首先需要在设备树上创建一个节点用于给驱动提供硬件信息。</p> 
+<pre><code class="prism language-powershell">&amp;i2c1 <span class="token punctuation">{<!-- --></span>
+    clock-frequency = &lt;100000&gt;<span class="token punctuation">;</span>     <span class="token operator">/</span><span class="token operator">/</span>时钟频率
+    pinctrl-names = <span class="token string">"default"</span><span class="token punctuation">;</span>
+    pinctrl-0 = &lt;&amp;pinctrl_i2c1&gt;<span class="token punctuation">;</span>    <span class="token operator">/</span><span class="token operator">/</span>使用管脚的第一个功能，引用的功能正好是复用为 IIC
+    status = <span class="token string">"okay"</span><span class="token punctuation">;</span>                <span class="token operator">/</span><span class="token operator">/</span>使能
+    <span class="token operator">/</span><span class="token operator">*</span> 上面那些都是修改IIC控制器的，下面这个才是描述设备的 <span class="token operator">*</span><span class="token operator">/</span>
+    mag3110@0e <span class="token punctuation">{<!-- --></span>
+        compatible = <span class="token string">"fsl,mag3110"</span><span class="token punctuation">;</span>    <span class="token operator">/</span><span class="token operator">/</span>匹配驱动的名字
+        reg = &lt;0x0e&gt;<span class="token punctuation">;</span>                  <span class="token operator">/</span><span class="token operator">/</span>从机相对地址，主机发送包含该地址帧的msg，可以被该从机接收
+        position = &lt;2&gt;<span class="token punctuation">;</span>                <span class="token operator">/</span><span class="token operator">/</span>不用管，别的处理器也不一定有
+    <span class="token punctuation">}</span><span class="token punctuation">;</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>一些规则有必要解释一下：</p> 
+<ul><li>如何确定修改哪一个设备树？<br> 首先厂商会提供对应处理器的设备树，但是这个设备树上只有控制器描述，并且都是 disabled 的；自己的设备节点需要我们引用控制器节点后，使能控制器节点，并在这个基础上添加设备的描述信息。<br> 如果是购买方案的，那么方案商一定提供了开发板的设备树，找到对应的设备树，在 IIC 设备节点之下再创建一个子节点，然后描述设备信息。</li><li>需要添加哪些信息？<br> 时钟、地址、驱动匹配名是必须的，但是每个厂商的设备树语法会有差异，可以根据其他类似节点修改。</li></ul> 
+<p>IIC 数据传输函数：</p> 
+<pre><code class="prism language-c"><span class="token keyword">int</span> <span class="token function">i2c_transfer</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_adapter</span> <span class="token operator">*</span>adap<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">i2c_msg</span> <span class="token operator">*</span>msgs<span class="token punctuation">,</span> <span class="token keyword">int</span> num<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">/* num：消息数量，也就是 msgs 的数量。
+   返回值：负值，失败，其他非负值，发送的 msgs 数量。*/</span>
+</code></pre> 
+<p>使用 i2c_transfer 函数发送数据之前要先构建好 i2c_msg：<br> 由于读取之前必须先告诉模块我们要什么数据，所以读操作会比写操作多一个 i2c_msg 。</p> 
+<pre><code class="prism language-c"><span class="token comment">/* 读取 I2C 设备多个寄存器数据的函数
+    dev IIC设备
+    reg 要读取的寄存器的首地址
+    val 读取到的数据
+    len 读取的数据长度
+*/</span>
+<span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">xxx_read_regs</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">xxx_dev</span> <span class="token operator">*</span>dev<span class="token punctuation">,</span> u8 reg<span class="token punctuation">,</span> <span class="token keyword">void</span> <span class="token operator">*</span>val<span class="token punctuation">,</span> <span class="token keyword">int</span> len<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> ret<span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> <span class="token class-name">i2c_msg</span> msg<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> <span class="token class-name">i2c_client</span> <span class="token operator">*</span>client <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_client</span> <span class="token operator">*</span><span class="token punctuation">)</span>dev<span class="token operator">-&gt;</span>private_data<span class="token punctuation">;</span><span class="token comment">//一般每个设备都会有一个私有数据，指向设备本身的结构体</span>
+    <span class="token comment">/* msg[0]，第一条写消息，发送要读取的寄存器首地址 */</span>
+    msg<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">.</span>addr <span class="token operator">=</span> client<span class="token operator">-&gt;</span>addr<span class="token punctuation">;</span>   <span class="token comment">/* I2C 器件地址 */</span>
+    msg<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">.</span>flags <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>             <span class="token comment">/* 标记为发送数据 */</span>
+    msg<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">.</span>buf <span class="token operator">=</span> <span class="token operator">&amp;</span>reg<span class="token punctuation">;</span>            <span class="token comment">/* 读取的首地址 */</span>
+    msg<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">.</span>len <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>               <span class="token comment">/* reg 长度 */</span>
+    <span class="token comment">/* msg[1]，第二条读消息，读取寄存器数据 */</span>
+    msg<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">.</span>addr <span class="token operator">=</span> client<span class="token operator">-&gt;</span>addr<span class="token punctuation">;</span>   <span class="token comment">/* I2C 器件地址 */</span>
+    msg<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">.</span>flags <span class="token operator">=</span> I2C_M_RD<span class="token punctuation">;</span>      <span class="token comment">/* 标记为读取数据 */</span>
+    msg<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">.</span>buf <span class="token operator">=</span> val<span class="token punctuation">;</span>             <span class="token comment">/* 读取数据缓冲区 */</span>
+    msg<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">.</span>len <span class="token operator">=</span> len<span class="token punctuation">;</span>             <span class="token comment">/* 要读取的数据长度 */</span>
+    ret <span class="token operator">=</span> <span class="token function">i2c_transfer</span><span class="token punctuation">(</span>client<span class="token operator">-&gt;</span>adapter<span class="token punctuation">,</span> msg<span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span><span class="token punctuation">(</span>ret <span class="token operator">==</span> <span class="token number">2</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        ret <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        ret <span class="token operator">=</span> <span class="token operator">-</span>EREMOTEIO<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">/*  向 I2C 设备多个寄存器写入数据
+    dev IIC设备
+    reg 要写入的寄存器的首地址
+    buf 要写入的数据缓冲区
+    len 写入的数据长度
+*/</span>
+<span class="token keyword">static</span> s32 <span class="token function">xxx_write_regs</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">xxx_dev</span> <span class="token operator">*</span>dev<span class="token punctuation">,</span> u8 reg<span class="token punctuation">,</span> u8 <span class="token operator">*</span>buf<span class="token punctuation">,</span>
+ u8 len<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+ u8 b<span class="token punctuation">[</span><span class="token number">256</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+ <span class="token keyword">struct</span> <span class="token class-name">i2c_msg</span> msg<span class="token punctuation">;</span>
+ <span class="token keyword">struct</span> <span class="token class-name">i2c_client</span> <span class="token operator">*</span>client <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_client</span> <span class="token operator">*</span><span class="token punctuation">)</span>dev<span class="token operator">-&gt;</span>private_data<span class="token punctuation">;</span>
+ 
+ b<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">=</span> reg<span class="token punctuation">;</span>              <span class="token comment">/* 寄存器首地址 */</span>
+ <span class="token function">memcpy</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>b<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">,</span>buf<span class="token punctuation">,</span>len<span class="token punctuation">)</span><span class="token punctuation">;</span>   <span class="token comment">/* 将要发送的数据拷贝到数组 b 里面 */</span>
+ 
+ msg<span class="token punctuation">.</span>addr <span class="token operator">=</span> client<span class="token operator">-&gt;</span>addr<span class="token punctuation">;</span> <span class="token comment">/* I2C 器件地址 */</span>
+ msg<span class="token punctuation">.</span>flags <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>           <span class="token comment">/* 标记为写数据 */</span>
+
+ msg<span class="token punctuation">.</span>buf <span class="token operator">=</span> b<span class="token punctuation">;</span>             <span class="token comment">/* 要发送的数据缓冲区 */</span>
+ msg<span class="token punctuation">.</span>len <span class="token operator">=</span> len <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>       <span class="token comment">/* 要发送的数据长度 */</span>
+ 
+ <span class="token keyword">return</span> <span class="token function">i2c_transfer</span><span class="token punctuation">(</span>client<span class="token operator">-&gt;</span>adapter<span class="token punctuation">,</span> <span class="token operator">&amp;</span>msg<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>可以看到是收是发，完全是由 msg 决定的，和函数没有关系。<br> 还有两个 API 函数是和收发相关的：</p> 
+<pre><code class="prism language-c"><span class="token keyword">int</span> <span class="token function">i2c_master_send</span><span class="token punctuation">(</span><span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">i2c_client</span> <span class="token operator">*</span>client<span class="token punctuation">,</span> <span class="token keyword">const</span> <span class="token keyword">char</span> <span class="token operator">*</span>buf<span class="token punctuation">,</span> <span class="token keyword">int</span> count<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">int</span> <span class="token function">i2c_master_recv</span><span class="token punctuation">(</span><span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">i2c_client</span> <span class="token operator">*</span>client<span class="token punctuation">,</span> <span class="token keyword">char</span> <span class="token operator">*</span>buf<span class="token punctuation">,</span> <span class="token keyword">int</span> count<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">/* buf：要接收的数据
+   count：要接收的数据字节数，要小于 64KB，因为 i2c_msg 的 len 成员变量是一个 u16(无
+符号 16 位)类型的数据
+   返回值：负值，失败，其他非负值，发送的字节数
+*/</span>
+</code></pre> 
+<h2><a id="1IIC_543"></a>实例1：读取IIC接口传感器的数据</h2> 
+<p><img src="https://images2.imgbox.com/bd/b9/IbrenwEb_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/60/fd/r4JpcHUJ_o.png" alt="在这里插入图片描述"><br> 传感器模块通过 IIC 接线处理器，那么只能在 IIC 驱动里面把传感器模块的业务给封装起来就是传感器模块驱动了。<br> 开发步骤：</p> 
+<ol><li>修改设备树：<br> 在 pinctrl 节点中添加：引脚号、复用类型，是否中断（中断要在gpio节点中配置中断引脚，图中的7号引脚AP_INT就是中断引脚。再添加内容引用到了 IIC 控制器节点上，使能控制器并设置频率、匹配驱动名、从机地址。</li><li>复制粘贴 IIC 设备驱动框架。</li><li>把EEPROM读写的规则封装到 IIC 传输函数中。</li></ol> 
+<p>修改设备树：</p> 
+<pre><code class="prism language-powershell">pinctrl_i2c1: i2c1grp <span class="token punctuation">{<!-- --></span>
+ fsl<span class="token punctuation">,</span>pins = &lt;
+     MX6UL_PAD_UART4_TX_DATA__I2C1_SCL 0x4001b8b0
+     MX6UL_PAD_UART4_RX_DATA__I2C1_SDA 0x4001b8b0
+ &gt;<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>MX6UL_PAD_UART4_TX_DATA__I2C1_SCL 是引脚号，0x4001b8b0 是复用的电气属性，<br> 这个知道是设置复用就好了，不同厂商的 pinctrl 规则不一样。</p> 
+<pre><code class="prism language-powershell">&amp;i2c1 <span class="token punctuation">{<!-- --></span>
+ clock-frequency = &lt;100000&gt;<span class="token punctuation">;</span>
+ pinctrl-names = <span class="token string">"default"</span><span class="token punctuation">;</span>             <span class="token operator">/</span><span class="token operator">/</span>默认就是第0个功能
+ pinctrl-0 = &lt;&amp;pinctrl_i2c1&gt;<span class="token punctuation">;</span>           <span class="token operator">/</span><span class="token operator">/</span>第0个功能：引用上面设置的复用
+ status = <span class="token string">"okay"</span><span class="token punctuation">;</span>
+ 
+ ap3216c@1e <span class="token punctuation">{<!-- --></span>
+     compatible = <span class="token string">"alientek,ap3216c"</span><span class="token punctuation">;</span>    <span class="token operator">/</span><span class="token operator">/</span>正点原子的IIC驱动名
+     reg = &lt;0x1e&gt;<span class="token punctuation">;</span>                       <span class="token operator">/</span><span class="token operator">/</span>从机地址，IIC 地址帧需要用到
+ <span class="token punctuation">}</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>从设备模型那一讲中，可以知道设备注册和驱动注册时分开的，所以设备树添加了设备之后，在 sys/bus/i2c/devices/ 目录是可以看到设备文件的。<br> IIC 驱动框架：</p> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">AP3216C_CNT</span>    <span class="token expression"><span class="token number">1</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">AP3216C_NAME</span>    <span class="token string">"ap3216c"</span></span>
+
+<span class="token keyword">struct</span> <span class="token class-name">ap3216c_dev</span> <span class="token punctuation">{<!-- --></span>
+ <span class="token class-name">dev_t</span> devid<span class="token punctuation">;</span>                <span class="token comment">/* 设备号 */</span>
+    <span class="token keyword">struct</span> <span class="token class-name">cdev</span> cdev<span class="token punctuation">;</span>            <span class="token comment">/* cdev */</span>
+    <span class="token keyword">struct</span> <span class="token class-name">class</span> <span class="token operator">*</span>class<span class="token punctuation">;</span>        <span class="token comment">/* 类 */</span>
+    <span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>device<span class="token punctuation">;</span>        <span class="token comment">/* 设备 */</span>
+    <span class="token keyword">struct</span> <span class="token class-name">device_node</span>    <span class="token operator">*</span>nd<span class="token punctuation">;</span>    <span class="token comment">/* 设备节点 */</span>
+    <span class="token keyword">int</span> major<span class="token punctuation">;</span>                    <span class="token comment">/* 主设备号 */</span>
+    <span class="token keyword">void</span> <span class="token operator">*</span>private_data<span class="token punctuation">;</span>        <span class="token comment">/* 私有数据 */</span>
+
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+<span class="token keyword">static</span> <span class="token keyword">struct</span> <span class="token class-name">ap3216c_dev</span> ap3216cdev<span class="token punctuation">;</span>
+
+<span class="token keyword">static</span> <span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">of_device_id</span> ap3216c_of_match<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token punctuation">{<!-- --></span> <span class="token punctuation">.</span>compatible <span class="token operator">=</span> <span class="token string">"alientek,ap3216c"</span> <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">ap3216c_open</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">inode</span> <span class="token operator">*</span>inode<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">file</span> <span class="token operator">*</span>filp<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">static</span> <span class="token class-name">ssize_t</span> <span class="token function">ap3216c_read</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">file</span> <span class="token operator">*</span>filp<span class="token punctuation">,</span> <span class="token keyword">char</span> __user <span class="token operator">*</span>buf<span class="token punctuation">,</span> <span class="token class-name">size_t</span> cnt<span class="token punctuation">,</span> <span class="token class-name">loff_t</span> <span class="token operator">*</span>off<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">ap3216c_release</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">inode</span> <span class="token operator">*</span>inode<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">file</span> <span class="token operator">*</span>filp<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token keyword">static</span> <span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">file_operations</span> ap3216c_ops <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token punctuation">.</span>owner <span class="token operator">=</span> THIS_MODULE<span class="token punctuation">,</span>
+    <span class="token punctuation">.</span>open <span class="token operator">=</span> ap3216c_open<span class="token punctuation">,</span>
+    <span class="token punctuation">.</span>read <span class="token operator">=</span> ap3216c_read<span class="token punctuation">,</span>
+    <span class="token punctuation">.</span>release <span class="token operator">=</span> ap3216c_release<span class="token punctuation">,</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">ap3216c_probe</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_client</span> <span class="token operator">*</span>client<span class="token punctuation">,</span> <span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">i2c_device_id</span> <span class="token operator">*</span>id<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+ <span class="token comment">/* 1、构建设备号 */</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>ap3216cdev<span class="token punctuation">.</span>major<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+     ap3216cdev<span class="token punctuation">.</span>devid <span class="token operator">=</span> <span class="token function">MKDEV</span><span class="token punctuation">(</span>ap3216cdev<span class="token punctuation">.</span>major<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+     <span class="token function">register_chrdev_region</span><span class="token punctuation">(</span>ap3216cdev<span class="token punctuation">.</span>devid<span class="token punctuation">,</span> AP3216C_CNT<span class="token punctuation">,</span> AP3216C_NAME<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+     <span class="token function">alloc_chrdev_region</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>ap3216cdev<span class="token punctuation">.</span>devid<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> AP3216C_CNT<span class="token punctuation">,</span> AP3216C_NAME<span class="token punctuation">)</span><span class="token punctuation">;</span>
+     ap3216cdev<span class="token punctuation">.</span>major <span class="token operator">=</span> <span class="token function">MAJOR</span><span class="token punctuation">(</span>ap3216cdev<span class="token punctuation">.</span>devid<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">/* 2、注册设备 */</span>
+    <span class="token function">cdev_init</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>ap3216cdev<span class="token punctuation">.</span>cdev<span class="token punctuation">,</span> <span class="token operator">&amp;</span>ap3216c_ops<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">cdev_add</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>ap3216cdev<span class="token punctuation">.</span>cdev<span class="token punctuation">,</span> ap3216cdev<span class="token punctuation">.</span>devid<span class="token punctuation">,</span> AP3216C_CNT<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/* 3、创建类 */</span>
+ ap3216cdev<span class="token punctuation">.</span>class <span class="token operator">=</span> <span class="token function">class_create</span><span class="token punctuation">(</span>THIS_MODULE<span class="token punctuation">,</span> AP3216C_NAME<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">IS_ERR</span><span class="token punctuation">(</span>ap3216cdev<span class="token punctuation">.</span>class<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> <span class="token function">PTR_ERR</span><span class="token punctuation">(</span>ap3216cdev<span class="token punctuation">.</span>class<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">/* 4、创建设备 */</span>
+ ap3216cdev<span class="token punctuation">.</span>device <span class="token operator">=</span> <span class="token function">device_create</span><span class="token punctuation">(</span>ap3216cdev<span class="token punctuation">.</span>class<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> ap3216cdev<span class="token punctuation">.</span>devid<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> AP3216C_NAME<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">IS_ERR</span><span class="token punctuation">(</span>ap3216cdev<span class="token punctuation">.</span>device<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> <span class="token function">PTR_ERR</span><span class="token punctuation">(</span>ap3216cdev<span class="token punctuation">.</span>device<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+ ap3216cdev<span class="token punctuation">.</span>private_data <span class="token operator">=</span> client<span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">ap3216c_remove</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">i2c_client</span> <span class="token operator">*</span>client<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+ <span class="token comment">/* 删除设备 */</span>
+    <span class="token function">cdev_del</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>ap3216cdev<span class="token punctuation">.</span>cdev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">unregister_chrdev_region</span><span class="token punctuation">(</span>ap3216cdev<span class="token punctuation">.</span>devid<span class="token punctuation">,</span> AP3216C_CNT<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/* 注销掉类和设备 */</span>
+    <span class="token function">device_destroy</span><span class="token punctuation">(</span>ap3216cdev<span class="token punctuation">.</span>class<span class="token punctuation">,</span> ap3216cdev<span class="token punctuation">.</span>devid<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">class_destroy</span><span class="token punctuation">(</span>ap3216cdev<span class="token punctuation">.</span>class<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ 
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">static</span> <span class="token keyword">struct</span> <span class="token class-name">i2c_driver</span> ap3216c_driver <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token punctuation">.</span>probe <span class="token operator">=</span> ap3216c_probe<span class="token punctuation">,</span>
+    <span class="token punctuation">.</span>remove <span class="token operator">=</span> ap3216c_remove<span class="token punctuation">,</span>
+    <span class="token punctuation">.</span>driver <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+     <span class="token punctuation">.</span>owner <span class="token operator">=</span> THIS_MODULE<span class="token punctuation">,</span>
+     <span class="token punctuation">.</span>name <span class="token operator">=</span> <span class="token string">"ap3216c"</span><span class="token punctuation">,</span>
+     <span class="token punctuation">.</span>of_match_table <span class="token operator">=</span> ap3216c_of_match<span class="token punctuation">,</span> 
+ <span class="token punctuation">}</span><span class="token punctuation">,</span>
+     <span class="token punctuation">.</span>id_table <span class="token operator">=</span> ap3216c_id<span class="token punctuation">,</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token keyword">static</span> <span class="token keyword">int</span> __init <span class="token function">ap3216c_init</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> ret <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+
+ ret <span class="token operator">=</span> <span class="token function">i2c_add_driver</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>ap3216c_driver<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">static</span> <span class="token keyword">void</span> __exit <span class="token function">ap3216c_exit</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token function">i2c_del_driver</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>ap3216c_driver<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>添加业务：</p> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">AP3216C_ADDR</span>          <span class="token expression"><span class="token number">0X1E</span>    </span><span class="token comment">/* AP3216C器件地址 */</span></span>
+<span class="token comment">/* AP3316C 寄存器 */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">AP3216C_SYSTEMCONG</span>    <span class="token expression"><span class="token number">0x00</span> </span><span class="token comment">/* 配置寄存器 */</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">AP3216C_INTSTATUS</span>     <span class="token expression"><span class="token number">0X01</span> </span><span class="token comment">/* 中断状态寄存器 */</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">AP3216C_INTCLEAR</span>      <span class="token expression"><span class="token number">0X02</span> </span><span class="token comment">/* 中断清除寄存器 */</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">AP3216C_IRDATALOW</span>     <span class="token expression"><span class="token number">0x0A</span> </span><span class="token comment">/* IR 数据低字节 */</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">AP3216C_IRDATAHIGH</span>    <span class="token expression"><span class="token number">0x0B</span> </span><span class="token comment">/* IR 数据高字节 */</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">AP3216C_ALSDATALOW</span>    <span class="token expression"><span class="token number">0x0C</span> </span><span class="token comment">/* ALS 数据低字节 */</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">AP3216C_ALSDATAHIGH</span>   <span class="token expression"><span class="token number">0X0D</span> </span><span class="token comment">/* ALS 数据高字节 */</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">AP3216C_PSDATALOW</span>     <span class="token expression"><span class="token number">0X0E</span> </span><span class="token comment">/* PS 数据低字节 */</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">AP3216C_PSDATAHIGH</span>    <span class="token expression"><span class="token number">0X0F</span> </span><span class="token comment">/* PS 数据高字节 */</span></span>
+</code></pre> 
+<p>以上这些是外设自己的处理器的寄存器的地址。模块本身是有MCU的，也有自己的固件程序，只能通过IIC发送特定的数据，让模块固件程序回复我们想要的内容，具体什么数据，那得看看模块的文档了。</p> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">ap3216c_read_regs</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">ap3216c_dev</span> <span class="token operator">*</span>dev<span class="token punctuation">,</span> u8 reg<span class="token punctuation">,</span> <span class="token keyword">void</span> <span class="token operator">*</span>val<span class="token punctuation">,</span> <span class="token keyword">int</span> len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">static</span> s32 <span class="token function">ap3216c_write_regs</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">ap3216c_dev</span> <span class="token operator">*</span>dev<span class="token punctuation">,</span> u8 reg<span class="token punctuation">,</span> u8 <span class="token operator">*</span>buf<span class="token punctuation">,</span> u8 len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">/* 专门用来读取传感器数据的函数 */</span>
+<span class="token keyword">void</span> <span class="token function">ap3216c_readdata</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">ap3216c_dev</span> <span class="token operator">*</span>dev<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">char</span> i <span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span>
+ <span class="token keyword">unsigned</span> <span class="token keyword">char</span> buf<span class="token punctuation">[</span><span class="token number">6</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/* 循环读取所有传感器数据 */</span>
+ <span class="token keyword">for</span><span class="token punctuation">(</span>i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> <span class="token number">6</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span>    
+ <span class="token punctuation">{<!-- --></span>
+     buf<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token function">ap3216c_read_reg</span><span class="token punctuation">(</span>dev<span class="token punctuation">,</span> AP3216C_IRDATALOW <span class="token operator">+</span> i<span class="token punctuation">)</span><span class="token punctuation">;</span>    
+ <span class="token punctuation">}</span>
+
+ <span class="token keyword">if</span><span class="token punctuation">(</span>buf<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">&amp;</span> <span class="token number">0X80</span><span class="token punctuation">)</span>     <span class="token comment">/* IR_OF位为1,则数据无效 */</span>
+    dev<span class="token operator">-&gt;</span>ir <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>                    
+    <span class="token keyword">else</span>                 <span class="token comment">/* 读取IR传感器的数据 */</span>
+    dev<span class="token operator">-&gt;</span>ir <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">short</span><span class="token punctuation">)</span>buf<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">&lt;&lt;</span> <span class="token number">2</span><span class="token punctuation">)</span> <span class="token operator">|</span> <span class="token punctuation">(</span>buf<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">&amp;</span> <span class="token number">0X03</span><span class="token punctuation">)</span><span class="token punctuation">;</span>             
+
+    dev<span class="token operator">-&gt;</span>als <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">short</span><span class="token punctuation">)</span>buf<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span> <span class="token operator">&lt;&lt;</span> <span class="token number">8</span><span class="token punctuation">)</span> <span class="token operator">|</span> buf<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">;</span>    <span class="token comment">/* 读取ALS传感器的数据 */</span>  
+
+    <span class="token keyword">if</span><span class="token punctuation">(</span>buf<span class="token punctuation">[</span><span class="token number">4</span><span class="token punctuation">]</span> <span class="token operator">&amp;</span> <span class="token number">0x40</span><span class="token punctuation">)</span>        <span class="token comment">/* IR_OF位为1,则数据无效 */</span>
+        dev<span class="token operator">-&gt;</span>ps <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>                                                        
+    <span class="token keyword">else</span>                         <span class="token comment">/* 读取PS传感器的数据 */</span>
+        dev<span class="token operator">-&gt;</span>ps <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">short</span><span class="token punctuation">)</span><span class="token punctuation">(</span>buf<span class="token punctuation">[</span><span class="token number">5</span><span class="token punctuation">]</span> <span class="token operator">&amp;</span> <span class="token number">0X3F</span><span class="token punctuation">)</span> <span class="token operator">&lt;&lt;</span> <span class="token number">4</span><span class="token punctuation">)</span> <span class="token operator">|</span> <span class="token punctuation">(</span>buf<span class="token punctuation">[</span><span class="token number">4</span><span class="token punctuation">]</span> <span class="token operator">&amp;</span> <span class="token number">0X0F</span><span class="token punctuation">)</span><span class="token punctuation">;</span> 
+<span class="token punctuation">}</span>
+<span class="token comment">/* 注意：读取的数据的格式是模块固件设定的，这个函数并没有太多参考意义
+         重要的是构建 i2c_msg 并使用 i2c_transfer() 发送
+*/</span>
+</code></pre> 
+<p>首先目的是读取三个传感器的数据。<br> 那么需要在设备结构体中增加这三个成员：</p> 
+<pre><code class="prism language-c"><span class="token keyword">struct</span> <span class="token class-name">ap3216c_dev</span> <span class="token punctuation">{<!-- --></span>
+ <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">short</span> ir<span class="token punctuation">,</span> als<span class="token punctuation">,</span> ps<span class="token punctuation">;</span>        <span class="token comment">/* 三个光传感器数据 */</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>open 操作：打开设备文件时对设备进行复位。</p> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">ap3216c_open</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">inode</span> <span class="token operator">*</span>inode<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">file</span> <span class="token operator">*</span>filp<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+filp<span class="token operator">-&gt;</span>private_data <span class="token operator">=</span> <span class="token operator">&amp;</span>ap3216cdev<span class="token punctuation">;</span>
+
+    <span class="token comment">/* 初始化AP3216C */</span>
+    <span class="token function">ap3216c_write_reg</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>ap3216cdev<span class="token punctuation">,</span> AP3216C_SYSTEMCONG<span class="token punctuation">,</span> <span class="token number">0x04</span><span class="token punctuation">)</span><span class="token punctuation">;</span>        <span class="token comment">/* 复位AP3216C             */</span>
+    <span class="token function">mdelay</span><span class="token punctuation">(</span><span class="token number">50</span><span class="token punctuation">)</span><span class="token punctuation">;</span>                                                        <span class="token comment">/* AP3216C复位最少10ms     */</span>
+    <span class="token function">ap3216c_write_reg</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>ap3216cdev<span class="token punctuation">,</span> AP3216C_SYSTEMCONG<span class="token punctuation">,</span> <span class="token number">0X03</span><span class="token punctuation">)</span><span class="token punctuation">;</span>        <span class="token comment">/* 开启ALS、PS+IR         */</span>
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>read 操作：简单暴力，直接调用 ap3216c_readdata() 读取三个寄存器的值</p> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token class-name">ssize_t</span> <span class="token function">ap3216c_read</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">file</span> <span class="token operator">*</span>filp<span class="token punctuation">,</span> <span class="token keyword">char</span> __user <span class="token operator">*</span>buf<span class="token punctuation">,</span> <span class="token class-name">size_t</span> cnt<span class="token punctuation">,</span> <span class="token class-name">loff_t</span> <span class="token operator">*</span>off<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">short</span> data<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token keyword">long</span> err <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">struct</span> <span class="token class-name">ap3216c_dev</span> <span class="token operator">*</span>dev <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">ap3216c_dev</span> <span class="token operator">*</span><span class="token punctuation">)</span>filp<span class="token operator">-&gt;</span>private_data<span class="token punctuation">;</span>
+
+    <span class="token function">ap3216c_readdata</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+ data<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">=</span> dev<span class="token operator">-&gt;</span>ir<span class="token punctuation">;</span>
+ data<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">=</span> dev<span class="token operator">-&gt;</span>als<span class="token punctuation">;</span>
+ data<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span> <span class="token operator">=</span> dev<span class="token operator">-&gt;</span>ps<span class="token punctuation">;</span>
+ err <span class="token operator">=</span> <span class="token function">copy_to_user</span><span class="token punctuation">(</span>buf<span class="token punctuation">,</span> data<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>data<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>release 操作：设备打开的时候并没有申请任何动态内存，也没有进行内存映射。因此这里直接写个空函数都可以了。<br> 略…</p> 
+<h2><a id="2RK3568_778"></a>实例2：RK3568触摸屏驱动</h2> 
+<p>内容较大，移步到另一篇博客：</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/a3be8128d48f95f053e817fbbb88f5b0/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">input子系统理论与实例分析</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/c07b56bb003d7d7218bc8bab3c2c8289/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">蓝易云：使用dbeaver连接MongoDB教程</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

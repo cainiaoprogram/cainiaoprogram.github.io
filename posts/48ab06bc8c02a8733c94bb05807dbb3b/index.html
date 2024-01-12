@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>读源码学MYSQL系列（二）decimal存储转化函数decimal2bin - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="读源码学MYSQL系列（二）decimal存储转化函数decimal2bin" />
+<meta property="og:description" content="问题来源 高精度计算是计算机工程实践中非常重要的内容，在涉及到精确计算的项目中，思考过数据库的设计。因而比较好奇MYSQL中是如何实现对decimal的支持的。本文通过源码阅读，分析理解decimal的存储及各种运算转化。参考源代码：
+https://github.com/google/mysql/blob/master/include/decimal.h https://github.com/twitter-forks/mysql/blob/master/strings/decimal.c 基础准备 首先，在头文件decimal.h中定义了基本结构体和类型：
+typedef int32 decimal_digit_t; MYSQL采取4字节为一组来存储高精度小数，可以存储9位十进制数字。不足9位部分仍然使用4字节存储。
+typedef struct st_decimal_t { int intg, frac, len; my_bool sign; decimal_digit_t *buf; } decimal_t; 其中，各个字段含义如下：
+intg: 整数，十进制整数部分位数 frac: 整数，十进制小数部分位数 sign: 布尔，false表示正数，true表示负数 buf: int32类型数组，每个int32存储9位十进制数字 len: 数组buf的长度 还有一些其他的宏定义如下：
+typedef decimal_digit_t dec1; typedef longlong dec2; #define DIG_PER_DEC1 9 #define DIG_MASK 100000000 #define DIG_BASE 1000000000 #define DIG_MAX (DIG_BASE-1) #define DIG_BASE2 ((dec2)DIG_BASE * (dec2)DIG_BASE) #define ROUND_UP(X) (((X)&#43;DIG_PER_DEC1-1)/DIG_PER_DEC1) static const dec1 powers10[DIG_PER_DEC1&#43;1]={ 1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000}; static const int dig2bytes[DIG_PER_DEC1&#43;1]={0, 1, 1, 2, 2, 3, 3, 4, 4, 4}; static const dec1 frac_max[DIG_PER_DEC1-1]={ 900000000, 990000000, 999000000, 999900000, 999990000, 999999000, 999999900, 999999990 }; 存储转化函数decimal2bin 该函数将decimal_t类型的结构体转化为二进制形式。下面结合源代码说明，为了便于理解，将整个函数按照功能顺序拆分成几个模块分析。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/48ab06bc8c02a8733c94bb05807dbb3b/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-06-27T18:03:02+08:00" />
+<meta property="article:modified_time" content="2020-06-27T18:03:02+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">读源码学MYSQL系列（二）decimal存储转化函数decimal2bin</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="_0"></a>问题来源</h2> 
+<p>  高精度计算是计算机工程实践中非常重要的内容，在涉及到精确计算的项目中，思考过数据库的设计。因而比较好奇MYSQL中是如何实现对decimal的支持的。本文通过源码阅读，分析理解decimal的存储及各种运算转化。参考源代码：</p> 
+<pre><code>https://github.com/google/mysql/blob/master/include/decimal.h
+
+https://github.com/twitter-forks/mysql/blob/master/strings/decimal.c
+</code></pre> 
+<h2><a id="_7"></a>基础准备</h2> 
+<p>首先，在头文件decimal.h中定义了基本结构体和类型：</p> 
+<pre><code class="prism language-c"><span class="token keyword">typedef</span> int32 decimal_digit_t<span class="token punctuation">;</span>
+</code></pre> 
+<p>MYSQL采取4字节为一组来存储高精度小数，可以存储9位十进制数字。不足9位部分仍然使用4字节存储。</p> 
+<pre><code class="prism language-c"><span class="token keyword">typedef</span> <span class="token keyword">struct</span> st_decimal_t <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">int</span>    intg<span class="token punctuation">,</span> frac<span class="token punctuation">,</span> len<span class="token punctuation">;</span>
+  my_bool sign<span class="token punctuation">;</span>
+  decimal_digit_t <span class="token operator">*</span>buf<span class="token punctuation">;</span>
+<span class="token punctuation">}</span> decimal_t<span class="token punctuation">;</span>
+</code></pre> 
+<p>其中，各个字段含义如下：</p> 
+<pre><code>intg: 整数，十进制整数部分位数
+frac: 整数，十进制小数部分位数
+sign: 布尔，false表示正数，true表示负数
+buf: int32类型数组，每个int32存储9位十进制数字
+len: 数组buf的长度
+</code></pre> 
+<p>还有一些其他的宏定义如下：</p> 
+<pre><code class="prism language-c"><span class="token keyword">typedef</span> decimal_digit_t dec1<span class="token punctuation">;</span>
+<span class="token keyword">typedef</span> longlong      dec2<span class="token punctuation">;</span>
+
+<span class="token macro property">#<span class="token directive keyword">define</span> DIG_PER_DEC1 9</span>
+<span class="token macro property">#<span class="token directive keyword">define</span> DIG_MASK     100000000</span>
+<span class="token macro property">#<span class="token directive keyword">define</span> DIG_BASE     1000000000</span>
+<span class="token macro property">#<span class="token directive keyword">define</span> DIG_MAX      (DIG_BASE-1)</span>
+<span class="token macro property">#<span class="token directive keyword">define</span> DIG_BASE2    ((dec2)DIG_BASE * (dec2)DIG_BASE)</span>
+<span class="token macro property">#<span class="token directive keyword">define</span> ROUND_UP(X)  (((X)+DIG_PER_DEC1-1)/DIG_PER_DEC1)</span>
+<span class="token keyword">static</span> <span class="token keyword">const</span> dec1 powers10<span class="token punctuation">[</span>DIG_PER_DEC1<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token operator">=</span><span class="token punctuation">{<!-- --></span>
+  <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">10</span><span class="token punctuation">,</span> <span class="token number">100</span><span class="token punctuation">,</span> <span class="token number">1000</span><span class="token punctuation">,</span> <span class="token number">10000</span><span class="token punctuation">,</span> <span class="token number">100000</span><span class="token punctuation">,</span> <span class="token number">1000000</span><span class="token punctuation">,</span> <span class="token number">10000000</span><span class="token punctuation">,</span> <span class="token number">100000000</span><span class="token punctuation">,</span> <span class="token number">1000000000</span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+<span class="token keyword">static</span> <span class="token keyword">const</span> <span class="token keyword">int</span> dig2bytes<span class="token punctuation">[</span>DIG_PER_DEC1<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token operator">=</span><span class="token punctuation">{<!-- --></span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+<span class="token keyword">static</span> <span class="token keyword">const</span> dec1 frac_max<span class="token punctuation">[</span>DIG_PER_DEC1<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token operator">=</span><span class="token punctuation">{<!-- --></span>
+  <span class="token number">900000000</span><span class="token punctuation">,</span> <span class="token number">990000000</span><span class="token punctuation">,</span> <span class="token number">999000000</span><span class="token punctuation">,</span>
+  <span class="token number">999900000</span><span class="token punctuation">,</span> <span class="token number">999990000</span><span class="token punctuation">,</span> <span class="token number">999999000</span><span class="token punctuation">,</span>
+  <span class="token number">999999900</span><span class="token punctuation">,</span> <span class="token number">999999990</span> <span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<h2><a id="decimal2bin_47"></a>存储转化函数decimal2bin</h2> 
+<p>  该函数将decimal_t类型的结构体转化为二进制形式。下面结合源代码说明，为了便于理解，将整个函数按照功能顺序拆分成几个模块分析。</p> 
+<h3><a id="_49"></a>思路说明</h3> 
+<p>  前文说过，decimal是采用4字节来存储9位整数的，该函数主要围绕着该思路进行。对于任意一个小数，可以进行如下拆分：</p> 
+<pre><code>不足9位部分|9位整数（重复多次）|小数点|9位小数（重复多次）|不足9位部分
+</code></pre> 
+<h3><a id="_54"></a>函数声明</h3> 
+<pre><code class="prism language-c"><span class="token keyword">int</span> <span class="token function">decimal2bin</span><span class="token punctuation">(</span>decimal_t <span class="token operator">*</span>from<span class="token punctuation">,</span> uchar <span class="token operator">*</span>to<span class="token punctuation">,</span> <span class="token keyword">int</span> precision<span class="token punctuation">,</span> <span class="token keyword">int</span> frac<span class="token punctuation">)</span>
+</code></pre> 
+<p>各个参数含义如下：</p> 
+<pre><code>from: 待转化的decimal结构体
+to: uchar数组，转化结果保存到该数组
+precision: 声明decimal精度中的总位数
+frac: 声明decimal精度中的小数位数
+</code></pre> 
+<p>该函数返回执行结果的状态码：</p> 
+<pre><code>E_DEC_OK/E_DEC_TRUNCATED/E_DEC_OVERFLOW
+</code></pre> 
+<h3><a id="_69"></a>变量声明</h3> 
+<pre><code class="prism language-c"> dec1 mask<span class="token operator">=</span>from<span class="token operator">-&gt;</span>sign <span class="token operator">?</span> <span class="token operator">-</span><span class="token number">1</span> <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token operator">*</span>buf1<span class="token operator">=</span>from<span class="token operator">-&gt;</span>buf<span class="token punctuation">,</span> <span class="token operator">*</span>stop1<span class="token punctuation">;</span>
+ <span class="token keyword">int</span> error<span class="token operator">=</span>E_DEC_OK<span class="token punctuation">,</span> intg<span class="token operator">=</span>precision<span class="token operator">-</span>frac<span class="token punctuation">,</span>
+      isize1<span class="token punctuation">,</span> intg1<span class="token punctuation">,</span> intg1x<span class="token punctuation">,</span> from_intg<span class="token punctuation">,</span>
+      intg0<span class="token operator">=</span>intg<span class="token operator">/</span>DIG_PER_DEC1<span class="token punctuation">,</span>
+      frac0<span class="token operator">=</span>frac<span class="token operator">/</span>DIG_PER_DEC1<span class="token punctuation">,</span>
+      intg0x<span class="token operator">=</span>intg<span class="token operator">-</span>intg0<span class="token operator">*</span>DIG_PER_DEC1<span class="token punctuation">,</span>
+      frac0x<span class="token operator">=</span>frac<span class="token operator">-</span>frac0<span class="token operator">*</span>DIG_PER_DEC1<span class="token punctuation">,</span>
+      frac1<span class="token operator">=</span>from<span class="token operator">-&gt;</span>frac<span class="token operator">/</span>DIG_PER_DEC1<span class="token punctuation">,</span>
+      frac1x<span class="token operator">=</span>from<span class="token operator">-&gt;</span>frac<span class="token operator">-</span>frac1<span class="token operator">*</span>DIG_PER_DEC1<span class="token punctuation">,</span>
+      isize0<span class="token operator">=</span>intg0<span class="token operator">*</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span>dec1<span class="token punctuation">)</span><span class="token operator">+</span>dig2bytes<span class="token punctuation">[</span>intg0x<span class="token punctuation">]</span><span class="token punctuation">,</span>
+      fsize0<span class="token operator">=</span>frac0<span class="token operator">*</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span>dec1<span class="token punctuation">)</span><span class="token operator">+</span>dig2bytes<span class="token punctuation">[</span>frac0x<span class="token punctuation">]</span><span class="token punctuation">,</span>
+      fsize1<span class="token operator">=</span>frac1<span class="token operator">*</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span>dec1<span class="token punctuation">)</span><span class="token operator">+</span>dig2bytes<span class="token punctuation">[</span>frac1x<span class="token punctuation">]</span><span class="token punctuation">;</span>
+  <span class="token keyword">const</span> <span class="token keyword">int</span> orig_isize0<span class="token operator">=</span> isize0<span class="token punctuation">;</span>
+  <span class="token keyword">const</span> <span class="token keyword">int</span> orig_fsize0<span class="token operator">=</span> fsize0<span class="token punctuation">;</span>
+  uchar <span class="token operator">*</span>orig_to<span class="token operator">=</span> to<span class="token punctuation">;</span>
+</code></pre> 
+<p>  该函数声明的变量比较多，有一部分是在计算过程中使用到的，可以到时候再根据代码判断含义。在此主要说明初始化过的变量：</p> 
+<pre><code>mask: 符号位，dec1类型，其实就是int类型
+buf1: 指向from数据中的buf数组
+intg: 计算出来的整数部分位数
+</code></pre> 
+<p>intg0, frac0, intg0x, frac0x是根据类型精度参数decimal(precision, frac)计算出来的各部分长度。按照前文的拆分，可以表示如下：</p> 
+<pre><code>intg0x | intg0 | 小数点 | frac0 | frac0x
+</code></pre> 
+<p>相应的，isize0和fsize0分别表示计算出来的整数部分和小数部分的字节数。</p> 
+<p>frac1和frac1x表示实际传进来的from参数的小数部分：</p> 
+<pre><code>整数部分 | 小数点 | frac1 | frac1x
+</code></pre> 
+<p>fsize1表示小数部分需要的字节数。</p> 
+<p>  那么此处为什么不计算整数部分呢？整数部分涉及到前导0的移除，相对要复杂一点，其计算放到了下面的代码中。</p> 
+<h3><a id="0_106"></a>前置0处理</h3> 
+<pre><code class="prism language-c">  buf1<span class="token operator">=</span> <span class="token function">remove_leading_zeroes</span><span class="token punctuation">(</span>from<span class="token punctuation">,</span> <span class="token operator">&amp;</span>from_intg<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+  <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">unlikely</span><span class="token punctuation">(</span>from_intg<span class="token operator">+</span>fsize1<span class="token operator">==</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+  <span class="token punctuation">{<!-- --></span>
+    mask<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span> <span class="token comment">/* just in case */</span>
+    intg<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">;</span>
+    buf1<span class="token operator">=</span><span class="token operator">&amp;</span>mask<span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+
+  intg1<span class="token operator">=</span>from_intg<span class="token operator">/</span>DIG_PER_DEC1<span class="token punctuation">;</span>
+  intg1x<span class="token operator">=</span>from_intg<span class="token operator">-</span>intg1<span class="token operator">*</span>DIG_PER_DEC1<span class="token punctuation">;</span>
+  isize1<span class="token operator">=</span>intg1<span class="token operator">*</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span>dec1<span class="token punctuation">)</span><span class="token operator">+</span>dig2bytes<span class="token punctuation">[</span>intg1x<span class="token punctuation">]</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>  remove_leading_zeros函数的功能通过名字就可以看出，移除前置0，该函数功能比较简单，只有十几行，可以自行查看。from_intg返回移除之后的整数部分位数，返回的buf1指向数组中从左到右第一个非0的元素位置。<br> <small><br>   为了理解if语句，需要解释一下unlikely。在mysql源码中，likely和unlikely都出现过，从用法上来说是一样的，if (likely(value))等价于if(value)，unlikely类似。那有什么用处呢？其实它们是编译优化语句，likely表示if语句块有较大概率执行，unlikely表示else语句块有较大概率执行，方便编译器做指令优化用的。<br> </small></p> 
+<p>  条件from_intg+fsize1==0表示整数部分是0，同时小数部分也为0，此时做一些例外处理。因为这是一个较小概率的情形，所以使用了unlikely。<br>   回答上一节的疑问，在这里，intg1和intg1x分别表示移除前置0后的整数部分中足9位和不足9位部分，isize1则表示相应的字节数。如下：</p> 
+<pre><code>intg1x | intg1 | 小数点 | 小数部分
+</code></pre> 
+<h3><a id="_131"></a>空间检查</h3> 
+<h4><a id="_132"></a>整数部分</h4> 
+<pre><code class="prism language-c">  <span class="token keyword">if</span> <span class="token punctuation">(</span>intg <span class="token operator">&lt;</span> from_intg<span class="token punctuation">)</span>
+  <span class="token punctuation">{<!-- --></span>
+    buf1<span class="token operator">+</span><span class="token operator">=</span>intg1<span class="token operator">-</span>intg0<span class="token operator">+</span><span class="token punctuation">(</span>intg1x<span class="token operator">&gt;</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token punctuation">(</span>intg0x<span class="token operator">&gt;</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    intg1<span class="token operator">=</span>intg0<span class="token punctuation">;</span> intg1x<span class="token operator">=</span>intg0x<span class="token punctuation">;</span>
+    error<span class="token operator">=</span>E_DEC_OVERFLOW<span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+  <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>isize0 <span class="token operator">&gt;</span> isize1<span class="token punctuation">)</span>
+  <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">while</span> <span class="token punctuation">(</span>isize0<span class="token operator">--</span> <span class="token operator">&gt;</span> isize1<span class="token punctuation">)</span>
+      <span class="token operator">*</span>to<span class="token operator">++</span><span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">char</span><span class="token punctuation">)</span>mask<span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<p>  先看if条件，intg是根据声明规格计算出来的整数部分位数，如果小于实际from_intg，报溢出错误。buf1指向实际存储数位的数组，intg1-intg0是足9位部分超出的个数。（intg1x&gt;0)指实际数据中不足9位部分是否需要一个int元素，类似的，(intg0x&gt;0)指声明规格中不足9位部分是否需要一个int元素。buf1加上这些超出部分，实际含义是跳过from中比声明规格多的部分。intg1和intg1x也要修正为声明规格。<br>   在else分支中，如果根据规格计算出来的字节数isize0大于实际字节数isize1，移动to指针，同时将多出的字节设置成符号位mask。</p> 
+<h4><a id="_148"></a>小数部分</h4> 
+<pre><code class="prism language-c">  <span class="token keyword">if</span> <span class="token punctuation">(</span>fsize0 <span class="token operator">&lt;</span> fsize1<span class="token punctuation">)</span>
+  <span class="token punctuation">{<!-- --></span>
+    frac1<span class="token operator">=</span>frac0<span class="token punctuation">;</span> frac1x<span class="token operator">=</span>frac0x<span class="token punctuation">;</span>
+    error<span class="token operator">=</span>E_DEC_TRUNCATED<span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+  <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>fsize0 <span class="token operator">&gt;</span> fsize1 <span class="token operator">&amp;&amp;</span> frac1x<span class="token punctuation">)</span>
+  <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>frac0 <span class="token operator">==</span> frac1<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+      frac1x<span class="token operator">=</span>frac0x<span class="token punctuation">;</span>
+      fsize0<span class="token operator">=</span> fsize1<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">else</span>
+    <span class="token punctuation">{<!-- --></span>
+      frac1<span class="token operator">++</span><span class="token punctuation">;</span>
+      frac1x<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<p>  首先，看外层if条件，如果规格计算值fsize0小于实际字节数fsize1，报溢出错误，并将frac1和frac1x修正为声明规格参数。注意，对比整数部分，此处不需要移动buf1指针。因为，超出的小数部分位于数组的末尾。<br>   然后，在else分支中，如果规格计算值fsize0大于实际字节数且实际frac1x大于0（即小数部分有不足9位的剩余部分出现），为了方便后续计算，需要对位数进行一些调整，继续分两种情况。一是frac0==frac1，此时必有frac0x&gt;frac1x，需要对frac1x进行修正。二是frac0&gt;frac1，此时，将frac1x直接并入到frac1中一起处理。注意，因为fsize0&gt;fsize1且frac1x&gt;0，不可能有frac0&lt;frac1。<br>   为了便于后续小数部分的处理，在此做一个总结。经过上段代码后，小数部分的可能关系如下：</p> 
+<pre><code>当fsize0 &lt; fsize1时, frac1 = frac0, frac1x = frac0x
+当fsize0 = fsize1时, frac1 = frac0, frac1x = frac0x or frac1 - frac0 = 1, frac1x = 0, frac0x=7/8 or frac0 - frac1 = 1, frac0x = 0, frac1x = 7/8
+当fsize0 &gt; fsize1时, frac0 &gt;= frac1, frac0x &gt;= frac1x
+</code></pre> 
+<h3><a id="_177"></a>数值转换</h3> 
+<p>  根据拆分成9位部分和不足9位部分的思路，可以将要转化的数划分为以下结构：</p> 
+<pre><code>intg1x | intg1 | 小数点 | frac1 | frac1x
+</code></pre> 
+<p>转化过程分成这四部分展开：</p> 
+<h4><a id="intg1x_183"></a>intg1x</h4> 
+<pre><code class="prism language-c">  <span class="token comment">/* intg1x part */</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>intg1x<span class="token punctuation">)</span>
+  <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> i<span class="token operator">=</span>dig2bytes<span class="token punctuation">[</span>intg1x<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    dec1 x<span class="token operator">=</span><span class="token punctuation">(</span><span class="token operator">*</span>buf1<span class="token operator">++</span> <span class="token operator">%</span> powers10<span class="token punctuation">[</span>intg1x<span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token operator">^</span> mask<span class="token punctuation">;</span>
+    <span class="token keyword">switch</span> <span class="token punctuation">(</span>i<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">case</span> <span class="token number">1</span><span class="token punctuation">:</span> <span class="token function">mi_int1store</span><span class="token punctuation">(</span>to<span class="token punctuation">,</span> x<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token keyword">break</span><span class="token punctuation">;</span>
+      <span class="token keyword">case</span> <span class="token number">2</span><span class="token punctuation">:</span> <span class="token function">mi_int2store</span><span class="token punctuation">(</span>to<span class="token punctuation">,</span> x<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token keyword">break</span><span class="token punctuation">;</span>
+      <span class="token keyword">case</span> <span class="token number">3</span><span class="token punctuation">:</span> <span class="token function">mi_int3store</span><span class="token punctuation">(</span>to<span class="token punctuation">,</span> x<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token keyword">break</span><span class="token punctuation">;</span>
+      <span class="token keyword">case</span> <span class="token number">4</span><span class="token punctuation">:</span> <span class="token function">mi_int4store</span><span class="token punctuation">(</span>to<span class="token punctuation">,</span> x<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token keyword">break</span><span class="token punctuation">;</span>
+      <span class="token keyword">default</span><span class="token punctuation">:</span> <span class="token function">DBUG_ASSERT</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    to<span class="token operator">+</span><span class="token operator">=</span>i<span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<p>  dig2bytes函数根据数字位数（intg1x）计算需要的字节数。此处，*buf1即是最高位的那个int整数，求余操作保证不会超出intg1x位数限制，最后与符号位mask进行了异或操作。<br>   得到了要保存的数值后，依据字节数i，分别将x存储到to所指向的数组中。mi_int1store表示将x的一个字节存储到to地址中，其他类似。</p> 
+<h4><a id="intg1__frac1_203"></a>intg1 + frac1</h4> 
+<pre><code class="prism language-c">  <span class="token comment">/* intg1+frac1 part */</span>
+  <span class="token keyword">for</span> <span class="token punctuation">(</span>stop1<span class="token operator">=</span>buf1<span class="token operator">+</span>intg1<span class="token operator">+</span>frac1<span class="token punctuation">;</span> buf1 <span class="token operator">&lt;</span> stop1<span class="token punctuation">;</span> to<span class="token operator">+</span><span class="token operator">=</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span>dec1<span class="token punctuation">)</span><span class="token punctuation">)</span>
+  <span class="token punctuation">{<!-- --></span>
+    dec1 x<span class="token operator">=</span><span class="token operator">*</span>buf1<span class="token operator">++</span> <span class="token operator">^</span> mask<span class="token punctuation">;</span>
+    <span class="token function">DBUG_ASSERT</span><span class="token punctuation">(</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span>dec1<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">4</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">mi_int4store</span><span class="token punctuation">(</span>to<span class="token punctuation">,</span> x<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<p>  接下来是整数和小数中的足9位部分，这个比较简单，一个一个复制int就可以了。参考上面的代码，每次复制一个int到to数组中，直到遍历完intg1和frac1次。值得注意的是，在保存数值的时候，同样的，与符号位mask进行了异或操作。</p> 
+<h4><a id="frac1x_214"></a>frac1x</h4> 
+<pre><code class="prism language-c">  <span class="token comment">/* frac1x part */</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>frac1x<span class="token punctuation">)</span>
+  <span class="token punctuation">{<!-- --></span>
+    dec1 x<span class="token punctuation">;</span>
+    <span class="token keyword">int</span> i<span class="token operator">=</span>dig2bytes<span class="token punctuation">[</span>frac1x<span class="token punctuation">]</span><span class="token punctuation">,</span>
+        lim<span class="token operator">=</span><span class="token punctuation">(</span>frac1 <span class="token operator">&lt;</span> frac0 <span class="token operator">?</span> DIG_PER_DEC1 <span class="token punctuation">:</span> frac0x<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">while</span> <span class="token punctuation">(</span>frac1x <span class="token operator">&lt;</span> lim <span class="token operator">&amp;&amp;</span> dig2bytes<span class="token punctuation">[</span>frac1x<span class="token punctuation">]</span> <span class="token operator">==</span> i<span class="token punctuation">)</span>
+      frac1x<span class="token operator">++</span><span class="token punctuation">;</span>
+    x<span class="token operator">=</span><span class="token punctuation">(</span><span class="token operator">*</span>buf1 <span class="token operator">/</span> powers10<span class="token punctuation">[</span>DIG_PER_DEC1 <span class="token operator">-</span> frac1x<span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token operator">^</span> mask<span class="token punctuation">;</span>
+    <span class="token keyword">switch</span> <span class="token punctuation">(</span>i<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">case</span> <span class="token number">1</span><span class="token punctuation">:</span> <span class="token function">mi_int1store</span><span class="token punctuation">(</span>to<span class="token punctuation">,</span> x<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token keyword">break</span><span class="token punctuation">;</span>
+      <span class="token keyword">case</span> <span class="token number">2</span><span class="token punctuation">:</span> <span class="token function">mi_int2store</span><span class="token punctuation">(</span>to<span class="token punctuation">,</span> x<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token keyword">break</span><span class="token punctuation">;</span>
+      <span class="token keyword">case</span> <span class="token number">3</span><span class="token punctuation">:</span> <span class="token function">mi_int3store</span><span class="token punctuation">(</span>to<span class="token punctuation">,</span> x<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token keyword">break</span><span class="token punctuation">;</span>
+      <span class="token keyword">case</span> <span class="token number">4</span><span class="token punctuation">:</span> <span class="token function">mi_int4store</span><span class="token punctuation">(</span>to<span class="token punctuation">,</span> x<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token keyword">break</span><span class="token punctuation">;</span>
+      <span class="token keyword">default</span><span class="token punctuation">:</span> <span class="token function">DBUG_ASSERT</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    to<span class="token operator">+</span><span class="token operator">=</span>i<span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<p>  对比intg1x部分的处理，前面多了一个while循环。这里的逻辑比较绕，while的作用是为了扩充frac1x，举个例子，0.345，frac1 = 0, frac1x = 3，此时，通过while循环可以把frac1x扩充为4，即0.3450，分别以34和50的形式存储到uchar数组中。那么，此处的lim是怎么计算的呢？参考上一行代码，这里有一个大前提，不能超过声明规格，即isize0 &gt;= isize1。当frac1 &lt; frac0时，frac1x的取值从0到DIG_PER_DEC1都有可能，所以lim = DIG_PER_DEC1。而当frac1 &gt;= frac0时，必有frac1x &lt;= frac0x，所以lim = frac0x。</p> 
+<h4><a id="_237"></a>收尾</h4> 
+<pre><code class="prism language-c">  <span class="token keyword">if</span> <span class="token punctuation">(</span>fsize0 <span class="token operator">&gt;</span> fsize1<span class="token punctuation">)</span>
+  <span class="token punctuation">{<!-- --></span>
+    uchar <span class="token operator">*</span>to_end<span class="token operator">=</span> orig_to <span class="token operator">+</span> orig_fsize0 <span class="token operator">+</span> orig_isize0<span class="token punctuation">;</span>
+
+    <span class="token keyword">while</span> <span class="token punctuation">(</span>fsize0<span class="token operator">--</span> <span class="token operator">&gt;</span> fsize1 <span class="token operator">&amp;&amp;</span> to <span class="token operator">&lt;</span> to_end<span class="token punctuation">)</span>
+      <span class="token operator">*</span>to<span class="token operator">++</span><span class="token operator">=</span> <span class="token punctuation">(</span>uchar<span class="token punctuation">)</span>mask<span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+  orig_to<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token operator">^</span><span class="token operator">=</span> <span class="token number">0x80</span><span class="token punctuation">;</span>
+
+  <span class="token comment">/* Check that we have written the whole decimal and nothing more */</span>
+  <span class="token function">DBUG_ASSERT</span><span class="token punctuation">(</span>to <span class="token operator">==</span> orig_to <span class="token operator">+</span> orig_fsize0 <span class="token operator">+</span> orig_isize0<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token keyword">return</span> error<span class="token punctuation">;</span>
+</code></pre> 
+<p>  if条件表示在to数组大于实际需要的情况下，使用符号位mask对to数组进行填充。<br>   最后返回该函数执行的状态码。</p> 
+<h3><a id="_254"></a>总结</h3> 
+<p>  该函数虽然只有120多行，但有较多的细节，因为涉及到from数据和to数组之间的规格检测及空间填充问题。通过该函数，我们可以比较清楚的看到mysql是如何存储decimal类型的数据的。</p> 
+<h2><a id="_257"></a>参考</h2> 
+<p><a href="https://github.com/twitter-forks/mysql/blob/master/strings/decimal.c">github decimal源代码</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/4e23e4ee0e816bb588c195c247979c4a/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【数据处理】数据集划分、打乱(shuffle)、以及keras里K-折交叉验证</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/281124edb056ff3cb4f8613bd8a51869/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">用JAVA编程实现斗地主小游戏（建牌，发牌，选地主，排序）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

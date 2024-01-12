@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>基于SPDK-vhost的云原生Kubevirt虚拟化存储IO的优化方案 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="基于SPDK-vhost的云原生Kubevirt虚拟化存储IO的优化方案" />
+<meta property="og:description" content="摘要
+本文主要介绍针对云原生kubernetes虚拟化IO的应用场景，在Kubevirt中引入SPDK-vhost的支持，来加速虚机中IO存储性能。同时基于Intel开源的Workload Service Framework[1]平台集成部署一套端到端虚拟化IO的应用场景做基本的性能对比测试。
+云原生Kubevirt虚拟化 在云原生时代，越来越多的业务开始逐步迁移到容器上来，容器也成为了一种不可或缺的资源发布和管理形式，同时由于场景的需求，有部分业务形态更适合运行在虚拟机，如何同时管控虚拟机和容器逐渐成为了云原生时代的主流需求，Kubevirt给出了完美的解决方案。VM在Kubernetes环境中的管理和部署工具Kubevirt是 Red Hat 开源的，是基于Kubernetes运行，具体的来说是基于Kubernetes的CRD（自定义资源）增加虚拟机的运行和管理相关的资源，特别是VM，VMI资源类型。用户可以在K8S环境中通过CRD进行增加关于虚拟机的资源类型，再通过部署VM.yaml的形式来创建虚拟机等一系列的操作。
+图1：云原生Kubevirt架构介绍
+如图1所示绿色模块是Kubevirt的原生插件和功能模块，在master上部署virt-controller和virt-api，virt-api是管理虚拟机资源及其运营管理的接口，而virt-controller则负责管理和监控VM实例对象及其关联的POD，其中virt-launcher POD就是virt-controller依据VM的配置文件来创建的。这里需要关注的是virt-launcher POD，每一个virt-launcher承载一个VM实例，其内部是通过libvirtd来管理虚拟机的生命周期。 引入SPDK-vhost加速Kubevirt虚拟化IO 在实际边缘计算和云计算应用场景中，不少客户使用云原生的Rook-Ceph来部署后端存储服务。以常用的block设备为例，用户在创建虚机之前，先通过PV/PVC向Rook-Ceph存储申请volume资源，在创建虚机的时候挂载到VM中，如下图2所示。这种Kubevirt虚机挂载使用Ceph block IO的本质是通过Ceph kernel rbd来提供block块设备，而Kubevirt的虚机则是使用传统的virtIO的前端和后端方案，实际的应用中，会带来频繁的用户空间和内核空间的切换，同时这种基于Qemu-KVM的半虚拟化的IO模型会伴随着大量KVM的VM EXIT和VM ENTRY事件，同时产生大量中断，这会带来不少系统资源的消耗和IO latency 的增大。
+图2：Kubevirt VM在Ceph存储上的使用
+集成SPDK-vhost到Kubevirt 众所周知，业界为了优化virtIO的虚拟化IO性能，而引入vhost的模型，以便减少频繁的用户空间和内核空间的切换和数据的拷贝。而在我们云原生虚拟化场景中引入了SPDK-vhost在空户空间的一种虚拟化IO优化的方案，基于KubeVirt中引入SPDK-vhost的deamonset模块来加速VM中block IO的访问，对于SPDK-vhost的具体细节可以参考SPDK官网介绍[2]。如下图3所示，我们针对Kubevirt中virt-launcher模块进行优化，加入spdk-vhost-user的接口功能，提供对SPDK-vhost的接口检测和通讯，以便在VMI实例中使用SPDK-vhost的接口给VM提供加速的block功能。同时，当在K8S集群中部署Kubevirt的时候我们同时会在集群中部署SPDK-vhost daemonset，在每个节点都会部署一个SPDK-vhost功能POD。而SPDK-vhost POD中的接口会相应的检测和并通过librbd链接到后端的Rook-Ceph，创建对应的SPDK rbd bdev 设备，再以此bdev设备创建vhost-block controller。基于此，当virt-launcher发起创建虚机的过程中，vhost-user接口模块会解析VM yaml文件中定义的块设备信息，并链接到SPDK-vhost POD 向该模块申请特定size的 block设备，而SPDK-vhost守护进程则会向Rook-Ceph申请对应的卷空间，一旦成功，则会在VM中成功看到虚拟磁盘，而此虚拟磁盘则是基于Ceph块设备通过SPDK-vhost加速之后提供的。 图3：引入SPDK-vhost的Kubevirt架构
+下面介绍一下KubeVirt虚机的部署过程中SPDK-vhost功能的接口。如下图4所示，SPDK-vhost模块支持对Rook-Ceph的存储功能管理和链接，能够按需申请Ceph RBD存储卷，并在SPDK内部对应的创建rbd-bdev逻辑设备，再将bdev设备挂接到创建的vhost block controller上，而虚机中vdisk是通过共享内存的方式和SPDK-vhost做数据传输。在控制面，virt-launcher中的libvirt是通过链接SPDK-vhost所提供vhost socket来实现通讯。
+图4：基于SPDK-vhost的Kubevirt VM的接口机制
+对于新的方案的部署和实施流程如下图5所示，以Rook-Ceph为后端存储为例，用户需要在Kubernetes集群环境中预先部署Rook-Ceph和优化过的Kubevirt版本。同时确保SPDK-vhost daemonset正常部署到集群中(当前示例是将SPDK-vhost deamonset单独作为一个模块部署，没有和kubevirt的部署集成到一起)。SPDK-vhost POD中有接口会检测Root-Ceph的环境健康状态并建立链接。随后用户基于编写好的VM yaml文件部署虚机，通过virt-api的将创建VM的信息和资源申请传递给virt-controller，那么virt-controller则会创建virt-launcher POD以便在内部创建VM实例。如下图所示，virt-launcher会往本地node上SPDK-vhost POD发送创建volume的请求，SPDK-vhost POD则会通知Rook-Ceph创建相应的RBD image，成功之后会在SPDK-vhost POD中创建一个SPDK-vhost controller，同时返回结果给到virt-launcher，至此基于SPDK-vhost的block设备创建成功，那么virt-launcher则会正式通知libvirt创建虚机并挂载相应的virtual block设备。
+图5：基于SPDK-vhost的Kubevirt VM的部署流程
+如下图6所示，用户在创建虚机之前，需要在VM yaml文件中申明基于“spdkVhostBlkDisk”类型的块设备，并申请相应的卷容量。
+图6：申请SPDK-vhost类型的块设备
+性能的对比 我们基于Intel开源的WSF (Workload Service Framework，见下一节)框架搭建一套端到端的全栈式workload来对使用SPDK-vhost的虚拟化IO方案和使用Kubevirt内置virtIO方案做性能对比测试。这里采用的是一套三节点集群的存储超融合环境，部署2副本的Rook-Ceph在该集群中，同时在该集群中均匀的部署3个虚机，每个虚机挂载3个虚拟卷。该workload [3]的具体实现可以参考WSF git仓库中的代码和相应的手册。下面是对于使用Kubevirt内置的virtIO方案和加入SPDK-vhost的方案的性能对比。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/afa1195fad67aa33f5a8f9975f7e6dfd/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-07-20T14:22:11+08:00" />
+<meta property="article:modified_time" content="2023-07-20T14:22:11+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">基于SPDK-vhost的云原生Kubevirt虚拟化存储IO的优化方案</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div id="js_content"> 
+ <ul><li><p><strong><span lang="zh-cn">摘要</span></strong></p></li></ul> 
+ <p><span lang="zh-cn">本文主要介绍针对云原生</span>kubernetes<span lang="zh-cn">虚拟化</span>IO<span lang="zh-cn">的应用场景，在</span>Kubevirt<span lang="zh-cn">中引入</span>SPDK-vhost<span lang="zh-cn">的支持，来加速虚机中</span>IO<span lang="zh-cn">存储性能。同时基于</span>Intel<span lang="zh-cn">开源的</span>Workload Service Framework[1]<span lang="zh-cn">平台集成部署一套端到端虚拟化</span>IO<span lang="zh-cn">的应用场景做基本的性能对比测试。</span></p> 
+ <ul><li><h3><strong><span lang="zh-cn">云原生Kubevirt虚拟化</span></strong><strong></strong></h3></li></ul> 
+ <p><span lang="zh-cn">在云原生时代，越来越多的业务开始逐步迁移到容器上来，容器也成为了一种不可或缺的资源发布和管理形式，同时由于场景的需求，有部分业务形态更适合运行在虚拟机，如何同时管控虚拟机和容器逐渐成为了云原生时代的主流需求，</span>Kubevirt<span lang="zh-cn">给出了完美的解决方案。</span>VM<span lang="zh-cn">在</span>Kubernetes<span lang="zh-cn">环境中的管理和部署工具</span>Kubevirt<span lang="zh-cn">是</span> Red Hat <span lang="zh-cn">开源的，是基于</span>Kubernetes<span lang="zh-cn">运行，具体的来说是基于</span>Kubernetes<span lang="zh-cn">的</span>CRD<span lang="zh-cn">（自定义资源）增加虚拟机的运行和管理相关的资源，特别是</span>VM<span lang="zh-cn">，</span>VMI<span lang="zh-cn">资源类型。用户可以在</span>K8S<span lang="zh-cn">环境中通过</span>CRD<span lang="zh-cn">进行增加关于虚拟机的资源类型，再通过部署</span>VM.yaml<span lang="zh-cn">的形式来创建虚拟机等一系列的操作。</span></p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/e9/39/9ZqZfhIL_o.png" alt="c2089c4450a5976a11b3a154b688632a.png"></p> 
+ <p style="text-align:center;"><em><span lang="zh-cn">图</span></em><em>1</em><em><span lang="zh-cn">：云原生</span></em><em>Kubevirt</em><em><span lang="zh-cn">架构介绍</span></em><em></em></p> 
+ <p><span lang="zh-cn">如图</span>1<span lang="zh-cn">所示绿色模块是</span>Kubevirt<span lang="zh-cn">的原生插件和功能模块，在</span>master<span lang="zh-cn">上部署</span>virt-controller<span lang="zh-cn">和</span>virt-api<span lang="zh-cn">，</span>virt-api<span lang="zh-cn">是管理虚拟机资源及其运营管理的接口，而</span>virt-controller<span lang="zh-cn">则负责管理和监控</span>VM<span lang="zh-cn">实例对象及其关联的</span>POD<span lang="zh-cn">，其中</span>virt-launcher POD<span lang="zh-cn">就是</span>virt-controller<span lang="zh-cn">依据</span>VM<span lang="zh-cn">的配置文件来创建的。这里需要关注的是</span>virt-launcher POD<span lang="zh-cn">，每一个</span>virt-launcher<span lang="zh-cn">承载一个</span>VM<span lang="zh-cn">实例，其内部是通过</span>libvirtd<span lang="zh-cn">来管理虚拟机的生命周期。</span> </p> 
+ <ul><li><h3><strong><span lang="zh-cn">引入</span></strong><strong><span lang="zh-cn">SPDK-</span></strong><strong><span lang="zh-cn">vhost加速Kubevirt虚拟化IO</span></strong><strong></strong></h3></li></ul> 
+ <p><span lang="zh-cn">在实际边缘计算和云计算应用场景中，不少客户使用云原生的</span>Rook-Ceph<span lang="zh-cn">来部署后端存储服务。以常用的</span>block<span lang="zh-cn">设备为例，用户在创建虚机之前，先通过</span>PV/PVC<span lang="zh-cn">向</span>Rook-Ceph<span lang="zh-cn">存储申请</span>volume<span lang="zh-cn">资源，在创建虚机的时候挂载到</span>VM<span lang="zh-cn">中，如下图</span>2<span lang="zh-cn">所示。这种</span>Kubevirt<span lang="zh-cn">虚机挂载使用</span>Ceph block IO<span lang="zh-cn">的本质是通过</span>Ceph kernel rbd<span lang="zh-cn">来提供</span>block<span lang="zh-cn">块设备，而</span>Kubevirt<span lang="zh-cn">的虚机则是使用传统的</span>virtIO<span lang="zh-cn">的前端和后端方案，实际的应用中，会带来频繁的用户空间和内核空间的切换，同时这种基于</span>Qemu-KVM<span lang="zh-cn">的半虚拟化的</span>IO<span lang="zh-cn">模型会伴随着大量</span>KVM<span lang="zh-cn">的</span>VM EXIT<span lang="zh-cn">和</span>VM ENTRY<span lang="zh-cn">事件，同时产生大量中断，这会带来不少系统资源的消耗和</span>IO latency <span lang="zh-cn">的增大。</span></p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/75/40/dgdW2h3v_o.png" alt="7f608cbcbb3cd5253cff8f40bf7497a2.png"></p> 
+ <p style="text-align:center;"><em><span lang="zh-cn">图</span></em><em>2</em><em><span lang="zh-cn">：</span></em><em>Kubevirt VM</em><em><span lang="zh-cn">在</span></em><em>Ceph</em><em><span lang="zh-cn">存储上的使用</span></em><em></em></p> 
+ <h4><strong><span lang="zh-cn">集成</span></strong><strong>SPDK-vho</strong><strong>st<span lang="zh-cn">到</span>Kubevirt</strong></h4> 
+ <p><span lang="zh-cn">众所周知，业界为了优化</span>virtIO<span lang="zh-cn">的虚拟化</span>IO<span lang="zh-cn">性能，而引入</span>vhost<span lang="zh-cn">的模型，以便减少频繁的用户空间和内核空间的切换和数据的拷贝。而在我们云原生虚拟化场景中引入了</span>SPDK-vhost<span lang="zh-cn">在空户空间的一种虚拟化</span>IO<span lang="zh-cn">优化的方案，基于</span>KubeVirt<span lang="zh-cn">中引入</span>SPDK-vhost<span lang="zh-cn">的</span>deamonset<span lang="zh-cn">模块来加速</span>VM<span lang="zh-cn">中</span>block IO<span lang="zh-cn">的访问，对于</span>SPDK-vhost<span lang="zh-cn">的具体细节可以参考</span>SPDK<span lang="zh-cn">官网介绍</span>[2]<span lang="zh-cn">。如下图</span>3<span lang="zh-cn">所示，我们针对</span>Kubevirt<span lang="zh-cn">中</span>virt-launcher<span lang="zh-cn">模块进行优化，加入</span>spdk-vhost-user<span lang="zh-cn">的接口功能，提供对</span>SPDK-vhost<span lang="zh-cn">的接口检测和通讯，以便在</span>VMI<span lang="zh-cn">实例中使用</span>SPDK-vhost<span lang="zh-cn">的接口给</span>VM<span lang="zh-cn">提供加速的</span>block<span lang="zh-cn">功能。同时，当在</span>K8S<span lang="zh-cn">集群中部署</span>Kubevirt<span lang="zh-cn">的时候我们同时会在集群中部署</span>SPDK-vhost daemonset<span lang="zh-cn">，在每个节点都会部署一个</span>SPDK-vhost<span lang="zh-cn">功能</span>POD<span lang="zh-cn">。而</span>SPDK-vhost POD<span lang="zh-cn">中的接口会相应的检测和并通过</span>librbd<span lang="zh-cn">链接到后端的</span>Rook-Ceph<span lang="zh-cn">，创建对应的</span>SPDK rbd bdev <span lang="zh-cn">设备，再以此</span>bdev<span lang="zh-cn">设备创建</span>vhost-block controller<span lang="zh-cn">。基于此，当</span>virt-launcher<span lang="zh-cn">发起创建虚机的过程中，</span>vhost-user<span lang="zh-cn">接口模块会解析</span>VM yaml<span lang="zh-cn">文件中定义的块设备信息，并链接到</span>SPDK-vhost POD <span lang="zh-cn">向该模块申请特定</span>size<span lang="zh-cn">的</span> block<span lang="zh-cn">设备，而</span>SPDK-vhost<span lang="zh-cn">守护进程则会向</span>Rook-Ceph<span lang="zh-cn">申请对应的卷空间，一旦成功，则会在</span>VM<span lang="zh-cn">中成功看到虚拟磁盘，而此虚拟磁盘则是基于</span>Ceph<span lang="zh-cn">块设备通过</span>SPDK-vhost<span lang="zh-cn">加速之后提供的。</span> </p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/9d/c6/Qr6WSH3u_o.png" alt="14d14a83c7935cda6ae416f19bcdba48.png"></p> 
+ <p style="text-align:center;"><em><span lang="zh-cn">图</span></em><em>3</em><em><span lang="zh-cn">：引入</span></em><em>SPDK-vhost</em><em><span lang="zh-cn">的</span></em><em>Kubevirt</em><em><span lang="zh-cn">架构</span></em><em></em></p> 
+ <p><span lang="zh-cn">下面介绍一下</span>KubeVirt<span lang="zh-cn">虚机的部署过程中</span>SPDK-vhost<span lang="zh-cn">功能的接口。如下图</span>4<span lang="zh-cn">所示，</span>SPDK-vhost<span lang="zh-cn">模块支持对</span>Rook-Ceph<span lang="zh-cn">的存储功能管理和链接，能够按需申请</span>Ceph RBD<span lang="zh-cn">存储卷，并在</span>SPDK<span lang="zh-cn">内部对应的创建</span>rbd-bdev<span lang="zh-cn">逻辑设备，再将</span>bdev<span lang="zh-cn">设备挂接到创建的</span>vhost block controller<span lang="zh-cn">上，而虚机中</span>vdisk<span lang="zh-cn">是通过共享内存的方式和</span>SPDK-vhost<span lang="zh-cn">做数据传输。在控制面，</span>virt-launcher<span lang="zh-cn">中的</span>libvirt<span lang="zh-cn">是通过链接</span>SPDK-vhost<span lang="zh-cn">所提供</span>vhost socket<span lang="zh-cn">来实现通讯。</span></p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/de/b4/OYcXtDgc_o.png" alt="48006df10c6a30618293e80e3cdc2ae0.png"></p> 
+ <p style="text-align:center;"><em><span lang="zh-cn">图</span></em><em>4</em><em><span lang="zh-cn">：基于</span></em><em>SPDK-vhost</em><em><span lang="zh-cn">的</span></em><em>Kubevirt VM</em><em><span lang="zh-cn">的接口机制</span></em><em></em></p> 
+ <p><span lang="zh-cn">对于新的方案的部署和实施流程如下图</span>5<span lang="zh-cn">所示，以</span>Rook-Ceph<span lang="zh-cn">为后端存储为例，用户需要在</span>Kubernetes<span lang="zh-cn">集群环境中预先部署</span>Rook-Ceph<span lang="zh-cn">和优化过的</span>Kubevirt<span lang="zh-cn">版本。同时确保</span>SPDK-vhost daemonset<span lang="zh-cn">正常部署到集群中</span>(<span lang="zh-cn">当前示例是将</span>SPDK-vhost deamonset<span lang="zh-cn">单独作为一个模块部署，没有和</span>kubevirt<span lang="zh-cn">的部署集成到一起</span>)<span lang="zh-cn">。</span>SPDK-vhost POD<span lang="zh-cn">中有接口会检测</span>Root-Ceph<span lang="zh-cn">的环境健康状态并建立链接。随后用户基于编写好的</span>VM yaml<span lang="zh-cn">文件部署虚机，通过</span>virt-api<span lang="zh-cn">的将创建</span>VM<span lang="zh-cn">的信息和资源申请传递给</span>virt-controller<span lang="zh-cn">，那么</span>virt-controller<span lang="zh-cn">则会创建</span>virt-launcher POD<span lang="zh-cn">以便在内部创建</span>VM<span lang="zh-cn">实例。如下图所示，</span>virt-launcher<span lang="zh-cn">会往本地</span>node<span lang="zh-cn">上</span>SPDK-vhost POD<span lang="zh-cn">发送创建</span>volume<span lang="zh-cn">的请求，</span>SPDK-vhost POD<span lang="zh-cn">则会通知</span>Rook-Ceph<span lang="zh-cn">创建相应的</span>RBD image<span lang="zh-cn">，成功之后会在</span>SPDK-vhost POD<span lang="zh-cn">中创建一个</span>SPDK-vhost controller<span lang="zh-cn">，同时返回结果给到</span>virt-launcher<span lang="zh-cn">，至此基于</span>SPDK-vhost<span lang="zh-cn">的</span>block<span lang="zh-cn">设备创建成功，那么</span>virt-launcher<span lang="zh-cn">则会正式通知</span>libvirt<span lang="zh-cn">创建虚机并挂载相应的</span>virtual block<span lang="zh-cn">设备。</span></p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/4b/e3/TY3KaD0U_o.png" alt="a90238f6032e6349348dc6a86ef84f97.png"></p> 
+ <p style="text-align:center;"><em><span lang="zh-cn">图</span></em><em>5</em><em><span lang="zh-cn">：基于</span></em><em>SPDK-vhost</em><em><span lang="zh-cn">的</span></em><em>Kubevirt VM</em><em><span lang="zh-cn">的部署流程</span></em><em></em></p> 
+ <p><span lang="zh-cn">如下图</span>6<span lang="zh-cn">所示，用户在创建虚机之前，需要在</span>VM yaml<span lang="zh-cn">文件中申明基于“</span>spdkVhostBlkDisk<span lang="zh-cn">”类型的块设备，并申请相应的卷容量。</span></p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/19/f5/wyAdJOkr_o.png" alt="33bee661ab11c2eea46356a66db52edd.png"></p> 
+ <p style="text-align:center;"><em><span lang="zh-cn">图</span></em><em>6</em><em><span lang="zh-cn">：申请</span></em><em>SPDK-vhost</em><em><span lang="zh-cn">类型的块设备</span></em><em></em></p> 
+ <h4><strong>性能的对比</strong></h4> 
+ <p><span lang="zh-cn">我们基于</span>Intel<span lang="zh-cn">开源的</span>WSF (Workload Service Framework<span lang="zh-cn">，见下一节</span>)<span lang="zh-cn">框架搭建一套端到端的全栈式</span>workload<span lang="zh-cn">来对使用</span>SPDK-vhost<span lang="zh-cn">的虚拟化</span>IO<span lang="zh-cn">方案和使用</span>Kubevirt<span lang="zh-cn">内置</span>virtIO<span lang="zh-cn">方案做性能对比测试。这里采用的是一套三节点集群的存储超融合环境，部署</span>2<span lang="zh-cn">副本的</span>Rook-Ceph<span lang="zh-cn">在该集群中，同时在该集群中均匀的部署</span>3<span lang="zh-cn">个虚机，每个虚机挂载</span>3<span lang="zh-cn">个虚拟卷。该</span>workload [3]<span lang="zh-cn">的具体实现可以参考</span>WSF git<span lang="zh-cn">仓库中的代码和相应的手册。下面是对于使用</span>Kubevirt<span lang="zh-cn">内置的</span>virtIO<span lang="zh-cn">方案和加入</span>SPDK-vhost<span lang="zh-cn">的方案的性能对比。</span></p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/6b/7f/VfWX7ICx_o.png" alt="f6d6489acac6db5e531c102631319e2b.png"></p> 
+ <p style="text-align:center;"><em><span lang="zh-cn">图</span></em><em>7</em><em><span lang="zh-cn">：</span></em><em>4K </em><em><span lang="zh-cn">的随机写的吞吐性能和时延对比</span></em><em></em></p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/08/59/e88K6oA4_o.png" alt="8af56f3f3c4ebb65cdc509fd91b16201.png"></p> 
+ <p style="text-align:center;"><em><span lang="zh-cn">图</span></em><em>8</em><em><span lang="zh-cn">：</span></em><em>4k </em><em><span lang="zh-cn">的随机读的吞吐性能和时延对比</span></em><em></em></p> 
+ <p><span lang="zh-cn">如图</span>7<span lang="zh-cn">和图</span>8<span lang="zh-cn">所示，对测试数据做归一化处理，以</span>virtio<span lang="zh-cn">方案为基准，可以看到</span>vhost<span lang="zh-cn">方案对于</span>4K<span lang="zh-cn">的读写场景均有一定程度的性能提升，并且在某些场景中时延也能得到比较大的改善。</span></p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/ca/72/8X36gNg0_o.png" alt="c7d473e554f1ba8ebebf01e0a5051829.png"></p> 
+ <p style="text-align:center;"><em><span lang="zh-cn">图</span></em><em>9</em><em><span lang="zh-cn">：</span></em><em>1M Read &amp; Write </em><em><span lang="zh-cn">带宽性能对比测试</span></em><em></em></p> 
+ <p><span lang="zh-cn">而对比较大的</span>IO<span lang="zh-cn">，如图</span>9<span lang="zh-cn">所示，可以看到</span>vhost<span lang="zh-cn">方案相比原有的</span>virtIO<span lang="zh-cn">方案在</span>1M<span lang="zh-cn">的读写场景中也有性能提升，</span>1M<span lang="zh-cn">顺序读能提升</span>11.52%<span lang="zh-cn">，而对比</span>1M<span lang="zh-cn">的顺序写可以得到</span>18.64%<span lang="zh-cn">的性能提升。</span></p> 
+ <ul><li><h3><strong><span lang="zh-cn">WSF 的介绍</span></strong><strong></strong></h3></li></ul> 
+ <p>WSF <span lang="zh-cn">全称</span>Workload Service Framework [1], <span lang="zh-cn">是一套</span>Intel<span lang="zh-cn">开源的面向云原生，端到端的全栈式</span>workload<span lang="zh-cn">的集成开发，基准测试和调优的平台。该平台支持在不同环境中自动化的系统性的运行并测试</span>workload<span lang="zh-cn">的性能，目前可以支持在</span>On-Prem<span lang="zh-cn">和云服务厂商</span>CSP<span lang="zh-cn">上的实例上部署和性能测试，同时也支持多个硬件平台</span>(<span lang="zh-cn">比如</span>Intel, AMD, ARM<span lang="zh-cn">等</span>) <span lang="zh-cn">的性能对比分析。</span></p> 
+ <p>WSF <span lang="zh-cn">目前支持云原生应用场景中的几个主要的部署类型，如下图所示，其中包括纯</span>Docker<span lang="zh-cn">部署，</span>Kubernetes<span lang="zh-cn">的部署和基于</span>Terraform<span lang="zh-cn">的部署方式。其中</span>Terraform<span lang="zh-cn">的部署方式能有效的帮助我们将软件栈和</span>workload<span lang="zh-cn">部署到</span>On-Prem<span lang="zh-cn">和</span>CSP <span lang="zh-cn">的云实例上。</span>WSF<span lang="zh-cn">中集成的</span>workload<span lang="zh-cn">是依据业界内常用的客户应用场景来实现，并对应的定义</span>workload<span lang="zh-cn">性能</span>KPI<span lang="zh-cn">测试标准，这不仅能够帮助芯片制造商来分析芯片在各种应用场景下的运行行为和性能状况，也能帮助行业客户在特定平台上部署和调优软件栈和工作负载。</span></p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/24/d5/haPKn3YC_o.png" alt="c2f657b16e32ea87072991b10828adf0.png"></p> 
+ <p style="text-align:center;"><em><span lang="zh-cn">图</span></em><em>10</em><em><span lang="zh-cn">：</span></em><em>WSF </em><em><span lang="zh-cn">支持的几种部署后端</span></em><em></em></p> 
+ <ul><li><h3><strong><span lang="zh-cn">WSF 最新的Release</span></strong><strong></strong></h3></li></ul> 
+ <p><span lang="zh-cn">WSF仓库中包含一系列的完整，独立，可单独执行的workload， 囊括AI，网络，存储，安全等行业类型的软件栈和使用场景。Intel计划会在每个季度做一次workload的发布和更新，最新的一次是23.2的版本[6], 主要更新如下内容：</span></p> 
+ <ul><li><p><span lang="zh-cn">新增</span>Edge-Ceph-VirtIO workload,<span lang="zh-cn">该</span>workload<span lang="zh-cn">是针对</span>edge native<span lang="zh-cn">的应用平台搭建端到端的虚拟化</span>IO<span lang="zh-cn">方案，以</span>rook-ceph<span lang="zh-cn">作为超融合块存储后端，基于</span>KubeVirt<span lang="zh-cn">引入</span>spdk-vhost<span lang="zh-cn">加速虚机</span>IO<span lang="zh-cn">性能</span></p></li><li><p><span lang="zh-cn">新增</span>CM-xAPP-OpenVINO workload<span lang="zh-cn">，该</span>Workload<span lang="zh-cn">是基于</span>O-RAN<span lang="zh-cn">网络架构开发的智能连接管理（</span>CM<span lang="zh-cn">）</span>xApp<span lang="zh-cn">，使用</span>OpenVINO<span lang="zh-cn">框架来优化</span>5G<span lang="zh-cn">用户关联和负载均衡，以提高用户设备（</span>UE<span lang="zh-cn">）的服务质量（</span>QoS<span lang="zh-cn">）要求。</span></p></li><li><p><span lang="zh-cn">新增</span>OpenSSL3 workload<span lang="zh-cn">，该</span>workload<span lang="zh-cn">中引入</span>Intel® QuickAssist Technology (Intel® QAT)<span lang="zh-cn">技术的硬件加速</span>OpenSSL<span lang="zh-cn">软件栈。</span><span lang="zh-cn"> </span></p></li><li><p><span lang="zh-cn">更新</span>NGNIX workload: <span lang="zh-cn">升级</span>OpenSSL<span lang="zh-cn">的版本到</span>OpenSSL3<span lang="zh-cn">，同时加入</span>Intel® QuickAssist Technology (Intel® QAT) <span lang="zh-cn">技术的硬件加速，来提升端到端的</span>RPS<span lang="zh-cn">整体性能。</span></p></li></ul> 
+ <h3><strong>参考和引用</strong><strong></strong></h3> 
+ <ul><li><p>[1] WSF Repo: https://github.com/intel/workload-services-framework</p></li><li><p>[2] SPDK Vhost<span lang="zh-cn">的介绍：</span>https://spdk.io/doc/vhost.html</p></li><li><p>[3] Edge-Ceph-Virtio Workload: 代码链接</p></li><li><p>[4] Kubevirt<span lang="zh-cn">官网：</span>https://kubevirt.io</p></li><li><p>[5] Kubevirt repo<span lang="zh-cn">：</span>https://github.com/kubevirt/kubevirt</p></li><li><p>[6] WSF V23.02<span lang="zh-cn">版本：</span>https://github.com/intel/workload-services-framework/tree/23.2</p></li></ul> 
+ <p><em><span lang="zh-cn">点击“</span></em><em><span lang="zh-cn">阅读原文</span></em><em><span lang="zh-cn">”链接，访问</span>WSF</em><em><span lang="zh-cn">对本文中提到的</span>Workload</em><em><span lang="zh-cn">和</span>SPDK vhost</em><em><span lang="zh-cn">的支持。</span></em></p> 
+ <p><span lang="zh-cn"><strong>作者</strong>：张敏，朱永波，杨鼎，WE Team等</span></p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/f96ae49c3d8dfce0ba19f65d3f942561/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Python视频剪辑合并操作</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/8515d6bfa412510bc774c300ad1c4bb1/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Open3D 入门教程</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

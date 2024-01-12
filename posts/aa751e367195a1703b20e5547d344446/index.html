@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>SpMV稀疏格式调研 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="SpMV稀疏格式调研" />
+<meta property="og:description" content="针对矩阵格式介绍的benchmark：
+Evaluation Criteria for Sparse Matrix Storage Formats
+类似于综述。这篇文章调研了2015年之前在多核共享内存系统中常见的矩阵格式。这篇文章认为，对于一个新的考虑一个针对SpMV的数据格式，仅仅使用FLOPS这样的指标是不够的，要考虑多个方面：1）FLOPS，和SpMV的执行时间相关；2）相对于CSR的执行时间；3）FLOPS占硬件极限性能的占比；4）SpMV的内存占用；5）每个非零元素的所占的平均内存；6）相对于CSR，每个非零元素的所占的平均内存；7）将CSR格式的、相对通用的格式转化为特定的新格式；8）格式转换的内存占用；9）格式的较优超参的寻找时间；10）格式的较优超参的寻找所占的内存。
+一篇17年的综述，更详尽地总结了矩阵的格式（70种），并且将矩阵的格式分为了几类：
+Sparse Matrix-Vector Multiplication on GPGPUs
+这些格式主要按照几种初始格式的派生来分类：CSR、COO、ELL、DIA等。
+分块矩阵的存储，用COO存储矩阵块，然后从CSR、COO、Bitmap、Dense选一个类型来存储子矩阵块内部的元素：
+Adaptive-Blocking Hierarchical Storage Format for Sparse Matrices
+整个的存储如上图所示。block matrix这一层（level 1）是以块为单位来存储，存的本质上是每一个块的索引。blocks这一层（level 0）存的是真正的数据。Level 1是完全按照COO的方式来存储的，level 0是完全依照最小空间占用的方式来选择合适的数据结构。只要知道下列信息，一种格式的空间复杂度可以很精确地算出：1）子块的长宽；2）子块的非零元数量；3）子块的索引数量；4）子块索引的数据类型所占的字节数；5）非零元数据类型所占的字节数。基于这些信息，每种存储方式的空间复杂度都可以得出，就可以选择了。这个工作没有考虑到性能问题。
+通过简单的预处理，解决GPU负载均衡的问题：
+Fast Sparse Matrix-Vector Multiplication on GPUs for Graph Applications
+在动态图分析这类应用中，SpMV的矩阵一直在变化，没有什么机会来进行长时间的、精细的预处理来转换矩阵格式。文章提出了一种新的格式，几乎不需要对传统的通用格式CSR进行转换，只需要统计一下CSR格式中每一行非零元的数量就可以了就足够了。这篇文章的设计主要建立在两个观点上。
+第一个观点是，在GPU中，为了保证数据的合并读取，应该让线程在行方向上并行。一个线程块负责一行中的连续非零元。
+第二个观点是，很多现实的图存在严重的幂律分布，有些行需要很多的线程数量，有些行中的非零元甚至塞不满一个thread wrap（如下图所示）。这些不同类型的行需要用不同的方式处理。
+所以这篇文章提出了ACSR，采用的方式总体如下图，首先就是将不同的行按照非零元的数量归类到不同的桶（Bin）中，（简单来说）每个桶启动一个内核：
+对非零元比较多的行按照行为单位来执行SpMV，在这个内核中不执行任何计算（图中Parent内核），而是去根据每一行的非零元数量计算出这一行所需要的线程块的大小，然后进一步对每一行启动一个新的内核（Parent后面的SpMV）来执行真正的SpMV计算。
+对非零元比较少的行以组（Bin）为单位来执行SpMV（如图中的上面两个SpMV）。这样子就保证了一些非零元特别少的组（Bin）中，可以合并到一个内核中进行处理，防止因为非零元实在是太小，甚至不到一个Thread wrap所导致的难以高效地并行。
+针对ELL格式的进一步调整，打破一个线程负责ELL一行的现状。通过一个线程处理多行或者多个线程处理一行数据，来均衡各个线程的负载。从而进一步平衡wrap内不同线程的负载，以及不同wrap之间的负载：
+AdELL: An Adaptive Warp-Balancing ELL Format for Efficient Sparse Matrix-Vector Multiplication on GPUs
+上面这个AdELL的设计主要是为了保证一个wrap内部不同线程的负载均衡。AdELL后面两个矩阵一个是值一个是列索引。他的主要处理就是将比较长的行在列方向上进行折叠（保护y=Ax中x的局部性），由多个线程处理。通过保证事实上负责一行的多个线程源自于一个wrap，可以利用wrap内自带的同步来完成对于同一位y中元素的更新（A中同一行的数据被用于更新y中的一位）。上面这张图w代表wrap，wrap size是4。前面几个数组都是元数据。因为是ELL操作，所以数据所列号的记录也是需要补零的。
+此外，因为存在多个thread处理一行的问题，所以需要用其中一个thread规约一行的结果，这个thread被记录在Reduction Map里面。K里面放的是每个wrap的负载，并累计起来的结果。
+此外，因为每个SM可以调度的block数量有限，如果wrap之间的负载不均衡，会导致block因为大的尾部延迟退出不了，占用调度资源。为了平衡Wrap之间的负载，AdELL使用了一种相对简单的思路。首先计算每一行所需要的线程数量，使得每个线程的负载差不多（这是关键）。然后用贪婪算法、在不超过wrap容量（总非零元数量/wrap数量，此外每个wrap不能超过32个线程）的前提下，尽可能将占用线程多的行分配给可以装得下的wrap，类似于“先装石头、再装沙子、再装水”的思路。这种方式可以保证wrap之间的负载均衡，但是会打乱已有的行排序，需要加入新的索引来记录一个wrap要处理的行，以及线程对行中小块的对应关系。
+在GPU上的CSR格式，在总体上按行并行的同时，每一行还能再分chunk，一个chunk一个线程，在行维度进一步增加并行度，解决CSR中线程不均衡的问题：
+Adaptive row-grouped CSR format for storing of sparse matrices on GPU" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/aa751e367195a1703b20e5547d344446/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-04-22T00:48:06+08:00" />
+<meta property="article:modified_time" content="2022-04-22T00:48:06+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">SpMV稀疏格式调研</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>针对矩阵格式介绍的benchmark：</p> 
+<blockquote> 
+ <p>Evaluation Criteria for Sparse Matrix Storage Formats</p> 
+</blockquote> 
+<p>类似于综述。这篇文章调研了2015年之前在多核共享内存系统中常见的矩阵格式。这篇文章认为，对于一个新的考虑一个针对SpMV的数据格式，仅仅使用FLOPS这样的指标是不够的，要考虑多个方面：1）FLOPS，和SpMV的执行时间相关；2）相对于CSR的执行时间；3）FLOPS占硬件极限性能的占比；4）SpMV的内存占用；5）每个非零元素的所占的平均内存；6）相对于CSR，每个非零元素的所占的平均内存；7）将CSR格式的、相对通用的格式转化为特定的新格式；8）格式转换的内存占用；9）格式的较优超参的寻找时间；10）格式的较优超参的寻找所占的内存。</p> 
+<hr> 
+<p>一篇17年的综述，更详尽地总结了矩阵的格式（70种），并且将矩阵的格式分为了几类：</p> 
+<blockquote> 
+ <p>Sparse Matrix-Vector Multiplication on GPGPUs</p> 
+</blockquote> 
+<p>这些格式主要按照几种初始格式的派生来分类：CSR、COO、ELL、DIA等。</p> 
+<hr> 
+<p>分块矩阵的存储，用COO存储矩阵块，然后从CSR、COO、Bitmap、Dense选一个类型来存储子矩阵块内部的元素：</p> 
+<blockquote> 
+ <p>Adaptive-Blocking Hierarchical Storage Format for Sparse Matrices</p> 
+</blockquote> 
+<center> 
+ <img src="https://images2.imgbox.com/dd/1d/aYfBW2i0_o.png" width="280em/"> 
+</center> 
+<p>整个的存储如上图所示。block matrix这一层（level 1）是以块为单位来存储，存的本质上是每一个块的索引。blocks这一层（level 0）存的是真正的数据。Level 1是完全按照COO的方式来存储的，level 0是完全依照<strong>最小空间占用的方式来</strong>选择合适的数据结构。只要知道下列信息，一种格式的空间复杂度可以很精确地算出：1）子块的长宽；2）子块的非零元数量；3）子块的索引数量；4）子块索引的数据类型所占的字节数；5）非零元数据类型所占的字节数。基于这些信息，每种存储方式的空间复杂度都可以得出，就可以选择了。<strong>这个工作没有考虑到性能问题</strong>。</p> 
+<hr> 
+<p>通过简单的预处理，解决GPU负载均衡的问题：</p> 
+<blockquote> 
+ <p>Fast Sparse Matrix-Vector Multiplication on GPUs for Graph Applications</p> 
+</blockquote> 
+<p>在动态图分析这类应用中，SpMV的矩阵一直在变化，没有什么机会来进行长时间的、精细的预处理来转换矩阵格式。文章提出了一种新的格式，几乎不需要对传统的通用格式CSR进行转换，只需要统计一下CSR格式中每一行非零元的数量就可以了就足够了。这篇文章的设计主要建立在两个观点上。</p> 
+<p>第一个观点是，在GPU中，为了保证数据的合并读取，应该让线程在行方向上并行。一个线程块负责一行中的连续非零元。</p> 
+<p>第二个观点是，很多现实的图存在严重的幂律分布，有些行需要很多的线程数量，有些行中的非零元甚至塞不满一个thread wrap（如下图所示）。这些不同类型的行需要用不同的方式处理。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/f2/2e/7pN42uhj_o.png" width="500em"> 
+</center> 
+<p>所以这篇文章提出了ACSR，采用的方式总体如下图，首先就是将不同的行按照非零元的数量归类到不同的桶（Bin）中，（简单来说）每个桶启动一个内核：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/36/20/tmq3ZICN_o.png" width="400em/"> 
+</center> 
+<p><strong>对非零元比较多的行按照行为单位来执行SpMV</strong>，在这个内核中不执行任何计算（图中Parent内核），而是去根据每一行的非零元数量计算出这一行所需要的线程块的大小，然后进一步对每一行启动一个新的内核（Parent后面的SpMV）来执行真正的SpMV计算。</p> 
+<p>对非零元比较少的行以组（Bin）为单位来执行SpMV（如图中的上面两个SpMV）。这样子就保证了一些非零元特别少的组（Bin）中，可以合并到一个内核中进行处理，防止因为非零元实在是太小，甚至不到一个Thread wrap所导致的难以高效地并行。</p> 
+<hr> 
+<p>针对ELL格式的进一步调整，打破一个线程负责ELL一行的现状。通过一个线程处理多行或者多个线程处理一行数据，来均衡各个线程的负载。从而进一步平衡wrap内不同线程的负载，以及不同wrap之间的负载：</p> 
+<blockquote> 
+ <p>AdELL: An Adaptive Warp-Balancing ELL Format for Efficient Sparse Matrix-Vector Multiplication on GPUs</p> 
+</blockquote> 
+<center> 
+ <img src="https://images2.imgbox.com/a4/8b/waJTaOGk_o.png" width="380em/"> 
+</center> 
+<p>上面这个AdELL的设计主要是为了保证一个wrap内部不同线程的负载均衡。AdELL后面两个矩阵一个是值一个是列索引。他的主要处理就是将比较长的行在列方向上进行折叠（保护y=Ax中x的局部性），由多个线程处理。通过保证<strong>事实上</strong>负责一行的多个线程源自于一个wrap，可以利用wrap内自带的同步来完成对于同一位y中元素的更新（A中同一行的数据被用于更新y中的一位）。上面这张图w代表wrap，wrap size是4。前面几个数组都是元数据。因为是ELL操作，所以数据所列号的记录也是需要补零的。</p> 
+<p>此外，因为存在多个thread处理一行的问题，所以需要用其中一个thread规约一行的结果，这个thread被记录在Reduction Map里面。K里面放的是每个wrap的负载，并累计起来的结果。</p> 
+<p>此外，因为每个SM可以调度的block数量有限，如果wrap之间的负载不均衡，会导致block因为大的尾部延迟退出不了，占用调度资源。为了平衡Wrap之间的负载，AdELL使用了一种相对简单的思路。首先计算每一行所需要的线程数量，使得每个线程的负载差不多（这是关键）。然后用贪婪算法、在不超过wrap容量（总非零元数量/wrap数量，此外每个wrap不能超过32个线程）的前提下，尽可能将占用线程多的行分配给可以装得下的wrap，类似于“先装石头、再装沙子、再装水”的思路。这种方式可以保证wrap之间的负载均衡，但是会打乱已有的行排序，需要加入新的索引来记录一个wrap要处理的行，以及线程对行中小块的对应关系。</p> 
+<hr> 
+<p>在GPU上的CSR格式，在总体上按行并行的同时，每一行还能再分chunk，一个chunk一个线程，在行维度进一步增加并行度，解决CSR中线程不均衡的问题：</p> 
+<blockquote> 
+ <p>Adaptive row-grouped CSR format for storing of sparse matrices on GPU</p> 
+</blockquote> 
+<center> 
+ <img src="https://images2.imgbox.com/20/ad/BXOGnwNf_o.png" width="390em/"> 
+</center> 
+<p>上图是一个极度不均匀的矩阵，每行至少一个线程。为了解决负载均衡问题，将每一行划分为一个个chunk，chunk size（= 2）是一个可配置项，平衡了负载。</p> 
+<p>此外作为一个针对GPU优化数据结构，chunk内空白值的补齐以及不同chunk的内容（不同线程的数据）在一个线性空间上的交叉排布，保证对于显存的合并IO。ELL格式也有这样的特点。另外，因为按照固定大小分了组，需要用一个矩阵来直接或者间接得出每个块所在行号是多少，从而方便在输出向量y的特定位置规约结果。</p> 
+<hr> 
+<p>针对GPU的优化。引入动态大小的分组，针对矩阵的不同部分，分组的长和宽都不一样，并且按照一定的规律来变化，最终的目的是保证负载均衡和为了对齐更小的补零率。</p> 
+<blockquote> 
+ <p>BiELL: A bisection ELLPACK-based storage format for optimizing SpMV on GPUs</p> 
+</blockquote> 
+<center> 
+ <img src="https://images2.imgbox.com/75/de/nskEwMY5_o.png" width="450em/"> 
+</center> 
+<p>上面是ELL、JAD（行非零元排序版的ELL，然后按照wrapsize来分条带，列方向并行）和BiELL。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/55/58/pxYcnJnW_o.png" width="250em/"> 
+</center> 
+<p>BiELL在JAD的基础上进一步改进，除了先分条带，然后按照行非零元数量降序排列，还在条带的基础上进一步再进行分组。因为不规则的分组、分块、分条带都会引入新的索引，增加存储负担，所以BiELL的组是规则分布、大小是规则变化的。如上图，假设wrapsize=4，组的分布是在一个条带（strip）严丝合缝、从左到右，组在列方向的长度从strip的最大行数开始一次次减半变化的，而行方向的长度是由当前组的下半部分的最多行非零元数量决定的。比如上图的group0，是第一个组，所以行数和条带的行数是一样的；而因为下一个组（group1）在列方向的长度会减半，所以为了防止有些非零元被遗漏，所以group的长度必须包含到自己完整的下半部分，也就是第3、4两行，所以这个group需要两列，在这一组内长度不够的行要补0。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/02/47/JenV0afx_o.png" width="600em/"> 
+ <br> 
+ <img src="https://images2.imgbox.com/6e/1f/UAtiLXK8_o.png" width="600em/"> 
+</center> 
+<p>根据GPU的传统艺能，每一组都按列交给一个wrap处理，线程和行号没有严格的绑定关系，只要按照列方向将一个组的内容在线性空间里面排开，然后线程交叉处理，合并IO。通过规则的group分别和groupsize变化，可以推导出每一个非零元的行号和列号。ia代表了每个组的累积计算量（在线性存储空间a中的起始位置），通过每个组的行数，除一下就可以推出这一组中每一行在线性空间中存储范围，以及每个元素的纵坐标（因为是按列方向拉伸成线性数组的）。这样子值、行索引、列索引就都知道了，SpMV就能算了。</p> 
+<hr> 
+<p>7、</p> 
+<blockquote> 
+ <p>yaSpMV: Yet Another SpMV Framework on GPUs</p> 
+</blockquote> 
+<p>PPoPP‘14，一个相对来讲复杂得多的算法。矩阵格式的设计和SpMV算法的设计是绑定的。本文提出算法BCCOO，对于矩阵的设计主要有3点：1）在稀疏视图上对矩阵进行分块存储，只存储非零块，只记录块索引，可以压缩行索引和列索引；2）用类似于差分编码的位标记符对行索引和列索引中的其中一个进行进一步压缩，3）将整个矩阵按实际的列索引分条带，保证x线性向量的访问局部性（如果是按行遍历，y向量的访问局部性是可以天然被保证的）。</p> 
+<p><strong>类似差分编码的位标记符</strong>。如下图所示，左边是原始索引，右边是压缩之后的索引。主要内容针对行索引进行压缩，将每一行最后一个元素标记为0，其他元素标记为1。这样子带来了新的问题，虽然可以知道每一行的分界线，但是每一行到有多少个元素，某一个元素到底属于哪一行就很难知道。因为相比Row Index每一位就需要好几个字节，bit flag只需要一位。因为通过让一个线程负责多个块，线程就可以以short等数据类型为单位从显存中读出数据，触发对齐合并访存。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/27/b5/qKYXEeFe_o.png" width="200em/"> 
+ <img src="https://images2.imgbox.com/b4/68/4sx1p2T1_o.png" width="200em/"> 
+</center> 
+<p><strong>按列方向划分条带</strong>。如下图所示，这里的条带就是4列。这样子就保证了与稀疏矩阵A相乘的密集向量（文章中被称作y），是一块一块被访问的，保证了局部性。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/70/35/cvZ3RkbP_o.png" width="250em/"> 
+ <img src="https://images2.imgbox.com/09/f9/itOQEvXp_o.png" width="250em/"> 
+</center> 
+<p><strong>数据在线程上的分配</strong>。矩阵的值和索引在连续的空间中排开。如下图所示，为了保证严格的负载均衡，数据在线程和线程块中按照地址顺序均匀有序地分配。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/d4/30/eiS8IAUx_o.png" width="450em/"> 
+</center> 
+<p><strong>结果的规约</strong>。假设我们有一个矩阵，矩阵已经被分块，不考虑列方向的分条带，每个线程分四个块，分别和向量的不同部分做加权和。如下图所示。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/61/62/BnGcQ0NI_o.png" width="280em/"> 
+ <img src="https://images2.imgbox.com/40/19/i31XkIr9_o.png" width="400em/"> 
+</center> 
+<p>从上往下看，首先，每一位的计算都有一个结果，比如R1、R2、R2，然后根据行索引bitflag决定是不是需要将结果累加一下。如果当前bitflag是1，那么就代表需要将当前的结果累加到后一位，如果后面一位不在当前线程，那么就将当前的临时结果记录在<code>last_partial_sums array</code>里面（如果线程所负责的最后一位就是行的最后一个元素，那么就记录为0）。如果当前bitflag是0，那么就将结果记录在<code>Result cache</code>里面，最后，<code>last_partial_sums array</code>和<code>Result cache</code>中的内容需要合并起来。</p> 
+<p>在结果的规约中存在性能优化的问题，线程内部、线程之间都存在结果的规约，如果数据量不是很大，那么这个规约可以在shared memory中完成，反之就需要在全局内存。</p> 
+<hr> 
+<p>通过离线数据建立模型，根据输入参数来自动调优：</p> 
+<blockquote> 
+ <p>Model-driven Autotuning of Sparse Matrix-Vector Multiply on GPUs</p> 
+</blockquote> 
+<p>文章首先先确立了一个baseline，Block-CSR。在矩阵分块，将不全是0的块存储在连续存储的空间里：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/3c/9c/a9181Md9_o.png" width="500em/"> 
+</center> 
+<p>文章让每个线程块负责块矩阵中的一行，线程块中的每个线程负责这一块矩阵行中一块的计算。每个线程块先将自己的结果规约到shared memory，然后再在全局内存中规约最终的结果。</p> 
+<p>以此为基础，还可以进一步进行三个优化：1）短向量打包；2）行对齐；3）交错内存访问。</p> 
+<p><strong>短向量打包</strong>。在前文方案中，每个块由一个线程负责，因为块内元素是连续存储的，所以不利于合并访存。但是如果块比较少（比如一个块4个非零元），那么就可以用一些CUDA特别的向量数据类型（float4），将4个数据合并，使得不同线程的数据可以相邻，从而触发合并IO。</p> 
+<p><strong>行对齐</strong>。一个线程块负责矩阵的一行，但是，如果块矩阵一行中元素的大小的和不是128、64、32bit的整数倍，那么合并IO就没有办法触发。所以需要用补零等操作来触发对齐。</p> 
+<p><strong>交错内存访问</strong>。如果同一个块内的多个元素连续存储，并且每个线程负责一个块，那么一个wrap访问的空间就是不连续的，没法触发合并访存，所以可以让每个线程的内容按照存储的数据类型为单位在连续空间在错开存储。</p> 
+<p>当然经过实测BCSR在GPU的表现并不好，所以本文将BCSR的思路移植到ELL格式中，如下图所示。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/82/2f/vNgFB3xc_o.png" width="330em/"> 
+</center> 
+<p>首先将矩阵进行分块（块大小<strong>r*c</strong>），然后将块矩阵按照行非零块的数量进行排序，在列方向上划分为长度为<strong>R</strong>的条带，然后按照一个条带的最大行非零快的大小补0。在任务划分的时候每个线程块负责一个条带，每个线程负责条带的一行。</p> 
+<p>针对r、c、R三个参数，就涉及自动调参问题了。本文提出的是基于GPU的白盒模型、建立了一系列的理想化假设，并且认为给GPU对于任务在并行度一定的情况下，执行时间满足线性关系。整体的建模粗糙、令人费解。</p> 
+<hr> 
+<p>9、将已经是ELL格式的矩阵进行分块，先分行，后分列，分块内部空位补零。并且会挪动某些非零元的位置来保证补零尽可能少。</p> 
+<blockquote> 
+ <p>An Efficient Two-Dimensional Blocking Strategy for Sparse Matrix-Vector Multiplication on GPUs</p> 
+</blockquote> 
+<p>行方向不均衡的矩阵会带来严重的线程发散，而使用ELL的方式虽然缓解了线程发散，但是在不均衡的稀疏矩阵中会带来冗余计算。在假设每个线程负责一行的前提下，将行按照非零元数量进行排序，然后将矩阵在行方向上分块，根据每个块的具体情况进行补零，就可以减少补零，如下图所示：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/ee/45/PqFKuZc3_o.png"> 
+</center> 
+<p>最终在线性数组中按照block的顺序存储，每个block按照列方向存储。索引结构记录每个block在线性数组中的起始位置、每一行的行号（因为排过序），块的行非零元数量。block宽度通常设定为一个wrap。</p> 
+<p>上图中第一行的内容尤其多，负载均衡很不好，所以用更多的线程处理第一行的内容可以进一步提升负载均衡，所以列方向也要进行分块：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/58/d5/3SKII2MY_o.png"> 
+</center> 
+<p>通过列分块将每一行又分为三个部分，为了进一步提升空间利用率，让一个块中有一整行的缺失的时候。可以从右边相邻的块中找一行补过来，如上图的Block2所示。索引结构和前文行分块的索引结构一样。列分块的大小通常由行条带的非零元素的密集程度有关，如果条带比较密集，那使用较大的列分块可以减少处理同一行的线程的数量，从而降低y向量某一位的原子性操作数量；如果条带比较稀疏，用较小的行分块来减少补零的数量。</p> 
+<hr> 
+<p>10、针对多核CPU优化的矩阵乘法和转置矩阵乘法。传统的索引压缩方法存在一些缺点，如果在行或者列方向压缩，那么只能在对应方向上遍历，比如CSR通常通过遍历行来实现Spmv，CSC通常只能按列遍历。所以，通过将索引矩阵中连续相同的行索引值和列索引值进行合并来压缩（像CSR或者CSC）会限制SpMV的实现，CSR去实现并行的转置矩阵乘法<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          A 
+         
+        
+          T 
+         
+        
+       
+         x 
+        
+       
+      
+        A^{T}x 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.8413309999999999em; vertical-align: 0em;"></span><span class="mord"><span class="mord mathdefault">A</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.8413309999999999em;"><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span style="margin-right: 0.13889em;" class="mord mathdefault mtight">T</span></span></span></span></span></span></span></span></span><span class="mord mathdefault">x</span></span></span></span></span>就很麻烦、很难并行化。所以只能使用不挑方向的COO，然后用分块矩阵的方式来压缩索引的数据量：</p> 
+<blockquote> 
+ <p>Parallel Sparse Matrix-Vector and Matrix-Transpose-Vector Multiplication Using Compressed Sparse Blocks</p> 
+</blockquote> 
+<center> 
+ <img src="https://images2.imgbox.com/7c/eb/IAb41xuB_o.png" width="350em/"> 
+</center> 
+<p>已有的很多稀疏矩阵格式对于算法遍历的方向的亲和性很强，比如CSR通常只能行方向遍历。如果需要一个算法，同时对<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         A 
+        
+       
+         x 
+        
+       
+      
+        Ax 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.68333em; vertical-align: 0em;"></span><span class="mord mathdefault">A</span><span class="mord mathdefault">x</span></span></span></span></span>和<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          A 
+         
+        
+          T 
+         
+        
+       
+         x 
+        
+       
+      
+        A^{T}x 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.8413309999999999em; vertical-align: 0em;"></span><span class="mord"><span class="mord mathdefault">A</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.8413309999999999em;"><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span style="margin-right: 0.13889em;" class="mord mathdefault mtight">T</span></span></span></span></span></span></span></span></span><span class="mord mathdefault">x</span></span></span></span></span>性能都特别好，那就需要一个对遍历方向不敏感数据格式。本文提出来的格式（上图），CSB，本质上是使用不挑方向COO，但是为了进一步压缩索引，CSB将矩阵分成长宽（<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         β 
+        
+       
+      
+        \beta 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.8888799999999999em; vertical-align: -0.19444em;"></span><span style="margin-right: 0.05278em;" class="mord mathdefault">β</span></span></span></span></span>）相等的块。从块矩阵的视角来看，这些块按行连续存储在内存的连续一维空间中，因为块的大小是固定的，所以原矩阵每一行每一列的块数量是固定的，所以不需要为每一个块记录其行列索引，只需要一个索引来记录每个块存储的偏移量就行（这也是一种压缩，而块索引的压缩意味着块是最小的遍历单元，如果块的大小正好是矩阵的一行，那这个格式就退化成类CSR的格式）。整体上的设计如下图所示：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/c5/24/Z8ASF3B4_o.png" width="400em/"> 
+</center> 
+<p>从一个块内部的角度来看，块内的元素采用一种叫做Z型曲线的顺序存储：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/f6/59/uIW6yAvo_o.png" width="350em/"> 
+</center> 
+<p>整个存储顺序是一个递归的过程，将一个块分成四个象限，按照左上右上左下右下的顺序存储，然后在每个象限内，将象限内的空间分为四个象限，继续这个递归的存储过程，文章认为这一种方式的局部性很好，有利于缓存的利用。并且这种方式相比按行排序和按列排序没有特定的亲和性。如上图所示。以上就是CSB格式块间和块内的存储过程。</p> 
+<p>与新的数据格式对应，CSB提出了一个新的、适合CPU的线程调度方法，尽可能保证每个线程的负载均衡。从比较粗粒度来说，每个线程负责块矩阵的一行，但是如果块矩阵非零元的分布不均匀，就有线程负载不均衡的问题，所以需要在行方向上进行进一步的分块。也就是将块矩阵的每一行分成多个非零元达到一定阈值的chunk，chunk包含整数个block，对于很稀疏的行来说，一般一行也就一个chunk，对于相对密集的行来说，一行包含多个chunk，最终（大致来说）每个chunk用一个线程处理。</p> 
+<p>因为块内部采用的COO的格式，外部在行方向和列方向的索引都有压缩，所以矩阵与矩阵转置的Spmv都有很好的效果。无论是行遍历还是列遍历都不是很挑方向。</p> 
+<hr> 
+<p>11、在ELL的基础上在行方向上分相同宽度的条带，每个GPU的wrap负责一个条带，解决条带内部和条带之间的负载不均衡问题，将矩阵的行按照非零元数量从大到小排序：</p> 
+<blockquote> 
+ <p>Optimization of Sparse Matrix-Vector Multiplication with Variant CSR on GPUs</p> 
+</blockquote> 
+<p>针对一个原始CSR存储格式，这个工作先将行按照非零元排序，然后进行固定高度的行分组，然后每个分组使用ELL方式进行存储，形成名为SIC的格式。如下图所示：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/56/1b/o5y0QPBS_o.png" width="300em/"> 
+</center> 
+<p>上图的上半部分是一个CSR格式的存储，虚线是每一行的分界线，这个例子将两行合并到SIC的一行交错存储（两行分为一组，每组用ELL的方式存储，每组的长度与这一组最多非零元数量的一行有关，需要补零）。一个wrap负责SIC的一行，保证了对于结果向量同一位的修改有wrap内自带的原子性。为了保证补零不要太多，以及wrap内不同线程的负载均衡，原矩阵会先根据行非零元数量先进行一个排序，按照非零元数量降序排列，使得每一组行非零元数量差不多。</p> 
+<p>为了进一步提升wrap之间的负载均衡，我们要在之前的分组的基础上进一步分段（segment），因为之前已经进行了排序，所以每一段中的SIC行（CSR组）长度是类似的，所以通过每一段启动一个kernal，段中每组一个wrap，wrap之间的负载也是类似的。每一段包含的SIC行数是满足一定的范围的，这篇文章一共将SIC行分为5个段：长度&gt;32，32&gt;长度&gt;16，16&gt;长度&gt;8，8&gt;长度&gt;4，长度&lt;4。因为每一段一个kernal，为了能够吃满GPU，可以通过GPU的SM数量、active block数量等参数计算出需要吃满GPU需要的wrap数量，如果某一段SIC行数太小，吃不满GPU，那就将其和相邻的段合并执行。</p> 
+<hr> 
+<p>12、一篇非常早的文章，将稀疏矩阵格式的分块优化进行了总结，并且提出了两种新的格式：</p> 
+<blockquote> 
+ <p>A comparative study of blocking storage methods for sparse matrices on multicore architectures</p> 
+</blockquote> 
+<p>分块作为稀疏矩阵的一种传统优化手段有很多好处：在块内有更好的局部性，更有利于向量优化，在多数情况下只需要记录块的索引来节省空间和内存带宽。文章总结了三种主流的分块方式，下图包含了其中两种方式。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/b0/7d/jckvOnql_o.png"> 
+</center> 
+<p>a和b两张图是第一种典型的分块方式：<strong>带补零的固定大小分块</strong>。这种分块不需要添加额外的索引，将一个分块作为一个原子性的单元来处理，这种方式的好处是，可以完全继承不分块的存储格式，比如CSR，并且块矩阵相比原矩阵被成倍缩小，有利于压缩索引，这种分块的方式有利于数据局部性和向量化。但是缺点也是显著的，比如因为补零所造成的空间浪费。</p> 
+<p>c和d两张图是第二种典型的分块方式：<strong>变化分块大小</strong>。因为分块的大小可以变化，所以可以不用仔补零去追求固定的分块大小。但是变化的分块大小需要引入新的索引，比如块的大小。下图是1D-VBL的格式，整体在CSR格式的基础上加入一个记录块大小的数组：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/42/3b/vaJ6W2wZ_o.png" width="350em/"> 
+</center> 
+<p>最终一种分块方式：<strong>分解</strong>。这种方式不补零，只将满足特定分块模式的矩阵分块，不补零，将无法满足特定模式的部分用CSR等通用的方式存储，如图a，只有右上角的8、1、5、1可以按照块的方式去存储，剩下的非零元都要按照CSR的方式存储。此篇文章基于这种类型提出了两种数据格式：BCSR-DEC和BCSD-DEC。并且设定块的大小（BCSR块的长和宽，BCSD的对角线长度）为2。这种格式的有点是不用补0，但是这种方式的局部性差。</p> 
+<hr> 
+<p>将矩阵的索引部分进行压缩有利于降低内存复杂度并且降低访问开销，在CSR中，一般行索引是压缩的，而列索引实际上也有很大的压缩空间：</p> 
+<blockquote> 
+ <p>Accelerating Sparse Matrix Computations via Data Compression</p> 
+</blockquote> 
+<p>在CSR格式中，所以每一行的列索引排过序，列索引有很多部分是相对连续的，这使得列索引大小之间的间隔可能比列索引的取值范围小得多。这篇文章就基于这个特点，设计了一种基于索引增量的存储格式，然后在SpMV中实时进行解压。这种方式比较适合CPU。</p> 
+<p>因为如果两个相邻列之间的差距过大，那么存储增量相比存原值就未必可以省空间。这篇文章值确定了以下的增量类型：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/b9/ea/b7aFiGvk_o.png" width="330em/"> 
+</center> 
+<p>在实际的压缩中，我们需要存储两个东西，一个是增量的类型，包括几个常量1、2、3、4，代表两个列索引大小之间的差距是1、2、3、4；以及几个需要附带参数的间隔类型，1-4字节，这只能声明两个列索引之间的间隔大小的范围，还需要一个额外的参数来记录相邻列索引之间的间隔大小。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/55/02/IGxMiR6G_o.png" width="550em/"> 
+</center> 
+<p>上图是一个压缩的过程，后面三行是压缩的结果。首先先将CSR数据的列索引进行分组，这里是一行一组（如第一行所示）。然后每一组分别计算相邻列索引之间的差值（如第二行所示）。然后根据差值的大小，选择合适的差值类型（第三行所示），比如999就是两个字节，0是一个字节，1是常量。对于不是常量的差值类型，需要一个额外的参数来记录相邻列索引大小差值的具体值（第五行）。当然，因为分组了，所以还需要一个组索引。虽然多引入了一些数组（后三个），但是这些数组要么更短、要么数组元素需要的空间更小，所以可以达到压缩效果。</p> 
+<hr> 
+<p>利用GPU SIMT的特点对ELL中zero padding数量进行一个自然的裁剪：</p> 
+<blockquote> 
+ <p>A new approach for sparse matrix vector product on NVIDIA GPUs</p> 
+</blockquote> 
+<p>ELL性能很好，每个线程负责一行，每个wrap负责相邻的32行。为了减少补零，将32行分为一组，每一组执行自己的补零，这样减少有些非零元比较少的组的补零，如下图所示：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/c2/9a/gy6rmpvC_o.png" width="350em/"> 
+</center> 
+<p>上面是ELL-R格式。这里wrapsize=8，所以8行分为一组，每一个分配一个wrap，按照每一组的行最大非零元补0。这篇文章实现分组补零的方式非常的特别，首先相对于ELL来说，ELL-R值数组和列索引数组是完全一样的。ELL-R只是多加了一个数组<code>rl[]</code>来记录每一行的非零元数量：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/1a/c0/FGKG8WIa_o.png" width="650em/"> 
+</center> 
+<p>和传统ELL格式唯一的区别是，这个rowlength矩阵决定了每一行（每一个线程）执行的迭代次数，每个线程只遍历一行非零，不去理会padding的0。虽然因为一个wrap内不同线程的迭代次数不一样，因为一个wrap执行的指令是完全相同的，所以每个wrap的执行时间由遍历次数最多的线程决定，由此产生了分组，然后按照每组的最大行非零元补零的效果。这种处理在不引入每个warp的最大行非零元数量的前提下，达成了SELL的效果。理论上来说是一个必然带来性能提升的优化。</p> 
+<hr> 
+<p>15、在ELL-R的基础上，将矩阵的每一行按照行非零元数量的进行排序，从而保证每一个wrap的负载均衡：</p> 
+<blockquote> 
+ <p>Implementing Sparse Matrix-Vector Multiplication using CUDA based on a Hybrid Sparse Matrix Format</p> 
+</blockquote> 
+<p>总体上就是将ELL-R格式和JAD格式组合起来，先将ELL格式按照行非零元数量进行排序，然后再改造成ELL-R格式，这样子一个wrap负责相邻的32个线程，wrap内部的负载均衡就可以保证。因为有排序，所以这个数据格式需要引入一个新的索引来记录每一行数据原来的位置。</p> 
+<hr> 
+<p>在ELL-R中，每个线程负责一行，进一步可以让多个线程负责一行：</p> 
+<blockquote> 
+ <p>Improving the performance of the sparse matrix vector product with GPUs</p> 
+</blockquote> 
+<p>在这个工作中，为算法多加了参数T，即规定负责每行的线程数量是可以自定义的。新的数据类型叫做ELLR-T。在这个数据格式中，每一行的数据被分配的线程数量是一样的。</p> 
+<hr> 
+<p>对于ELL及其衍生的一些格式的小改进：</p> 
+<blockquote> 
+ <p>Three Storage Formats for Sparse Matrices on GPGPUs</p> 
+</blockquote> 
+<p>这篇文章的大多数观点几乎都是已有的，唯一不同是其关于类似于SELL的格式的实现。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/ad/b6/IEWXjfNW_o.png" width="300em"> 
+</center> 
+<p><code>JA ARRAY</code>是列索引，<code>AS ARRAY</code>是值，<code>HACK OFFSET</code>每个行条带非零元索引的起始位置。这里面没有记录每一个行条带的行非零元数量，因为使用的是定长的行分块，所以每个行条带的行数量是一样的。</p> 
+<hr> 
+<p>先分块再ELL，充分保证y与x局部性，并且尽可能减少zero padding的数量：</p> 
+<blockquote> 
+ <p>Efficient Sparse Matrix-Vector Multiplication on x86-Based Many-Core Processors</p> 
+</blockquote> 
+<p>这是一个关于众核处理器的调优，众核处理器的优化和GPU很像，其SIMD相当于GPU的wrap。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/41/34/v1G8IGGB_o.png" width="450em/"> 
+</center> 
+<p>上图是众核处理器的基本结构，将一系列内核和内存控制器用一个环形总线连在一起，每个核心拥有一个L2 cache，并且有一个目录TD来标记L2cache被缓存的数据地址。每个核心有定序的双发射流水线，并且有四个同步线程。此外每个核心还有一个512位的超宽SIMD引擎，支持向量化运算。</p> 
+<p>本文提出了一种新的数据格式：ELLPACK Sparse Block (ESB)。这种格式是ELL的变种，解决了ELL zero padding过多的问题，并且保证了X矩阵和Y矩阵的局部性。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/a4/c4/luWxGagB_o.png" width="350em/"> 
+</center> 
+<p>上图几乎涵盖了这个格式的所有想法，首先是将整个格式进行列分块，保证对于x访问的局部性。另外，利用排序和行分组来解决zero padding的问题，在每一个列分块首先进行排序，然后进行分组（slice），按照每个slice内部按照slice内的行最大非零元数量进行补零，因为排序之后相邻行之间的非零元是相近的，所以补零会变少很多。最后因为整个矩阵维度的排序会大幅改变行的位置，从而降低输出矩阵y访问的局部性，所以这篇文章加入了一个“排序窗口的概念（w）”，将整个矩阵在行方向分为多个排序窗口，仅在每个排序窗口内部进行自己的排序→行分块（slice）→padding，这样子既保证了padding数量少，又保证了y局部性。</p> 
+<p>为了不让padding的内容加入计算，这篇文章运用了至强融核write mask功能，用一个掩码vbit来标记经过padding之后哪些项是真正的非零元。</p> 
+<hr> 
+<p>18、在GPU上同时保障矩阵向量乘和矩阵转置向量乘，这篇文章认为，不特别对某一个遍历方向亲和的稀疏矩阵非零元的存储方式是Z字型的存储。在这一点上保持不变，剩下的在CSB格式的基础上，引入ELL格式即可。新的格式叫做eCSB。</p> 
+<blockquote> 
+ <p>GPU accelerated sparse matrix-vector multiplication and sparse matrix-transpose vector multiplication</p> 
+</blockquote> 
+<p>CPU版本的CSB格式主要包含了两个索引和一个值，分别是块矩阵层次的索引，块内索引，以及值索引。其中块矩阵层次的索引使用了类似于CSR的行压缩，压缩为每一个块的第一个非零元在值数组中的偏移量。另外块矩阵内部的数据采用Z型的方式存储在一个线性空间中。</p> 
+<p>在GPU版本中，eCSB结构在CPU版本的基础上加了未经压缩的块矩阵索引，一个线程可以在遍历非零元数组的时候反向查出一个非零元所在的块在块矩阵中的索引，方便GPU数据并行的计算。</p> 
+<p>为了适应矩阵不同的非零元分布，eCSB从ELL、COO、HYB中选一个格式。ELL格式与COO格式将矩阵分为两个部分，对于非零元比较少的行，或者非零元分布不均匀的块矩阵行，使用COO的方式，对于比较规整的部分使用ELL。</p> 
+<p>ELL的部分让一个线程块负责一个块矩阵行，COO的方式每个线程负责固定数量的非零元，使用完全不同的两种形式。采用“矩阵分解”（A comparative study of blocking storage methods for sparse matrices on multicore architectures）的分块方法。</p> 
+<hr> 
+<p>19、</p> 
+<blockquote> 
+ <p>An Improved Sparse Matrix-Vector Multiplication Kernel for Solving Modified Equation in Large Scale Power Flow Calculation on CUDA</p> 
+</blockquote> 
+<p>CSR格式中，比较流行的方式是让一个wrap负责矩阵的一行，但是如果一行的内容没有对齐的话，会导致一个wrap无法对显存进行合并访问，从而导致性能不足，所以让将每一行的非零元补到wrap size的整数倍有利于更高的IO性能。如下图所示。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/ea/f0/XJDR6YhI_o.png" width="200em/"> 
+ <img src="https://images2.imgbox.com/df/77/X3kbRymz_o.png" width="200em"> 
+</center> 
+<hr> 
+<p>先按照行非零元数量排序，再分行条带，每个条带使用ELL的方式进行存储。</p> 
+<blockquote> 
+ <p>Sparse matrix-vector multiplication on GPGPU clusters: A new storage format and a scalable implementation</p> 
+</blockquote> 
+<p>除了不考虑x与y的局部性，基本上就是最佳的格式。又有对齐、又尽可能减少了padding，又保证了同一个wrap的线程发散尽可能少。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/e8/3c/2l4LN622_o.png" width="500em/"> 
+</center> 
+<hr> 
+<p>将矩阵相同模式的部分压缩存储，统一优化，降低空间复杂度，方便优化，提升性能：</p> 
+<blockquote> 
+ <p>Pattern-based Sparse Matrix Representation for Memory-Efficient SMVM Kernels</p> 
+</blockquote> 
+<p>很多矩阵可以用少量不同模式的子矩阵构成，通过将相同格式的子矩阵统一存储，来进行压缩和优化。首先将整个矩阵划分为固定大小的子块，如果结构一样的子块出现多次，并且子块中非零元足够多，使用bitmap来表达子块的模式，并且将相同模式的子块用在块矩阵层次用COO的方式集中存储，如下图所示：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/b2/76/R3eOb5Fh_o.png" width="400em/"> 
+</center> 
+<p>如果子块的模式出现得不够多，或者子块非零元不够多，那就用CSR方式在非零元粒度上存储，并且用CSR版本的SpMV算法处理。而特定的模式只需要存储其bitmap（用一个short值存储即可），以及对应模式的块坐标就好了。这种方式有两个好处：省空间（分块了，压缩了块内与块矩阵的索引）、方便对特定模式的优化（文章针对常出现的模式都提供了专门的向量化实现）。这种方式属于<strong>分解</strong>的矩阵分块方式。</p> 
+<hr> 
+<p>22、分条带，同一个条带中一个线程负责一行，每一个线程所负责的元素在线性空间中交错存储：</p> 
+<blockquote> 
+ <p>New Row-grouped CSR format for storing the sparse matrices on GPU with implementation in CUDA</p> 
+</blockquote> 
+<p>本质上就是ELL-R + SELL。相比slice-ELL，不对padding的zero执行计算。通过记录每一行的非零元数量来决定。总体格式下图所示：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/40/95/19f7mCvu_o.png" width="500em/"> 
+</center> 
+<p>4行一组，因为组内每一行非零元数量一样，所以不需要行索引。</p> 
+<hr> 
+<p>23、预处理速度快，还原成CSR速度快，对SpMV优化：</p> 
+<blockquote> 
+ <p>CSR5: An Efficient Storage Format for Cross-Platform Sparse Matrix-Vector Multiplication</p> 
+</blockquote> 
+<p>这是一个和yaSpMV很类似的格式，为了保证极致的负载均衡所以比较复杂，但是其关键不是放在对于索引的压缩上，而是放在快速的格式转化上（from CSR to CSR5）。与yaSpMV一样，CSR5没有任何zero padding，每一个线程被分配的非零元数量完全一致，所以每个线程处理的非零元并没有按行或者按列对齐，所以相邻线程处理的非零元可能来自于同一行，不同线程可能会参与y数组中同一位的计算，所以<strong>中间结果的同步归约过程就会比较复杂</strong>。整个SpMV，包含预处理过程需要多个kernal才能完成：预处理的kernal，每个线程计算知己的乘加和中间结果的kernal，合并所有线程中间结果的kernal。</p> 
+<p>CSR5非零元的分配和yaSpmv一致，在不考虑非零元在原矩阵中位置的前提下在各个线程中平均分配，为了保证同一个wrap中的线程可以合并访存，需要将每个线程负责的非零元在线程内存空间中交叉存储。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/3c/2c/wMFG4CLF_o.png" width="700em/"> 
+</center> 
+<p>如上图所示，原始矩阵按照按照行方向分给不同的线程块（在CSR5的源码中，一个tile对应一个warp）以及不同的线程，每个warp处理的内容称作一个<code>tile</code>，是一个<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         ω 
+        
+       
+         × 
+        
+       
+         σ 
+        
+       
+      
+        \omega \times \sigma 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.66666em; vertical-align: -0.08333em;"></span><span style="margin-right: 0.03588em;" class="mord mathdefault">ω</span><span class="mspace" style="margin-right: 0.2222222222222222em;"></span><span class="mbin">×</span><span class="mspace" style="margin-right: 0.2222222222222222em;"></span></span><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span style="margin-right: 0.03588em;" class="mord mathdefault">σ</span></span></span></span></span>的固定大小的块，每个线程负责<code>tile</code>中的一列，<code>tile</code>的宽度就是warp的宽度。<code>tile</code>的高度就是每个线程的工作量。col_idx和val数组本质上是一维的。row_ptr是压缩的行索引，但是与一般的CSR不同，其不是每一行的第一个元素在val或col_idx中的偏移量，只是记录了每一行非零元数量的累加和。<code>tile_ptr</code>是每个<code>tile</code>的第一个非零元的行号，如果这个<code>tile</code>包含了空行，那么行号就加个负号。这个CSR5格式中以上的几个部分和一般的CSR分块矩阵的存储很像，就是一些基本信息。其中title_ptr是写回数据非常重要的依据，线程在写回自己的结果的时候，是写回位置的基址索引，在<code>tile</code>内部的每一个线程也有一个行索引来记录当前线程第一个行首非零元的tile内行索引号。用tile基址、线程内首个非零元的行号、线程粒度的块（一个线程对应的块）已经被遍历到的行首索引的数量，这三个叠加就可以得到一个线程粒度的块内每个线程内的行索引，从而可以给出一个明确的归约位置。</p> 
+<p>而<code>tile_desc</code>主要包含一些可以帮助结果进行归约的内容。</p> 
+<p><code>bit-flag</code>用bool值记录了每个非零元是不是行首的非零元（warp负责的第一个非零元），这个非常重要，可以用来计算一个线程和隔壁线程在y的计算上有没有交集。每个<code>bit-flag</code>为T的位置都对应一次线程在全局内存y对应行的位置上对自己计算的一部分中间结果进行记录。</p> 
+<p><code>y-offset</code>列的第一个非零元所对应的y中的索引（一个<code>tile</code>内的相对索引）。每一列（也就是每个线程）都有一个<code>y-offset</code>，其值的计算方法就是看<code>bit-flag</code>对应列的左侧的所有列中的<code>T</code>的数量。比如<code>Tile 0</code>的第三列左边的所有列中一共三个<code>T</code>，所以<code>y-offset[3]</code>等于3。其他也是同理。<code>y-offset</code>和<code>tile-ptr</code>以及<code>bit-flag</code>就可以完全得出一个非零元所对应的行索引是多少。对于thread中没有行首的情况，这类线程不需要向y数组中写数据，所以对于这类线程来说，行索引可以算一算，但是没有什么意义，因为不会用到。</p> 
+<p><code>seg-offset</code>用来记录一列全<code>F</code>的情况，每一列都有一个<code>seg-offset</code>其记录了一列后面全是同一行的列数。因为存在一行的结果在两个线程或者多个线程的情况。这里就会导致，每个线程最多会产生两个需要进一步归约的结果，一个是向前归约结果，一个是向后归约的结果，如果一个结果同时是向前归约的结果和向后归约的结果，那就按照向前归约的结果来算。</p> 
+<p>当一个<code>tile</code>中有空行的时候，比如<code>Tile 0</code>的第二行，就需要引入<code>empty_offset</code>来记录每一个行首元素所属于的行，因为<code>y-offset</code>是不考虑空行的。<code>tile_desc</code>，即每一个非零元块的描述中的所有数据都可以用一个或者多个kernal生成。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/06/36/1KS7b95C_o.png" width="430em/"> 
+</center> 
+<p>上图展示了一个<code>tile</code>的SpMV，右边的数组，<code>tmp</code>等，在shared memory中，用来存储一个wrap的SpMV中间结果，<code>y</code>在全局内存中，是整个内核的最终结果。绿色的块代表一个<code>tile</code>中不用和其他列归并的非零元，可以直接把这一小块的结果写到<code>y</code>中。红色代表和左边的列有来自于原始矩阵同一行的非零元，蓝色代表要和右边的列归约。对于每一列来说，有需要保存红色和蓝色的SpMV乘加的中间结果。<code>R2</code>这个块是一个特殊情况，既是蓝的又是红的，在之前提及的<code>seg-offset</code>这个数组中，就把这种特殊情况识别了出来，按照让其和<code>R3</code>先归约。最终红色和蓝色块的中间结果都算出之后，将两个中间结果<code>tmp</code>与<code>last_tmp</code>中的内容叠加，并且放到<code>y</code>中。在CSR5的源码中，线程之间归约的逻辑是用Warp reduce原语实现的，</p> 
+<p>对于跨<code>tile</code>的行，也是按照绿色块的方式去处理，如左上角的绿色块，但是是用原子加的方式写回全局内存，用来和其他<code>tile</code>的结果归约。</p> 
+<p>CSR5表面上是一个极致负载均衡的格式，但是我认为它的性能提升不是全是来自于负载均衡（降低长尾延迟或者说SpMV乘法阶段超高的并行度上限），还有一部分来源于灵活的行结果归约的并行度（短行用少量线程归约，长行用多个线程归约，并且这种灵活的并行度分配不需要引入很多元数据）以及仅仅使用warp reduce的高性能线程间归约。另外CSR5的元数据压缩也做得很好，对于bool值使用bitmap，并且使用了相对索引来缩小元数据的数据类型，并且将元数据合并到一个数据类型内存储来进一步提升性能。</p> 
+<hr> 
+<p>在行和列上采用不同方法的分块：</p> 
+<blockquote> 
+ <p>Scale-Free Sparse Matrix-Vector Multiplication on Many-Core Architectures</p> 
+</blockquote> 
+<p>一个在众核处理器的SIMD优化，在行分块和纵分块两个方向进行分块，保证x和y两个向量的局部性。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/85/63/IJZKUiy8_o.png" width="250em/"> 
+</center> 
+<p>如上图所示，首先进行列分块，其中每个条带的宽度是固定的，然后在列分块（Panel）的基础上对每一个列条带进行单独的行分块，但是行分块是不padding、不对齐的，这里的行分块和CSR5以及yaSpMV一样，是按照相等非零元数量的分块（block），在一个列条带中的每一个块都拥有相同的非零元数量，每个块都分为多个段（segment），由一个向量单元（SIMD，或者wrap）处理，每个段中非零元数量是向量计算宽度的整数倍。因为对线程的任务分配是不对齐的，是以负载均衡为优先的，可能一个线程的所被分配的非零元会跨越两行，所以设计一个线程内部、线程之前、wrap之间、线程块之间都存在不同程度的结果规约问题。对于一个Panel内的非零元在线程中的分配和yaSpMV以及CSR5的思路是完全一致的。示意图如下所示：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/e5/1f/I9PBDdgW_o.png" width="500em/"> 
+</center> 
+<p>本文提出的矩阵格式叫HCC，没有明确给出这个稀疏矩阵数据格式的细节，并且其提出的算法并不是很适合SIMT的GPU。但可以推测出其大概包含几个数组：1）val与col_idx，两个一维数组，按照panel、块、段的顺序依次存储；2）row_idx，panel内部被压缩的行索引，因为一个panel内部的非零元行号是升序排列的；3）seg_ptr，非零元分布在多行的段（segment）的段号，升序排列。4）eor_arr，一个位标记数组，非零元分布在多行的段中，是行首元素的标记为1，其他的是0，当一个线程发现自己处理的段是跨越多行的，就能通过查询eor_arr知道具体的分界点是在哪里。</p> 
+<p>HCC整体的思路和CSR5差别不大，主要是列分块的引入，并且行和列横跨了两种不同的分块策略：列是按照固定宽度的分块，行分块是在列条带的基础上按照非零元数量的分块。这样子就同时保证了x和y的局部性。</p> 
+<hr> 
+<p>在CSR的基础上，以非零元数量尽可能均衡为目的进行行分块，划分应该是以行为单位对齐的，根据每个行条带内部的行非零元分布执行不同的线程分布策略和SpMV kernal实现：</p> 
+<blockquote> 
+ <p>Structural Agnostic SpMV: Adapting CSR-Adaptive for Irregular Matrices</p> 
+</blockquote> 
+<p>这篇文章认为，因为CSR是一种通用格式，新的数据格式会带来很大的额外的转换开销，所以基于CSR来处理是最好的。针对平均非零元数量相对小的行条带，文章提出了改进型的CSR stream算法。CSR stream的本质是将SpMV的“乘”和“加”分开对待，这篇文章中，“乘”是每个线程负责一个非零元，交错处理，保证合并访存，并且将所有乘完的结果先放在共享内存中，然后根据乘完的中间结果的行号，每一行分配一个或多个线程来执行并行的、树状的归约加法。</p> 
+<p>对于非零元较多的行，分配一个或者多个线程块来处理。因为考虑到一行的的元素非常多，如果将乘完的结果放到共享内存中，可能放不下，所以采用的方式是原子加操作。先归约每个线程块的结果，然后将这些结果原子加到到全局内存中。</p> 
+<p>这篇文章给的细节太少了，而且作者可能都不懂wrap的概念。他的思路本质上就是考虑了行条带内部的行非零元分布，选取不同的SpMV实现，并且严格来说，SpMV实现的主要区别几乎只体现在“归约加”上。</p> 
+<hr> 
+<p>26、分开对待SpMV的乘和加两个操作，并为两个阶段采取不同的并行度。采用线程的动态分配，同样大小的线程块可以处理多个短行和少量的长行：</p> 
+<blockquote> 
+ <p>Efficient Sparse Matrix-Vector Multiplication on GPUs using the CSR Storage Format</p> 
+</blockquote> 
+<p>此篇文章认为，CSR是传统存储方式，如果转换成其他格式可能可以提升性能，但是需要一定数据格式转换的开销。所以这篇文章提出的是CSR格式在GPU上的一种执行方法。传统的一行一线程的分配方式不利于合并访存；使用一行一wrap（CSR Vector）的方式有利于合并访存，但对于非零元特别少的行会浪费计算资源。所以这篇文章介于两者之间提出了CSR Stream算法。线程们交错负责非零元，先计算每个非零元和稠密向量x对应位的相乘，将结果存在共享内存里面。然后再用多个线程去归约共享内存中不同行的结果（按行加起来）。</p> 
+<p>这个算法是典型的线程块内有同步（在共享内存中规约），但是线程块之间不需要同步的算法（全局内存中的块间规约）。算法名字中“Stream”体现在一个线程从线程中读一个非零元→做个乘法→写到共享内存中这个过程。这篇文章的意义在于，它认为一个线程在执行计算的过程中不用急于归约自己所负责的非零元的计算结果，可以先放到共享内存中，在块内同步的基础上再集中归约。虽然很难说性能能不能更好，但是至少在文章中是管用的。此外这篇文章打破了行与线程分配的对应关系，变成了行与线程块的对应关系，即将一个或者多个行分配给一个线程块。</p> 
+<p>因为CSR Stream将中间结果都放在共享内存中，并且执行块内的结果归约，这就需要额外两层设计，一个是非零元的分配要按行对齐，并且与线程块为单位，不能出现一行的非零元跨在两个线程块中（用以避免块之间的同步）。当然，将乘完的中间结果放在共享内存中限制了一个线程块的负载，在文章中，每个线程块都有一定的共享内存配额，比如1024，为每个线程块分配的行条带的非零元数量之和不能超过这个线程块的共享内存的配额。这里就会遇到两种情况：1）如果一行的非零元数量直接就超过了配额，那这个行条带只有一行，并且使用CSR Vector这个算法，即每个线程用原子加的方式在共享内存中线归约一下自己的结果，或者干脆线程块中所有的线程直接用原子加在共享内存中归约每一行的结果。2）如果共享配额没超，但是行非零元数量很大，那就也对每一行使用CSR vector算法，并且防止wrap的处理范围横跨两行导致线程发散就好。总之全局同步加多线程规约的方式和原子加的方式有不同的适用范围。</p> 
+<hr> 
+<p>27、用更细粒度的方式来平衡每个每个向量执行管线的负载，但是总体上比较适合CPU：</p> 
+<blockquote> 
+ <p>CVR: Effjcient Vectorization of SpMV on X86 Processors</p> 
+</blockquote> 
+<p>本质上还是要解决的是负载均衡问题。这个数据格式本质上是想追求负载均衡的，但是根据已有的调研可以知道，如果想追求极致的负载均衡，那么计算资源和数据彼此之间就会很难对齐。所以这篇文章提出的思路是“对齐优先”。先尽可能以行为单位将非零元尽可能均衡地分配到各个线程。执行的方式就是按照顺序扫描所有的行，将行分配给当前工作量最小的线程就可以，如下图所示，注意lmn和op这两行的分配：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/28/13/oo3x4Q9I_o.png" width="480em"> 
+</center> 
+<p>我们这一看到初步的分配策略是对齐的（线程与行对齐）。但是仅仅是对齐的分配方式有时候没有办法很好地保证负载均衡，所以最后需要将非零元比较多的匀一些非零元给非零元更少的线程：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/dd/91/uHGz3JFd_o.png" width="650em/"> 
+</center> 
+<p>比如上图的黄色的行，一开始分配给0号线程（Tracker 0），但是因为这导致了负载不均衡，所以黄色的这一行的内容的一部分被分给了其他线程。</p> 
+<hr> 
+<p>几乎不需要引入任何额外索引的、可以完全负载均衡的CSR格式的SpMV实现：</p> 
+<blockquote> 
+ <p>Merge-based Parallel Sparse Matrix-Vector Multiplication</p> 
+</blockquote> 
+<p>在一般的负载均衡策略中，通常只考虑到了非零元数量在线程、wrap、block之间的均衡，但是没有考虑到每个子块包含行数不同也会带来额外的、写输出向量“y”的开销。所以非零元数量的均衡不代表最终的负载均衡。这篇文章给“处理的行数”和“处理的非零元数”一致的权重。保证每个线程被分配的“行数+非零元”数量的相等。</p> 
+<p>这篇文章的方案是CSR的一种新的实现，其目的是将row数组和值数组合并为一个列表，然后均等地切分这个列表保证负载均衡。而合并也不是瞎合并，行索引要正好插入到值数组中行交界的位置。原CSR的结构和改变之后的结构：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/5d/7d/s12QyC6I_o.png" width="300em/"> 
+ <img src="https://images2.imgbox.com/7c/76/lT3JM2f3_o.png" width="430em/"> 
+</center> 
+<p>可以看到，行索引插到了值数组中行交界的位置，并且也占用被合并之后列表的一个位置，最终将合并之后的列表均分给不同的处理器。其中，因为第1行是一个空行，所以0、2两个行索引相邻放在一起。</p> 
+<p>这个问题最终被建模成一个决策路径问题，其中既包含了两个数组的合并，又支持并行，又正好可以完成SpMV：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/b1/e5/CrZgLjyc_o.png" width="1000em/"> 
+</center> 
+<p>从左到右看这个图，首先行索引和值数组相互垂直放置，二者之间就构成一个长方形的“决策空间”，SpMV的过程是一个从决策空间左上角走到右下角的过程，往下走代表遍历值数组，计算加权和，往右走代表要算新的一行了，写输出（y），清空临时数据。当值数组的索引小于等于CSR中行索引数组对应的值时，就往下走，反之就代表到了遍历到新的行了，向右走。</p> 
+<p>为了保证负载均衡，整个决策空间按照次对角线方向被均匀划分，每个线程负责一个条带。只要知道每个条带的起始坐标，那么基本上每个线程的决策路径和SpMV运行时都可以通过上面的决策路径形成规则来得到。因为每一个对角线，每个点的横纵坐标都是相等的，我们在对角线上执行一个二分搜索，找到值数组的索引正好等于行数组值的位置。作为每一个条带的起点。</p> 
+<p>这个工作为了加速，将所有非零元都放在共享内存中了。</p> 
+<hr> 
+<p>使用warp行分块，并且使用了对角线矩阵分解：</p> 
+<blockquote> 
+ <p>Efficient GPU data structures and methods to solve sparse linear systems in dynamics applications</p> 
+</blockquote> 
+<p>一个类似于warp版的SELL格式，每个warp负责一个行条带。每个warp行条带按照行最大非零元来padding。这个格式还使用了对角线分解，这个分解主要是为了方便雅克比预处理。</p> 
+<img src="https://images2.imgbox.com/9e/a3/PXvjh9Cj_o.png" width="480em"> 
+<hr> 
+<p>让不超过32个线程处理一行，用warp reduce归约一行的结果。并且通过在全局内存中维护一个变量，以及使用原子加来实现运行时的行号与计算资源的映射。</p> 
+<blockquote> 
+ <p>LightSpMV: Faster CSR-based Sparse Matrix-Vector Multiplication on CUDA-enabled GPUs</p> 
+</blockquote> 
+<p>这篇文章将一个warp分为大小相同的一个或者多个vector，每个vector负责一行。在此基础上使用warp reduce来归约每个vector，也就是一行的结果。从这点来看，这就是CSR-Vector的思路。但是这种方式对于行非零元分布不均匀矩阵来说会带来向量之间负载不均衡的问题，这篇文章做了一个软件层次的负载均衡调度。</p> 
+<p>主要的实现方法，是在每个vector执行完对应的行之后临时选择其要处理的下一个行。具体的处理方法是在全局内存中维护一个数据（行号），这个数据从0开始，代表着一个向量要处理的下一行的行号。每个向量再处理完自己的行之后通过原子加全局内存中的这个行号，获得这个向量需要处理的下一行的行号。通过这种方式让每个vector在完成自己的任务之后都有缘缘不断的任务可以处理，让先执行完任务的vector可以处理其他的内容来保证负载均衡。</p> 
+<p>当然每个vector都要去全局内存中取自己需要的数据，而且还是原子加同一个位置，这样子性能肯定不好。所以这篇文章提出了一个更大的调度粒度，按照warp级别来执行调度，将整个矩阵进行均匀的行分块，为每个行条带行分块映射一个warp，然后将warp中的每一个向量分配给行条带中的一行，并且满足<code>行条带的行数量*向量的非零元数量==32</code>的条件。通过增加调度的粒度，将全局内存同一个位置原子加的操作变成每个warp执行完之后进行一次。</p> 
+<p>这篇文章将所有的计算资源都看成是静态的，所有的线程都是从头到尾几乎都在运行的。这忽略了硬件是自带调度的。但是实际上可以通过给每一个行条带分配一个warp，并且发射足够多的线程来覆盖所有的行条带。实际发射的线程或者warp数量一般来说肯定比GPU能提供的多，在硬件上GPU有自己的调度。GPU会自己给计算资源分配对应的逻辑线程的执行逻辑。</p> 
+<hr> 
+<p>SELL-P格式，为GPU设计的SELL格式的变种：</p> 
+<blockquote> 
+ <p>Implementing a Sparse Matrix Vector Product for the SELL-C/SELL-C-σ formats on NVIDIA GPUs</p> 
+</blockquote> 
+<p>本质上还是SELL，但是有一些改进。首先是没有行排序，文章认为，按照行长度交换行的顺序，会带来很大的处理前和处理后开销。其次，除了在行方向上进行切分之外，还在列方向上进行切分。并且对于一个条带，要把每一行的非零元数量padding到一致，然后在进行列切分。从而产生一个大致像SELL的，但是每一行有多个线程的数据格式。如下图所示。</p> 
+<center> 
+ <img src="https://images2.imgbox.com/bf/2b/6T2bnea5_o.png" width="25%"> 
+</center> 
+<p>上面这张图就是一行两个线程的SELL。另外，因为一行有两个线程，每个线程产生一个计算结果，所以线程间归约是必须的，这篇文章采用的方式是在共享内存中进行进一步归约。这个格式有点像SELL和CSR-Adaptive的杂交。在距离的处理上，可以理解为先是一个线程块粒度的行切分，然后是一个线程粒度的行切分（一行一个线程），然后是线程粒度的padding（将每一块（行）pad到一致的大小），最后是线程粒度的列切分，最后再padding一次。</p> 
+<hr> 
+<p><strong>GPU的全局内存及其缓存</strong></p> 
+<p>在科学计算的负载中，全局内存的数据可能出现在L2 cache，L1 cache和Texture cache中。下图是一个SM内部的结构：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/8b/1c/hInyrNio_o.jpg" width="550em"> 
+</center> 
+<p>其中底下的就是纹理内存和L1cache。纹理内存和L1 cache位置是一样，我们可以认为速度是相似的，都是SM内部的缓存结构。</p> 
+<p>在更新的GPU中，shared memory、texture cache、L1 cache基本被合并在一起了，变成了SM内部的一大块缓存区域。L1 cache和texture cache更是不分你我。</p> 
+<p>在不少文章中认为，将只读的全局内存数组声明为<code>__ldg()</code>或者<code>__restrict__ const</code>是可以提升性能的。这是因为在<strong>Pascal</strong>架构及其之前的一段时期，L1cache基本上不能作为全局内存的数据缓存，所以如果要让global memory中的可以在SM内部有所缓存只能纹理内存（texture cache）。又因为只读全局内存本质上走的就是纹理内存的管线，所以只读优化是唯一可以让全局内存的数据在SM内部得以缓存的办法，在这时，这个优化能给性能带来的提升就非常关键。</p> 
+<hr> 
+<p><strong>NVIDA GPU架构解析</strong></p> 
+<p>一篇非常好NVIDA每一代结构解析的文章：<a href="https://zhuanlan.zhihu.com/p/258196004" rel="nofollow">https://zhuanlan.zhihu.com/p/258196004</a></p> 
+<hr> 
+<p>一个CUDA指令调度的文章：</p> 
+<p><a href="https://zhuanlan.zhihu.com/p/166180054" rel="nofollow">https://zhuanlan.zhihu.com/p/166180054</a></p> 
+<p>包含了一些比较重要的观点：</p> 
+<p>1）每个Kernel有一个grid，下面有若干个block，每个block有若干个warp。同一个block的warp只能在同一个SM上运行，但是同一SM可以可以容纳来自不同block甚至不同grid的若干个warp。</p> 
+<p>2）当前CUDA的所有架构都没有乱序执行（Out of order），意味着每个warp的指令一定是按照运行顺序来发射的。当然，有的架构支持dual-issue，这样可以有两个连续的指令同时发射，前提是两者不相互依赖。</p> 
+<p>3）和CPU类似，GPU也有功能单元（分支、单精度、双精度等）和调度单元（wrap调度、指令的分配单元等）的分别。</p> 
+<p>4）在一个周期内，每个warp scheduler能执行一个调度，每个dispatch unit可以执行一个指令发射。warp scheduler之后可以有多个dispatch unit，有时候为了可以把一个SM中所有wrap都分配指令，需要多发射（dual-issue）。warp会将不依赖的连续指令交给自己的多个dispatch unit。</p> 
+<p>截取一部分看看warp scheduler、dispatch unit和计算单元之间的关系（上功能单元，下执行单元）：</p> 
+<center> 
+ <img src="https://images2.imgbox.com/03/81/LuBeWN9J_o.jpg"> 
+</center> 
+<h2><a id="Summary_685"></a>Summary</h2> 
+<p>GPU上SpMV要解决的几个问题：线程负载均衡、显存对齐访问、降低空间复杂度</p> 
+<p>格式设计的本质就是分组</p> 
+<p>非零元行坐标和列坐标是升序或者降序的时候才有压缩</p> 
+<p>DIA等斜着存的方法只是在规定起始索引号的位置</p> 
+<p>分块主要是根据结构分块，也可以根据非零元密度分块</p> 
+<p>无论是分块还是元素，其都需要在某种程度上与行索引和列索引相对应，有些索引是记录在存储中，然后<strong>查</strong>出来的；有些索引是根据当前块或者行在连续存储空间中的位置<strong>算</strong>出来的。</p> 
+<p>所有的非零元最终都是存在内存的一维连续空间中</p> 
+<p>逻辑数据结构的设计是一回事，数据在线程中的分配是一回事，逻辑数据结构在物理的线性地址空间的分配是一回事</p> 
+<p>对每一个索引的压缩通常会导致SpMV只能并行化这个索引的遍历，或者就要引入复杂的同步机制。索引的压缩是负载不均衡的最主要推手。</p> 
+<p>负载均衡优先的数据分配通常是遍历值的数组，所以需要一种手段，引入尽可能少的索引结构，构建从值到行号列号的反查手段，可以让一个线程知道自己是不是算到了行的边界，以及自己具体在算哪一行，并且要如何解决多个层次的同步问题和线程临时结果的规约问题。</p> 
+<hr> 
+<p><strong>归约</strong></p> 
+<p>SpMV有乘法和加法两个过程，其实可以分开对待，即“乘”是完全并行的过程，“加”（归约）是需要同步的过程。即便将矩阵分块，并且为每个线程分配非零元之后，乘是没有分歧的难度的，算法的设计主要在加（归约）上。归约存在不同的时机：每个线程处理完自己负责的内容时先进行一次归约，每个wrap执行完之后进行一次归约，每个block执行执行完之后进行一次归约，全局都执行玩之后执行一次归约。其中，这几种归约的时机可以叠加，但是全局规约是必须的。归约是对中间结果的按行叠加，可以在不同的位置：共享内存，显存。</p> 
+<p>对于wrap、block、乃至全局层次，归约可以用不同的方式：原子操作的方式，全局同步的方式。原子操作实现比较简单，而且省空间，但是有争用。全局的方式同步就是，将需要归约的所有数据先存下来，然后用一个或者多个线程统一加（归约）到一起，这种方式需要额外的存储空间，但是完全不会在同一个存储的位置上出现“写争用”。</p> 
+<p>此外，规约的算法也有不同：可以一个线程规约一行的数据，也可以多个线程树状规约。</p> 
+<hr> 
+<p><strong>对齐</strong></p> 
+<p>在稀疏矩阵非零元与线程的分配中，<strong>对齐</strong>决定了中间计算结果的处理方式。<strong>对齐</strong>有不同的方向，分成不同的层次，主要体现在稀疏矩阵行与不同计算单元粒度之间的关系上：线程、wrap、线程块。</p> 
+<p>对齐的不同方向主要是两个方向，比如行与线程对齐（数据与不同粒度的计算资源的对齐），就是一行中的非零元不能横跨多个线程，行与线程不对齐代表了不同线程产生的结果需要进行归约，反之行与wrap、行与线程块之间也一样，主要是体现了中间结果规约的范围。</p> 
+<p>不同粒度计算资源与数据之间也存在对齐，比如一个线程与行的对齐，就是一个线程的处理的非零元只能都在一个行内。如果不同粒度的计算资源与行不对齐，那么对应粒度的计算资源就会产生多个中间结果。比如，如果线程与行的不对齐，代表了一个线程的中间结果可能来自于不同行，从而需要引入更多的索引和元数据。这会导致更复杂的内核实现和数据结构设计。</p> 
+<p>当然也有两个方向都不对齐的情况，一行可能被多个线程处理，并且一个线程同时处理多行在一个矩阵中同时存在，那就非常复杂了，CSR5、yaSpMV与HCC这类完全按照非零元数量为线程（wrap、线程块）分配任务，从而保证绝对负载均衡的工作就是这一类。他们完全不考虑对齐的问题，所以同步过程非常复杂，数据结构的设计、kernal的实现也非常复杂。</p> 
+<p>两个方向全都不对齐格式有：yaSpMV，CSR5，HCC，Merge-based</p> 
+<hr> 
+<p><strong>逻辑索引和实际索引</strong></p> 
+<p>逻辑索引是一个非零元在原稀疏矩阵中的真实坐标，线程可以在这个逻辑索引上交错分布（类似于CSR vector）或者在逻辑索引上连续分布。如果线程不在逻辑索引上连续分布，那么为了保证合并访存，可能需要将逻辑索引连续的非零值在内存中线性分布。</p> 
+<hr> 
+<p><strong>“负载均衡”</strong></p> 
+<p>SpMV分为并行乘和规约加两个部分，其中乘阶段的线程间负载均衡是很好保证的，难是难在归约加的负载均衡上。通常来讲，为了保证归约加的负载均衡，大多数文章都采用线程和数据完全都不对齐的方式来处理，这些方式有的仅仅考虑按照非零元数量的平均分配，有的综合考虑了非零元的数量和所包含的行的数量。</p> 
+<p>采用负载均衡的方式几乎必然导致线程和数据两个方向的完全不对齐，这导致线程所负责非零元的逻辑索引必须只能是连续的，虽然在实际的执行中，可以通过预处理去做个转置，通过改变物理索引使其支持合并访存，但是这也有额外的预处理开销。</p> 
+<hr> 
+<p><strong>计算能力</strong></p> 
+<p>https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#compute-capabilities</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/fd94eade019853231c645ae89a4a7c8d/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">数据资产管理介绍</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/95fc9f130b064d17d8b40aa51d729e26/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">SpMV矩阵格式自动调优</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

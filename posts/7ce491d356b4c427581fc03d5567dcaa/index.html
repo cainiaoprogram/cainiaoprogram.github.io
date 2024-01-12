@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>基于主机Overlay和自研虚拟化网关的VPC在360的落地 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="基于主机Overlay和自研虚拟化网关的VPC在360的落地" />
+<meta property="og:description" content="01
+背景
+1.1 概述
+随着公司业务的不断发展，用户对网络也提出了更多的需求。一方面360公司25G机房逐步上线，交换机架构升级，导致原有的虚拟化网络方案无法支持虚机的跨交换机迁移，而且部分特殊业务线对网络有着隔离的需求。另一方面，之前的网络Overlay架构与交换机耦合太严重，在稳定性、运维和问题排查方面都不太理想。
+综合上述情况，虚拟化团队选择了主机Overlay的方案，与交换机解耦，支持专有网络（Virtual Private Cloud，简称VPC），保证不同用户间隔离，保障云上资源的安全性，并上线至公司内部私有云平台HULK，丰富了HULK的服务类别。
+1.2 架构思路
+在私有云内做VPC的需求，最初团队内部是存在一定争议的。考虑到私有云的每个IDC本身就是一个独立的VPC，IDC内VLAN隔离，三层互通，再去做VPC是否有必要？
+业务发展过程中，集团的部分事业部逐渐子公司化，其安全要求是与集团独立的。当前公司都是采用IDC VLAN隔离网段 &#43; 核心ACL控制等方式，来限制关联公司与集团的互访。每当有隔离需求，都需要网络运维部门单独去分配段或设置三层隔离等，不够灵活，IP段无法定制，限制比较死。所以需要集团内部私有云平台去支持公有云的VPC，通过逻辑划分的VPC，业务可以实现自定义交换机、IP段、路由表，以及自定义VPC之间的互联互通等。所有的VPC的概念都可以和IDC的物理机逻辑相映射，例如子网对应接入交换机，路由表对应三层核心交换机和路由器，VPC内的VM对应IDC的物理机等。软件定义网络，本质上依然是物理网络的逻辑映射。
+在开始摸索VPC之前，公司集团都是网络Overlay，主机侧走VLAN模式，接入交换机做VLAN封装，实现大二层网络，保证VM跨交换机迁移等。但是存在网络侧工作量很大的痛点，每次上线部署都需要和网络运维部门联调VLAN配置。并且交换机侧做Overlay，对交换机侵入性比较大，需要网络运维部门参与配置，对交换机的选型和品牌都有要求，优势是性能好，都是硬件交换机做VXLAN解封装。
+在综合考虑之后，我们实施了主机Overlay的方案。当前业界主流云厂商基本都是将VXLAN解封装放到了主机侧，优势就是和网络设备解绑，除了主机的包都是IP包，交换机做好纯转发即可。OpenStack社区Neutron也支持主机Overlay，基于OVS做解封装，再加上DVR分布式路由方案消灭集中式Neutron网络节点Vrouter性能瓶颈，主机路由Vrouter来处理南北东西流量。而我们的方案是DVR&#43;自研虚拟化网关，DVR处理东西流量，南北流量都统一走基于DPVS开发的虚拟化网关，既能区分VPC的负载均衡NAT网，也能达到最高单机性能和降低计算节点主机路由负载等目标。
+自研虚拟化网关的技术背景是，虚拟化团队同时维护和开发着公司的基于DPVS的负载均衡，专有网络的NAT网关和FIP浮动IP本质上就是VPC内的SNAT和DNAT，所以需要在DPVS上增加VPC的区分和标识。这是自研的关键点。具体细节信息可参考下文中的SNAT虚拟化网关和FIP虚拟化网关架构章节。
+这一套基于自研虚拟化网关的主机Overlay方案已经在线上25G机房运行接近一年之久，运行稳定，架构高可用性可体现在：在网关与交换机的对接中，网关设备采用了双活冗余方案，每台交换机下一组6台25G网卡的网关集群，整体VPC流量峰值在200Gbps左右。后续考虑100G网卡来做网关，但有利有弊，利是网关机器数少了，弊是故障域大了。计算节点侧都采用了双发ARP的bond方案，上层对接去堆叠的双线双交换机，综上在网关侧和主机侧都做了高可用保证。
+该方案的收益：
+对业务方来说，业务可从公司私有云平台上进行自定义VPC、创建二层隔离网络、自定义IP段等操作；
+对网络运维部门来说，网络交换机专注于纯转发，降低了交换机配置复杂度；
+对公司的信息安全部门来说，以前在核心交换机上做ACL策略可以在网关或者虚拟化网络侧做限制，更加灵活；
+对研发团队来说，由于不需要重复与网络运维部门做VLAN联调等步骤，上线部署更快，整体部署效率由天提升至小时级别。排查问题也集中在主机侧的虚拟网络，交换机测只需保证IP可达即可；
+此方案存在的缺点：主机侧基于内核OVS做解封装，在性能方面会比硬件交换机差一些。按照当前的压测损耗统计，性能损耗基本维持在20%到30%，延迟上也同样比VLAN网络和sriov直通VM的模式高出一倍。
+那么接下来工作基本集中在如何降低损耗，包括通过OVS-DPDK加速OVS转发，通过智能网卡做流表卸载加速等方式。除了速度损耗问题，网络IO负载本身也会占用不少CPU，以OVS-DPDK进程为例，它一般情况下会绑定8个core，造成不必要的资源浪费，所以主流的DPU方案都会集中在网络和存储IO的卸载和加速。
+360也在与部分DPU厂商联测，尝试将网络IO和存储IO卸载到DPU上。DPU本质上是一个加了ARM CPU的智能网卡，比如主流的intel的IPU，麦乐思的bf2等，可理解为BF2=ARM&#43;CX6。该DPU上一般会装一个Ubuntu系统，把OVS-DPDK和存储SPDK进程部署到DPU上，然后DPU上生成一个VF，主机OS通过VF走网卡将流量送到DPU上的OVS-DPDK，在这里做VXLAN的封装解封装，达到完全IO卸载，在CX6中部分流表还能卸载到智能网卡规则中。如果流表匹配，直接加速转发，如果不匹配，上送到OVS-DPDK中继续寻找流表，匹配以后再下放到网卡流表中。如此循环。
+在接下来的工作中，我们还会输出一些关于虚拟化网络的文章，希望能给大家一些启发。
+02
+VPC架构介绍
+2.1 VPC层级架构
+图2.1 VPC整体架构图
+由上图2.1可知，VPC整体架构从层级角度上可以分为计算节点的虚拟化网络和云网关两个部分。
+计算节点的虚拟化网络负责处理并转发虚拟机即用户的流量。云网关根据功能可以分为SNAT网关、EIP网关、LB网关、CCN网关等。其中SNAT网关和EIP网关负责用户南北向流量的转发，LB网关负责负载业务，CCN网关负责VPC之间的互通。目前这些网关均已开发完成，VPC一期上线了SNAT网关和EIP网关，其余网关功能将在VPC二期上线。SNAT网关适用于用户主动访问外网的场景，使用统一的IP池，而不对外暴露虚机IP。EIP网关即弹性公网IP网关，允许外网主动访问绑定EIP的虚机。SNAT与EIP网关的转发逻辑类似，下面介绍的是实现架构和细节，如果不特殊说明，默认就以EIP网关为例。
+2.2 VPC流量架构
+图2.2 VPC流量架构图
+由上图2.2可知，VPC从流量角度上可以分为东西向流量、南北向流量以及一些控制类流量，如dhcp和metadata等数据流量。
+东西向流量采用DVR模式，只在计算节点之间流通，这与传统的Openstack网络架构保持一致。南北向流量采用与云网关对接的方式，每台计算节点与云网关建立VXLAN隧道，将用户的南北向流量发给网关，由网关来处理转发。云网关南向通告VIP给计算节点，该VIP用于与计算节点建立VXLAN隧道，即VIP就是云网关的vtep IP，这就实现了三层网络，不依赖中间的交换机或者路由器。云网关北向通告EIP网段，用于外网访问EIP的引流。
+2.3 VPC实现架构
+图2.3 VPC控制与转发面架构
+由上图2.3可知，VPC架构从实现角度上可以分为控制面和转发面两个部分。控制面包含FIPCTL组件和Neutron组件，转发面包含DPDK和OVS。
+2.3.1 控制面
+虚拟化网络控制面由Neutron Server和Ovs Agent实现。用户在HULK页面绑定EIP后，请求到达Neutron Server，合法性检查通过后将虚机与EIP的关联关系记录数据库，并且通知云网关Fipctl Server和计算节点的Ovs Agent该对应关系的变化。
+网关控制面由Fipctl Server和Fipctl Agent实现。Fipctl Server负责提供对外API接口，接收来自Neutron Server的虚机和EIP绑定/解绑关系，并将该信息存储至ETCD集群；Fipctl Agent部署在每台EIP网关上，实时监听ETCD变化，拉取对应的映射关系，并及时下发至转发面。
+2.3.2 转发面
+虚拟化网络转发面由OVS实现。虚机创建后，计算节点会下发相关OVS流表，根据流表规则匹配转发。东西向流量采用DVR模式，在计算节点内部或计算节点间转发，不经过网络节点，不存在发卡流量，这和原生的Neutron逻辑一致。南北向流量会通过VXLAN隧道引到云网关进行处理。
+网关转发面是基于DPDK实现的高性能网关，CPU和网关服务的worker进程一一绑定，绕过内核协议栈，提升了收发包性能。它通过查找EIP和虚机映射关系进行数据包转发，一条映射关系包含5个参数：EIP、虚机IP(VM_IP)、虚机所在宿主机IP(HOST_IP)、VXLAN网络标识(VNI)和计算节点的DVR_MAC。映射关系会同步至每个核，保证数据包无论在哪个网卡队列都可以被成功转发。映射关系需要保证唯一，即同一个EIP只允许绑定一台虚机，虚机删除会同时将映射关系删除，虚机迁移也会同步更新映射关系，保证数据包转发至正确的宿主机。
+03
+流量路径" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/7ce491d356b4c427581fc03d5567dcaa/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-03-08T16:12:15+08:00" />
+<meta property="article:modified_time" content="2022-03-08T16:12:15+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">基于主机Overlay和自研虚拟化网关的VPC在360的落地</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div id="js_content"> 
+ <p><strong>01</strong></p> 
+ <p><strong>背景</strong></p> 
+ <p><strong>1.1 概述</strong></p> 
+ <p>随着公司业务的不断发展，用户对网络也提出了更多的需求。一方面360公司25G机房逐步上线，交换机架构升级，导致原有的虚拟化网络方案无法支持虚机的跨交换机迁移，而且部分特殊业务线对网络有着隔离的需求。另一方面，之前的网络Overlay架构与交换机耦合太严重，在稳定性、运维和问题排查方面都不太理想。</p> 
+ <p>综合上述情况，虚拟化团队选择了主机Overlay的方案，与交换机解耦，支持专有网络（Virtual Private Cloud，简称VPC），保证不同用户间隔离，保障云上资源的安全性，并上线至公司内部私有云平台HULK，丰富了HULK的服务类别。<br></p> 
+ <p><strong>1.2 架构思路</strong></p> 
+ <p>在私有云内做VPC的需求，最初团队内部是存在一定争议的。考虑到私有云的每个IDC本身就是一个独立的VPC，IDC内VLAN隔离，三层互通，再去做VPC是否有必要？</p> 
+ <p>业务发展过程中，集团的部分事业部逐渐子公司化，其安全要求是与集团独立的。当前公司都是采用IDC VLAN隔离网段 + 核心ACL控制等方式，来限制关联公司与集团的互访。每当有隔离需求，都需要网络运维部门单独去分配段或设置三层隔离等，不够灵活，IP段无法定制，限制比较死。所以需要集团内部私有云平台去支持公有云的VPC，通过逻辑划分的VPC，业务可以实现自定义交换机、IP段、路由表，以及自定义VPC之间的互联互通等。所有的VPC的概念都可以和IDC的物理机逻辑相映射，例如子网对应接入交换机，路由表对应三层核心交换机和路由器，VPC内的VM对应IDC的物理机等。软件定义网络，本质上依然是物理网络的逻辑映射。</p> 
+ <p>在开始摸索VPC之前，公司集团都是网络Overlay，主机侧走VLAN模式，接入交换机做VLAN封装，实现大二层网络，保证VM跨交换机迁移等。但是存在网络侧工作量很大的痛点，每次上线部署都需要和网络运维部门联调VLAN配置。并且交换机侧做Overlay，对交换机侵入性比较大，需要网络运维部门参与配置，对交换机的选型和品牌都有要求，优势是性能好，都是硬件交换机做VXLAN解封装。</p> 
+ <p>在综合考虑之后，我们实施了主机Overlay的方案。当前业界主流云厂商基本都是将VXLAN解封装放到了主机侧，优势就是和网络设备解绑，除了主机的包都是IP包，交换机做好纯转发即可。OpenStack社区Neutron也支持主机Overlay，基于OVS做解封装，再加上DVR分布式路由方案消灭集中式Neutron网络节点Vrouter性能瓶颈，主机路由Vrouter来处理南北东西流量。而我们的方案是DVR+自研虚拟化网关，DVR处理东西流量，南北流量都统一走基于DPVS开发的虚拟化网关，既能区分VPC的负载均衡NAT网，也能达到最高单机性能和降低计算节点主机路由负载等目标。</p> 
+ <p>自研虚拟化网关的技术背景是，虚拟化团队同时维护和开发着公司的基于DPVS的负载均衡，专有网络的NAT网关和FIP浮动IP本质上就是VPC内的SNAT和DNAT，所以需要在DPVS上增加VPC的区分和标识。这是自研的关键点。具体细节信息可参考下文中的SNAT虚拟化网关和FIP虚拟化网关架构章节。</p> 
+ <p>这一套基于自研虚拟化网关的主机Overlay方案已经在线上25G机房运行接近一年之久，运行稳定，架构高可用性可体现在：在网关与交换机的对接中，网关设备采用了双活冗余方案，每台交换机下一组6台25G网卡的网关集群，整体VPC流量峰值在200Gbps左右。后续考虑100G网卡来做网关，但有利有弊，利是网关机器数少了，弊是故障域大了。计算节点侧都采用了双发ARP的bond方案，上层对接去堆叠的双线双交换机，综上在网关侧和主机侧都做了高可用保证。</p> 
+ <p>该方案的收益：</p> 
+ <ul><li><p>对业务方来说，业务可从公司私有云平台上进行自定义VPC、创建二层隔离网络、自定义IP段等操作；</p></li><li><p>对网络运维部门来说，网络交换机专注于纯转发，降低了交换机配置复杂度；</p></li><li><p>对公司的信息安全部门来说，以前在核心交换机上做ACL策略可以在网关或者虚拟化网络侧做限制，更加灵活；</p></li><li><p>对研发团队来说，由于不需要重复与网络运维部门做VLAN联调等步骤，上线部署更快，整体部署效率由天提升至小时级别。排查问题也集中在主机侧的虚拟网络，交换机测只需保证IP可达即可；</p></li></ul> 
+ <p>此方案存在的缺点：主机侧基于内核OVS做解封装，在性能方面会比硬件交换机差一些。按照当前的压测损耗统计，性能损耗基本维持在20%到30%，延迟上也同样比VLAN网络和sriov直通VM的模式高出一倍。</p> 
+ <p>那么接下来工作基本集中在如何降低损耗，包括通过OVS-DPDK加速OVS转发，通过智能网卡做流表卸载加速等方式。除了速度损耗问题，网络IO负载本身也会占用不少CPU，以OVS-DPDK进程为例，它一般情况下会绑定8个core，造成不必要的资源浪费，所以主流的DPU方案都会集中在网络和存储IO的卸载和加速。</p> 
+ <p>360也在与部分DPU厂商联测，尝试将网络IO和存储IO卸载到DPU上。DPU本质上是一个加了ARM CPU的智能网卡，比如主流的intel的IPU，麦乐思的bf2等，可理解为BF2=ARM+CX6。该DPU上一般会装一个Ubuntu系统，把OVS-DPDK和存储SPDK进程部署到DPU上，然后DPU上生成一个VF，主机OS通过VF走网卡将流量送到DPU上的OVS-DPDK，在这里做VXLAN的封装解封装，达到完全IO卸载，在CX6中部分流表还能卸载到智能网卡规则中。如果流表匹配，直接加速转发，如果不匹配，上送到OVS-DPDK中继续寻找流表，匹配以后再下放到网卡流表中。如此循环。</p> 
+ <p>在接下来的工作中，我们还会输出一些关于虚拟化网络的文章，希望能给大家一些启发。</p> 
+ <p><strong>02</strong></p> 
+ <p><strong>VPC架构介绍</strong></p> 
+ <p><strong>2.1 VPC层级架构</strong></p> 
+ <p><img src="https://images2.imgbox.com/08/2e/EhrVgSBw_o.png" alt="fe46e10c08dfb254836100cdf4394ead.png"></p> 
+ <p>图2.1 VPC整体架构图</p> 
+ <p>由上图2.1可知，VPC整体架构从层级角度上可以分为计算节点的虚拟化网络和云网关两个部分。</p> 
+ <p>计算节点的虚拟化网络负责处理并转发虚拟机即用户的流量。云网关根据功能可以分为SNAT网关、EIP网关、LB网关、CCN网关等。其中SNAT网关和EIP网关负责用户南北向流量的转发，LB网关负责负载业务，CCN网关负责VPC之间的互通。目前这些网关均已开发完成，VPC一期上线了SNAT网关和EIP网关，其余网关功能将在VPC二期上线。SNAT网关适用于用户主动访问外网的场景，使用统一的IP池，而不对外暴露虚机IP。EIP网关即弹性公网IP网关，允许外网主动访问绑定EIP的虚机。SNAT与EIP网关的转发逻辑类似，下面介绍的是实现架构和细节，如果不特殊说明，默认就以EIP网关为例。</p> 
+ <p><strong>2.2 VPC流量架构</strong></p> 
+ <p><img src="https://images2.imgbox.com/4c/c6/qiQFGhtA_o.png" alt="bded57a189db80fa4e738fcba22af729.png"></p> 
+ <p>图2.2 VPC流量架构图</p> 
+ <p>由上图2.2可知，VPC从流量角度上可以分为东西向流量、南北向流量以及一些控制类流量，如dhcp和metadata等数据流量。</p> 
+ <p>东西向流量采用DVR模式，只在计算节点之间流通，这与传统的Openstack网络架构保持一致。南北向流量采用与云网关对接的方式，每台计算节点与云网关建立VXLAN隧道，将用户的南北向流量发给网关，由网关来处理转发。云网关南向通告VIP给计算节点，该VIP用于与计算节点建立VXLAN隧道，即VIP就是云网关的vtep IP，这就实现了三层网络，不依赖中间的交换机或者路由器。云网关北向通告EIP网段，用于外网访问EIP的引流。</p> 
+ <p><strong>2.3 VPC实现架构</strong></p> 
+ <p><img src="https://images2.imgbox.com/a0/f1/Z7y68WFf_o.png" alt="835f4aa446f1bb264c5eb488391dc5fb.png"></p> 
+ <p>图2.3 VPC控制与转发面架构</p> 
+ <p>由上图2.3可知，VPC架构从实现角度上可以分为控制面和转发面两个部分。控制面包含FIPCTL组件和Neutron组件，转发面包含DPDK和OVS。</p> 
+ <p><strong>2.3.1 控制面</strong></p> 
+ <p>虚拟化网络控制面由Neutron Server和Ovs Agent实现。用户在HULK页面绑定EIP后，请求到达Neutron Server，合法性检查通过后将虚机与EIP的关联关系记录数据库，并且通知云网关Fipctl Server和计算节点的Ovs Agent该对应关系的变化。</p> 
+ <p>网关控制面由Fipctl Server和Fipctl Agent实现。Fipctl Server负责提供对外API接口，接收来自Neutron Server的虚机和EIP绑定/解绑关系，并将该信息存储至ETCD集群；Fipctl Agent部署在每台EIP网关上，实时监听ETCD变化，拉取对应的映射关系，并及时下发至转发面。</p> 
+ <p><strong>2.3.2 转发面</strong></p> 
+ <p>虚拟化网络转发面由OVS实现。虚机创建后，计算节点会下发相关OVS流表，根据流表规则匹配转发。东西向流量采用DVR模式，在计算节点内部或计算节点间转发，不经过网络节点，不存在发卡流量，这和原生的Neutron逻辑一致。南北向流量会通过VXLAN隧道引到云网关进行处理。</p> 
+ <p>网关转发面是基于DPDK实现的高性能网关，CPU和网关服务的worker进程一一绑定，绕过内核协议栈，提升了收发包性能。它通过查找EIP和虚机映射关系进行数据包转发，一条映射关系包含5个参数：EIP、虚机IP(VM_IP)、虚机所在宿主机IP(HOST_IP)、VXLAN网络标识(VNI)和计算节点的DVR_MAC。映射关系会同步至每个核，保证数据包无论在哪个网卡队列都可以被成功转发。映射关系需要保证唯一，即同一个EIP只允许绑定一台虚机，虚机删除会同时将映射关系删除，虚机迁移也会同步更新映射关系，保证数据包转发至正确的宿主机。</p> 
+ <p><strong>03</strong></p> 
+ <p><strong>流量路径</strong></p> 
+ <p>流量路径分为东西向流量和南北向流量，由于东西向流量采用Neutron原生的DVR模式，这里不在详述。我们来重点看下南北向流量，这是我们不同于社区的实现方案。南北向流量根据报文流向，分为外网访问虚机的流量和虚机访问外网的流量。</p> 
+ <p><strong>3.1 虚机访问外网的流量</strong></p> 
+ <p>虚机出外网的流量先通过虚机的tap口到达宿主机，然后匹配流表进行VXLAN封装发给EIP网关。由于目的vtep ip被多台EIP服务器通告，因此流量经过TOR交换机时会根据ECMP负载到其中一台EIP服务器。EIP服务器收到报文后查看转发表项，如果查询到EIP与虚机私网IP的对应关系，则将源IP修改为EIP，并进行转发。</p> 
+ <p><strong>3.2 外网访问虚机的流量</strong></p> 
+ <p>EIP网关由多台EIP服务器组成，每台EIP服务器向外通告相同的EIP网段，这样交换机上学到相应的路由，外网访问该网段时流量会被引到EIP网关上，具体引到哪台EIP服务器，由交换机设置的HASH算法决定。</p> 
+ <p>EIP服务器收到流量后查看转发表项，如果查询到EIP与虚机私网IP的对应关系，则加上VXLAN隧道封装进行转发。由于是VXLAN隧道，只要三层IP可达流量就能到计算节点，计算节点收到报文后解VXLAN封装，根据内层报文匹配流表转发给相应的虚拟机。下面我们看个具体的转发例子。</p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/d3/c7/0PK5B1As_o.png" alt="8600fbd77751a743ca89492c3a9447d4.png"></p> 
+ <p style="text-align:center;">图3.2 EIP网关转发流程</p> 
+ <p>图3.2是用户访问虚机EIP的整体处理流程：</p> 
+ <p>1）用户IP为xxx.118要访问EIP(xxx.18)，通过路由到达一台EIP网关服务器。</p> 
+ <p>2）转发面对数据包进行判断，由于数据包VNI=0，说明该数据包是访问虚机的流量，方向为INBOUND。</p> 
+ <p>3）通过查找转发面的EIP和虚机映射关系，查找到该EIP对应的VPC内虚机IP为xxx.123，VNI为96，虚机所在宿主机为xxx.201。</p> 
+ <p>4）根据已知信息封装一个VXLAN数据包，外层头源IP为EIP网关VIP xxx.3，外层头目的IP为宿主机IP xxx.201；内层头源保持用户IP不变，目的IP替换为虚机VPC内IP xxx.123。</p> 
+ <p>至此，网关处理流程完成，数据包将会通过路由到达宿主机进行下一步处理。</p> 
+ <p>5）宿主机的br-tun设备收到数据包后，将数据包解封。</p> 
+ <p>6）此时数据包可以通过OVS各类桥上的流表，正确发送至tap口被虚机(xxx.123)接收。</p> 
+ <p>虚机回包的流程与上述流程对称，不再赘述。</p> 
+ <p><strong>3.3 流量路径分析</strong></p> 
+ <p>（1）流量无状态<br></p> 
+ <p>由上面的转发逻辑可知EIP服务器转发流量是无状态的，收到流量后查看转发表项，只要匹配上EIP与虚机私网IP的对应关系就可以进行转发。而这个对应关系在每台EIP服务器上是统一的，虚机的添加删除或者迁移会影响该对应关系，这个对应关系的正确性由控制面来保障。这种无状态的转发使得我们可以很方便的扩缩容，当集群中单台EIP服务器宕机，交换机路由表中就不再有这台下一跳，避免流量异常。为保证服务高可用，集群最小规模为4台服务器，分别挂在两台交换机下，可以根据集群流量情况水平扩缩容。</p> 
+ <p>（2）与交换机解耦</p> 
+ <p>由于计算节点与云网关建立了VXLAN隧道，计算节点流量可直达云网关，完成了与交换机的解耦。这样交换机侧少了运维工作，可专心致力于提升基础网络的带宽、时延与稳定性。虚拟化侧也将流量的转发掌控在自己手中，利于后期问题排查与技术迭代升级。</p> 
+ <p>（3）支持跨交换机迁移</p> 
+ <p>公司内交换机是三层交换机，不支持交换机间二层广播，可以理解成网关都在接入交换机上，网络的广播域被终结在接入交换机，这种做法可以避免IDC内大面积的广播风暴出现。因此社区中EIP采用二层通告的方式，是不支持虚机跨交换机迁移的，这在一定程度上限制了集群规模。</p> 
+ <p>当然我们可以采用BGP路由通告的方式解决这一问题，但公司内大部分服务器采用BOND模式与交换机相连，而MLAG或者SMLAG模式下的交换机是不支持BGP通告的。基于以上原因，我们用云网关的方式就可以完美解决这个问题。由于计算节点与云网关建立了VXLAN隧道，所以不论计算节点在哪台交换机下，只要计算节点与云网关三层可达就可以。</p> 
+ <p><strong>04</strong></p> 
+ <p><strong>监控与产品呈现</strong></p> 
+ <p><strong>4.1 监控服务</strong></p> 
+ <p>监控是网关服务的重要组成部分，能够及时预警，事后问题溯源，也可以通过日常流量分布来分析用户的使用情况。网关服务除了硬件层面的服务器宕机、CPU、磁盘报警之外，也对VPC中相关资源进行了监控，例如EIP流量(图4.1 EIP网关BPS和PPS监控)、计算节点路由条数和各机房PING延迟监控等。<br></p> 
+ <p>如图4.2所示，网关服务器上运行Exporter暴露端口并指定存放监控数据的目录，Promethues Server定期去服务器指定目录下拉取数据，并通过Grafana展示。如数据存在异常，可通过公司监控平台将异常报警发出。</p> 
+ <p>Ping延迟监控采用官方提供的Blackbox Exporter采集数据，各个机房部署打点机器，最终也会通过Grafana展示延迟情况，通过邮件发送异常报警。</p> 
+ <p><img src="https://images2.imgbox.com/88/57/abG8VRT2_o.png" alt="8f1508b5e481cb54d27f74e80e908a54.png"></p> 
+ <p>图 4.1 监控展示图</p> 
+ <p><img src="https://images2.imgbox.com/c7/15/lfjpKkAb_o.png" alt="54eb2d2f25d0e0997f24e8cf21b8d4e4.png"></p> 
+ <p style="text-align:center;">图 4.2 监控架构</p> 
+ <p><strong>4.2 产品呈现</strong></p> 
+ <p>HULK起初只支持经典网络，在VPC1.0上线HULK后，用户可在HULK的云网络功能列表中，开通专有网络、交换机、弹性IP等服务，安全组、路由表等功能将会在VPC2.0陆续上线。</p> 
+ <p><img src="https://images2.imgbox.com/19/91/CdviRNou_o.png" alt="b5b1ee1fb6dfad754c5abc4c17efbd1a.png"></p> 
+ <p style="text-align:center;">图 4.3 HULK VPC功能列表</p> 
+ <p>每个专有网络都由至少一个交换机、一个路由器和一个私有网段组成。如下图所示，用户选择某个可用区创建自己的专有网络vpc-xxx，并自定义网段后，可在该网段继续创建交换机switch-xxx。在创建云服务器时，即可关联已有的专有网络和交换机，从中分配可用IP。在专有网络页面可以看到网络状态，该网络下交换机个数以及关联的云服务器个数。</p> 
+ <p><img src="https://images2.imgbox.com/5c/a5/V7zBIRfE_o.png" alt="48db3008395f0f5d9ec3b80b8553abec.png"></p> 
+ <p style="text-align:center;">图4.4 HULK专有网络功能展示页</p> 
+ <p><img src="https://images2.imgbox.com/86/5e/NguMHci7_o.png" alt="73ff722eb93de23ae75d38e7e21490b1.png"></p> 
+ <p style="text-align:center;">图4.5 HULK交换机功能展示页</p> 
+ <p><strong>05</strong></p> 
+ <p><strong>线上问题汇总</strong></p> 
+ <p>由于公司内常年使用经典网络，我们在落地VPC网络方案时，也遇到一些问题。下面我们看几个常见的问题。</p> 
+ <p>Q1：虚机里面跑K8S用什么方案？</p> 
+ <p>由于虚拟化和K8S都有自己的网络方案，如果都用overlay方案将大大降低网络性能。参考国内外主流方案后，我们采用弹性网卡直插的方式，让K8S直接用虚拟化网络即可。另外一台虚机上如果部署的POD数量较多，所需的IP也会较多，这种情况下可以采用弹性网卡+多个辅助IP的方式。</p> 
+ <p>Q2：大vpc场景下，EIP绑定解绑生效咋那么慢？</p> 
+ <p>经测试发现，如果一个VPC中存在大量虚机，例如2000台时，虚机解绑/绑定EIP时，生效会特别慢，大概3分钟左右。经定位发现主要时间耗费在查询数据库上，这和Openstack社区默认的查表规则有关（默认是多次查表，比如查询2000个Port信息时，首先查询2000个Port的基本信息，然后循环遍历Port，查询每个Port的具体信息），这里可将多查询改为一次联表查询，将其优化后会得到很大改善，实测查询时间由3分钟缩短为10s。当然我们不建议一个VPC的规模这么大，这不利于网络隔离。</p> 
+ <p>Q3: VPC转发性能怎么保证？</p> 
+ <p>由于VPC采用了VXLAN技术，存在封装和解封装的消耗，这会导致它的转发性能不如经典网络。后续我们会采用DPU、智能网卡卸载、OVS DPDK等技术进行优化。</p> 
+ <p><strong>06</strong></p> 
+ <p><strong>总结</strong></p> 
+ <p>目前专有网络已经上线至公司内全部主力机房，持续稳定运行7个月。为保持HULK原有用户习惯，专有网络一期默认为虚机绑定一个弹性IP，便于用户直接登录访问。二期将会上线安全组、自定义路由表等功能，持续功能的迭代。同时将提升网关架构高可用性，保证业务的稳定使用。</p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/5bc9d4231ff61808383f798df480825a/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">rootkit检测、病毒查杀、webshell检测</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/9324ca47c275bdb1a0557b7a8c25a48a/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">浅谈Docker四种网络模式</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

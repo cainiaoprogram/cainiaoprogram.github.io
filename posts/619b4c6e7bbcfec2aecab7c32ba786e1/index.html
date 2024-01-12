@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【KCP】UDP可靠性传输 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【KCP】UDP可靠性传输" />
+<meta property="og:description" content="1 如何做到可靠性传输 ◼ ACK机制 ◼ 重传机制 ◼ 序号机制 3 2 1 -》2 3 1 ◼ 重排机制 2 3 1 -&gt;3 2 1 ◼ 窗口机制 Tcp不用我们管 可靠性udp 5种机制都需要用户层处理
+2 UDP与TCP，我们如何选择 3 UDP如何可靠，KCP协议在哪些方面有优势 以10%-20%带宽浪费的代价换取了比 TCP快30%-40%的传输速度。
+RTO翻倍vs不翻倍： TCP超时计算是RTOx2，这样连续丢三次包就变成RTOx8了，十分恐怖，而 KCP启动快速模式后不x2，只是x1.5（实验证明1.5这个值相对比较好）， 提高了传输速度。 200 300 450 675 – 200 400 800 1600
+选择性重传 vs 全部重传： TCP丢包时会全部重传从丢的那个包开始以后的数据，KCP是选择性重传， 只重传真正丢失的数据包。 快速重传（跳过多少个包马上重传）（如果使用了快速重传，可以不考虑 RTO））： 发送端发送了1,2,3,4,5几个包，然后收到远端的ACK: 1, 3, 4, 5，当收到ACK3时，KCP知道2被跳过1次，收到ACK4时，知道2被跳过了2次，此时可以认为2号丢失，不用等超时，直接重传2号包，大大改善了丢包时的传输速度。 fastresend =2
+延迟ACK vs 非延迟ACK： TCP为了充分利用带宽，延迟发送ACK（NODELAY都没用），这样超时计算会算出较大 RTT时间，延长了丢包时的判断过程。KCP的ACK是否延迟发送可以调节。
+UNA vs ACK&#43;UNA： ARQ模型响应有两种，UNA（此编号前所有包已收到，如TCP）和ACK（该编号包已收到），光用UNA将导致全部重传，光用ACK则丢失成本太高，以往协议都是二选其一，而 KCP协议中，除去单独的 ACK包外，所有包都有UNA信息。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/619b4c6e7bbcfec2aecab7c32ba786e1/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-12-04T23:22:41+08:00" />
+<meta property="article:modified_time" content="2022-12-04T23:22:41+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【KCP】UDP可靠性传输</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="1__0"></a>1 如何做到可靠性传输</h2> 
+<p>◼ ACK机制 <br>◼ 重传机制 <br>◼ 序号机制 3 2 1 -》2 3 1 <br>◼ 重排机制 2 3 1 -&gt;3 2 1 <br>◼ 窗口机制 <br>Tcp不用我们管 <br>可靠性udp 5种机制都需要用户层处理</p> 
+<h2><a id="2_UDPTCP_2"></a>2 UDP与TCP，我们如何选择</h2> 
+<p><img src="https://images2.imgbox.com/89/8b/MWeM5e0K_o.png" alt="image.png"></p> 
+<h2><a id="3_UDPKCP_4"></a>3 UDP如何可靠，KCP协议在哪些方面有优势</h2> 
+<p>以10%-20%带宽浪费的代价换取了比 TCP快30%-40%的传输速度。</p> 
+<p><strong>RTO翻倍vs不翻倍</strong>： <br>TCP超时计算是RTOx2，这样连续丢三次包就变成RTOx8了，十分恐怖，而 KCP启动快速模式后不x2，只是x1.5（实验证明1.5这个值相对比较好）， 提高了传输速度。 200 300 450 675 – 200 400 800 1600</p> 
+<p><strong>选择性重传 vs 全部重传</strong>： <br>TCP丢包时会全部重传从丢的那个包开始以后的数据，KCP是选择性重传， 只重传真正丢失的数据包。 <br>快速重传（跳过多少个包马上重传）（如果使用了快速重传，可以不考虑 RTO））： 发送端发送了1,2,3,4,5几个包，然后收到远端的ACK: 1, 3, 4, 5，当收到ACK3时，KCP知道2被跳过1次，收到ACK4时，知道2被跳过了2次，此时可以认为2号丢失，不用等超时，直接重传2号包，大大改善了丢包时的传输速度。 fastresend =2</p> 
+<p><strong>延迟ACK vs 非延迟ACK</strong>： <br>TCP为了充分利用带宽，延迟发送ACK（NODELAY都没用），这样超时计算会算出较大 RTT时间，延长了丢包时的判断过程。KCP的ACK是否延迟发送可以调节。</p> 
+<p><strong>UNA vs ACK+UNA</strong>： <br>ARQ模型响应有两种，UNA（此编号前所有包已收到，如TCP）和ACK（该编号包已收到），光用UNA将导致全部重传，光用ACK则丢失成本太高，以往协议都是二选其一，而 KCP协议中，除去单独的 ACK包外，所有包都有UNA信息。</p> 
+<p><strong>非退让流控</strong>： <br>KCP正常模式同TCP一样使用公平退让法则，即发送窗口大小由：发送缓存大小、接收端剩余接收缓存大小、丢包退让及慢启动这四要素决定。但传送及时性要求很高的小数据时，可选择通过配置跳过后两步，仅用前两项来控制发送频率。 <br>以牺牲部分公平性及带宽利用率之代价，换取了开着BT都能流畅传输的效果。</p> 
+<h2><a id="4_KCP_16"></a>4 KCP精讲</h2> 
+<h3><a id="41_kcp_17"></a>4.1 kcp名词说明</h3> 
+<p>◼ <strong>kcp官方</strong>：https://github.com/skywind3000/kcp</p> 
+<p>◼ <strong>名词说明</strong></p> 
+<ul><li><strong>用户数据</strong>：应用层发送的数据，如一张图片2Kb的数据</li><li><strong>MTU</strong>：最大传输单元。即每次发送的最大数据</li><li><strong>RTO</strong>：Retransmission TimeOut，重传超时时间。</li><li><strong>cwnd</strong>：congestion window，拥塞窗口，表示发送方可发送多少个KCP数据包。与接收方窗口有关，与网络状况（拥塞控制）有关，与发送窗口大小有关。</li><li><strong>rwnd</strong>：receiver window,接收方窗口大小，表示接收方还可接收多少个KCP数据包</li><li><strong>snd_queue</strong>：待发送KCP数据包队列</li><li><strong>snd_nxt</strong>：下一个即将发送的kcp数据包序列号</li><li><strong>snd_una</strong>：下一个待确认的序列号</li></ul> 
+<h3><a id="42_kcp_30"></a>4.2 kcp使用方式</h3> 
+<ol><li>创建 KCP对象：ikcpcb *kcp = ikcp_create(conv, user);</li><li>设置传输回调函数（如UDP的send函数）：kcp-&gt;output = udp_output;</li></ol> 
+<p>真正发送数据需要调用sendto</p> 
+<ol start="3"><li>循环调用 update：ikcp_update(kcp, millisec);</li><li>输入一个应用层数据包（如UDP收到的数据包）：</li></ol> 
+<p>ikcp_input(kcp,received_udp_packet,received_udp_size); <br>我们要使用recvfrom接收，然后扔到kcp里面做解析</p> 
+<ol start="5"><li>发送数据：ikcp_send(kcp1, buffer, 8); 用户层接口</li><li>接收数据：hr = ikcp_recv(kcp2, buffer, 10);</li></ol> 
+<h3><a id="43_kcp_44"></a>4.3 kcp源码流程图</h3> 
+<p><img src="https://images2.imgbox.com/9e/d9/63yTxPkX_o.png" alt="image.png"></p> 
+<h3><a id="44_kcp_46"></a>4.4 kcp配置模式</h3> 
+<ol><li>工作模式：int ikcp_nodelay(ikcpcb *kcp, int nodelay, int interval, int resend, int nc) <br> nodelay ：是否启用 nodelay模式，0不启用；1启用。 <br> interval ：协议内部工作的 interval，单位毫秒，比如 10ms或者 20ms <br> resend ：快速重传模式，默认0关闭，可以设置2（2次ACK跨越将会直接重传） <br> nc ：是否关闭流控，默认是0代表不关闭，1代表关闭。 <br><strong>普通模式：</strong> ikcp_nodelay(kcp, 0, 40, 0, 0); <br><strong>极速模式：</strong> ikcp_nodelay(kcp, 1, 10, 2, 1) <br>2. 最大窗口：int ikcp_wndsize(ikcpcb *kcp, int sndwnd, int rcvwnd); <br>该调用将会设置协议的最大发送窗口和最大接收窗口大小，默认为32，单位为包。 <br>3. 最大传输单元：int ikcp_setmtu(ikcpcb *kcp, int mtu); <br>kcp协议并不负责探测 MTU，默认 mtu是1400字节 <br>4. 最小RTO：不管是 TCP还是 KCP计算 RTO 时都有最小 RTO 的限制，即便计算出来RTO为40ms，由于默认的 RTO是100ms，协议只有在100ms后才能检测到丢包，快速模式下为30ms，可以手动更改该值： kcp-&gt;rx_minrto = 10;</li></ol> 
+<h3><a id="45_kcp_48"></a>4.5 kcp协议头</h3> 
+<p><img src="https://images2.imgbox.com/72/2e/9huJhZMj_o.png" alt="image.png"><br> conv:连接号。UDP是无连接的，conv用于表示来自于哪个客户端。对连接的一种替代 <br> cmd:命令字。如，<br>IKCP_CMD_ACK确认命令， <br>IKCP_CMD_WASK接收窗口大小询问命令， <br>IKCP_CMD_WINS接收窗口大小告知命令， <br> frg:分片，用户数据可能会被分成多个KCP包，发送出去 <br> wnd:接收窗口大小，发送方的发送窗口不能超过接收方给出的数值 <br> ts:时间序列 <br> sn:序列号 <br> una:下一个可接收的序列号。其实就是确认号，收到 sn=10的包，una为11 <br> len：数据长度 <br> data:用户数据<br><img src="https://images2.imgbox.com/16/08/1YHdj0BU_o.png" alt="image.png"></p> 
+<h3><a id="46_kcp_50"></a>4.6 kcp发送数据过程</h3> 
+<p><img src="https://images2.imgbox.com/4f/d2/SLqZKZvH_o.png" alt="image.png"></p> 
+<h3><a id="47_kcp_52"></a>4.7 kcp接收数据过程</h3> 
+<p><img src="https://images2.imgbox.com/b2/43/v4bzFAKx_o.png" alt="image.png"></p> 
+<h3><a id="48_kcp_54"></a>4.8 kcp确认包处理流程</h3> 
+<p><img src="https://images2.imgbox.com/df/36/7SrpwQ6f_o.png" alt="image.png"></p> 
+<h3><a id="49_kcp_56"></a>4.9 kcp快速确认</h3> 
+<p><img src="https://images2.imgbox.com/76/89/NTou0KRF_o.png" alt="image.png"></p> 
+<h3><a id="410__58"></a>4.10 流量控制和拥塞控制</h3> 
+<p>RTO计算（与TCP完全一样） <br>RTT：一个报文段发送出去，到收到对应确认包的时间差。 <br>SRTT(kcp-&gt;rx_srtt)：RTT的一个加权RTT平均值，平滑值。 <br>RTTVAR(kcp-&gt;rx_rttval)：RTT的平均偏差，用来衡量 <br>RTT的抖动。</p> 
+<h3><a id="411_kcp_60"></a>4.11 如何在项目中集成kcp</h3> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/types.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/socket.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;pthread.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;netinet/in.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;string.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;unistd.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdlib.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;string.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/time.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/wait.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;arpa/inet.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"ikcp.h"</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">RECV_BUF</span> <span class="token expression"><span class="token number">1500</span></span></span>
+
+<span class="token keyword">static</span> <span class="token keyword">int</span> number <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+
+<span class="token keyword">typedef</span> <span class="token keyword">struct</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">char</span> <span class="token operator">*</span>ipstr<span class="token punctuation">;</span>
+	<span class="token keyword">int</span> port<span class="token punctuation">;</span>
+
+	ikcpcb <span class="token operator">*</span>pkcp<span class="token punctuation">;</span>
+
+	<span class="token keyword">int</span> sockfd<span class="token punctuation">;</span>
+
+	<span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span> addr<span class="token punctuation">;</span>	  <span class="token comment">//存放服务器信息的结构体</span>
+	<span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span> CientAddr<span class="token punctuation">;</span> <span class="token comment">//存放客户机信息的结构体</span>
+
+	<span class="token keyword">char</span> buff<span class="token punctuation">[</span>RECV_BUF<span class="token punctuation">]</span><span class="token punctuation">;</span> <span class="token comment">//存放收发的消息</span>
+
+<span class="token punctuation">}</span> kcpObj<span class="token punctuation">;</span>
+<span class="token comment">// 编译:  gcc -o server server.c ikcp.c  </span>
+<span class="token comment">// 特别需要注意，这里的服务器端也只能一次使用，即是等客户端退出后，服务端也要停止掉再启动</span>
+<span class="token comment">// 之所以是这样，主要是因为sn的问题，比如客户端第一次启动 sn 0~5， 第二次启动发送的sn还是0 ~5 如果服务器端不停止则自己以为0~5已经收到过了就不会回复。</span>
+
+<span class="token comment">// 在真正使用的时候，还需要另外的通道让客户端和服务器端之前重新创建ikcpcb，以匹配ikcpcb的conv</span>
+<span class="token comment">/* get system time */</span>
+<span class="token keyword">void</span> <span class="token function">itimeofday</span><span class="token punctuation">(</span><span class="token keyword">long</span> <span class="token operator">*</span>sec<span class="token punctuation">,</span> <span class="token keyword">long</span> <span class="token operator">*</span>usec<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression"><span class="token function">defined</span><span class="token punctuation">(</span>__unix<span class="token punctuation">)</span></span></span>
+	<span class="token keyword">struct</span> <span class="token class-name">timeval</span> time<span class="token punctuation">;</span>
+	<span class="token function">gettimeofday</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>time<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>sec<span class="token punctuation">)</span>
+		<span class="token operator">*</span>sec <span class="token operator">=</span> time<span class="token punctuation">.</span>tv_sec<span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>usec<span class="token punctuation">)</span>
+		<span class="token operator">*</span>usec <span class="token operator">=</span> time<span class="token punctuation">.</span>tv_usec<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+	<span class="token keyword">static</span> <span class="token keyword">long</span> mode <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">,</span> addsec <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	BOOL retval<span class="token punctuation">;</span>
+	<span class="token keyword">static</span> IINT64 freq <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+	IINT64 qpc<span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>mode <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		retval <span class="token operator">=</span> <span class="token function">QueryPerformanceFrequency</span><span class="token punctuation">(</span><span class="token punctuation">(</span>LARGE_INTEGER <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>freq<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		freq <span class="token operator">=</span> <span class="token punctuation">(</span>freq <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token number">1</span> <span class="token operator">:</span> freq<span class="token punctuation">;</span>
+		retval <span class="token operator">=</span> <span class="token function">QueryPerformanceCounter</span><span class="token punctuation">(</span><span class="token punctuation">(</span>LARGE_INTEGER <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>qpc<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		addsec <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">long</span><span class="token punctuation">)</span><span class="token function">time</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		addsec <span class="token operator">=</span> addsec <span class="token operator">-</span> <span class="token punctuation">(</span><span class="token keyword">long</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span>qpc <span class="token operator">/</span> freq<span class="token punctuation">)</span> <span class="token operator">&amp;</span> <span class="token number">0x7fffffff</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		mode <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	retval <span class="token operator">=</span> <span class="token function">QueryPerformanceCounter</span><span class="token punctuation">(</span><span class="token punctuation">(</span>LARGE_INTEGER <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>qpc<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	retval <span class="token operator">=</span> retval <span class="token operator">*</span> <span class="token number">2</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>sec<span class="token punctuation">)</span>
+		<span class="token operator">*</span>sec <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">long</span><span class="token punctuation">)</span><span class="token punctuation">(</span>qpc <span class="token operator">/</span> freq<span class="token punctuation">)</span> <span class="token operator">+</span> addsec<span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>usec<span class="token punctuation">)</span>
+		<span class="token operator">*</span>usec <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">long</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span>qpc <span class="token operator">%</span> freq<span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token number">1000000</span> <span class="token operator">/</span> freq<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">/* get clock in millisecond 64 */</span>
+IINT64 <span class="token function">iclock64</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">long</span> s<span class="token punctuation">,</span> u<span class="token punctuation">;</span>
+	IINT64 value<span class="token punctuation">;</span>
+	<span class="token function">itimeofday</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>s<span class="token punctuation">,</span> <span class="token operator">&amp;</span>u<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	value <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>IINT64<span class="token punctuation">)</span>s<span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token number">1000</span> <span class="token operator">+</span> <span class="token punctuation">(</span>u <span class="token operator">/</span> <span class="token number">1000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">return</span> value<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+IUINT32 <span class="token function">iclock</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">return</span> <span class="token punctuation">(</span>IUINT32<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token function">iclock64</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;</span> <span class="token number">0xfffffffful</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token class-name">int64_t</span> first_recv_time <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token comment">/* sleep in millisecond */</span>
+<span class="token keyword">void</span> <span class="token function">isleep</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">long</span> millisecond<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">__unix </span><span class="token comment">/* usleep( time * 1000 ); */</span></span>
+	<span class="token keyword">struct</span> <span class="token class-name">timespec</span> ts<span class="token punctuation">;</span>
+	ts<span class="token punctuation">.</span>tv_sec <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token class-name">time_t</span><span class="token punctuation">)</span><span class="token punctuation">(</span>millisecond <span class="token operator">/</span> <span class="token number">1000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	ts<span class="token punctuation">.</span>tv_nsec <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">long</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span>millisecond <span class="token operator">%</span> <span class="token number">1000</span><span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token number">1000000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">/*nanosleep(&amp;ts, NULL);*/</span>
+	<span class="token function">usleep</span><span class="token punctuation">(</span><span class="token punctuation">(</span>millisecond <span class="token operator">&lt;&lt;</span> <span class="token number">10</span><span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token punctuation">(</span>millisecond <span class="token operator">&lt;&lt;</span> <span class="token number">4</span><span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token punctuation">(</span>millisecond <span class="token operator">&lt;&lt;</span> <span class="token number">3</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">elif</span> <span class="token expression"><span class="token function">defined</span><span class="token punctuation">(</span>_WIN32<span class="token punctuation">)</span></span></span>
+	<span class="token function">Sleep</span><span class="token punctuation">(</span>millisecond<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">int</span> <span class="token function">udp_output</span><span class="token punctuation">(</span><span class="token keyword">const</span> <span class="token keyword">char</span> <span class="token operator">*</span>buf<span class="token punctuation">,</span> <span class="token keyword">int</span> len<span class="token punctuation">,</span> ikcpcb <span class="token operator">*</span>kcp<span class="token punctuation">,</span> <span class="token keyword">void</span> <span class="token operator">*</span>user<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+
+	kcpObj <span class="token operator">*</span>send <span class="token operator">=</span> <span class="token punctuation">(</span>kcpObj <span class="token operator">*</span><span class="token punctuation">)</span>user<span class="token punctuation">;</span>
+
+	<span class="token comment">//发送信息</span>
+	<span class="token keyword">int</span> n <span class="token operator">=</span> <span class="token function">sendto</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>sockfd<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> len<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>send<span class="token operator">-&gt;</span>CientAddr<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>n <span class="token operator">&gt;=</span> <span class="token number">0</span><span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token comment">//会重复发送，因此牺牲带宽</span>
+		<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"send: %d bytes, t:%lld\n"</span><span class="token punctuation">,</span> n<span class="token punctuation">,</span> <span class="token function">iclock64</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> first_recv_time<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//24字节的KCP头部</span>
+		<span class="token keyword">return</span> n<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">else</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"error: %d bytes send, error\n"</span><span class="token punctuation">,</span> n<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">int</span> <span class="token function">init</span><span class="token punctuation">(</span>kcpObj <span class="token operator">*</span>send<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	send<span class="token operator">-&gt;</span>sockfd <span class="token operator">=</span> <span class="token function">socket</span><span class="token punctuation">(</span>AF_INET<span class="token punctuation">,</span> SOCK_DGRAM<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>sockfd <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token function">perror</span><span class="token punctuation">(</span><span class="token string">"socket error！"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">exit</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token function">bzero</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>send<span class="token operator">-&gt;</span>addr<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>addr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	send<span class="token operator">-&gt;</span>addr<span class="token punctuation">.</span>sin_family <span class="token operator">=</span> AF_INET<span class="token punctuation">;</span>
+	send<span class="token operator">-&gt;</span>addr<span class="token punctuation">.</span>sin_addr<span class="token punctuation">.</span>s_addr <span class="token operator">=</span> <span class="token function">htonl</span><span class="token punctuation">(</span>INADDR_ANY<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//INADDR_ANY</span>
+	send<span class="token operator">-&gt;</span>addr<span class="token punctuation">.</span>sin_port <span class="token operator">=</span> <span class="token function">htons</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>port<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"服务器socket: %d  port:%d\n"</span><span class="token punctuation">,</span> send<span class="token operator">-&gt;</span>sockfd<span class="token punctuation">,</span> send<span class="token operator">-&gt;</span>port<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>sockfd <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token function">perror</span><span class="token punctuation">(</span><span class="token string">"socket error！"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">exit</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">bind</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>sockfd<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>addr<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token function">perror</span><span class="token punctuation">(</span><span class="token string">"bind"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">exit</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">void</span> <span class="token function">loop</span><span class="token punctuation">(</span>kcpObj <span class="token operator">*</span>send<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span> len <span class="token operator">=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">int</span> n<span class="token punctuation">,</span> ret<span class="token punctuation">;</span>
+	<span class="token comment">//接收到第一个包就开始循环处理</span>
+	<span class="token keyword">int</span> recv_count <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+
+	<span class="token function">isleep</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">ikcp_update</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>pkcp<span class="token punctuation">,</span> <span class="token function">iclock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">char</span> buf<span class="token punctuation">[</span>RECV_BUF<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token number">0</span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token function">isleep</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">ikcp_update</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>pkcp<span class="token punctuation">,</span> <span class="token function">iclock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token comment">//处理收消息</span>
+		n <span class="token operator">=</span> <span class="token function">recvfrom</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>sockfd<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> RECV_BUF<span class="token punctuation">,</span> MSG_DONTWAIT<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>send<span class="token operator">-&gt;</span>CientAddr<span class="token punctuation">,</span> <span class="token operator">&amp;</span>len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>n <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"UDP recv[%d]  size= %d   \n"</span><span class="token punctuation">,</span> recv_count<span class="token operator">++</span><span class="token punctuation">,</span> n<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span>first_recv_time <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span>
+			<span class="token punctuation">{<!-- --></span>
+				first_recv_time <span class="token operator">=</span> <span class="token function">iclock64</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+			<span class="token comment">//预接收数据:调用ikcp_input将裸数据交给KCP，这些数据有可能是KCP控制报文，并不是我们要的数据。</span>
+			<span class="token comment">//kcp接收到下层协议UDP传进来的数据底层数据buffer转换成kcp的数据包格式</span>
+			ret <span class="token operator">=</span> <span class="token function">ikcp_input</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>pkcp<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> n<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+			<span class="token punctuation">{<!-- --></span>
+				<span class="token keyword">continue</span><span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+			<span class="token comment">//kcp将接收到的kcp数据包还原成之前kcp发送的buffer数据</span>
+			ret <span class="token operator">=</span> <span class="token function">ikcp_recv</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>pkcp<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> n<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//从 buf中 提取真正数据，返回提取到的数据大小</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+			<span class="token punctuation">{<!-- --></span> <span class="token comment">// 没有检测ikcp_recv提取到的数据</span>
+				<span class="token function">isleep</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token keyword">continue</span><span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+			<span class="token keyword">int</span> send_size <span class="token operator">=</span> ret<span class="token punctuation">;</span>
+			<span class="token comment">//ikcp_send只是把数据存入发送队列，没有对数据加封kcp头部数据</span>
+			<span class="token comment">//应该是在kcp_update里面加封kcp头部数据</span>
+			<span class="token comment">//ikcp_send把要发送的buffer分片成KCP的数据包格式，插入待发送队列中。</span>
+			ret <span class="token operator">=</span> <span class="token function">ikcp_send</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>pkcp<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> send_size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"Server reply -&gt;  bytes[%d], ret = %d\n"</span><span class="token punctuation">,</span> send_size<span class="token punctuation">,</span> ret<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token function">ikcp_flush</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>pkcp<span class="token punctuation">)</span><span class="token punctuation">;</span>	<span class="token comment">// 快速flush一次 以更快让客户端收到数据</span>
+			number<span class="token operator">++</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>n <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"finish loop\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">break</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">else</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token comment">// printf("n:%d\n", n);</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token keyword">int</span> argc<span class="token punctuation">,</span> <span class="token keyword">char</span> <span class="token operator">*</span>argv<span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"this is kcpServer\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>argc <span class="token operator">&lt;</span> <span class="token number">2</span><span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"请输入服务器端口号\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+
+	kcpObj send<span class="token punctuation">;</span>
+	send<span class="token punctuation">.</span>port <span class="token operator">=</span> <span class="token function">atoi</span><span class="token punctuation">(</span>argv<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	send<span class="token punctuation">.</span>pkcp <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+
+	<span class="token function">bzero</span><span class="token punctuation">(</span>send<span class="token punctuation">.</span>buff<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>send<span class="token punctuation">.</span>buff<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">char</span> Msg<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">"Server:Hello!"</span><span class="token punctuation">;</span> <span class="token comment">//与客户机后续交互</span>
+	<span class="token function">memcpy</span><span class="token punctuation">(</span>send<span class="token punctuation">.</span>buff<span class="token punctuation">,</span> Msg<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>Msg<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	ikcpcb <span class="token operator">*</span>kcp <span class="token operator">=</span> <span class="token function">ikcp_create</span><span class="token punctuation">(</span><span class="token number">0x1</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>send<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//创建kcp对象把send传给kcp的user变量</span>
+	<span class="token function">ikcp_setmtu</span><span class="token punctuation">(</span>kcp<span class="token punctuation">,</span> <span class="token number">1400</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	kcp<span class="token operator">-&gt;</span>output <span class="token operator">=</span> udp_output<span class="token punctuation">;</span>		<span class="token comment">//设置kcp对象的回调函数</span>
+	<span class="token function">ikcp_nodelay</span><span class="token punctuation">(</span>kcp<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">10</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//1, 10, 2, 1</span>
+	<span class="token function">ikcp_wndsize</span><span class="token punctuation">(</span>kcp<span class="token punctuation">,</span> <span class="token number">128</span><span class="token punctuation">,</span> <span class="token number">128</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	send<span class="token punctuation">.</span>pkcp <span class="token operator">=</span> kcp<span class="token punctuation">;</span>
+
+	<span class="token function">init</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>send<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//服务器初始化套接字</span>
+	<span class="token function">loop</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>send<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//循环处理</span>
+
+	<span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/types.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/socket.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;pthread.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;netinet/in.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;string.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;unistd.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdlib.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"ikcp.h"</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/time.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/wait.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;arpa/inet.h&gt;</span></span>
+
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"delay.h"</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">DELAY_TEST2_N</span> <span class="token expression"><span class="token number">5</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">UDP_RECV_BUF_SIZE</span> <span class="token expression"><span class="token number">1500</span></span></span>
+
+<span class="token comment">// 编译:  gcc -o client client.c ikcp.c delay.c  -lpthread</span>
+
+
+ <span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">char</span> <span class="token operator">*</span>ipstr<span class="token punctuation">;</span>
+	<span class="token keyword">int</span> port<span class="token punctuation">;</span>
+	
+	ikcpcb <span class="token operator">*</span>pkcp<span class="token punctuation">;</span>
+	
+	<span class="token keyword">int</span> sockfd<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span> addr<span class="token punctuation">;</span><span class="token comment">//存放服务器的结构体</span>
+	
+	<span class="token keyword">char</span> buff<span class="token punctuation">[</span>UDP_RECV_BUF_SIZE<span class="token punctuation">]</span><span class="token punctuation">;</span><span class="token comment">//存放收发的消息</span>
+<span class="token punctuation">}</span>kcpObj<span class="token punctuation">;</span>
+
+
+<span class="token comment">/* sleep in millisecond */</span>
+<span class="token keyword">void</span> <span class="token function">isleep</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">long</span> millisecond<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">__unix 	</span><span class="token comment">/* usleep( time * 1000 ); */</span></span>
+	<span class="token keyword">struct</span> <span class="token class-name">timespec</span> ts<span class="token punctuation">;</span>
+	ts<span class="token punctuation">.</span>tv_sec <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token class-name">time_t</span><span class="token punctuation">)</span><span class="token punctuation">(</span>millisecond <span class="token operator">/</span> <span class="token number">1000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	ts<span class="token punctuation">.</span>tv_nsec <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">long</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span>millisecond <span class="token operator">%</span> <span class="token number">1000</span><span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token number">1000000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">/*nanosleep(&amp;ts, NULL);*/</span>
+	<span class="token function">usleep</span><span class="token punctuation">(</span><span class="token punctuation">(</span>millisecond <span class="token operator">&lt;&lt;</span> <span class="token number">10</span><span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token punctuation">(</span>millisecond <span class="token operator">&lt;&lt;</span> <span class="token number">4</span><span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token punctuation">(</span>millisecond <span class="token operator">&lt;&lt;</span> <span class="token number">3</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">elif</span> <span class="token expression"><span class="token function">defined</span><span class="token punctuation">(</span>_WIN32<span class="token punctuation">)</span></span></span>
+	<span class="token function">Sleep</span><span class="token punctuation">(</span>millisecond<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+<span class="token punctuation">}</span>
+
+
+
+<span class="token keyword">int</span> <span class="token function">udp_output</span><span class="token punctuation">(</span><span class="token keyword">const</span> <span class="token keyword">char</span> <span class="token operator">*</span>buf<span class="token punctuation">,</span> <span class="token keyword">int</span> len<span class="token punctuation">,</span> ikcpcb <span class="token operator">*</span>kcp<span class="token punctuation">,</span> <span class="token keyword">void</span> <span class="token operator">*</span>user<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+   
+ <span class="token comment">//  printf("使用udp_output发送数据\n");</span>
+   
+    kcpObj <span class="token operator">*</span>send <span class="token operator">=</span> <span class="token punctuation">(</span>kcpObj <span class="token operator">*</span><span class="token punctuation">)</span>user<span class="token punctuation">;</span>
+
+	<span class="token comment">//发送信息</span>
+    <span class="token keyword">int</span> n <span class="token operator">=</span> <span class="token function">sendto</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>sockfd<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> len<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span> <span class="token operator">&amp;</span>send<span class="token operator">-&gt;</span>addr<span class="token punctuation">,</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//【】</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>n <span class="token operator">&gt;=</span> <span class="token number">0</span><span class="token punctuation">)</span> 
+	<span class="token punctuation">{<!-- --></span>       
+		<span class="token comment">//会重复发送，因此牺牲带宽</span>
+	 	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"send:%d bytes\n"</span><span class="token punctuation">,</span> n<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//24字节的KCP头部</span>
+        <span class="token keyword">return</span> n<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> 
+	<span class="token keyword">else</span> 
+	<span class="token punctuation">{<!-- --></span>
+        <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"udp_output: %d bytes send, error\n"</span><span class="token punctuation">,</span> n<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+
+<span class="token keyword">int</span> <span class="token function">init</span><span class="token punctuation">(</span>kcpObj <span class="token operator">*</span>send<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>	
+	send<span class="token operator">-&gt;</span>sockfd <span class="token operator">=</span> <span class="token function">socket</span><span class="token punctuation">(</span>AF_INET<span class="token punctuation">,</span>SOCK_DGRAM<span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	
+	<span class="token keyword">if</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>sockfd <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token function">perror</span><span class="token punctuation">(</span><span class="token string">"socket error！"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">exit</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	
+	<span class="token function">bzero</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>send<span class="token operator">-&gt;</span>addr<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>addr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	
+	<span class="token comment">//设置服务器ip、port</span>
+	send<span class="token operator">-&gt;</span>addr<span class="token punctuation">.</span>sin_family<span class="token operator">=</span>AF_INET<span class="token punctuation">;</span>
+    send<span class="token operator">-&gt;</span>addr<span class="token punctuation">.</span>sin_addr<span class="token punctuation">.</span>s_addr <span class="token operator">=</span> <span class="token function">inet_addr</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">char</span><span class="token operator">*</span><span class="token punctuation">)</span>send<span class="token operator">-&gt;</span>ipstr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    send<span class="token operator">-&gt;</span>addr<span class="token punctuation">.</span>sin_port <span class="token operator">=</span> <span class="token function">htons</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>port<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"sockfd = %d ip = %s  port = %d\n"</span><span class="token punctuation">,</span>send<span class="token operator">-&gt;</span>sockfd<span class="token punctuation">,</span>send<span class="token operator">-&gt;</span>ipstr<span class="token punctuation">,</span>send<span class="token operator">-&gt;</span>port<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	
+<span class="token punctuation">}</span>
+
+<span class="token comment">// 特别说明，当我们使用kcp测试rtt的时候，如果发现rtt过大，很大一种可能是分片数据没有及时发送出去，需要调用ikcp_flush更快速将分片发送出去。</span>
+<span class="token keyword">void</span> <span class="token function">delay_test2</span><span class="token punctuation">(</span>kcpObj <span class="token operator">*</span>send<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 初始化 100个 delay obj</span>
+    <span class="token keyword">char</span> buf<span class="token punctuation">[</span>UDP_RECV_BUF_SIZE<span class="token punctuation">]</span><span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span> len <span class="token operator">=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token class-name">size_t</span> obj_size <span class="token operator">=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>t_delay_obj<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    t_delay_obj <span class="token operator">*</span>objs <span class="token operator">=</span> <span class="token function">malloc</span><span class="token punctuation">(</span>DELAY_TEST2_N <span class="token operator">*</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>t_delay_obj<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">int</span> ret <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">int</span> recv_objs <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	<span class="token comment">//ikcp_update包含ikcp_flush，ikcp_flush将发送队列中的数据通过下层协议UDP进行发送</span>
+ 	<span class="token function">ikcp_update</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>pkcp<span class="token punctuation">,</span><span class="token function">iclock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//不是调用一次两次就起作用，要loop调用</span>
+    <span class="token keyword">for</span><span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> DELAY_TEST2_N<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token comment">//  isleep(1);</span>
+		<span class="token function">delay_set_seqno_send_time</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>objs<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">,</span> i<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+		ret <span class="token operator">=</span> <span class="token function">ikcp_send</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>pkcp<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span> <span class="token operator">&amp;</span>objs<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">,</span> obj_size<span class="token punctuation">)</span><span class="token punctuation">;</span> 
+        <span class="token keyword">if</span><span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"send %d seqno:%u failed, ret:%d, obj_size:%ld\n"</span><span class="token punctuation">,</span> i<span class="token punctuation">,</span> objs<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>seqno<span class="token punctuation">,</span> ret<span class="token punctuation">,</span> obj_size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> 
+        <span class="token comment">// ikcp_flush(send-&gt;pkcp);		// 调用flush能更快速把分片发送出去</span>
+		<span class="token comment">//ikcp_update包含ikcp_flush，ikcp_flush将发送队列中的数据通过下层协议UDP进行发送</span>
+		<span class="token function">ikcp_update</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>pkcp<span class="token punctuation">,</span><span class="token function">iclock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//不是调用一次两次就起作用，要loop调用</span>
+		
+		<span class="token keyword">int</span> n <span class="token operator">=</span> <span class="token function">recvfrom</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>sockfd<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> UDP_RECV_BUF_SIZE<span class="token punctuation">,</span> MSG_DONTWAIT<span class="token punctuation">,</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span> <span class="token operator">&amp;</span>send<span class="token operator">-&gt;</span>addr<span class="token punctuation">,</span><span class="token operator">&amp;</span>len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token comment">// printf("print recv1:%d\n", n);</span>
+		<span class="token keyword">if</span><span class="token punctuation">(</span>n <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span><span class="token comment">//检测是否有UDP数据包 </span>
+			<span class="token comment">// isleep(1);</span>
+			<span class="token keyword">continue</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		ret <span class="token operator">=</span> <span class="token function">ikcp_input</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>pkcp<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> n<span class="token punctuation">)</span><span class="token punctuation">;</span>	<span class="token comment">// 从 linux api recvfrom先扔到kcp引擎</span>
+		<span class="token keyword">if</span><span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token comment">//检测ikcp_input是否提取到真正的数据</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token comment">//printf("ikcp_input ret = %d\n",ret);</span>
+			<span class="token keyword">continue</span><span class="token punctuation">;</span>			<span class="token comment">// 没有读取到数据</span>
+		<span class="token punctuation">}</span>	
+		ret <span class="token operator">=</span> <span class="token function">ikcp_recv</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>pkcp<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>objs<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">,</span> obj_size<span class="token punctuation">)</span><span class="token punctuation">;</span>		
+		<span class="token keyword">if</span><span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token comment">//检测ikcp_recv提取到的数据	</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"ikcp_recv1 ret = %d\n"</span><span class="token punctuation">,</span>ret<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">continue</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token function">delay_set_recv_time</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>objs<span class="token punctuation">[</span>recv_objs<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		recv_objs<span class="token operator">++</span><span class="token punctuation">;</span>
+		<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"recv1 %d seqno:%d, ret:%d\n"</span><span class="token punctuation">,</span> recv_objs<span class="token punctuation">,</span> objs<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>seqno<span class="token punctuation">,</span> ret<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span><span class="token punctuation">(</span>ret <span class="token operator">!=</span> obj_size<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"recv1 %d seqno:%d failed, size:%d\n"</span><span class="token punctuation">,</span> i<span class="token punctuation">,</span> objs<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>seqno<span class="token punctuation">,</span> ret<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token function">delay_print_rtt_time</span><span class="token punctuation">(</span>objs<span class="token punctuation">,</span> i<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+	<span class="token comment">// 还有没有发送完毕的数据</span>
+	<span class="token keyword">for</span><span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> recv_objs<span class="token punctuation">;</span> i <span class="token operator">&lt;</span> DELAY_TEST2_N<span class="token punctuation">;</span> <span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token comment">//  isleep(1);</span>
+		<span class="token comment">//ikcp_update包含ikcp_flush，ikcp_flush将发送队列中的数据通过下层协议UDP进行发送</span>
+		<span class="token function">ikcp_update</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>pkcp<span class="token punctuation">,</span><span class="token function">iclock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//不是调用一次两次就起作用，要loop调用</span>
+		<span class="token comment">//ikcp_flush(send-&gt;pkcp);		// 调用flush能更快速把分片发送出去  </span>
+		<span class="token keyword">int</span> n <span class="token operator">=</span> <span class="token function">recvfrom</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>sockfd<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> UDP_RECV_BUF_SIZE<span class="token punctuation">,</span> MSG_DONTWAIT<span class="token punctuation">,</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span> <span class="token operator">&amp;</span>send<span class="token operator">-&gt;</span>addr<span class="token punctuation">,</span><span class="token operator">&amp;</span>len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token comment">// printf("recv2:%d\n", n);</span>
+		<span class="token keyword">if</span><span class="token punctuation">(</span>n <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span><span class="token comment">//检测是否有UDP数据包</span>
+			<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"recv2:%d\n"</span><span class="token punctuation">,</span> n<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token function">isleep</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">continue</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+			
+		ret <span class="token operator">=</span> <span class="token function">ikcp_input</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>pkcp<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> n<span class="token punctuation">)</span><span class="token punctuation">;</span>	
+		<span class="token keyword">if</span><span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token comment">//检测ikcp_input是否提取到真正的数据</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"ikcp_input2 ret = %d\n"</span><span class="token punctuation">,</span>ret<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">continue</span><span class="token punctuation">;</span>			<span class="token comment">// 没有读取到数据</span>
+		<span class="token punctuation">}</span>	
+		ret <span class="token operator">=</span> <span class="token function">ikcp_recv</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>pkcp<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>objs<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">,</span> obj_size<span class="token punctuation">)</span><span class="token punctuation">;</span>		
+		<span class="token keyword">if</span><span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token comment">//检测ikcp_recv提取到的数据	</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"ikcp_recv2 ret = %d\n"</span><span class="token punctuation">,</span>ret<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">continue</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"recv2 %d seqno:%d, ret:%d\n"</span><span class="token punctuation">,</span> recv_objs<span class="token punctuation">,</span>  objs<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>seqno<span class="token punctuation">,</span> ret<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">delay_set_recv_time</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>objs<span class="token punctuation">[</span>recv_objs<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		recv_objs<span class="token operator">++</span><span class="token punctuation">;</span>
+		i<span class="token operator">++</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span><span class="token punctuation">(</span>ret <span class="token operator">!=</span> obj_size<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"recv2 %d seqno:%d failed, size:%d\n"</span><span class="token punctuation">,</span> i<span class="token punctuation">,</span> objs<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>seqno<span class="token punctuation">,</span> ret<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token function">delay_print_rtt_time</span><span class="token punctuation">(</span>objs<span class="token punctuation">,</span> i<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        
+	<span class="token punctuation">}</span>
+	<span class="token function">ikcp_flush</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>pkcp<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token function">delay_print_rtt_time</span><span class="token punctuation">(</span>objs<span class="token punctuation">,</span> DELAY_TEST2_N<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">void</span> <span class="token function">loop</span><span class="token punctuation">(</span>kcpObj <span class="token operator">*</span>send<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span> len <span class="token operator">=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">int</span> n<span class="token punctuation">,</span>ret<span class="token punctuation">;</span>
+
+	<span class="token comment">// while(1)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token function">isleep</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">delay_test2</span><span class="token punctuation">(</span>send<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"loop finish\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">close</span><span class="token punctuation">(</span>send<span class="token operator">-&gt;</span>sockfd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	
+<span class="token punctuation">}</span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token keyword">int</span> argc<span class="token punctuation">,</span><span class="token keyword">char</span> <span class="token operator">*</span>argv<span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token comment">//printf("this is kcpClient,请输入服务器 ip地址和端口号：\n");</span>
+	<span class="token keyword">if</span><span class="token punctuation">(</span>argc <span class="token operator">!=</span> <span class="token number">3</span><span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"请输入服务器ip地址和端口号\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"this is kcpClient\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	
+	<span class="token keyword">unsigned</span> <span class="token keyword">char</span> <span class="token operator">*</span>ipstr <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span>argv<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">char</span> <span class="token operator">*</span>port  <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span>argv<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+	
+	kcpObj send<span class="token punctuation">;</span>
+	send<span class="token punctuation">.</span>ipstr <span class="token operator">=</span> ipstr<span class="token punctuation">;</span>
+	send<span class="token punctuation">.</span>port <span class="token operator">=</span> <span class="token function">atoi</span><span class="token punctuation">(</span>argv<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	
+	<span class="token function">init</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>send<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//初始化send,主要是设置与服务器通信的套接字对象</span>
+	
+	<span class="token function">bzero</span><span class="token punctuation">(</span>send<span class="token punctuation">.</span>buff<span class="token punctuation">,</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span>send<span class="token punctuation">.</span>buff<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	
+	<span class="token comment">// 每个连接都是需要对应一个ikcpcb</span>
+	ikcpcb <span class="token operator">*</span>kcp <span class="token operator">=</span> <span class="token function">ikcp_create</span><span class="token punctuation">(</span><span class="token number">0x1</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>send<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//创建kcp对象把send传给kcp的user变量</span>
+	kcp<span class="token operator">-&gt;</span>output <span class="token operator">=</span> udp_output<span class="token punctuation">;</span><span class="token comment">//设置kcp对象的回调函数</span>
+	<span class="token function">ikcp_nodelay</span><span class="token punctuation">(</span>kcp<span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">10</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//(kcp1, 0, 10, 0, 0); 1, 10, 2, 1</span>
+	<span class="token function">ikcp_wndsize</span><span class="token punctuation">(</span>kcp<span class="token punctuation">,</span> <span class="token number">128</span><span class="token punctuation">,</span> <span class="token number">128</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">ikcp_setmtu</span><span class="token punctuation">(</span>kcp<span class="token punctuation">,</span> <span class="token number">1400</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	send<span class="token punctuation">.</span>pkcp <span class="token operator">=</span> kcp<span class="token punctuation">;</span>	
+	<span class="token function">loop</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>send<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//循环处理</span>
+	<span class="token function">ikcp_release</span><span class="token punctuation">(</span>send<span class="token punctuation">.</span>pkcp<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"main finish\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>	
+<span class="token punctuation">}</span>
+</code></pre> 
+<h2><a id="50_QUICXQUIC_544"></a>5.0 QUIC衍生版本XQUIC（作学习参考）</h2> 
+<p>https://www.yuque.com/docs/share/01d83f75-0fd5-4c9f-976a-0dfcf417e0cc?# <br>《阿里XQUIC：标准QUIC实现自研之路》</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/c24c21a673faf1efe5da125a685a7be4/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【用户态协议栈】用户态协议栈</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/c789d91e095d03add0a691b928cb5a1e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">python创建树结点——分支限界法解决0-1背包问题</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

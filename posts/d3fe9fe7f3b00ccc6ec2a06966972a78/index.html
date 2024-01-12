@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>OceanBase数据库运行原理小结 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="OceanBase数据库运行原理小结" />
+<meta property="og:description" content="目录 前言一、概述二、MergeServer与ChunkServerMergeServerChunkServer 三、OceanBase主要应用的技术全局时间戳服务（Global Timestamp Service，GTS）两阶段提交（2 Phase Commit，2PC） 总结 前言 最近因工作接触了OceanBase数据库，查阅了一些资料有了大概的认识，在此做一个笔记。
+若要了解更多可以移步Oceanbase官方社区。
+感谢OceanBase 架构初探、OceanBase事务引擎特性和应用实践分享、OceanBase的分布式事务两阶段提交工程实践他们的分享。
+一、概述 OceanBase是阿里集团研发的可扩展的关系数据库，从模块划分的角度看，OceanBase可以划分为四个模块：
+主控服务器RootServer更新服务器UpdateServer基线数据服务器ChunkServer合并服务器MergeServer OceanBase系统内部按照时间线将数据划分为基线数据和增量数据，基线数据是只读的，所有的修改更新到增量数据中，系统内部通过合并操作定期将增量数据融合到基线数据中。
+OceanBase系统结构如下所示：
+其架构有三个特点：
+1 多副本。一般部署为三个Zone，每个Zone由多个节点/服务器（OBServer）组成。
+2 全对等节点。每个节点均有自己的SQL引擎和存储引擎，各自管理不同的数据分区。
+3 无共享。数据分布在各个节点上，不基于共享存储结构。
+OceanBase四个模块具体功能为：
+RootServer：管理集群中的所有服务器，子表（tablet）数据分布以及副本管理。
+RootServer一般为一主一备，主备之间数据强同步。UpdateServer：存储OceanBase系统的增量更新数据。UpdateServer一般为一主一备，主备之间可以配置不同的同步模式。部署时，UpdateServer进程和RootServer进程往往共用物理服务器。ChunkServer：存储OceanBase系统的基线数据。基线数据一般存储两份或者三份，可配置。MergeServer：接收并解析用户的SQL请求，经过词法分析、语法分析、查询优化等一系列操作后转发给相应的ChunkServer或者UpdateServer。如果请求的数据分布在多台ChunkServer上，MergeServer还需要对多台ChunkServer返回的结果进行合并。客户端和MergeServer之间采用原生的MySQL通信协议，MySQL客户端可以直接访问MergeServer。 另外，OceanBase还包括了一个客户端：
+OceanBase客户端（以下简称“客户端”）：用户使用OceanBase的方式和MySQL数据库完全相同，支持JDBC、C客户端访问等等。基于MySQL数据库开发的应用程序、工具能够直接迁移到OceanBase。 本篇文档将着手于服务层面（即重点阐述ChunkServer和MergeServe）和技术原理（包括如何实现ACID和分布式事务模型）两个方向进行资料归纳。
+二、MergeServer与ChunkServer MergeServer MergeServer的功能包括：协议解析、SQL解析、请求转发、结果合并、多表操作等。
+客户端与MergeServer之间的协议为Mysql协议。首先解析Mysql协议，从中提取出用户发送的SQL语句，接着进行词法和语法分析，生成SQL语句的逻辑和物理查询计划，最后根据物理查询计划调用OceanBase内部的各种操作符。
+MergeServer缓存了tablet(分表)分布信息，根据请求涉及的tablet将请求转发给其所在的ChunkServer。写操作还会转发给UpdateServer。某些请求需要跨多个tablet，MergeServer会将请求拆分后发送给多台ChunkServer，并合并这些ChunkServer返回的结果。如果请求涉及到多个表格，MergeServer需要首先从ChunkServer获取每个表格的数据，接着再执行多表关联或者嵌套查询等操作。
+MergeServer支持并发请求多台ChunkServer，再一次性等待所有请求的应答。另外，在SQL执行过程中，如果某个tablet所在的ChunkServer出现故障，MergeServer会将请求转发给该tablet的其他副本所在的ChunkServer。这样，ChunkServer故障是不会影响用户查询的。
+MergeServer本身是没有状态的，因此，MergeServer宕机不会对使用者产生影响，客户端会自动将发生故障的MergeServer屏蔽掉。
+ChunkServer ChunkServer的功能包括：存储多个tablet、提供读取服务、执行定期合并以及数据分发。
+OceanBase将大表划分为大小约为256MB的tablet（可配置），每个tablet由一个或者多个SSTable组成（一般为一个），每个SSTable由多个块（Block，大小为4KB ~ 64KB之间，可配置）组成，数据在SSTable中按照主键有序存储。查找某一行数据时，需要首先定位这一行所属的tablet，接着在相应的SSTable中执行二分查找。 SSTable支持两种缓存模式，Block Cache以及Row Cache。Block Cache以Block为单位缓存最近读取的数据，Row Cache以行为单位缓存最近读取的数据。
+MergeServer将每个tablet的读取请求发送到tablet所在的ChunkServer，ChunkServer首先读取SSTable中包含的基准数据，接着请求UpdateServer获取相应的增量更新数据，并将基准数据与增量更新融合后得到最终结果。
+由于每次读取都需要从UpdateServer中获取最新的增量更新，为了保证读取性能，需要限制UpdateServer中增量更新的数据量，最好能够全部存放在内存中。
+OceanBase内部会定期触发合并或者数据分发操作，在这个过程中，ChunkServer将从UpdateServer获取一段时间之前的更新操作。通常情况下，OceanBase集群会在每天的服务低峰期（凌晨1:00开始，可配置）执行一次合并操作。这个合并操作往往也称为每日合并。
+三、OceanBase主要应用的技术 全局时间戳服务（Global Timestamp Service，GTS） 每个租户一个GTS服务，服务的架构采用C/S结构。租户的每个节点都会有个GTS Client，服务于节点内部的请求。GTS Server只有一个，依托于表__all_dummy表的Leader副本。同时GTS Server也就有高可用能力了。使用全局时间戳服务获取一致性快照读版本这个又简称为全局一致性快照读。同时OceanBase默认读规则是强一致性读，即一个SQL读取的数据的提交版本必须是小于读快照版本的最新版本。在读已提交隔离级别下，这是语句级一致性读；在可序列化隔离级别下，这是事务级一致性读。
+两阶段提交（2 Phase Commit，2PC） 引入一个中心节点统一处理所有节点的执行逻辑，以感知每个节点的事务执行情况。该中心节点称为协调者(coordinator)，被协调者调度的其它节点称为参与者(participant)。
+2PC将分布式事务分成了两个阶段，两个阶段分别为提交请求（投票）和提交（执行）。协调者根据参与者的响应来决定是否需要真正地执行事务。一般地，还有一个预处理阶段，包括获取行锁，生成redo
+数据等操作。
+Prepare阶段：
+协调者向所有参与者发送prepare请求与事务内容，询问是否可以准备事务提交，并等待参与者的响应。参与者执行事务中包含的操作，并记录undo日志（用于回滚）和redo日志（用于重放），但不真正提交。参与者向协调者返回事务操作的执行结果，执行成功返回yes，否则返回no。 Commit阶段：
+分为成功与失败两种情况。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/d3fe9fe7f3b00ccc6ec2a06966972a78/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-01-18T10:46:01+08:00" />
+<meta property="article:modified_time" content="2022-01-18T10:46:01+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">OceanBase数据库运行原理小结</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>目录</h4> 
+ <ul><li><a href="#_5" rel="nofollow">前言</a></li><li><a href="#_15" rel="nofollow">一、概述</a></li><li><a href="#MergeServerChunkServer_45" rel="nofollow">二、MergeServer与ChunkServer</a></li><li><ul><li><a href="#MergeServer_46" rel="nofollow">MergeServer</a></li><li><a href="#ChunkServer_58" rel="nofollow">ChunkServer</a></li></ul> 
+  </li><li><a href="#OceanBase_70" rel="nofollow">三、OceanBase主要应用的技术</a></li><li><ul><li><a href="#Global_Timestamp_ServiceGTS_71" rel="nofollow">全局时间戳服务（Global Timestamp Service，GTS）</a></li><li><a href="#2_Phase_Commit2PC_74" rel="nofollow">两阶段提交（2 Phase Commit，2PC）</a></li></ul> 
+  </li><li><a href="#_113" rel="nofollow">总结</a></li></ul> 
+</div> 
+<p></p> 
+<hr color="#000000" size='1"'> 
+<h2><a id="_5"></a>前言</h2> 
+<p>最近因工作接触了OceanBase数据库，查阅了一些资料有了大概的认识，在此做一个笔记。<br> 若要了解更多可以移步<a href="https://open.oceanbase.com/docs/community/oceanbase-database/V3.1.1/what-is-oceanbase" rel="nofollow">Oceanbase官方社区</a>。<br> 感谢<a href="https://blog.csdn.net/jiankunking/article/details/84020030#t5">OceanBase 架构初探</a>、<a href="https://zhuanlan.zhihu.com/p/78402011" rel="nofollow">OceanBase事务引擎特性和应用实践分享</a>、<a href="https://zhuanlan.zhihu.com/p/145364298" rel="nofollow">OceanBase的分布式事务两阶段提交工程实践</a>他们的分享。</p> 
+<hr color="#000000" size='1"'> 
+<h2><a id="_15"></a>一、概述</h2> 
+<p>OceanBase是阿里集团研发的可扩展的关系数据库，从模块划分的角度看，OceanBase可以划分为四个模块：</p> 
+<ul><li>主控服务器RootServer</li><li>更新服务器UpdateServer</li><li>基线数据服务器ChunkServer</li><li>合并服务器MergeServer</li></ul> 
+<p>OceanBase系统内部按照时间线将数据划分为基线数据和增量数据，基线数据是只读的，所有的修改更新到增量数据中，系统内部通过合并操作定期将增量数据融合到基线数据中。<br> OceanBase系统结构如下所示：<br> <img src="https://images2.imgbox.com/00/9f/VVSZD7xR_o.png" alt="Oceanbase系统架构"><br> 其架构有三个特点：<br> 1 <strong>多副本</strong>。一般部署为三个Zone，每个Zone由多个节点/服务器（OBServer）组成。<br> 2 <strong>全对等节点</strong>。每个节点均有自己的SQL引擎和存储引擎，各自管理不同的数据分区。<br> 3 <strong>无共享</strong>。数据分布在各个节点上，不基于共享存储结构。</p> 
+<p>OceanBase四个模块具体功能为：</p> 
+<ul><li>RootServer：管理集群中的所有服务器，子表（tablet）数据分布以及副本管理。<br> RootServer一般为一主一备，主备之间数据强同步。</li><li>UpdateServer：存储OceanBase系统的增量更新数据。UpdateServer一般为一主一备，主备之间可以配置不同的同步模式。部署时，UpdateServer进程和RootServer进程往往共用物理服务器。</li><li>ChunkServer：存储OceanBase系统的基线数据。基线数据一般存储两份或者三份，可配置。</li><li>MergeServer：接收并解析用户的SQL请求，经过词法分析、语法分析、查询优化等一系列操作后转发给相应的ChunkServer或者UpdateServer。如果请求的数据分布在多台ChunkServer上，MergeServer还需要对多台ChunkServer返回的结果进行合并。客户端和MergeServer之间采用原生的MySQL通信协议，MySQL客户端可以直接访问MergeServer。</li></ul> 
+<p>另外，OceanBase还包括了一个客户端：</p> 
+<ul><li>OceanBase客户端（以下简称“客户端”）：用户使用OceanBase的方式和MySQL数据库完全相同，支持JDBC、C客户端访问等等。基于MySQL数据库开发的应用程序、工具能够直接迁移到OceanBase。</li></ul> 
+<p>本篇文档将着手于服务层面（即重点阐述ChunkServer和MergeServe）和技术原理（包括如何实现ACID和分布式事务模型）两个方向进行资料归纳。</p> 
+<h2><a id="MergeServerChunkServer_45"></a>二、MergeServer与ChunkServer</h2> 
+<h3><a id="MergeServer_46"></a>MergeServer</h3> 
+<p>MergeServer的功能包括：协议解析、SQL解析、请求转发、结果合并、多表操作等。</p> 
+<p>客户端与MergeServer之间的协议为Mysql协议。首先解析Mysql协议，从中提取出用户发送的SQL语句，接着进行词法和语法分析，生成SQL语句的逻辑和物理查询计划，最后根据物理查询计划调用OceanBase内部的各种操作符。</p> 
+<p>MergeServer缓存了tablet(分表)分布信息，根据请求涉及的tablet将请求转发给其所在的ChunkServer。写操作还会转发给UpdateServer。某些请求需要跨多个tablet，MergeServer会将请求拆分后发送给多台ChunkServer，并合并这些ChunkServer返回的结果。如果请求涉及到多个表格，MergeServer需要首先从ChunkServer获取每个表格的数据，接着再执行多表关联或者嵌套查询等操作。</p> 
+<p>MergeServer支持并发请求多台ChunkServer，再一次性等待所有请求的应答。另外，在SQL执行过程中，如果某个tablet所在的ChunkServer出现故障，MergeServer会将请求转发给该tablet的其他副本所在的ChunkServer。这样，ChunkServer故障是不会影响用户查询的。</p> 
+<p>MergeServer本身是没有状态的，因此，MergeServer宕机不会对使用者产生影响，客户端会自动将发生故障的MergeServer屏蔽掉。</p> 
+<h3><a id="ChunkServer_58"></a>ChunkServer</h3> 
+<p>ChunkServer的功能包括：存储多个tablet、提供读取服务、执行定期合并以及数据分发。</p> 
+<p>OceanBase将大表划分为大小约为256MB的tablet（可配置），每个tablet由一个或者多个SSTable组成（一般为一个），每个SSTable由多个块（Block，大小为4KB ~ 64KB之间，可配置）组成，数据在SSTable中按照主键有序存储。查找某一行数据时，需要首先定位这一行所属的tablet，接着在相应的SSTable中执行二分查找。 SSTable支持两种缓存模式，Block Cache以及Row Cache。Block Cache以Block为单位缓存最近读取的数据，Row Cache以行为单位缓存最近读取的数据。</p> 
+<p>MergeServer将每个tablet的读取请求发送到tablet所在的ChunkServer，ChunkServer首先读取SSTable中包含的基准数据，接着请求UpdateServer获取相应的增量更新数据，并将基准数据与增量更新融合后得到最终结果。</p> 
+<p>由于每次读取都需要从UpdateServer中获取最新的增量更新，为了保证读取性能，需要限制UpdateServer中增量更新的数据量，最好能够全部存放在内存中。</p> 
+<p>OceanBase内部会定期触发合并或者数据分发操作，在这个过程中，ChunkServer将从UpdateServer获取一段时间之前的更新操作。通常情况下，OceanBase集群会在每天的服务低峰期（凌晨1:00开始，可配置）执行一次合并操作。这个合并操作往往也称为每日合并。</p> 
+<h2><a id="OceanBase_70"></a>三、OceanBase主要应用的技术</h2> 
+<h3><a id="Global_Timestamp_ServiceGTS_71"></a>全局时间戳服务（Global Timestamp Service，GTS）</h3> 
+<p>每个租户一个GTS服务，服务的架构采用C/S结构。租户的每个节点都会有个GTS Client，服务于节点内部的请求。GTS Server只有一个，依托于表__all_dummy表的Leader副本。同时GTS Server也就有高可用能力了。使用全局时间戳服务获取一致性快照读版本这个又简称为全局一致性快照读。同时OceanBase默认读规则是强一致性读，即一个SQL读取的数据的提交版本必须是小于读快照版本的最新版本。在读已提交隔离级别下，这是语句级一致性读；在可序列化隔离级别下，这是事务级一致性读。</p> 
+<h3><a id="2_Phase_Commit2PC_74"></a>两阶段提交（2 Phase Commit，2PC）</h3> 
+<p>引入一个中心节点统一处理所有节点的执行逻辑，以感知每个节点的事务执行情况。该中心节点称为协调者(coordinator)，被协调者调度的其它节点称为参与者(participant)。</p> 
+<p>2PC将分布式事务分成了两个阶段，两个阶段分别为提交请求（投票）和提交（执行）。协调者根据参与者的响应来决定是否需要真正地执行事务。一般地，还有一个预处理阶段，包括获取行锁，生成redo<br> 数据等操作。</p> 
+<p><strong>Prepare阶段：</strong></p> 
+<ol><li>协调者向所有参与者发送prepare请求与事务内容，询问是否可以准备事务提交，并等待参与者的响应。</li><li>参与者执行事务中包含的操作，并记录undo日志（用于回滚）和redo日志（用于重放），但不真正提交。</li><li>参与者向协调者返回事务操作的执行结果，执行成功返回yes，否则返回no。</li></ol> 
+<p><strong>Commit阶段：</strong><br> 分为成功与失败两种情况。</p> 
+<p>若所有参与者都返回yes，说明事务可以提交：</p> 
+<ol><li>协调者向所有参与者发送commit请求。</li><li>参与者收到commit请求后，将事务真正地提交上去，并释放占用的事务资源，并向协调者返回ack。</li><li>协调者收到所有参与者的ack消息，事务成功完成。</li></ol> 
+<p>若有参与者返回no或者超时未返回，说明事务中断，需要回滚：</p> 
+<ol><li>协调者向所有参与者发送rollback请求。</li><li>参与者收到rollback请求后，根据undo日志回滚到事务执行前的状态，释放占用的事务资源，并向协调者返回ack。</li><li>协调者收到所有参与者的ack消息，事务回滚完成。</li></ol> 
+<p>事务执行情况如下图：<br> <strong>提交成功：</strong><br> <img src="https://images2.imgbox.com/a8/8b/IPZspcS1_o.png" alt="2PC提交成功"><br> <strong>提交失败：</strong><br> <img src="https://images2.imgbox.com/27/f4/DQf5AfS5_o.png" alt="在这里插入图片描述"><br> 其中，OceanBase利用Paxos算法将2PC做了优化，使得分布式事务具备自动容错能力。两阶段提交的每个参与者包含多个副本，副本之间通过 Paxos 协议实现高可用。当某个参与者节点发生故障时，通过 Paxos 协议可以很快（秒级）选举出另外一个副本代替原有参与者继续提供服务，并恢复原有参与者的状态，从而确定分布式事务的执行结果并继续推进两阶段提交协议的完成。其结构如下图所示：</p> 
+<p><img src="https://images2.imgbox.com/9a/7e/rV7A81LA_o.png" alt="在这里插入图片描述"><br> 另外，OceanBase还对传统的2PC流程做了优化，传统的两阶段提交的延迟相当于 2 次 RPC 和 4 次写日志操作。OceanBase 数据库采用协调者无状态设计，协调者不再维护分布式事务的状态，而是在宕机恢复时，通过所有参与者的局部状态动态构造分布式事务的全局状态。这种方式避免了协调者写日志，一次两阶段提交的延迟降低到 1 次 RPC 和 1 次写日志操作。其流程如下图所示：<br> <img src="https://images2.imgbox.com/ae/21/Qz0eqXmz_o.png" alt="在这里插入图片描述"></p> 
+<hr color="#000000" size='1"'> 
+<h2><a id="_113"></a>总结</h2> 
+<p>后面会根据工作的开展不断的进行补充和改进，本文参考的资料如下，在此表示感谢。</p> 
+<ul><li>https://open.oceanbase.com/docs/community/oceanbase-database/V3.1.0/distributed-transactions</li><li>https://zhuanlan.zhihu.com/p/111304281</li><li>https://zhuanlan.zhihu.com/p/78402011</li><li>https://blog.csdn.net/jiankunking/article/details/84020030#t5</li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/453f0b2f5208c7d1823f9597c0f6b9c0/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">python nrrd图像转png</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/65e966e9211ab9fe114acdc9a1e3b4e2/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Note13: selenium&#43;Python xpath父亲兄弟节点定位</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

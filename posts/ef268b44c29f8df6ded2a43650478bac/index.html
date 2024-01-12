@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>LVS三种工作模式原理 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="LVS三种工作模式原理" />
+<meta property="og:description" content="1. LVS 三种工作模式原理 1.1 LVS-DR: 通过直接路由实现虚拟服务器（VS/DR） 跟VS/TUN方法相同，VS/DR利用大多数Internet服务的非对称特点，负载调度器中只负责调度请求，而服务器直接将响应返回给客户，可以极大地提高整个集群系统的吞吐量。该方法与IBM的NetDispatcher产品中使用的方法类似，但IBM的NetDispatcher是非常昂贵的商品化产品，我们也不知道它内部所使用的机制，其中有些是IBM的专利。
+VS/DR的体系结构如图3.6所示：调度器和服务器组都必须在物理上有一个网卡通过不分段的局域网相连，即通过交换机或者高速的HUB相连，中间没有隔有路由器。VIP地址为调度器和服务器组共享，调度器配置的VIP地址是对外可见的，用于接收虚拟服务的请求报文；所有的服务器把VIP地址配置在各自的Non-ARP网络设备上，它对外面是不可见的，只是用于处理目标地址为VIP的网络请求。
+图3.6：VS/DR的体系结构 VS/DR的工作流程如图3.7所示：它的连接调度和管理与VS/NAT和VS/TUN中的一样，它的报文转发方法又有不同，将报文直接路由给目标服务器。在VS/DR中，调度器根据各个服务器的负载情况，动态地选择一台服务器，不修改也不封装IP报文，而是将数据帧的MAC地址改为选出服务器的MAC地址，再将修改后的数据帧在与服务器组的局域网上发送。因为数据帧的MAC地址是选出的服务器，所以服务器肯定可以收到这个数据帧，从中可以获得该IP报文。当服务器发现报文的目标地址VIP是在本地的网络设备上，服务器处理这个报文，然后根据路由表将响应报文直接返回给客户。
+图3.7：VS/DR的工作流程 在VS/DR中，请求报文的目标地址为VIP，响应报文的源地址也为VIP，所以响应报文不需要作任何修改，可以直接返回给客户，客户认为得到正常的服务，而不会知道是哪一台服务器处理的。
+VS/DR负载调度器也只处于从客户到服务器的半连接中，按照半连接的TCP有限状态机进行状态迁移。
+1.2 LVS-NAT: 通过NAT实现虚拟服务器（VS/NAT） 由于IPv4中IP地址空间的日益紧张和安全方面的原因，很多网络使用保留IP地址（10.0.0.0/255.0.0.0、172.16.0.0/255.128.0.0和192.168.0.0/255.255.0.0）[64, 65, 66]。这些地址不在Internet上使用，而是专门为内部网络预留的。当内部网络中的主机要访问Internet或被Internet访问时，就需要采用网络地址转换（Network Address Translation, 以下简称NAT），将内部地址转化为Internets上可用的外部地址。NAT的工作原理是报文头（目标地址、源地址和端口等）被正确改写后，客户相信它们连接一个IP地址，而不同IP地址的服务器组也认为它们是与客户直接相连的。由此，可以用NAT方法将不同IP地址的并行网络服务变成在一个IP地址上的一个虚拟服务。
+VS/NAT的体系结构如图3.1所示。在一组服务器前有一个调度器，它们是通过Switch/HUB相连接的。这些服务器提供相同的网络服务、相同的内容，即不管请求被发送到哪一台服务器，执行结果是一样的。服务的内容可以复制到每台服务器的本地硬盘上，可以通过网络文件系统（如NFS）共享，也可以通过一个分布式文件系统来提供。
+图3.1：VS/NAT的体系结构 客户通过Virtual IP Address（虚拟服务的IP地址）访问网络服务时，请求报文到达调度器，调度器根据连接调度算法从一组真实服务器中选出一台服务器，将报文的目标地址Virtual IP Address改写成选定服务器的地址，报文的目标端口改写成选定服务器的相应端口，最后将修改后的报文发送给选出的服务器。同时，调度器在连接Hash表中记录这个连接，当这个连接的下一个报文到达时，从连接Hash表中可以得到原选定服务器的地址和端口，进行同样的改写操作，并将报文传给原选定的服务器。当来自真实服务器的响应报文经过调度器时，调度器将报文的源地址和源端口改为Virtual IP Address和相应的端口，再把报文发给用户。我们在连接上引入一个状态机，不同的报文会使得连接处于不同的状态，不同的状态有不同的超时值。在TCP连接中，根据标准的TCP有限状态机进行状态迁移；在UDP中，我们只设置一个UDP状态。不同状态的超时值是可以设置的，在缺省情况下，SYN状态的超时为1分钟，ESTABLISHED状态的超时为15分钟，FIN状态的超时为1分钟；UDP状态的超时为5分钟。当连接终止或超时，调度器将这个连接从连接Hash表中删除。
+这样，客户所看到的只是在Virtual IP Address上提供的服务，而服务器集群的结构对用户是透明的。对改写后的报文，应用增量调整Checksum的算法调整TCP Checksum的值，避免了扫描整个报文来计算Checksum的开销。
+在一些网络服务中，它们将IP地址或者端口号在报文的数据中传送，若我们只对报文头的IP地址和端口号作转换，这样就会出现不一致性，服务会中断。所以，针对这些服务，需要编写相应的应用模块来转换报文数据中的IP地址或者端口号。我们所知道有这个问题的网络服务有FTP、IRC、H.323、CUSeeMe、Real Audio、Real Video、Vxtreme / Vosiac、VDOLive、VIVOActive、True Speech、RSTP、PPTP、StreamWorks、NTT AudioLink、NTT SoftwareVision、Yamaha MIDPlug、iChat Pager、Quake和Diablo。
+下面，举个例子来进一步说明VS/NAT，如图3.2所示：
+图3.2：VS/NAT的例子 VS/NAT的配置如下表所示，所有到IP地址为202.103.106.5和端口为80的流量都被负载均衡地调度的真实服务器172.16.0.2:80和172.16.0.3:8000上。目标地址为202.103.106.5:21的报文被转移到172.16.0.3:21上。而到其他端口的报文将被拒绝。
+Protocol Virtual IP Address Port Real IP Address Port Weight TCP 202.103.106.5 80 172.16.0.2 80 1 172.16.0.3 8000 2 TCP 202.103.106.5 21 172." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/ef268b44c29f8df6ded2a43650478bac/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2016-03-19T23:10:47+08:00" />
+<meta property="article:modified_time" content="2016-03-19T23:10:47+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">LVS三种工作模式原理</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h2 class="title" style="font-family:'Trebuchet MS',Geneva,Arial,Helvetica,SunSans-Regular,Verdana,sans-serif; margin:0px; color:rgb(51,102,153); font-size:1.6em"> 1. LVS 三种工作模式原理</h2> 
+<p style="font-family:'Trebuchet MS',Geneva,Arial,Helvetica,SunSans-Regular,Verdana,sans-serif; margin:0px"> <br> </p> 
+<h3 style="font-family:'Trebuchet MS',Geneva,Arial,Helvetica,SunSans-Regular,Verdana,sans-serif; margin:0px"> <span style="font-size:18px">1.1 LVS-DR: 通过直接路由实现虚拟服务器（VS/DR）</span></h3> 
+<div class="node" style="margin:0.5em 0px 2.5em; font-family:Verdana,Helvetica,Arial,sans-serif"> 
+ <span class="taxonomy" style="color:rgb(153,153,153); font-size:0.83em; padding:1.5em; font-size:0.83em; padding:1.5em"></span> 
+ <div class="content" style="line-height:1.3; margin:0.5em 0px"> 
+  <p style="font-size:0.85em; margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 跟VS/TUN方法相同，VS/DR利用大多数Internet服务的非对称特点，负载调度器中只负责调度请求，而服务器直接将响应返回给客户，可以极大地提高整个集群系统的吞吐量。该方法与IBM的NetDispatcher产品中使用的方法类似，但IBM的NetDispatcher是非常昂贵的商品化产品，我们也不知道它内部所使用的机制，其中有些是IBM的专利。</p> 
+  <p style="font-size:0.85em; margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> VS/DR的体系结构如图3.6所示：调度器和服务器组都必须在物理上有一个网卡通过不分段的局域网相连，即通过交换机或者高速的HUB相连，中间没有隔有路由器。VIP地址为调度器和服务器组共享，调度器配置的VIP地址是对外可见的，用于接收虚拟服务的请求报文；所有的服务器把VIP地址配置在各自的Non-ARP网络设备上，它对外面是不可见的，只是用于处理目标地址为VIP的网络请求。</p> 
+  <div align="center" style="font-size:0.85em"> 
+   <img src="https://images2.imgbox.com/3a/4c/3uBbuv2j_o.jpg" alt=""> 
+   <br> 
+   <br> 图3.6：VS/DR的体系结构 
+  </div> 
+  <p style="font-size:0.85em; margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> VS/DR的工作流程如图3.7所示：它的连接调度和管理与VS/NAT和VS/TUN中的一样，它的报文转发方法又有不同，将报文直接路由给目标服务器。在VS/DR中，调度器根据各个服务器的负载情况，动态地选择一台服务器，不修改也不封装IP报文，而是将数据帧的MAC地址改为选出服务器的MAC地址，再将修改后的数据帧在与服务器组的局域网上发送。因为数据帧的MAC地址是选出的服务器，所以服务器肯定可以收到这个数据帧，从中可以获得该IP报文。当服务器发现报文的目标地址VIP是在本地的网络设备上，服务器处理这个报文，然后根据路由表将响应报文直接返回给客户。</p> 
+  <div align="center" style="font-size:0.85em"> 
+   <img src="https://images2.imgbox.com/51/e9/wlVTLXTf_o.jpg" alt=""> 
+   <br> 
+   <br> 图3.7：VS/DR的工作流程 
+  </div> 
+  <p style="font-size:0.85em; margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 在VS/DR中，请求报文的目标地址为VIP，响应报文的源地址也为VIP，所以响应报文不需要作任何修改，可以直接返回给客户，客户认为得到正常的服务，而不会知道是哪一台服务器处理的。</p> 
+  <p style="font-size:0.85em; margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> VS/DR负载调度器也只处于从客户到服务器的半连接中，按照半连接的TCP有限状态机进行状态迁移。</p> 
+  <p style="font-size:0.85em; margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> <br> </p> 
+  <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> </p> 
+  <h3 style="font-family:'Trebuchet MS',Geneva,Arial,Helvetica,SunSans-Regular,Verdana,sans-serif; margin:0px"> <span style="font-size:18px">1.2 LVS-NAT: 通过NAT实现虚拟服务器（VS/NAT）</span></h3> 
+  <div class="node" style="font-size:14px; margin:0.5em 0px 2.5em; font-family:Verdana,Helvetica,Arial,sans-serif"> 
+   <span class="taxonomy" style="color:rgb(153,153,153); font-size:0.83em; padding:1.5em"></span> 
+   <div class="content" style="line-height:1.3; font-size:0.85em; margin:0.5em 0px"> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 由于IPv4中IP地址空间的日益紧张和安全方面的原因，很多网络使用保留IP地址（10.0.0.0/255.0.0.0、172.16.0.0/255.128.0.0和192.168.0.0/255.255.0.0）[64, 65, 66]。这些地址不在Internet上使用，而是专门为内部网络预留的。当内部网络中的主机要访问Internet或被Internet访问时，就需要采用网络地址转换（Network Address Translation, 以下简称NAT），将内部地址转化为Internets上可用的外部地址。NAT的工作原理是报文头（目标地址、源地址和端口等）被正确改写后，客户相信它们连接一个IP地址，而不同IP地址的服务器组也认为它们是与客户直接相连的。由此，可以用NAT方法将不同IP地址的并行网络服务变成在一个IP地址上的一个虚拟服务。</p> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> VS/NAT的体系结构如图3.1所示。在一组服务器前有一个调度器，它们是通过Switch/HUB相连接的。这些服务器提供相同的网络服务、相同的内容，即不管请求被发送到哪一台服务器，执行结果是一样的。服务的内容可以复制到每台服务器的本地硬盘上，可以通过网络文件系统（如NFS）共享，也可以通过一个分布式文件系统来提供。</p> 
+    <div align="center"> 
+     <img src="https://images2.imgbox.com/70/3b/sD0sZKjr_o.jpg" alt=""> 
+     <br> 
+     <br> 图3.1：VS/NAT的体系结构 
+    </div> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 客户通过Virtual IP Address（虚拟服务的IP地址）访问网络服务时，请求报文到达调度器，调度器根据连接调度算法从一组真实服务器中选出一台服务器，将报文的目标地址Virtual IP Address改写成选定服务器的地址，报文的目标端口改写成选定服务器的相应端口，最后将修改后的报文发送给选出的服务器。同时，调度器在连接Hash表中记录这个连接，当这个连接的下一个报文到达时，从连接Hash表中可以得到原选定服务器的地址和端口，进行同样的改写操作，并将报文传给原选定的服务器。当来自真实服务器的响应报文经过调度器时，调度器将报文的源地址和源端口改为Virtual IP Address和相应的端口，再把报文发给用户。我们在连接上引入一个状态机，不同的报文会使得连接处于不同的状态，不同的状态有不同的超时值。在TCP连接中，根据标准的TCP有限状态机进行状态迁移；在UDP中，我们只设置一个UDP状态。不同状态的超时值是可以设置的，在缺省情况下，SYN状态的超时为1分钟，ESTABLISHED状态的超时为15分钟，FIN状态的超时为1分钟；UDP状态的超时为5分钟。当连接终止或超时，调度器将这个连接从连接Hash表中删除。</p> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 这样，客户所看到的只是在Virtual IP Address上提供的服务，而服务器集群的结构对用户是透明的。对改写后的报文，应用增量调整Checksum的算法调整TCP Checksum的值，避免了扫描整个报文来计算Checksum的开销。</p> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 在一些网络服务中，它们将IP地址或者端口号在报文的数据中传送，若我们只对报文头的IP地址和端口号作转换，这样就会出现不一致性，服务会中断。所以，针对这些服务，需要编写相应的应用模块来转换报文数据中的IP地址或者端口号。我们所知道有这个问题的网络服务有FTP、IRC、H.323、CUSeeMe、Real Audio、Real Video、Vxtreme / Vosiac、VDOLive、VIVOActive、True Speech、RSTP、PPTP、StreamWorks、NTT AudioLink、NTT SoftwareVision、Yamaha MIDPlug、iChat Pager、Quake和Diablo。</p> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 下面，举个例子来进一步说明VS/NAT，如图3.2所示：</p> 
+    <div align="center"> 
+     <img src="https://images2.imgbox.com/08/c1/dvlc38pO_o.jpg" alt=""> 
+     <br> 
+     <br> 图3.2：VS/NAT的例子 
+    </div> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> VS/NAT的配置如下表所示，所有到IP地址为202.103.106.5和端口为80的流量都被负载均衡地调度的真实服务器172.16.0.2:80和172.16.0.3:8000上。目标地址为202.103.106.5:21的报文被转移到172.16.0.3:21上。而到其他端口的报文将被拒绝。</p> 
+    <div align="center"> 
+     <table border="1" cellpadding="0" cellspacing="0" style="border-collapse:collapse"><tbody><tr><td width="103" style="font-family:Verdana,Helvetica,Arial,sans-serif"> Protocol</td><td width="173" style="font-family:Verdana,Helvetica,Arial,sans-serif"> Virtual IP Address</td><td width="58" style="font-family:Verdana,Helvetica,Arial,sans-serif"> Port</td><td width="167" style="font-family:Verdana,Helvetica,Arial,sans-serif"> Real IP Address</td><td width="58" style="font-family:Verdana,Helvetica,Arial,sans-serif"> Port</td><td width="84" style="font-family:Verdana,Helvetica,Arial,sans-serif"> Weight</td></tr><tr><td rowspan="2" width="103" style="font-family:Verdana,Helvetica,Arial,sans-serif"> TCP</td><td rowspan="2" width="173" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 202.103.106.5</td><td rowspan="2" width="58" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 80</td><td width="167" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 172.16.0.2</td><td width="58" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 80</td><td width="84" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 1</td></tr><tr><td width="167" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 172.16.0.3</td><td width="58" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 8000</td><td width="84" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 2</td></tr><tr><td width="103" style="font-family:Verdana,Helvetica,Arial,sans-serif"> TCP</td><td width="173" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 202.103.106.5</td><td width="58" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 21</td><td width="167" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 172.16.0.3</td><td width="58" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 21</td><td width="84" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 1</td></tr></tbody></table> 
+    </div> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 从以下的例子中，我们可以更详细地了解报文改写的流程。</p> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 访问Web服务的报文可能有以下的源地址和目标地址：</p> 
+    <table border="1" cellpadding="0" cellspacing="0" style="border-collapse:collapse"><tbody><tr><td width="149" style="font-family:Verdana,Helvetica,Arial,sans-serif"> SOURCE</td><td width="175" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 202.100.1.2:3456</td><td width="158" style="font-family:Verdana,Helvetica,Arial,sans-serif"> DEST</td><td width="166" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 202.103.106.5:80</td></tr></tbody></table> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 调度器从调度列表中选出一台服务器，例如是172.16.0.3:8000。该报文会被改写为如下地址，并将它发送给选出的服务器。</p> 
+    <table border="1" cellpadding="0" cellspacing="0" style="border-collapse:collapse"><tbody><tr><td width="149" style="font-family:Verdana,Helvetica,Arial,sans-serif"> SOURCE</td><td width="175" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 202.100.1.2:3456</td><td width="158" style="font-family:Verdana,Helvetica,Arial,sans-serif"> DEST</td><td width="166" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 172.16.0.3:8000</td></tr></tbody></table> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 从服务器返回到调度器的响应报文如下：</p> 
+    <table border="1" cellpadding="0" cellspacing="0" style="border-collapse:collapse"><tbody><tr><td width="149" style="font-family:Verdana,Helvetica,Arial,sans-serif"> SOURCE</td><td width="175" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 172.16.0.3:8000</td><td width="158" style="font-family:Verdana,Helvetica,Arial,sans-serif"> DEST</td><td width="166" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 202.100.1.2:3456</td></tr></tbody></table> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 响应报文的源地址会被改写为虚拟服务的地址，再将报文发送给客户：</p> 
+    <table border="1" cellpadding="0" cellspacing="0" style="border-collapse:collapse"><tbody><tr><td width="149" style="font-family:Verdana,Helvetica,Arial,sans-serif"> SOURCE</td><td width="175" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 202.103.106.5:80</td><td width="158" style="font-family:Verdana,Helvetica,Arial,sans-serif"> DEST</td><td width="166" style="font-family:Verdana,Helvetica,Arial,sans-serif"> 202.100.1.2:3456</td></tr></tbody></table> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 这样，客户认为是从202.103.106.5:80服务得到正确的响应，而不会知道该请求是服务器172.16.0.2还是服务器172.16.0.3处理的。</p> 
+   </div> 
+  </div> 
+  <h3 style="font-family:'Trebuchet MS',Geneva,Arial,Helvetica,SunSans-Regular,Verdana,sans-serif; margin:0px"> <span style="font-size:18px">1.3 LVS-TUNNEL: 通过IP隧道实现虚拟服务器（VS/TUN）</span></h3> 
+  <div class="node" style="margin:0.5em 0px 2.5em; font-family:Verdana,Helvetica,Arial,sans-serif; font-size:14px"> 
+   <span class="taxonomy" style="color:rgb(153,153,153); font-size:0.83em; padding:1.5em"></span> 
+   <div class="content" style="line-height:1.3; font-size:0.85em; margin:0.5em 0px"> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 在VS/NAT的集群系统中，请求和响应的数据报文都需要通过负载调度器，当真实服务器的数目在10台和20台之间时，负载调度器将成为整个集群系统的新瓶颈。大多数Internet服务都有这样的特点：请求报文较短而响应报文往往包含大量的数据。如果能将请求和响应分开处理，即在负载调度器中只负责调度请求而响应直接返回给客户，将极大地提高整个集群系统的吞吐量。</p> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> IP隧道（IP tunneling）是将一个IP报文封装在另一个IP报文的技术，这可以使得目标为一个IP地址的数据报文能被封装和转发到另一个IP地址。IP隧道技术亦称为IP封装技术（IP encapsulation）。IP隧道主要用于移动主机和虚拟私有网络（Virtual Private Network），在其中隧道都是静态建立的，隧道一端有一个IP地址，另一端也有唯一的IP地址。</p> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 我们利用IP隧道技术将请求报文封装转发给后端服务器，响应报文能从后端服务器直接返回给客户。但在这里，后端服务器有一组而非一个，所以我们不可能静态地建立一一对应的隧道，而是动态地选择一台服务器，将请求报文封装和转发给选出的服务器。这样，我们可以利用IP隧道的原理将一组服务器上的网络服务组成在一个IP地址上的虚拟网络服务。VS/TUN的体系结构如图3.3所示，各个服务器将VIP地址配置在自己的IP隧道设备上。</p> 
+    <div align="center"> 
+     <img src="https://images2.imgbox.com/07/de/jjxZK9sG_o.jpg" alt=""> 
+     <br> 
+     <br> 图3.3：VS/TUN的体系结构 
+    </div> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> VS/TUN的工作流程如图3.4所示：它的连接调度和管理与VS/NAT中的一样，只是它的报文转发方法不同。调度器根据各个服务器的负载情况，动态地选择一台服务器，将请求报文封装在另一个IP报文中，再将封装后的IP报文转发给选出的服务器；服务器收到报文后，先将报文解封获得原来目标地址为VIP的报文，服务器发现VIP地址被配置在本地的IP隧道设备上，所以就处理这个请求，然后根据路由表将响应报文直接返回给客户。</p> 
+    <div align="center"> 
+     <img src="https://images2.imgbox.com/a0/e1/tObvUK0W_o.jpg" alt=""> 
+     <br> 
+     <br> 图3.4：VS/TUN的工作流程 
+    </div> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 在这里，请求报文的目标地址为VIP，响应报文的源地址也为VIP，所以响应报文不需要作任何修改，可以直接返回给客户，客户认为得到正常的服务，而不会知道是哪一台服务器处理的。</p> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 在VS/TUN中，响应报文根据服务器的路由表直接返回给客户，而不经过负载调度器，所以负载调度器只处于从客户到服务器的半连接中，VS/TUN的TCP状态迁移与VS/NAT的不同。我们给出半连接的TCP有限状态机，如图3.5所示，圈表示状态，箭头表示状态间的转换，箭头上的标识表示在当前状态上收到该标识的输入，迁移到下一个状态。VS/TUN的TCP状态迁移是按照半连接的TCP有限状态机进行的。</p> 
+    <div align="center"> 
+     <img src="https://images2.imgbox.com/38/38/aBIPD7Wo_o.jpg" alt=""> 
+     <br> 
+     <br> 图3.5：半连接的TCP有限状态机 
+    </div> 
+   </div> 
+  </div> 
+  <h2 class="title" style="font-family:'Trebuchet MS',Geneva,Arial,Helvetica,SunSans-Regular,Verdana,sans-serif; margin:0px; font-size:1.6em; color:rgb(51,102,153)"> 2. 三种方法的优缺点比较</h2> 
+  <div class="node" style="margin:0.5em 0px 2.5em; font-family:Verdana,Helvetica,Arial,sans-serif; font-size:14px"> 
+   <span class="taxonomy" style="color:rgb(153,153,153); font-size:0.83em; padding:1.5em"></span> 
+   <div class="content" style="line-height:1.3; font-size:0.85em; margin:0.5em 0px"> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 三种IP负载均衡技术的优缺点归纳在下表中：</p> 
+    <table border="1" cellpadding="0" cellspacing="0" style="border-collapse:collapse"><tbody><tr><td width="175" style="font-family:Verdana,Helvetica,Arial,sans-serif"> </td><td width="149" style="font-family:Verdana,Helvetica,Arial,sans-serif">VS/NAT</td><td width="140" style="font-family:Verdana,Helvetica,Arial,sans-serif">VS/TUN</td><td width="149" style="font-family:Verdana,Helvetica,Arial,sans-serif">VS/DR</td></tr><tr><td width="175" style="font-family:Verdana,Helvetica,Arial,sans-serif">Server</td><td width="149" style="font-family:Verdana,Helvetica,Arial,sans-serif">any</td><td width="140" style="font-family:Verdana,Helvetica,Arial,sans-serif">Tunneling</td><td width="149" style="font-family:Verdana,Helvetica,Arial,sans-serif">Non-arp device</td></tr><tr><td width="175" style="font-family:Verdana,Helvetica,Arial,sans-serif">server network</td><td width="149" style="font-family:Verdana,Helvetica,Arial,sans-serif">private</td><td width="140" style="font-family:Verdana,Helvetica,Arial,sans-serif">LAN/WAN</td><td width="149" style="font-family:Verdana,Helvetica,Arial,sans-serif">LAN</td></tr><tr><td width="175" style="font-family:Verdana,Helvetica,Arial,sans-serif">server number</td><td width="149" style="font-family:Verdana,Helvetica,Arial,sans-serif">low (10~20)</td><td width="140" style="font-family:Verdana,Helvetica,Arial,sans-serif">High (100)</td><td width="149" style="font-family:Verdana,Helvetica,Arial,sans-serif">High (100)</td></tr><tr><td style="font-family:Verdana,Helvetica,Arial,sans-serif">server gateway</td><td style="font-family:Verdana,Helvetica,Arial,sans-serif">load balancer</td><td width="140" style="font-family:Verdana,Helvetica,Arial,sans-serif">own router</td><td width="149" style="font-family:Verdana,Helvetica,Arial,sans-serif">Own router</td></tr></tbody></table> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> <br> </p> 
+    <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> 注：以上三种方法所能支持最大服务器数目的估计是假设调度器使用100M网卡，调度器的硬件配置与后端服务器的硬件配置相同，而且是对一般Web服务。使用更高的硬件配置（如千兆网卡和更快的处理器）作为调度器，调度器所能调度的服务器数量会相应增加。当应用不同时，服务器的数目也会相应地改变。所以，以上数据估计主要是为三种方法的伸缩性进行量化比较。</p> 
+   </div> 
+  </div> 
+  <h3 style="font-family:Verdana,Helvetica,Arial,sans-serif; margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px; line-height:17.68px"> <span style="font-size:18px">2.1 LVS-RD</span></h3> 
+  <p></p> 
+  <p style="font-family:Verdana,Helvetica,Arial,sans-serif; margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px; font-size:13.6px; line-height:17.68px"> 跟VS/TUN方法一样，VS/DR调度器只处理客户到服务器端的连接，响应数据可以直接从独立的网络路由返回给客户。这可以极大地提高LVS集群系统的伸缩性。</p> 
+  <p style="font-family:Verdana,Helvetica,Arial,sans-serif; margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px; font-size:13.6px; line-height:17.68px"> 跟VS/TUN相比，这种方法没有IP隧道的开销，但是要求负载调度器与实际服务器都有一块网卡连在同一物理网段上，服务器网络设备（或者设备别名）不作ARP响应，或者能将报文重定向（Redirect）到本地的Socket端口上。</p> 
+  <p style="font-family:Verdana,Helvetica,Arial,sans-serif; margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px; font-size:13.6px; line-height:17.68px"> <br> </p> 
+  <h3 style="font-family:Verdana,Helvetica,Arial,sans-serif; margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px; line-height:17.68px"> <span style="font-size:18px">2.2 LVS-NAT</span></h3> 
+  <p style="font-family:Verdana,Helvetica,Arial,sans-serif; margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px; font-size:13.6px; line-height:17.68px"> VS/NAT 的优点是服务器可以运行任何支持TCP/IP的操作系统，它只需要一个IP地址配置在调度器上，服务器组可以用私有的IP地址。缺点是它的伸缩能力有限，当服务器结点数目升到20时，调度器本身有可能成为系统的新瓶颈，因为在VS/NAT中请求和响应报文都需要通过负载调度器。 我们在Pentium 166 处理器的主机上测得重写报文的平均延时为60us，性能更高的处理器上延时会短一些。假设TCP报文的平均长度为536 Bytes，则调度器的最大吞吐量为8.93 MBytes/s. 我们再假设每台服务器的吞吐量为800KBytes/s，这样一个调度器可以带动10台服务器。（注：这是很早以前测得的数据）</p> 
+  <p style="font-family:Verdana,Helvetica,Arial,sans-serif; margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px; font-size:13.6px; line-height:17.68px"> 基于 VS/NAT的的集群系统可以适合许多服务器的性能要求。如果负载调度器成为系统新的瓶颈，可以有三种方法解决这个问题：混合方法、VS/TUN和 VS/DR。在DNS混合集群系统中，有若干个VS/NAT负载调度器，每个负载调度器带自己的服务器集群，同时这些负载调度器又通过RR-DNS组成简单的域名。但VS/TUN和VS/DR是提高系统吞吐量的更好方法。</p> 
+  <p style="font-family:Verdana,Helvetica,Arial,sans-serif; margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px; font-size:13.6px; line-height:17.68px"> 对于那些将IP地址或者端口号在报文数据中传送的网络服务，需要编写相应的应用模块来转换报文数据中的IP地址或者端口号。这会带来实现的工作量，同时应用模块检查报文的开销会降低系统的吞吐率。</p> 
+  <p style="font-family:Verdana,Helvetica,Arial,sans-serif; margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px; font-size:13.6px; line-height:17.68px"> <br> </p> 
+  <h3><span style="font-size:18px">2.3 LVS-TUNNEL</span></h3> 
+  <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> </p> 
+  <p style="font-family:Verdana,Helvetica,Arial,sans-serif; margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px; font-size:13.6px; line-height:17.68px"> 在VS/TUN 的集群系统中，负载调度器只将请求调度到不同的后端服务器，后端服务器将应答的数据直接返回给用户。这样，负载调度器就可以处理大量的请求，它甚至可以调度百台以上的服务器（同等规模的服务器），而它不会成为系统的瓶颈。即使负载调度器只有100Mbps的全双工网卡，整个系统的最大吞吐量可超过 1Gbps。所以，VS/TUN可以极大地增加负载调度器调度的服务器数量。VS/TUN调度器可以调度上百台服务器，而它本身不会成为系统的瓶颈，可以用来构建高性能的超级服务器。</p> 
+  <p style="font-family:Verdana,Helvetica,Arial,sans-serif; margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px; font-size:13.6px; line-height:17.68px"> VS/TUN技术对服务器有要求，即所有的服务器必须支持“IP Tunneling”或者“IP Encapsulation”协议。目前，VS/TUN的后端服务器主要运行Linux操作系统，我们没对其他操作系统进行测试。因为“IP Tunneling”正成为各个操作系统的标准协议，所以VS/TUN应该会适用运行其他操作系统的后端服务器。</p> 
+  <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> <br> </p> 参考文章： 
+  <p style="margin-top:0px; margin-bottom:1.3em; padding-top:0px; padding-bottom:0px"> http://zh.linuxvirtualserver.org/node/27<br> http://zh.linuxvirtualserver.org/node/28<br> http://zh.linuxvirtualserver.org/node/26<br> http://zh.linuxvirtualserver.org/node/29<br> http://zh.linuxvirtualserver.org/node/32<br> http://zh.linuxvirtualserver.org/node/31<br> http://zh.linuxvirtualserver.org/node/30<br> </p> 
+ </div> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/aa7e1228229d45895c8638b50f33dd6d/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">使用EA画ER图并导出为图片</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/d0d9ded04f0903ab38b93852084218d6/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">imageview wrap_content</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

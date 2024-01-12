@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Fast, Accurate Detection of 100,000 Object Classes on a Single Machine 读后记录（转载） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Fast, Accurate Detection of 100,000 Object Classes on a Single Machine 读后记录（转载）" />
+<meta property="og:description" content="这篇文章是CVPR 2013 best paper。 这篇文章的牛，主要体现在一些关键数字上，可以分类100000类别，比base line快了20000倍。 不过，美中不足的是，其单机处理一幅图像的速度，需要20s，而且，100000类mAP为0.16，看上去很美，但是距离实用还有一些距离。 这篇文章的卖点在于速度快，具体就是对于多类检测问题，检测速度可以做到和类别数目无关。 对于包含C类的物体检测而言，一个基本的框架是，训练C个分类器，对于每个候选位置，用每个分类器都判定一遍，然后做后处理融合。这样的坏处是速度太慢，处理速度和物体类别成反比（线性，算法复杂度O(C)）。 这篇文章参考的base line算法是DPM模型，就是每个物体的模型由多个part（假定P个）的模型组成，每个part的模型可以看作是一个filter和该位置特征的点积（整体上可以看作是一个convolution过程），然后根据可能的part候选的位置约束确定物体的位置。在实际中，最耗时的是convolution过程，每个物体分类器的filter（对应weight）都需要和候选位置的特征进行一次点积处理，假定候选窗口数目为W个，候选窗口的feature dimension是M维，则运算复杂度为W*C*P*M。 这篇文章利用了之前的一个工作的结果，可以将两个向量的点积（其实点积和cos距离有非常强的关联，如果预先对参与cos距离运算的两个向量进行模的归一化处理，则归一化后两向量的cos距离和点积是相同的）相似度转化为两个hash值的hamming距离。 距离将feature转换为lsh hash的过程如下（得到的hash是LSH hash，也是WTA hash）： 假定共M维feature，设K为保留的中间元素数目 设定一个重排数组（随机得到，个数为M，元素为0-M-1，每个元素的序号表示临时feature对应原始feature中的序号），从而将原始feature转变为一个临时feature，取临时featue的前K维，组成最终的新feature，则新feature中最大元素序号（新feature中）为k，将k表示为一个log（K）位的二进制数字串 继续设定共N个重排数组（随机得到），则得到共N*log（K）位的二进制串，按照最前面的重排数组对应的串放在最低位的原则，得到一个hash值（N*log（K）位整数）。 对应的，两个feature之间的点积转化为两个对应hash之间的hamming距离。 直观上看，由于如此得到的数字只和数字之间的相互大小有关，且每次保留最大的序号的信息，因此，对于数字的扰动非常鲁棒。因此，得到的两个hash值之间的hamming距离所对应的相似度对于特征值的变化更加鲁棒，是更有效的表示（到底是否是这样，无从得知，其他信息请参考J. Yagnik, D. Strelow, D. A. Ross, and R.-s. Lin. The powe of comparative reasoning. In IEEE International Conference on Computer Vision, 2011.）。 由于计算两个hash之间的hamming距离非常快速（还可以查表），因此最耗时的部分在计算每个窗口的feature以及计算hash值上，这个运算和类别数目无关。 上述可以用于点积衡量相似度的特征，可以是各种各样的特征，在物体检测里面最常用的要数HOG特征了。 下面以HOG特征为例，说明base line 算法和本文提出的改进之间计算时间的对比： base line算法的计算过程如下： 1，计算多尺度的边缘强度和边缘方向图像； 2，对所有窗口进行遍历 对于每个窗口， 计算其高斯加权HOG直方图特征 分别计算HOG特征和C类P个filter的点积 3， 将具有局部最大响应的窗口作为候选，得到可能的物体中心的分布累积 综合得到最终的物体检测结果 改进算法计算过程如下： 事先计算得到C*P个filter对应的hash值 1，计算多尺度的边缘强度和边缘方向图像； 2，对所有窗口进行遍历 对于每个窗口， 计算其高斯加权HOG直方图特征 计算特征对应的hash值 分别计算HOG特征hash值和C类P个filter的hash值的hamming距离 3， 将具有局部最大响应的窗口作为候选，得到可能的物体中心的分布累积 综合得到最终的物体检测结果 对比可以看到，由于改进算法中，计算hamming距离的部分非常快，可以忽略，因此，最终得到的多类检测器的运算量和类别数目无关。 进一步，为了快速运算，可以将上述的hamming距离计算转换为查表运算，为了当累积相似度高于阈值时无需继续计算，将hash值划分为多个不同部分（这样每个表也比较小）。 将N*log（K） bit的hash分为N/M组（band），每组是一个M*log（K） bit的整数，对于每个类别每个part的filter（训练模型），对应N/M组查找表（查找表的序号为当前窗口feature在该band上的hash值，查找表记录的值为该featurehash值和模型hash值的相似度），从而避免了hamming距离计算过程。每个filter取到的N/M组查找表的值的累积和为对应的点积值（相似度）。对N/M组累积和计算，当计算发现相似度大于阈值时，则放弃后面的运算，直接对预估物体位置分布进行累积。 则最终得到物体位置分布累积最大的位置为检测得到的物体位置。 文章中还有一些特殊的细节（比如root filter，以及在快速计算之后继续用点积计算相似度等），不再赘述。 文章中还有一点值得讨论的地方在于，作者的100000类数据都是搜索引擎爬取的，没有经过人工标定，所以结果存在一定不准确的地方。但是定性上看，这样做确实快了很多。 当然，相对base line算法，本文提出的算法在精度上还是降低一些的（见论文voc 2007的对比结果,mAP由0." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/828c01e2dc3a854010c8ac24fab47f85/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2014-05-12T12:41:54+08:00" />
+<meta property="article:modified_time" content="2014-05-12T12:41:54+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Fast, Accurate Detection of 100,000 Object Classes on a Single Machine 读后记录（转载）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <span style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">这篇文章是CVPR 2013 best paper。</span> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  这篇文章的牛，主要体现在一些关键数字上，可以分类100000类别，比base line快了20000倍。 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  不过，美中不足的是，其单机处理一幅图像的速度，需要20s，而且，100000类mAP为0.16，看上去很美，但是距离实用还有一些距离。 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  这篇文章的卖点在于速度快，具体就是对于多类检测问题，检测速度可以做到和类别数目无关。 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  对于包含C类的物体检测而言，一个基本的框架是，训练C个分类器，对于每个候选位置，用每个分类器都判定一遍，然后做后处理融合。这样的坏处是速度太慢，处理速度和物体类别成反比（线性，算法复杂度O(C)）。 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  这篇文章参考的base line算法是DPM模型，就是每个物体的模型由多个part（假定P个）的模型组成，每个part的模型可以看作是一个filter和该位置特征的点积（整体上可以看作是一个convolution过程），然后根据可能的part候选的位置约束确定物体的位置。在实际中，最耗时的是convolution过程，每个物体分类器的filter（对应weight）都需要和候选位置的特征进行一次点积处理，假定候选窗口数目为W个，候选窗口的feature dimension是M维，则运算复杂度为W*C*P*M。 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  这篇文章利用了之前的一个工作的结果，可以将两个向量的点积（其实点积和cos距离有非常强的关联，如果预先对参与cos距离运算的两个向量进行模的归一化处理，则归一化后两向量的cos距离和点积是相同的）相似度转化为两个hash值的hamming距离。 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  距离将feature转换为lsh hash的过程如下（得到的hash是LSH hash，也是WTA hash）： 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  假定共M维feature，设K为保留的中间元素数目 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  设定一个重排数组（随机得到，个数为M，元素为0-M-1，每个元素的序号表示临时feature对应原始feature中的序号），从而将原始feature转变为一个临时feature，取临时featue的前K维，组成最终的新feature，则新feature中最大元素序号（新feature中）为k，将k表示为一个log（K）位的二进制数字串 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  继续设定共N个重排数组（随机得到），则得到共N*log（K）位的二进制串，按照最前面的重排数组对应的串放在最低位的原则，得到一个hash值（N*log（K）位整数）。 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  对应的，两个feature之间的点积转化为两个对应hash之间的hamming距离。 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  直观上看，由于如此得到的数字只和数字之间的相互大小有关，且每次保留最大的序号的信息，因此，对于数字的扰动非常鲁棒。因此，得到的两个hash值之间的hamming距离所对应的相似度对于特征值的变化更加鲁棒，是更有效的表示（到底是否是这样，无从得知，其他信息请参考J. Yagnik, D. Strelow, D. A. Ross, and R.-s. Lin. The powe of comparative reasoning. In IEEE International Conference on Computer Vision, 2011.）。 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  由于计算两个hash之间的hamming距离非常快速（还可以查表），因此最耗时的部分在计算每个窗口的feature以及计算hash值上，这个运算和类别数目无关。 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  上述可以用于点积衡量相似度的特征，可以是各种各样的特征，在物体检测里面最常用的要数HOG特征了。 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  下面以HOG特征为例，说明base line 算法和本文提出的改进之间计算时间的对比： 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  base line算法的计算过程如下： 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  1，计算多尺度的边缘强度和边缘方向图像； 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  2，对所有窗口进行遍历 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  对于每个窗口， 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  计算其高斯加权HOG直方图特征 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  分别计算HOG特征和C类P个filter的点积 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  3， 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  将具有局部最大响应的窗口作为候选，得到可能的物体中心的分布累积 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  综合得到最终的物体检测结果 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  改进算法计算过程如下： 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  事先计算得到C*P个filter对应的hash值 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <div>
+   1，计算多尺度的边缘强度和边缘方向图像； 
+ </div> 
+ <div>
+   2，对所有窗口进行遍历 
+ </div> 
+ <div>
+   对于每个窗口， 
+ </div> 
+ <div>
+   计算其高斯加权HOG直方图特征 
+ </div> 
+ <div>
+   计算特征对应的hash值 
+ </div> 
+ <div>
+   分别计算HOG特征hash值和C类P个filter的hash值的hamming距离 
+ </div> 
+ <div>
+   3， 
+ </div> 
+ <div>
+   将具有局部最大响应的窗口作为候选，得到可能的物体中心的分布累积 
+ </div> 
+ <div>
+   综合得到最终的物体检测结果 
+ </div> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  对比可以看到，由于改进算法中，计算hamming距离的部分非常快，可以忽略，因此，最终得到的多类检测器的运算量和类别数目无关。 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  进一步，为了快速运算，可以将上述的hamming距离计算转换为查表运算，为了当累积相似度高于阈值时无需继续计算，将hash值划分为多个不同部分（这样每个表也比较小）。 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  将N*log（K） bit的hash分为N/M组（band），每组是一个M*log（K） bit的整数，对于每个类别每个part的filter（训练模型），对应N/M组查找表（查找表的序号为当前窗口feature在该band上的hash值，查找表记录的值为该featurehash值和模型hash值的相似度），从而避免了hamming距离计算过程。每个filter取到的N/M组查找表的值的累积和为对应的点积值（相似度）。对N/M组累积和计算，当计算发现相似度大于阈值时，则放弃后面的运算，直接对预估物体位置分布进行累积。 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  则最终得到物体位置分布累积最大的位置为检测得到的物体位置。 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  文章中还有一些特殊的细节（比如root filter，以及在快速计算之后继续用点积计算相似度等），不再赘述。 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  文章中还有一点值得讨论的地方在于，作者的100000类数据都是搜索引擎爬取的，没有经过人工标定，所以结果存在一定不准确的地方。但是定性上看，这样做确实快了很多。 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  当然，相对base line算法，本文提出的算法在精度上还是降低一些的（见论文voc 2007的对比结果,mAP由0.26-&gt;0.24）。而耗费的20G内存，推测主要应该是查找表对应的内存。 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  启发： 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  1，这个思路，对于基本操作为点积（x*y）运算的，都可以加速，这个操作非常常见，比如线性svm，cos距离，以及神经网络和LR里面的wx等等，都可以使用。一个比较容易想到的是可以应用于multi-model检测框架中（比如多类别物体检测，多姿态人脸/汽车检测等等）； 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  2，对于多模型检测，速度是一个非常重要的方面，一般的思路就是在提高单个模型速度（feature和分类器计算速度）的情况下，增加特征共用（LAB feature image, vector boosting），其实，最理想的特征共用是deep learning模型（只在最后一层不同，其它层都是共用的，每个隐节点可以看作是feature，所有类别共用feature，只在输出层时，计算一个wh+b项，是非常理想的特征共用），只可惜单个deep learning模型太慢，当遍历多个检测候选窗口时，最终的速度现在看太慢了，谁感兴趣可以好好想想这个问题； 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)"> 
+ <br> 
+</div> 
+<div style="color:rgb(70,70,70); font-family:simsun; font-size:14px; line-height:21px; background-color:rgb(188,211,229)">
+  补充：其实这个方法可能用于加速神经网络模型（当然包括deep learning），难点在于点积变为hash距离的近似比较大，未必会有好的结果，谁去想想试试吧； 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/173b8179c820315ba4da355fa4707a0e/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">21世纪初最有影响力的20篇计算机视觉期刊论文 及 邓亚峰老师关于人脸识别方面总结</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/ba31164b7d5a82a611b422b6b26ff8dc/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">人脸识别必读的N篇文章（转载）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

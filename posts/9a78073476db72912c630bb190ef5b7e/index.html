@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>SparkSQL中的三种Join及其具体实现（broadcast join、shuffle hash join和sort merge join） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="SparkSQL中的三种Join及其具体实现（broadcast join、shuffle hash join和sort merge join）" />
+<meta property="og:description" content="https://blog.csdn.net/wlk_328909605/article/details/82933552
+1.小表对大表（broadcast join） 将小表的数据分发到每个节点上，供大表使用。executor存储小表的全部数据，一定程度上牺牲了空间，换取shuffle操作大量的耗时，这在SparkSQL中称作Broadcast Join
+Broadcast Join的条件有以下几个：
+*被广播的表需要小于 spark.sql.autoBroadcastJoinThreshold 所配置的值，默认是10M （或者加了broadcast join的hint）
+*基表不能被广播，比如 left outer join 时，只能广播右表
+2.Shuffle Hash Join 因为被广播的表首先被collect到driver段，然后被冗余分发到每个executor上，所以当表比较大时，采用broadcast join会对driver端和executor端造成较大的压力。
+spark可以通过分区的形式将大批量的数据划分成n份较小的数据集进行并行计算.
+利用key相同必然分区相同的这个原理，SparkSQL将较大表的join分而治之，先将表划分成n个分区，再对两个表中相对应分区的数据分别进行Hash Join，
+这样即在一定程度上减少了driver广播一侧表的压力，也减少了executor端取整张被广播表的内存消耗。
+*Shuffle Hash Join分为两步：
+对两张表分别按照join keys进行重分区，即shuffle，目的是为了让有相同join keys值的记录分到对应的分区中
+对对应分区中的数据进行join，此处先将小表分区构造为一张hash表，然后根据大表分区中记录的join keys值拿出来进行匹配
+*Shuffle Hash Join的条件有以下几个：
+分区的平均大小不超过spark.sql.autoBroadcastJoinThreshold所配置的值，默认是10M
+基表不能被广播，比如left outer join时，只能广播右表
+一侧的表要明显小于另外一侧，小的一侧将被广播（明显小于的定义为3倍小，此处为经验值）
+3.大表对大表（Sort Merge Join） 将两张表按照join keys进行了重新shuffle，保证join keys值相同的记录会被分在相应的分区。分区后对每个分区内的数据进行排序，排序后再对相应的分区内的记录进行连接
+因为两个序列都是有序的，从头遍历，碰到key相同的就输出；如果不同，左边小就继续取左边，反之取右边(即用即取即丢)
+package day05 import org.apache.spark.sql.{DataFrame, SparkSession} /** * @author WangLeiKai * 2018/10/3 18:24 */ object SparkSQLJoinDemo { def main(args: Array[String]): Unit = { //程序的入口 val spark = SparkSession." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/9a78073476db72912c630bb190ef5b7e/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-02-04T22:34:25+08:00" />
+<meta property="article:modified_time" content="2021-02-04T22:34:25+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">SparkSQL中的三种Join及其具体实现（broadcast join、shuffle hash join和sort merge join）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p><a href="https://blog.csdn.net/wlk_328909605/article/details/82933552">https://blog.csdn.net/wlk_328909605/article/details/82933552</a></p> 
+<p> </p> 
+<h2>1.小表对大表（broadcast join）</h2> 
+<p>将小表的数据分发到每个节点上，供大表使用。executor存储小表的全部数据，一定程度上牺牲了空间，换取shuffle操作大量的耗时，这在SparkSQL中称作Broadcast Join</p> 
+<p>Broadcast Join的条件有以下几个：</p> 
+<p>*被广播的表需要小于 spark.sql.autoBroadcastJoinThreshold 所配置的值，默认是10M （或者加了broadcast join的hint）</p> 
+<p>*基表不能被广播，比如 left outer join 时，只能广播右表<br><img alt="在这里插入图片描述" src="https://images2.imgbox.com/1c/9b/lgj4UpBE_o.png"></p> 
+<h2><a name="t1"></a><a id="2Shuffle_Hash_Join_11"></a>2.Shuffle Hash Join</h2> 
+<p>因为被广播的表首先被collect到driver段，然后被冗余分发到每个executor上，所以当表比较大时，采用broadcast join会对driver端和executor端造成较大的压力。</p> 
+<p>spark可以通过分区的形式将大批量的数据划分成n份较小的数据集进行并行计算.</p> 
+<p>利用key相同必然分区相同的这个原理，SparkSQL将较大表的join分而治之，先将表划分成n个分区，再对两个表中相对应分区的数据分别进行Hash Join，</p> 
+<p>这样即在一定程度上减少了driver广播一侧表的压力，也减少了executor端取整张被广播表的内存消耗。</p> 
+<p>*Shuffle Hash Join分为两步：</p> 
+<p>对两张表分别按照join keys进行重分区，即shuffle，目的是为了让有相同join keys值的记录分到对应的分区中</p> 
+<p>对对应分区中的数据进行join，此处先将小表分区构造为一张hash表，然后根据大表分区中记录的join keys值拿出来进行匹配</p> 
+<p>*Shuffle Hash Join的条件有以下几个：</p> 
+<p>分区的平均大小不超过spark.sql.autoBroadcastJoinThreshold所配置的值，默认是10M</p> 
+<p>基表不能被广播，比如left outer join时，只能广播右表</p> 
+<p>一侧的表要明显小于另外一侧，小的一侧将被广播（明显小于的定义为3倍小，此处为经验值）<br> 　　　　<img alt="在这里插入图片描述" src="https://images2.imgbox.com/ed/61/vRzS801A_o.png"></p> 
+<h2><a name="t2"></a><a id="3Sort_Merge_Join_36"></a>3.大表对大表（Sort Merge Join）</h2> 
+<p>将两张表按照join keys进行了重新shuffle，保证join keys值相同的记录会被分在相应的分区。分区后对每个分区内的数据进行排序，排序后再对相应的分区内的记录进行连接</p> 
+<p>因为两个序列都是有序的，从头遍历，碰到key相同的就输出；如果不同，左边小就继续取左边，反之取右边(即用即取即丢)<br> 　　<img alt="在这里插入图片描述" src="https://images2.imgbox.com/8a/7f/MRRFpzDr_o.png"></p> 
+<pre><code>package day05
+
+import org.apache.spark.sql.{DataFrame, SparkSession}
+
+/**
+  * @author WangLeiKai
+  *         2018/10/3  18:24
+  */
+object SparkSQLJoinDemo {
+  def main(args: Array[String]): Unit = {
+    //程序的入口
+    val spark = SparkSession.builder().appName("SparkSQLJoinDemo").master("local[*]").getOrCreate()
+    //导入spark对象的隐式转换
+    import spark.implicits._
+
+
+
+    //spark.sql.autoBroadcastJoinThreshold = -1
+    //不限定小表的大小
+    spark.conf.set("spark.sql.autoBroadcastJoinThreshold", -1)
+    // 每个分区的平均大小不超过spark.sql.autoBroadcastJoinThreshold设定的值
+    spark.conf.set("spark.sql.join.preferSortMergeJoin", true)
+
+    println(spark.conf.get("spark.sql.autoBroadcastJoinThreshold"))
+
+
+    //定义两个集合，转换成dataframe
+    val df1: DataFrame = Seq(
+      ("0", "a"),
+      ("1", "b"),
+      ("2", "c")
+    ).toDF("id", "name")
+
+
+    val df2: DataFrame = Seq(
+      ("0", "d"),
+      ("1", "e"),
+      ("2", "f")
+    ).toDF("aid", "aname")
+
+    //重新分区
+    df2.repartition()
+
+    //df1.cache().count()
+
+    //进行连接
+    val result = df1.join(df2,$"id" === $"aid")
+
+    //查看执行计划
+    result.explain()
+
+    //展示结果
+    result.show()
+
+    //释放资源
+    spark.stop()
+
+  }
+}
+
+</code></pre> 
+<ul><li>1</li><li>2</li><li>3</li><li>4</li><li>5</li><li>6</li><li>7</li><li>8</li><li>9</li><li>10</li><li>11</li><li>12</li><li>13</li><li>14</li><li>15</li><li>16</li><li>17</li><li>18</li><li>19</li><li>20</li><li>21</li><li>22</li><li>23</li><li>24</li><li>25</li><li>26</li><li>27</li><li>28</li><li>29</li><li>30</li><li>31</li><li>32</li><li>33</li><li>34</li><li>35</li><li>36</li><li>37</li><li>38</li><li>39</li><li>40</li><li>41</li><li>42</li><li>43</li><li>44</li><li>45</li><li>46</li><li>47</li><li>48</li><li>49</li><li>50</li><li>51</li><li>52</li><li>53</li><li>54</li><li>55</li><li>56</li><li>57</li><li>58</li><li>59</li><li>60</li></ul> 
+<p>执行结果都是一样的</p> 
+<p><img alt="在这里插入图片描述" src="https://images2.imgbox.com/aa/5d/s7Wo3zFV_o.png"></p> 
+<p>查看执行计划：<br><img alt="在这里插入图片描述" src="https://images2.imgbox.com/c4/2c/GVV2X5ia_o.png"><br><img alt="在这里插入图片描述" src="https://images2.imgbox.com/f1/9c/vOFRhlC3_o.png"></p> 
+<p>**</p> 
+<h3><a name="t3"></a><a id="join_117"></a>这三种join在传统的数据库中也有体现，只是现在是分布式的。</h3> 
+<p>**</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/ebc830230e7a8e0a56e703bf6fdba659/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Matlab 特殊函数绘图（求和函数、特殊函数）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/31205a00e0d7f6c287cc5da8359df9b7/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">C 语言和 C&#43;&#43;、C# 的区别</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

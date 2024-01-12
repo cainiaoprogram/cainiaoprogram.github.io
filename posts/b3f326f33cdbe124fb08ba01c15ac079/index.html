@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>MyCat部署运行（Windows环境）与使用步骤详解 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="MyCat部署运行（Windows环境）与使用步骤详解" />
+<meta property="og:description" content="转自：http://blog.csdn.net/Stubborn_Cow/article/details/46967407 1、MyCat概念
+1.1 总体架构 MyCAT的架构如下图所示：
+MyCAT使用MySQL的通讯协议模拟成一个MySQL服务器，并建立了完整的Schema（数据库）、Table（数据表）、User（用户）的逻辑模型，并将这套逻辑模型映射到后端的存储节点DataNode（MySQL Instance）上的真实物理库中，这样一来，所有能使用MySQL的客户端以及编程语言都能将MyCAT当成是MySQLServer来使用，不必开发新的客户端协议。
+当MyCAT收到一个客户端发送的SQL请求时，会先对SQL进行语法分析和检查，分析的结果用于SQL路由，SQL路由策略支持传统的基于表格的分片字段方式进行分片，也支持独有的基于数据库E-R关系的分片策略，对于路由到多个数据节点（DataNode）的SQL，则会对收到的数据集进行“归并”然后输出到客户端。
+SQL执行的过程，简单的说，就是把SQL通过网络协议发送给后端的真正的数据库上进行执行，对于MySQL Server来说，是通过MySQL网络协议发送报文，并解析返回的结果，若SQL不涉及到多个分片节点，则直接返回结果，写入客户端的SOCKET流中，这个过程是非阻塞模式（NIO）。
+DataNode是MyCAT的逻辑数据节点，映射到后端的某一个物理数据库的一个Database，为了做到系统高可用，每个DataNode可以配置多个引用地址（DataSource），当主DataSource被检测为不可用时，系统会自动切换到下一个可用的DataSource上，这里的DataSource即可认为是Mysql的主从服务器的地址。
+1.2 逻辑库 与任何一个传统的关系型数据库一样，MyCAT也提供了“数据库”的定义，并有用户授权的功能，下面是MyCAT逻辑库相关的一些概念：
+schema:逻辑库，与MySQL中的Database（数据库）对应，一个逻辑库中定义了所包括的Table。table：表，即物理数据库中存储的某一张表，与传统数据库不同，这里的表格需要声明其所存储的逻辑数据节点DataNode，这是通过表格的分片规则定义来实现的，table可以定义其所属的“子表(childTable)”，子表的分片依赖于与“父表”的具体分片地址，简单的说，就是属于父表里某一条记录A的子表的所有记录都与A存储在同一个分片上。分片规则：是一个字段与函数的捆绑定义，根据这个字段的取值来返回所在存储的分片（DataNode）的序号，每个表格可以定义一个分片规则，分片规则可以灵活扩展，默认提供了基于数字的分片规则，字符串的分片规则等。dataNode: MyCAT的逻辑数据节点，是存放table的具体物理节点，也称之为分片节点，通过DataSource来关联到后端某个具体数据库上，一般来说，为了高可用性，每个DataNode都设置两个DataSource，一主一从，当主节点宕机，系统自动切换到从节点。dataHost：定义某个物理库的访问地址，用于捆绑到dataNode上。 MyCAT目前通过配置文件的方式来定义逻辑库和相关配置：
+· MYCAT_HOME/conf/schema.xml中定义逻辑库，表、分片节点等内容；
+· MYCAT_HOME/conf/rule.xml中定义分片规则；
+· MYCAT_HOME/conf/server.xml中定义用户以及系统相关变量，如端口等。
+下图给出了MyCAT一个可能的逻辑库到物理库（MySQL的完整映射关系），可以看出强大的分片能力以及灵活的Mysql集群整合能力。 2、 MyCat基本使用教程 2.1 下载和安装 MyCAT使用Java开发，因为用到了JDK 7的部分功能，所以在使用前请确保安装了JDK 7.0，要求是JDK 7.0以上，并设置了正确的Java环境变量
+目前下载的版本是免安装，解压在任意磁盘、根目录下，避免路径中出现中文。
+目录下的“Mycat-server-1.2-GA-win.tar.gz”文件，解压后的目录结构如下图所示：
+目录说明见下表所示：
+目录名称
+说明
+bin
+存放window版本和Linux版本，除了提供封装成服务的版本之外，也提供nowrap的shell脚本命令，方便大家选择和修改。
+Windows 下 运行：mycat.bat console在控制台启动程序，也可以装载成服务，若此程序运行有问题，也可以运行startup_nowrap.bat，确保java命令可以在命令执行。
+Warp方式的命令，可以安装成服务并启动或停止。
+l mycat install (可选)
+l mycat start
+注意，wrap方式的程序，其JVM配置参数在conf/wrap.conf中，可以修改为合适的参数，参数调整参照http://wrapper.tanukisoftware.com/doc/english/properties.html。
+conf
+存放配置文件：
+l server.xml：是Mycat服务器参数调整和用户授权的配置文件。
+l schema.xml：是逻辑库定义和表以及分片定义的配置文件。
+l rule.xml：是分片规则的配置文件，分片规则的具体一些参数信息单独存放为文件，也在这个目录下，配置文件修改，需要重启MyCAT或者通过9066端口reload。
+l wrapper.conf：JVM配置参数等设置。
+l log4j.xml：日志存放在logs/mycat.log中，每天一个文件，日志的配置是在conf/log4j.xml中，根据自己的需要，可以调整输出级别为debug，debug级别下，会输出更多的信息，方便排查问题。
+lib
+MyCAT自身的jar包或依赖的jar包的存放目录。
+logs
+MyCAT日志的存放目录。日志存放在logs/mycat.log中，每天一个文件
+2.2 启动和停止 安装mycat服务 ：mycate install 启动mycat服务 ：mycate start" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/b3f326f33cdbe124fb08ba01c15ac079/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2017-03-17T16:19:19+08:00" />
+<meta property="article:modified_time" content="2017-03-17T16:19:19+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">MyCat部署运行（Windows环境）与使用步骤详解</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h3 style="margin:0px; padding:0px; font-family:Arial"><br> </h3> 
+<h3 style="margin:0px; padding:0px; font-family:Arial">转自：http://blog.csdn.net/Stubborn_Cow/article/details/46967407</h3> 
+<h3 style="margin:0px; padding:0px; font-family:Arial"><br> </h3> 
+<h3 style="margin:0px; padding:0px; font-family:Arial">1、MyCat概念<br> </h3> 
+<h3 style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t1" style="color:rgb(202,0,0)"></a><span style="font-family:黑体">1.1 </span><span style="font-family:黑体">总体架构</span></h3> 
+<p align="left" style="margin:auto auto auto 21pt; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px"> MyCAT<span style="font-family:宋体">的<a target="_blank" href="http://lib.csdn.net/base/architecture" rel="nofollow noopener noreferrer" class="replace_word" title="大型网站架构知识库" style="color:rgb(223,52,52); text-decoration:none; font-weight:bold">架构</a>如下图所示：<br> <img alt="" src="https://images2.imgbox.com/77/af/YGWrp0Q4_o.png" height="415" border="0" width="404" style="border:none; max-width:100%"><br> </span></p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:21pt"> MyCAT<span style="font-family:宋体">使用</span><a target="_blank" href="http://lib.csdn.net/base/mysql" rel="nofollow noopener noreferrer" class="replace_word" title="MySQL知识库" style="color:rgb(223,52,52); text-decoration:none; font-weight:bold">MySQL</a><span style="font-family:宋体">的通讯协议模拟成一个</span>MySQL<span style="font-family:宋体">服务器，并建立了完整的</span>Schema<span style="font-family:宋体">（<a target="_blank" href="http://lib.csdn.net/base/mysql" rel="nofollow noopener noreferrer" class="replace_word" title="MySQL知识库" style="color:rgb(223,52,52); text-decoration:none; font-weight:bold">数据库</a>）、</span>Table<span style="font-family:宋体">（数据表）、</span>User<span style="font-family:宋体">（用户）的逻辑模型，并将这套逻辑模型映射到后端的存储节点</span>DataNode<span style="font-family:宋体">（</span>MySQL Instance<span style="font-family:宋体">）上的真实物理库中，这样一来，所有能使用</span>MySQL<span style="font-family:宋体">的客户端以及编程语言都能将</span>MyCAT<span style="font-family:宋体">当成是</span>MySQLServer<span style="font-family:宋体">来使用，不必开发新的客户端协议。</span></p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:21pt"> <span style="font-family:宋体">当</span>MyCAT<span style="font-family:宋体">收到一个客户端发送的</span>SQL<span style="font-family:宋体">请求时，会先对</span>SQL<span style="font-family:宋体">进行语法分析和检查，分析的结果用于</span>SQL<span style="font-family:宋体">路由，</span>SQL<span style="font-family:宋体">路由策略支持传统的基于表格的分片字段方式进行分片，也支持独有的基于数据库</span>E-R<span style="font-family:宋体">关系的分片策略，对于路由到多个数据节点（</span>DataNode<span style="font-family:宋体">）的</span>SQL<span style="font-family:宋体">，则会对收到的数据集进行“归并”然后输出到客户端。</span></p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:21pt"> SQL<span style="font-family:宋体">执行的过程，简单的说，就是把</span>SQL<span style="font-family:宋体">通过网络协议发送给后端的真正的数据库上进行执行，对于</span>MySQL Server<span style="font-family:宋体">来说，是通过</span>MySQL<span style="font-family:宋体">网络协议发送报文，并解析返回的结果，若</span>SQL<span style="font-family:宋体">不涉及到多个分片节点，则直接返回结果，写入客户端的</span>SOCKET<span style="font-family:宋体">流中，这个过程是非阻塞模式（</span>NIO<span style="font-family:宋体">）。</span></p> 
+<p align="left" style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:21pt"> DataNode<span style="font-family:宋体">是</span><strong>MyCAT</strong><span style="font-family:宋体">的逻辑数据节点，映射到后端的某一个物理数据库的一个</span>Database<span style="font-family:宋体">，为了做到系统高可用，每个</span>DataNode<span style="font-family:宋体">可以配置多个引用地址（</span>DataSource<span style="font-family:宋体">），当主</span>DataSource<span style="font-family:宋体">被检测为不可用时，系统会自动切换到下一个可用的</span>DataSource<span style="font-family:宋体">上，这里的</span>DataSource<span style="font-family:宋体">即可认为是</span>Mysql<span style="font-family:宋体">的主从服务器的地址。</span></p> 
+<h3 style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t2" style="color:rgb(202,0,0)"></a><span style="font-family:黑体">1.2 </span><span style="font-family:黑体">逻辑库</span></h3> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:18pt"> <span style="font-family:宋体">与任何一个传统的关系型数据库一样，</span><strong>MyCAT</strong><span style="font-family:宋体">也提供了“数据库”的定义，并有用户授权的功能，下面是</span><strong>MyCAT</strong><span style="font-family:宋体">逻辑库相关的一些概念：</span></p> 
+<ul type="disc" style="font-family:Arial; font-size:14px; margin-top:0cm"><li style="text-align:left; line-height:21px"><strong>schema</strong>:<span style="font-family:宋体">逻辑库，与</span>MySQL<span style="font-family:宋体">中的</span>Database<span style="font-family:宋体">（数据库）对应，一个逻辑库中定义了所包括的</span>Table<span style="font-family:宋体">。</span></li><li style="text-align:left; line-height:21px"><strong>table</strong><span style="font-family:宋体">：表，即物理数据库中存储的某一张表，与传统数据库不同，这里的表格需要声明其所存储的逻辑数据节点</span>DataNode<span style="font-family:宋体">，这是通过表格的分片规则定义来实现的，</span>table<span style="font-family:宋体">可以定义其所属的“子表</span>(childTable)<span style="font-family:宋体">”，子表的分片依赖于与“父表”的具体分片地址，简单的说，就是属于父表里某一条记录</span>A<span style="font-family:宋体">的子表的所有记录都与</span>A<span style="font-family:宋体">存储在同一个分片上。</span></li><li style="text-align:left; line-height:21px"><strong><span style="font-family:宋体">分片规则</span></strong><span style="font-family:宋体">：是一个字段与函数的捆绑定义，根据这个字段的取值来返回所在存储的分片（</span>DataNode<span style="font-family:宋体">）的序号，每个表格可以定义一个分片规则，分片规则可以灵活扩展，默认提供了基于数字的分片规则，字符串的分片规则等。</span></li><li style="text-align:left; line-height:21px"><strong>dataNode</strong>:<strong> MyCAT</strong><span style="font-family:宋体">的逻辑数据节点，是存放</span>table<span style="font-family:宋体">的具体物理节点，也称之为分片节点，通过</span>DataSource<span style="font-family:宋体">来关联到后端某个具体数据库上，一般来说，为了高可用性，每个</span>DataNode<span style="font-family:宋体">都设置两个</span>DataSource<span style="font-family:宋体">，一主一从，当主节点宕机，系统自动切换到从节点。</span></li><li style="text-align:left; line-height:21px"><strong>dataHost</strong><span style="font-family:宋体">：定义某个物理库的访问地址，用于捆绑到</span>dataNode<span style="font-family:宋体">上。</span></li></ul> 
+<p style="margin:0cm 0cm 0pt 18pt; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px"> <strong>MyCAT</strong><span style="font-family:宋体">目前通过配置文件的方式来定义逻辑库和相关配置：</span></p> 
+<p align="left" style="margin:0cm 0cm 0pt 54pt; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:-18pt"> <span style="font-family:Symbol">·<span style='font-size:7pt; line-height:normal; font-family:"Times New Roman"'>        </span></span>MYCAT_HOME/conf/schema.xml<span style="font-family:宋体">中定义逻辑库，表、分片节点等内容；</span></p> 
+<p align="left" style="margin:0cm 0cm 0pt 54pt; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:-18pt"> <span style="font-family:Symbol">·<span style='font-size:7pt; line-height:normal; font-family:"Times New Roman"'>        </span></span>MYCAT_HOME/conf/rule.xml<span style="font-family:宋体">中定义分片规则；</span></p> 
+<p align="left" style="margin:0cm 0cm 0pt 54pt; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:-18pt"> <span style="font-family:Symbol">·<span style='font-size:7pt; line-height:normal; font-family:"Times New Roman"'>        </span></span>MYCAT_HOME/conf/server.xml<span style="font-family:宋体">中定义用户以及系统相关变量，如端口等。</span></p> 
+<p align="left" style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:21pt"> <span style="font-family:宋体; font-size:10.5pt">下图给出了</span><strong><span style="font-family:Calibri,sans-serif; font-size:10.5pt">MyCAT</span></strong><span style="font-family:宋体; font-size:10.5pt">一个可能的逻辑库到物理库（</span><span style="font-family:Calibri,sans-serif; font-size:10.5pt">MySQL</span><span style="font-family:宋体; font-size:10.5pt">的完整映射关系），可以看出强大的分片能力以及灵活的</span><span style="font-family:Calibri,sans-serif; font-size:10.5pt">Mysql</span><span style="font-family:宋体; font-size:10.5pt">集群整合能力。          <img alt="" src="https://images2.imgbox.com/d4/55/zROHjATU_o.png" height="362" border="0" width="472" style="border:none; max-width:100%"></span><br> <br> <br> </p> 
+<h2 style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t3" style="color:rgb(202,0,0)"></a><span style="font-family:黑体; line-height:36px; font-size:18pt">2、<span style='font-weight:normal; font-size:7pt; line-height:normal; font-family:"Times New Roman"'>  </span></span><span style="font-family:黑体; line-height:36px; font-size:18pt">MyCat基本使用教程</span></h2> 
+<h3 style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t4" style="color:rgb(202,0,0)"></a><span style="font-family:黑体">2.1 </span><span style="font-family:黑体">下载和安装</span></h3> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px"> <span style="line-height:21px">         MyCAT</span><span style="font-family:宋体; line-height:21px">使用</span><span style="line-height:21px"><a target="_blank" href="http://lib.csdn.net/base/javase" rel="nofollow noopener noreferrer" class="replace_word" title="Java SE知识库" style="color:rgb(223,52,52); text-decoration:none; font-weight:bold">Java</a></span><span style="font-family:宋体; line-height:21px">开发，因为用到了</span><span style="line-height:21px">JDK 7</span><span style="font-family:宋体; line-height:21px">的部分功能，所以在使用前请确保安装了</span><span style="line-height:21px">JDK 7.0</span><span style="font-family:宋体; line-height:21px">，要求是<span style="font-size:18px"><strong><span style="color:rgb(102,0,0)"><span style="line-height:27px">JDK 7.0</span>以上</span></strong></span>，并设置了正确的</span><span style="line-height:21px">Java</span><span style="font-family:宋体; line-height:21px">环境变量</span></p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:21pt"> <span style="font-family:宋体; line-height:21px">目前下载的版本是免安装，解压在<span style="font-size:18px; color:rgb(102,0,0)"><strong>任意</strong></span>磁盘、根目录下，<span style="color:rgb(102,0,0)"><strong><span style="font-size:18px">避免路径中出现中文</span></strong></span>。<span style="line-height:21px"><br> </span></span></p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:21pt"> <span style="font-family:宋体; line-height:21px"><span style="line-height:21px">目录下的“</span><a target="_blank" href="http://code.taobao.org/svn/openclouddb/downloads/old/MyCat-Sever-1.2/Mycat-server-1.2-GA-win.tar.gz" rel="nofollow noopener noreferrer" style="color:rgb(202,0,0); text-decoration:none">Mycat-server-1.2-GA-win.tar.gz</a><span style="line-height:21px">”文件，解压后的目录结构如下图所示：<br>      <img alt="" src="https://images2.imgbox.com/f5/10/bNWIZ7cX_o.png" height="125" border="0" width="488" style="border:none; max-width:100%"></span><br> </span></p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:21pt"> <span style="font-family:宋体; line-height:21px">目录说明见下表所示：</span></p> 
+<table border="1" cellpadding="0" cellspacing="0" style="color:rgb(0,0,0); font-family:Arial; font-size:14px; border-width:medium; border-style:none; border-color:initial; border-collapse:collapse"><tbody><tr><td width="111" style="border-width:1pt; border-style:solid; border-color:black; padding:0cm 5.4pt; width:83.4pt; background:yellow"> <p align="center" style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; text-align:center; line-height:21px"> <strong><span style="font-family:黑体; line-height:21px">目录名称</span></strong></p> </td><td width="457" style="border-bottom:1pt solid black; border-left:rgb(240,240,240); padding:0cm 5.4pt; width:342.7pt; background:yellow; border-top:1pt solid black; border-right:1pt solid black"> <p align="center" style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; text-align:center; line-height:21px"> <strong><span style="font-family:黑体; line-height:21px">说明</span></strong></p> </td></tr><tr style="height:195.2pt"><td width="111" style="border-bottom:1pt solid black; border-left:1pt solid black; padding:0cm 5.4pt; background-color:transparent; width:83.4pt; height:195.2pt; border-top:rgb(240,240,240); border-right:1pt solid black"> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; line-height:21px"> <span style="line-height:21px">bin</span></p> </td><td width="457" style="border-bottom:1pt solid black; border-left:rgb(240,240,240); padding:0cm 5.4pt; background-color:transparent; width:342.7pt; height:195.2pt; border-top:rgb(240,240,240); border-right:1pt solid black"> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; line-height:21px"> <span style="font-family:宋体">存放</span>window<span style="font-family:宋体">版本和</span><a target="_blank" href="http://lib.csdn.net/base/linux" rel="nofollow noopener noreferrer" class="replace_word" title="Linux知识库" style="color:rgb(223,52,52); text-decoration:none; font-weight:bold">Linux</a><span style="font-family:宋体">版本，除了提供封装成服务的版本之外，也提供</span>nowrap<span style="font-family:宋体">的</span>shell<span style="font-family:宋体">脚本命令，方便大家选择和修改。</span></p> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px"> Windows <span style="font-family:宋体">下</span> <span style="font-family:宋体">运行：</span>mycat.bat console<span style="font-family:宋体">在控制台启动程序，也可以装载成服务，若此程序运行有问题，也可以运行</span>startup_nowrap.bat<span style="font-family:宋体">，确保</span>java<span style="font-family:宋体">命令可以在命令执行。</span></p> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px"> Warp<span style="font-family:宋体">方式的命令，可以安装成服务并启动或停止。</span></p> <p style="margin:0cm 0cm 0pt 21pt; padding-top:0px; padding-bottom:0px; text-indent:-21pt"> <span style="font-family:Wingdings">l </span>mycat install (<span style="font-family:宋体">可选</span>)</p> <p style="margin:0cm 0cm 0pt 21pt; padding-top:0px; padding-bottom:0px; text-indent:-21pt"> <span style="font-family:Wingdings">l </span>mycat start</p> <p align="left" style="margin:0cm 0cm 10pt; padding-top:0px; padding-bottom:0px; line-height:16.1px"> <span style="font-family:宋体">注意，</span>wrap<span style="font-family:宋体">方式的程序，其</span>JVM<span style="font-family:宋体">配置参数在</span>conf/wrap.conf<span style="font-family:宋体">中，可以修改为合适的参数，参数调整参照</span><a target="_blank" href="http://wrapper.tanukisoftware.com/doc/english/properties.html" rel="nofollow noopener noreferrer" style="color:rgb(202,0,0); text-decoration:none"><span style="color:windowtext">http://wrapper.tanukisoftware.com/doc/english/properties.html</span></a><span style="font-family:宋体">。</span></p> </td></tr><tr><td width="111" style="border-bottom:1pt solid black; border-left:1pt solid black; padding:0cm 5.4pt; background-color:transparent; width:83.4pt; border-top:rgb(240,240,240); border-right:1pt solid black"> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; line-height:21px"> <span style="line-height:21px">conf</span></p> </td><td width="457" style="border-bottom:1pt solid black; border-left:rgb(240,240,240); padding:0cm 5.4pt; background-color:transparent; width:342.7pt; border-top:rgb(240,240,240); border-right:1pt solid black"> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px"> <span style="font-family:宋体">存放配置文件：</span></p> <p style="margin:0cm 0cm 0pt 21pt; padding-top:0px; padding-bottom:0px; text-indent:-21pt"> <span style="font-family:Wingdings">l </span>server.xml<span style="font-family:宋体">：是</span>Mycat<span style="font-family:宋体">服务器参数调整和用户授权的配置文件。</span></p> <p style="margin:0cm 0cm 0pt 21pt; padding-top:0px; padding-bottom:0px; text-indent:-21pt"> <span style="font-family:Wingdings">l </span>schema.xml<span style="font-family:宋体">：是逻辑库定义和表以及分片定义的配置文件。</span></p> <p style="margin:0cm 0cm 0pt 21pt; padding-top:0px; padding-bottom:0px; text-indent:-21pt"> <span style="font-family:Wingdings">l </span>rule.xml<span style="font-family:宋体">：是分片规则的配置文件，分片规则的具体一些参数信息单独存放为文件，也在这个目录下，配置文件修改，需要重启</span>MyCAT<span style="font-family:宋体">或者通过</span>9066<span style="font-family:宋体">端口</span>reload<span style="font-family:宋体">。</span></p> <p style="margin:0cm 0cm 0pt 21pt; padding-top:0px; padding-bottom:0px; text-indent:-21pt"> <span style="font-family:Wingdings">l </span>wrapper.conf<span style="font-family:宋体">：</span>JVM<span style="font-family:宋体">配置参数等设置。</span></p> <p style="margin:0cm 0cm 0pt 21pt; padding-top:0px; padding-bottom:0px; text-indent:-21pt"> <span style="font-family:Wingdings">l </span>log4j.xml<span style="font-family:宋体">：日志存放在</span>logs/mycat.log<span style="font-family:宋体">中，每天一个文件，日志的配置是在</span>conf/log4j.xml<span style="font-family:宋体">中，根据自己的需要，可以调整输出级别为</span>debug<span style="font-family:宋体">，</span>debug<span style="font-family:宋体">级别下，会输出更多的信息，方便排查问题。</span></p> </td></tr><tr><td width="111" style="border-bottom:1pt solid black; border-left:1pt solid black; padding:0cm 5.4pt; background-color:transparent; width:83.4pt; border-top:rgb(240,240,240); border-right:1pt solid black"> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; line-height:21px"> <span style="line-height:21px">lib</span></p> </td><td width="457" style="border-bottom:1pt solid black; border-left:rgb(240,240,240); padding:0cm 5.4pt; background-color:transparent; width:342.7pt; border-top:rgb(240,240,240); border-right:1pt solid black"> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; line-height:21px"> <span style="line-height:21px">MyCAT</span><span style="font-family:宋体; line-height:21px">自身的</span><span style="line-height:21px">jar</span><span style="font-family:宋体; line-height:21px">包或依赖的</span><span style="line-height:21px">jar</span><span style="font-family:宋体; line-height:21px">包的存放目录。</span></p> </td></tr><tr><td width="111" style="border-bottom:1pt solid black; border-left:1pt solid black; padding:0cm 5.4pt; background-color:transparent; width:83.4pt; border-top:rgb(240,240,240); border-right:1pt solid black"> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; line-height:21px"> <span style="line-height:21px">logs</span></p> </td><td width="457" style="border-bottom:1pt solid black; border-left:rgb(240,240,240); padding:0cm 5.4pt; background-color:transparent; width:342.7pt; border-top:rgb(240,240,240); border-right:1pt solid black"> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; line-height:21px"> <span style="line-height:21px">MyCAT</span><span style="font-family:宋体; line-height:21px">日志的存放目录。</span><span style="font-family:宋体">日志存放在</span>logs/mycat.log<span style="font-family:宋体">中，每天一个文件</span></p> </td></tr></tbody></table> 
+<h3 style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t5" style="color:rgb(202,0,0)"></a><span style="font-family:黑体"><br> 2.2 </span><span style="font-family:黑体">启动和停止</span></h3> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> 安装mycat服务 ：mycate install <br> </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> 启动mycat服务 ：mycate start</p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> 停止mycat服务 ：mycate stop</p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px"> 注意：当修改配置文件后，需要重启mycat服务<br> <br> </p> 
+<h3 style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t6" style="color:rgb(202,0,0)"></a><span style="font-family:黑体">3、</span><span style="font-family:黑体">使用教程</span><span style="font-size:14px"><span style="line-height:30px; font-size:15pt"></span></span></h3> 
+<h3 style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t7" style="color:rgb(202,0,0)"></a><span style="font-size:14px"><span style="font-size:18px">3.1<strong> </strong><span style="font-family:宋体">硬件配置和安装数据库</span></span></span></h3> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">         本地          mycat    192.168.1.5</p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">         服务器A    mysql    192.168.1.201</p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">         服务器A    mysql    192.168.1.202</p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">        <br> </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px"> <span style="line-height:21px">         </span><span style="font-family:宋体; line-height:21px">安装</span><span style="line-height:21px">MySQL</span><span style="font-family:宋体; line-height:21px">服务器和</span><span style="line-height:21px">MySQL</span><span style="font-family:宋体; line-height:21px">客户端，笔者使用的</span><span style="line-height:21px">MySQL</span><span style="font-family:宋体; line-height:21px">服务器是免安装版本：</span><span style="line-height:21px">mysql-noinstall-5.1.73-winx64</span><span style="font-family:宋体; line-height:21px">，</span><span style="line-height:21px">MySQL</span><span style="font-family:宋体; line-height:21px">客户端是：</span><span style="line-height:21px">Navicat for MySQL</span><span style="font-family:宋体; line-height:21px">，免安装版本安装方法请参考：</span><a target="_blank" href="http://blog.csdn.net/q98842674/article/details/12094777" style="color:rgb(202,0,0); text-decoration:none" rel="noopener noreferrer">http://blog.csdn.net/q98842674/article/details/12094777<br> <br> </a></p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> <span style="font-size:18px"><strong>3.2 <span style="font-family:宋体">创建数据库</span></strong></span></p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px"> <span style="line-height:21px">        </span>分别在服务器A、服务器B创建所用的分片数据库；<br>         CREATE database db1;<span style="font-family:宋体; line-height:21px"></span></p> 
+<h4 style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t8" style="color:rgb(202,0,0)"></a><span style="line-height:30px; font-size:15pt">3.3 </span><span style="font-family:宋体; font-size:18px">配置文件</span></h4> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">     schema.xml配置文件，因为分库在不同的服务器，因此配置两个datahost；如果在一个datahost中配置多个writeHost，则为主从配置。type="global"时，为全局表，</p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> <br> </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> </p> 
+<div style="font-family:Arial; border-width:1px; border-style:solid; border-color:rgb(204,204,204); padding:4px 5px 4px 4px; background-color:rgb(238,238,238); width:927.078px; font-size:13px; word-break:break-all"> 
+ <img alt="" src="https://images2.imgbox.com/6c/63/gjmX5316_o.gif" align="top" style="border:none; max-width:100%">&lt;?xml version="1.0"?&gt; 
+ <br> &lt;!DOCTYPE mycat:schema SYSTEM "schema.dtd"&gt; 
+ <br> &lt;mycat:schema xmlns:mycat="http://org.opencloudb/"&gt; 
+ <br> 
+ <br>     &lt;schema name="TESTDB" checkSQLschema="false" sqlMaxLimit="100"&gt; 
+ <br>         &lt;!-- auto sharding by id (long) --&gt; 
+ <br>         &lt;table name="travelrecord" dataNode="dn1,dn2" rule="auto-sharding-long" /&gt; 
+ <br> 
+ <br>         &lt;!-- global table is auto cloned to all defined data nodes ,so can join  
+ <br>             with any table whose sharding node is in the same data node --&gt; 
+ <br>         &lt;table name="company" primaryKey="ID" type="global" dataNode="dn1,dn2" /&gt; 
+ <br>         &lt;table name="goods" primaryKey="ID" type="global" dataNode="dn1,dn2" /&gt; 
+ <br> 
+ <br>         &lt;!-- random sharding using mod sharind rule --&gt; 
+ <br>         &lt;table name="hotnews" primaryKey="ID" dataNode="dn1,dn2" 
+ <br>             rule="mod-long" /&gt; 
+ <br>         &lt;!-- &lt;table name="dual" primaryKey="ID" dataNode="dnx,dnoracle2" type="global" 
+ <br>             needAddLimit="false"/&gt; &lt;table name="worker" primaryKey="ID" dataNode="jdbc_dn1,jdbc_dn2,jdbc_dn3" 
+ <br>             rule="mod-long" /&gt; --&gt; 
+ <br>         &lt;table name="employee" primaryKey="ID" dataNode="dn1,dn2" 
+ <br>             rule="sharding-by-intfile" /&gt; 
+ <br>         &lt;table name="customer" primaryKey="ID" dataNode="dn1,dn2" 
+ <br>             rule="sharding-by-intfile"&gt; 
+ <br>             &lt;childTable name="orders" primaryKey="ID" joinKey="customer_id" 
+ <br>                 parentKey="id"&gt; 
+ <br>                 &lt;childTable name="order_items" joinKey="order_id" 
+ <br>                     parentKey="id" /&gt; 
+ <br>             &lt;/childTable&gt; 
+ <br>             &lt;childTable name="customer_addr" primaryKey="ID" joinKey="customer_id" 
+ <br>                 parentKey="id" /&gt; 
+ <br>         &lt;/table&gt; 
+ <br>     &lt;/schema&gt; 
+ <br>     &lt;dataNode name="dn1" dataHost="localhost1" database="db1" /&gt; 
+ <br>     &lt;dataNode name="dn2" dataHost="localhost2" database="db1" /&gt; 
+ <br>     &lt;dataHost name="localhost1" maxCon="1000" minCon="10" balance="0" 
+ <br>         writeType="0" dbType="mysql" dbDriver="native" switchType="1"  slaveThreshold="100"&gt; 
+ <br>         &lt;heartbeat&gt;select user()&lt;/heartbeat&gt; 
+ <br>         &lt;writeHost host="hostM1" url="192.168.1.201:3306" user="shopuser" 
+ <br>             password="123456"&gt; 
+ <br>         &lt;/writeHost&gt; 
+ <br>     &lt;/dataHost&gt; 
+ <br>     &lt;dataHost name="localhost2" maxCon="1000" minCon="10" balance="0" 
+ <br>         writeType="0" dbType="mysql" dbDriver="native" switchType="1"  slaveThreshold="100"&gt; 
+ <br>         &lt;heartbeat&gt;select user()&lt;/heartbeat&gt; 
+ <br>         &lt;writeHost host="hostM1" url="192.168.1.202:3306" user="shopuser" 
+ <br>             password="123456"&gt; 
+ <br>         &lt;/writeHost&gt; 
+ <br>     &lt;/dataHost&gt; 
+ <br> &lt;/mycat:schema&gt; 
+</div> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">       server.xml配置文件，本实例很简单，就只定义user， </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">       name：用户名<br> </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">       password：密码</p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">       schemas：实例名，和schema.xml定义的schema对应，这里的实例名是虚拟名，也就是对mycat服务的一种别名，是 应用程序以及客户端连接的入口。<br> </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> </p> 
+<div style="font-family:Arial; border-width:1px; border-style:solid; border-color:rgb(204,204,204); padding:4px 5px 4px 4px; background-color:rgb(238,238,238); width:927.078px; font-size:13px; word-break:break-all">
+  &lt;?xml version="1.0" encoding="UTF-8"?&gt; 
+ <br> &lt;!-- - - Licensed under the Apache License, Version 2.0 (the "License");  
+ <br>     - you may not use this file except in compliance with the License. - You  
+ <br>     may obtain a copy of the License at - - http://www.apache.org/licenses/LICENSE-2.0 
+ <br>     - - Unless required by applicable law or agreed to in writing, software -  
+ <br>     distributed under the License is distributed on an "AS IS" BASIS, - WITHOUT  
+ <br>     WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. - See the  
+ <br>     License for the specific language governing permissions and - limitations  
+ <br>     under the License. --&gt; 
+ <br> &lt;!DOCTYPE mycat:server SYSTEM "server.dtd"&gt; 
+ <br> &lt;mycat:server xmlns:mycat="http://org.opencloudb/"&gt; 
+ <br>     &lt;system&gt; 
+ <br>     &lt;property name="defaultSqlParser"&gt;druidparser&lt;/property&gt; 
+ <br>       &lt;!--  &lt;property name="useCompression"&gt;1&lt;/property&gt;--&gt; &lt;!--1为开启mysql压缩协议--&gt; 
+ <br>     &lt;!-- &lt;property name="processorBufferChunk"&gt;40960&lt;/property&gt; --&gt; 
+ <br>     &lt;!--  
+ <br>     &lt;property name="processors"&gt;1&lt;/property&gt;  
+ <br>     &lt;property name="processorExecutor"&gt;32&lt;/property&gt;  
+ <br>      --&gt; 
+ <br>         &lt;!--默认是65535 64K 用于sql解析时最大文本长度 --&gt; 
+ <br>         &lt;!--&lt;property name="maxStringLiteralLength"&gt;65535&lt;/property&gt;--&gt; 
+ <br>         &lt;!--&lt;property name="sequnceHandlerType"&gt;0&lt;/property&gt;--&gt; 
+ <br>         &lt;!--&lt;property name="backSocketNoDelay"&gt;1&lt;/property&gt;--&gt; 
+ <br>         &lt;!--&lt;property name="frontSocketNoDelay"&gt;1&lt;/property&gt;--&gt; 
+ <br>         &lt;!--&lt;property name="processorExecutor"&gt;16&lt;/property&gt;--&gt; 
+ <br>         &lt;!--  
+ <br>             &lt;property name="mutiNodeLimitType"&gt;1&lt;/property&gt; 0：开启小数量级（默认） ；1：开启亿级数据排序 
+ <br>             &lt;property name="mutiNodePatchSize"&gt;100&lt;/property&gt; 亿级数量排序批量 
+ <br>             &lt;property name="processors"&gt;32&lt;/property&gt; &lt;property name="processorExecutor"&gt;32&lt;/property&gt; 
+ <br>             &lt;property name="serverPort"&gt;8066&lt;/property&gt; &lt;property name="managerPort"&gt;9066&lt;/property&gt; 
+ <br>             &lt;property name="idleTimeout"&gt;300000&lt;/property&gt; &lt;property name="bindIp"&gt;0.0.0.0&lt;/property&gt; 
+ <br>             &lt;property name="frontWriteQueueSize"&gt;4096&lt;/property&gt; &lt;property name="processors"&gt;32&lt;/property&gt; --&gt; 
+ <br>     &lt;/system&gt; 
+ <br>     &lt;user name="test"&gt; 
+ <br>         &lt;property name="password"&gt;test&lt;/property&gt; 
+ <br>         &lt;property name="schemas"&gt;TESTDB&lt;/property&gt; 
+ <br>     &lt;/user&gt; 
+ <br> &lt;/mycat:server&gt; 
+ <span style="line-height:30px; font-size:15pt"></span> 
+</div> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; text-indent:21pt"> </p> 
+<h4 align="left" style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t9" style="color:rgb(202,0,0)"></a><span style="line-height:30px; font-size:15pt"></span><span style="font-family:宋体"><span style="font-size:18px"><br> </span></span></h4> 
+<span style="font-family:Arial; font-size:14px">3.4 登录mycat</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">在任意有mysql的客户端的机器连接Mycat, 执行以下命令</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">       mysql -utest -ptest -h192.168.1.5 -P8066 -DTESTDB   注意：8066登录mycat数据端口，9066登录mycat管理端口(能看到mycat内的配置、以及各个数据库连接情况，很有用)</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">3.5 测试</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">全局表：company</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">mysql&gt; create table company(id int not null primary key,name varchar(100),sharding_id int not null);</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">      Query OK, 0 rows affected (0.30 sec)</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">      mysql&gt; explain create table company(id int not null primary key,name varchar(100),sharding_id int not null);</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">     +-----------+------------------------------------------------------------------------------------------------+</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">     | DATA_NODE | SQL                                                                                            |</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">     +-----------+------------------------------------------------------------------------------------------------+</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">     | dn1       | create table company(id int not null primary key,name varchar(100),sharding_id int not null) |</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">     | dn2       | create table company(id int not null primary key,name varchar(100),sharding_id int not null) |</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">     +-----------+------------------------------------------------------------------------------------------------+</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">     2 rows in set (0.04 sec)</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">mysql&gt; insert into company(id,name,sharding_id) values(1,'leader us',10000);</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">      ERROR 2006 (HY000): MySQL server has gone away</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">      No connection. Trying to reconnect...</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">      Connection id:    6</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">      Current database: TESTDB</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px"> Query OK, 1 row affected (0.03 sec)</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">       mysql&gt; explain insert into company(id,name,sharding_id) values(1,'leader us',10000);</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">       +-----------+-----------------------------------------------------------------------+</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">       | DATA_NODE | SQL                                                                   |</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">       +-----------+-----------------------------------------------------------------------+</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">      | dn1       | insert into company(id,name,sharding_id) values(1,'leader us',10000) |</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">      +-----------+-----------------------------------------------------------------------+</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">      1 row in set (0.00 sec)</span> 
+<h4 align="left" style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t10" style="color:rgb(202,0,0)"></a></h4> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> <br> </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> 水平分表：travelrecord</p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> mysql&gt; explain create table travelrecord(id int not null primary key,name varchar(100));<br>       +-----------+---------------------------------------------------------------------+<br>       | DATA_NODE | SQL                                                                 |<br>      +-----------+---------------------------------------------------------------------+<br>      | dn1       | create table travelrecord(id int not null primary key,name varchar(100)) |<br>      | dn2       | create table travelrecord(id int not null primary key,name varchar(100)) |<br>      | dn3       | create table travelrecord(id int not null primary key,name varchar(100)) |<br>      +-----------+---------------------------------------------------------------------+<br>      3 rows in set (0.01 sec)</p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">   (7) 三个分片上都插入了3条数据<br>      mysql&gt; explain insert into travelrecord(id,name) values(1,'hp');<br>      +-----------+---------------------------------------------+<br>      | DATA_NODE | SQL                                         |<br>      +-----------+---------------------------------------------+<br>      | dn1       | insert into travelrecord(id,name) values(1,'hp') | <br>      | dn2       | insert into travelrecord(id,name) values(1,'hp') | <br>      | dn3       | insert into travelrecord(id,name) values(1,'hp') | <br>      +-----------+---------------------------------------------+<br>      3 rows in set (0.00 sec)</p> 
+<div> 
+ <br> 
+</div> 
+<h3 style="margin:0px; padding:0px; font-family:Arial">1、MyCat概念<br> </h3> 
+<h3 style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t1" style="color:rgb(202,0,0)"></a><span style="font-family:黑体">1.1 </span><span style="font-family:黑体">总体架构</span></h3> 
+<p align="left" style="margin:auto auto auto 21pt; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px"> MyCAT<span style="font-family:宋体">的<a target="_blank" href="http://lib.csdn.net/base/architecture" rel="nofollow noopener noreferrer" class="replace_word" title="大型网站架构知识库" style="color:rgb(223,52,52); text-decoration:none; font-weight:bold">架构</a>如下图所示：<br> <img alt="" src="https://images2.imgbox.com/69/a0/kjpgvuKX_o.png" height="415" border="0" width="404" style="border:none; max-width:100%"><br> </span></p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:21pt"> MyCAT<span style="font-family:宋体">使用</span><a target="_blank" href="http://lib.csdn.net/base/mysql" rel="nofollow noopener noreferrer" class="replace_word" title="MySQL知识库" style="color:rgb(223,52,52); text-decoration:none; font-weight:bold">MySQL</a><span style="font-family:宋体">的通讯协议模拟成一个</span>MySQL<span style="font-family:宋体">服务器，并建立了完整的</span>Schema<span style="font-family:宋体">（<a target="_blank" href="http://lib.csdn.net/base/mysql" rel="nofollow noopener noreferrer" class="replace_word" title="MySQL知识库" style="color:rgb(223,52,52); text-decoration:none; font-weight:bold">数据库</a>）、</span>Table<span style="font-family:宋体">（数据表）、</span>User<span style="font-family:宋体">（用户）的逻辑模型，并将这套逻辑模型映射到后端的存储节点</span>DataNode<span style="font-family:宋体">（</span>MySQL Instance<span style="font-family:宋体">）上的真实物理库中，这样一来，所有能使用</span>MySQL<span style="font-family:宋体">的客户端以及编程语言都能将</span>MyCAT<span style="font-family:宋体">当成是</span>MySQLServer<span style="font-family:宋体">来使用，不必开发新的客户端协议。</span></p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:21pt"> <span style="font-family:宋体">当</span>MyCAT<span style="font-family:宋体">收到一个客户端发送的</span>SQL<span style="font-family:宋体">请求时，会先对</span>SQL<span style="font-family:宋体">进行语法分析和检查，分析的结果用于</span>SQL<span style="font-family:宋体">路由，</span>SQL<span style="font-family:宋体">路由策略支持传统的基于表格的分片字段方式进行分片，也支持独有的基于数据库</span>E-R<span style="font-family:宋体">关系的分片策略，对于路由到多个数据节点（</span>DataNode<span style="font-family:宋体">）的</span>SQL<span style="font-family:宋体">，则会对收到的数据集进行“归并”然后输出到客户端。</span></p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:21pt"> SQL<span style="font-family:宋体">执行的过程，简单的说，就是把</span>SQL<span style="font-family:宋体">通过网络协议发送给后端的真正的数据库上进行执行，对于</span>MySQL Server<span style="font-family:宋体">来说，是通过</span>MySQL<span style="font-family:宋体">网络协议发送报文，并解析返回的结果，若</span>SQL<span style="font-family:宋体">不涉及到多个分片节点，则直接返回结果，写入客户端的</span>SOCKET<span style="font-family:宋体">流中，这个过程是非阻塞模式（</span>NIO<span style="font-family:宋体">）。</span></p> 
+<p align="left" style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:21pt"> DataNode<span style="font-family:宋体">是</span><strong>MyCAT</strong><span style="font-family:宋体">的逻辑数据节点，映射到后端的某一个物理数据库的一个</span>Database<span style="font-family:宋体">，为了做到系统高可用，每个</span>DataNode<span style="font-family:宋体">可以配置多个引用地址（</span>DataSource<span style="font-family:宋体">），当主</span>DataSource<span style="font-family:宋体">被检测为不可用时，系统会自动切换到下一个可用的</span>DataSource<span style="font-family:宋体">上，这里的</span>DataSource<span style="font-family:宋体">即可认为是</span>Mysql<span style="font-family:宋体">的主从服务器的地址。</span></p> 
+<h3 style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t2" style="color:rgb(202,0,0)"></a><span style="font-family:黑体">1.2 </span><span style="font-family:黑体">逻辑库</span></h3> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:18pt"> <span style="font-family:宋体">与任何一个传统的关系型数据库一样，</span><strong>MyCAT</strong><span style="font-family:宋体">也提供了“数据库”的定义，并有用户授权的功能，下面是</span><strong>MyCAT</strong><span style="font-family:宋体">逻辑库相关的一些概念：</span></p> 
+<ul type="disc" style="font-family:Arial; font-size:14px; margin-top:0cm"><li style="text-align:left; line-height:21px"><strong>schema</strong>:<span style="font-family:宋体">逻辑库，与</span>MySQL<span style="font-family:宋体">中的</span>Database<span style="font-family:宋体">（数据库）对应，一个逻辑库中定义了所包括的</span>Table<span style="font-family:宋体">。</span></li><li style="text-align:left; line-height:21px"><strong>table</strong><span style="font-family:宋体">：表，即物理数据库中存储的某一张表，与传统数据库不同，这里的表格需要声明其所存储的逻辑数据节点</span>DataNode<span style="font-family:宋体">，这是通过表格的分片规则定义来实现的，</span>table<span style="font-family:宋体">可以定义其所属的“子表</span>(childTable)<span style="font-family:宋体">”，子表的分片依赖于与“父表”的具体分片地址，简单的说，就是属于父表里某一条记录</span>A<span style="font-family:宋体">的子表的所有记录都与</span>A<span style="font-family:宋体">存储在同一个分片上。</span></li><li style="text-align:left; line-height:21px"><strong><span style="font-family:宋体">分片规则</span></strong><span style="font-family:宋体">：是一个字段与函数的捆绑定义，根据这个字段的取值来返回所在存储的分片（</span>DataNode<span style="font-family:宋体">）的序号，每个表格可以定义一个分片规则，分片规则可以灵活扩展，默认提供了基于数字的分片规则，字符串的分片规则等。</span></li><li style="text-align:left; line-height:21px"><strong>dataNode</strong>:<strong> MyCAT</strong><span style="font-family:宋体">的逻辑数据节点，是存放</span>table<span style="font-family:宋体">的具体物理节点，也称之为分片节点，通过</span>DataSource<span style="font-family:宋体">来关联到后端某个具体数据库上，一般来说，为了高可用性，每个</span>DataNode<span style="font-family:宋体">都设置两个</span>DataSource<span style="font-family:宋体">，一主一从，当主节点宕机，系统自动切换到从节点。</span></li><li style="text-align:left; line-height:21px"><strong>dataHost</strong><span style="font-family:宋体">：定义某个物理库的访问地址，用于捆绑到</span>dataNode<span style="font-family:宋体">上。</span></li></ul> 
+<p style="margin:0cm 0cm 0pt 18pt; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px"> <strong>MyCAT</strong><span style="font-family:宋体">目前通过配置文件的方式来定义逻辑库和相关配置：</span></p> 
+<p align="left" style="margin:0cm 0cm 0pt 54pt; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:-18pt"> <span style="font-family:Symbol">·<span style='font-size:7pt; line-height:normal; font-family:"Times New Roman"'>        </span></span>MYCAT_HOME/conf/schema.xml<span style="font-family:宋体">中定义逻辑库，表、分片节点等内容；</span></p> 
+<p align="left" style="margin:0cm 0cm 0pt 54pt; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:-18pt"> <span style="font-family:Symbol">·<span style='font-size:7pt; line-height:normal; font-family:"Times New Roman"'>        </span></span>MYCAT_HOME/conf/rule.xml<span style="font-family:宋体">中定义分片规则；</span></p> 
+<p align="left" style="margin:0cm 0cm 0pt 54pt; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:-18pt"> <span style="font-family:Symbol">·<span style='font-size:7pt; line-height:normal; font-family:"Times New Roman"'>        </span></span>MYCAT_HOME/conf/server.xml<span style="font-family:宋体">中定义用户以及系统相关变量，如端口等。</span></p> 
+<p align="left" style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:21pt"> <span style="font-family:宋体; font-size:10.5pt">下图给出了</span><strong><span style="font-family:Calibri,sans-serif; font-size:10.5pt">MyCAT</span></strong><span style="font-family:宋体; font-size:10.5pt">一个可能的逻辑库到物理库（</span><span style="font-family:Calibri,sans-serif; font-size:10.5pt">MySQL</span><span style="font-family:宋体; font-size:10.5pt">的完整映射关系），可以看出强大的分片能力以及灵活的</span><span style="font-family:Calibri,sans-serif; font-size:10.5pt">Mysql</span><span style="font-family:宋体; font-size:10.5pt">集群整合能力。          <img alt="" src="https://images2.imgbox.com/f1/e1/oQujAM09_o.png" height="362" border="0" width="472" style="border:none; max-width:100%"></span><br> <br> <br> </p> 
+<h2 style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t3" style="color:rgb(202,0,0)"></a><span style="font-family:黑体; line-height:36px; font-size:18pt">2、<span style='font-weight:normal; font-size:7pt; line-height:normal; font-family:"Times New Roman"'>  </span></span><span style="font-family:黑体; line-height:36px; font-size:18pt">MyCat基本使用教程</span></h2> 
+<h3 style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t4" style="color:rgb(202,0,0)"></a><span style="font-family:黑体">2.1 </span><span style="font-family:黑体">下载和安装</span></h3> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px"> <span style="line-height:21px">         MyCAT</span><span style="font-family:宋体; line-height:21px">使用</span><span style="line-height:21px"><a target="_blank" href="http://lib.csdn.net/base/javase" rel="nofollow noopener noreferrer" class="replace_word" title="Java SE知识库" style="color:rgb(223,52,52); text-decoration:none; font-weight:bold">Java</a></span><span style="font-family:宋体; line-height:21px">开发，因为用到了</span><span style="line-height:21px">JDK 7</span><span style="font-family:宋体; line-height:21px">的部分功能，所以在使用前请确保安装了</span><span style="line-height:21px">JDK 7.0</span><span style="font-family:宋体; line-height:21px">，要求是<span style="font-size:18px"><strong><span style="color:rgb(102,0,0)"><span style="line-height:27px">JDK 7.0</span>以上</span></strong></span>，并设置了正确的</span><span style="line-height:21px">Java</span><span style="font-family:宋体; line-height:21px">环境变量</span></p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:21pt"> <span style="font-family:宋体; line-height:21px">目前下载的版本是免安装，解压在<span style="font-size:18px; color:rgb(102,0,0)"><strong>任意</strong></span>磁盘、根目录下，<span style="color:rgb(102,0,0)"><strong><span style="font-size:18px">避免路径中出现中文</span></strong></span>。<span style="line-height:21px"><br> </span></span></p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:21pt"> <span style="font-family:宋体; line-height:21px"><span style="line-height:21px">目录下的“</span><a target="_blank" href="http://code.taobao.org/svn/openclouddb/downloads/old/MyCat-Sever-1.2/Mycat-server-1.2-GA-win.tar.gz" rel="nofollow noopener noreferrer" style="color:rgb(202,0,0); text-decoration:none">Mycat-server-1.2-GA-win.tar.gz</a><span style="line-height:21px">”文件，解压后的目录结构如下图所示：<br>      <img alt="" src="https://images2.imgbox.com/fc/32/EvXcc1l8_o.png" height="125" border="0" width="488" style="border:none; max-width:100%"></span><br> </span></p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px; text-indent:21pt"> <span style="font-family:宋体; line-height:21px">目录说明见下表所示：</span></p> 
+<table border="1" cellpadding="0" cellspacing="0" style="color:rgb(0,0,0); font-family:Arial; font-size:14px; border-width:medium; border-style:none; border-color:initial; border-collapse:collapse"><tbody><tr><td width="111" style="border-width:1pt; border-style:solid; border-color:black; padding:0cm 5.4pt; width:83.4pt; background:yellow"> <p align="center" style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; text-align:center; line-height:21px"> <strong><span style="font-family:黑体; line-height:21px">目录名称</span></strong></p> </td><td width="457" style="border-bottom:1pt solid black; border-left:rgb(240,240,240); padding:0cm 5.4pt; width:342.7pt; background:yellow; border-top:1pt solid black; border-right:1pt solid black"> <p align="center" style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; text-align:center; line-height:21px"> <strong><span style="font-family:黑体; line-height:21px">说明</span></strong></p> </td></tr><tr style="height:195.2pt"><td width="111" style="border-bottom:1pt solid black; border-left:1pt solid black; padding:0cm 5.4pt; background-color:transparent; width:83.4pt; height:195.2pt; border-top:rgb(240,240,240); border-right:1pt solid black"> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; line-height:21px"> <span style="line-height:21px">bin</span></p> </td><td width="457" style="border-bottom:1pt solid black; border-left:rgb(240,240,240); padding:0cm 5.4pt; background-color:transparent; width:342.7pt; height:195.2pt; border-top:rgb(240,240,240); border-right:1pt solid black"> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; line-height:21px"> <span style="font-family:宋体">存放</span>window<span style="font-family:宋体">版本和</span><a target="_blank" href="http://lib.csdn.net/base/linux" rel="nofollow noopener noreferrer" class="replace_word" title="Linux知识库" style="color:rgb(223,52,52); text-decoration:none; font-weight:bold">Linux</a><span style="font-family:宋体">版本，除了提供封装成服务的版本之外，也提供</span>nowrap<span style="font-family:宋体">的</span>shell<span style="font-family:宋体">脚本命令，方便大家选择和修改。</span></p> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px"> Windows <span style="font-family:宋体">下</span> <span style="font-family:宋体">运行：</span>mycat.bat console<span style="font-family:宋体">在控制台启动程序，也可以装载成服务，若此程序运行有问题，也可以运行</span>startup_nowrap.bat<span style="font-family:宋体">，确保</span>java<span style="font-family:宋体">命令可以在命令执行。</span></p> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px"> Warp<span style="font-family:宋体">方式的命令，可以安装成服务并启动或停止。</span></p> <p style="margin:0cm 0cm 0pt 21pt; padding-top:0px; padding-bottom:0px; text-indent:-21pt"> <span style="font-family:Wingdings">l </span>mycat install (<span style="font-family:宋体">可选</span>)</p> <p style="margin:0cm 0cm 0pt 21pt; padding-top:0px; padding-bottom:0px; text-indent:-21pt"> <span style="font-family:Wingdings">l </span>mycat start</p> <p align="left" style="margin:0cm 0cm 10pt; padding-top:0px; padding-bottom:0px; line-height:16.1px"> <span style="font-family:宋体">注意，</span>wrap<span style="font-family:宋体">方式的程序，其</span>JVM<span style="font-family:宋体">配置参数在</span>conf/wrap.conf<span style="font-family:宋体">中，可以修改为合适的参数，参数调整参照</span><a target="_blank" href="http://wrapper.tanukisoftware.com/doc/english/properties.html" rel="nofollow noopener noreferrer" style="color:rgb(202,0,0); text-decoration:none"><span style="color:windowtext">http://wrapper.tanukisoftware.com/doc/english/properties.html</span></a><span style="font-family:宋体">。</span></p> </td></tr><tr><td width="111" style="border-bottom:1pt solid black; border-left:1pt solid black; padding:0cm 5.4pt; background-color:transparent; width:83.4pt; border-top:rgb(240,240,240); border-right:1pt solid black"> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; line-height:21px"> <span style="line-height:21px">conf</span></p> </td><td width="457" style="border-bottom:1pt solid black; border-left:rgb(240,240,240); padding:0cm 5.4pt; background-color:transparent; width:342.7pt; border-top:rgb(240,240,240); border-right:1pt solid black"> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px"> <span style="font-family:宋体">存放配置文件：</span></p> <p style="margin:0cm 0cm 0pt 21pt; padding-top:0px; padding-bottom:0px; text-indent:-21pt"> <span style="font-family:Wingdings">l </span>server.xml<span style="font-family:宋体">：是</span>Mycat<span style="font-family:宋体">服务器参数调整和用户授权的配置文件。</span></p> <p style="margin:0cm 0cm 0pt 21pt; padding-top:0px; padding-bottom:0px; text-indent:-21pt"> <span style="font-family:Wingdings">l </span>schema.xml<span style="font-family:宋体">：是逻辑库定义和表以及分片定义的配置文件。</span></p> <p style="margin:0cm 0cm 0pt 21pt; padding-top:0px; padding-bottom:0px; text-indent:-21pt"> <span style="font-family:Wingdings">l </span>rule.xml<span style="font-family:宋体">：是分片规则的配置文件，分片规则的具体一些参数信息单独存放为文件，也在这个目录下，配置文件修改，需要重启</span>MyCAT<span style="font-family:宋体">或者通过</span>9066<span style="font-family:宋体">端口</span>reload<span style="font-family:宋体">。</span></p> <p style="margin:0cm 0cm 0pt 21pt; padding-top:0px; padding-bottom:0px; text-indent:-21pt"> <span style="font-family:Wingdings">l </span>wrapper.conf<span style="font-family:宋体">：</span>JVM<span style="font-family:宋体">配置参数等设置。</span></p> <p style="margin:0cm 0cm 0pt 21pt; padding-top:0px; padding-bottom:0px; text-indent:-21pt"> <span style="font-family:Wingdings">l </span>log4j.xml<span style="font-family:宋体">：日志存放在</span>logs/mycat.log<span style="font-family:宋体">中，每天一个文件，日志的配置是在</span>conf/log4j.xml<span style="font-family:宋体">中，根据自己的需要，可以调整输出级别为</span>debug<span style="font-family:宋体">，</span>debug<span style="font-family:宋体">级别下，会输出更多的信息，方便排查问题。</span></p> </td></tr><tr><td width="111" style="border-bottom:1pt solid black; border-left:1pt solid black; padding:0cm 5.4pt; background-color:transparent; width:83.4pt; border-top:rgb(240,240,240); border-right:1pt solid black"> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; line-height:21px"> <span style="line-height:21px">lib</span></p> </td><td width="457" style="border-bottom:1pt solid black; border-left:rgb(240,240,240); padding:0cm 5.4pt; background-color:transparent; width:342.7pt; border-top:rgb(240,240,240); border-right:1pt solid black"> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; line-height:21px"> <span style="line-height:21px">MyCAT</span><span style="font-family:宋体; line-height:21px">自身的</span><span style="line-height:21px">jar</span><span style="font-family:宋体; line-height:21px">包或依赖的</span><span style="line-height:21px">jar</span><span style="font-family:宋体; line-height:21px">包的存放目录。</span></p> </td></tr><tr><td width="111" style="border-bottom:1pt solid black; border-left:1pt solid black; padding:0cm 5.4pt; background-color:transparent; width:83.4pt; border-top:rgb(240,240,240); border-right:1pt solid black"> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; line-height:21px"> <span style="line-height:21px">logs</span></p> </td><td width="457" style="border-bottom:1pt solid black; border-left:rgb(240,240,240); padding:0cm 5.4pt; background-color:transparent; width:342.7pt; border-top:rgb(240,240,240); border-right:1pt solid black"> <p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; line-height:21px"> <span style="line-height:21px">MyCAT</span><span style="font-family:宋体; line-height:21px">日志的存放目录。</span><span style="font-family:宋体">日志存放在</span>logs/mycat.log<span style="font-family:宋体">中，每天一个文件</span></p> </td></tr></tbody></table> 
+<h3 style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t5" style="color:rgb(202,0,0)"></a><span style="font-family:黑体"><br> 2.2 </span><span style="font-family:黑体">启动和停止</span></h3> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> 安装mycat服务 ：mycate install <br> </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> 启动mycat服务 ：mycate start</p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> 停止mycat服务 ：mycate stop</p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px"> 注意：当修改配置文件后，需要重启mycat服务<br> <br> </p> 
+<h3 style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t6" style="color:rgb(202,0,0)"></a><span style="font-family:黑体">3、</span><span style="font-family:黑体">使用教程</span><span style="font-size:14px"><span style="line-height:30px; font-size:15pt"></span></span></h3> 
+<h3 style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t7" style="color:rgb(202,0,0)"></a><span style="font-size:14px"><span style="font-size:18px">3.1<strong> </strong><span style="font-family:宋体">硬件配置和安装数据库</span></span></span></h3> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">         本地          mycat    192.168.1.5</p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">         服务器A    mysql    192.168.1.201</p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">         服务器A    mysql    192.168.1.202</p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">        <br> </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px"> <span style="line-height:21px">         </span><span style="font-family:宋体; line-height:21px">安装</span><span style="line-height:21px">MySQL</span><span style="font-family:宋体; line-height:21px">服务器和</span><span style="line-height:21px">MySQL</span><span style="font-family:宋体; line-height:21px">客户端，笔者使用的</span><span style="line-height:21px">MySQL</span><span style="font-family:宋体; line-height:21px">服务器是免安装版本：</span><span style="line-height:21px">mysql-noinstall-5.1.73-winx64</span><span style="font-family:宋体; line-height:21px">，</span><span style="line-height:21px">MySQL</span><span style="font-family:宋体; line-height:21px">客户端是：</span><span style="line-height:21px">Navicat for MySQL</span><span style="font-family:宋体; line-height:21px">，免安装版本安装方法请参考：</span><a target="_blank" href="http://blog.csdn.net/q98842674/article/details/12094777" style="color:rgb(202,0,0); text-decoration:none" rel="noopener noreferrer">http://blog.csdn.net/q98842674/article/details/12094777<br> <br> </a></p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> <span style="font-size:18px"><strong>3.2 <span style="font-family:宋体">创建数据库</span></strong></span></p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; line-height:21px"> <span style="line-height:21px">        </span>分别在服务器A、服务器B创建所用的分片数据库；<br>         CREATE database db1;<span style="font-family:宋体; line-height:21px"></span></p> 
+<h4 style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t8" style="color:rgb(202,0,0)"></a><span style="line-height:30px; font-size:15pt">3.3 </span><span style="font-family:宋体; font-size:18px">配置文件</span></h4> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">     schema.xml配置文件，因为分库在不同的服务器，因此配置两个datahost；如果在一个datahost中配置多个writeHost，则为主从配置。type="global"时，为全局表，</p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> <br> </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> </p> 
+<div style="font-family:Arial; border-width:1px; border-style:solid; border-color:rgb(204,204,204); padding:4px 5px 4px 4px; background-color:rgb(238,238,238); width:927.078px; font-size:13px; word-break:break-all"> 
+ <img alt="" src="https://images2.imgbox.com/59/ac/lG6LKWJy_o.gif" align="top" style="border:none; max-width:100%">&lt;?xml version="1.0"?&gt; 
+ <br> &lt;!DOCTYPE mycat:schema SYSTEM "schema.dtd"&gt; 
+ <br> &lt;mycat:schema xmlns:mycat="http://org.opencloudb/"&gt; 
+ <br> 
+ <br>     &lt;schema name="TESTDB" checkSQLschema="false" sqlMaxLimit="100"&gt; 
+ <br>         &lt;!-- auto sharding by id (long) --&gt; 
+ <br>         &lt;table name="travelrecord" dataNode="dn1,dn2" rule="auto-sharding-long" /&gt; 
+ <br> 
+ <br>         &lt;!-- global table is auto cloned to all defined data nodes ,so can join  
+ <br>             with any table whose sharding node is in the same data node --&gt; 
+ <br>         &lt;table name="company" primaryKey="ID" type="global" dataNode="dn1,dn2" /&gt; 
+ <br>         &lt;table name="goods" primaryKey="ID" type="global" dataNode="dn1,dn2" /&gt; 
+ <br> 
+ <br>         &lt;!-- random sharding using mod sharind rule --&gt; 
+ <br>         &lt;table name="hotnews" primaryKey="ID" dataNode="dn1,dn2" 
+ <br>             rule="mod-long" /&gt; 
+ <br>         &lt;!-- &lt;table name="dual" primaryKey="ID" dataNode="dnx,dnoracle2" type="global" 
+ <br>             needAddLimit="false"/&gt; &lt;table name="worker" primaryKey="ID" dataNode="jdbc_dn1,jdbc_dn2,jdbc_dn3" 
+ <br>             rule="mod-long" /&gt; --&gt; 
+ <br>         &lt;table name="employee" primaryKey="ID" dataNode="dn1,dn2" 
+ <br>             rule="sharding-by-intfile" /&gt; 
+ <br>         &lt;table name="customer" primaryKey="ID" dataNode="dn1,dn2" 
+ <br>             rule="sharding-by-intfile"&gt; 
+ <br>             &lt;childTable name="orders" primaryKey="ID" joinKey="customer_id" 
+ <br>                 parentKey="id"&gt; 
+ <br>                 &lt;childTable name="order_items" joinKey="order_id" 
+ <br>                     parentKey="id" /&gt; 
+ <br>             &lt;/childTable&gt; 
+ <br>             &lt;childTable name="customer_addr" primaryKey="ID" joinKey="customer_id" 
+ <br>                 parentKey="id" /&gt; 
+ <br>         &lt;/table&gt; 
+ <br>     &lt;/schema&gt; 
+ <br>     &lt;dataNode name="dn1" dataHost="localhost1" database="db1" /&gt; 
+ <br>     &lt;dataNode name="dn2" dataHost="localhost2" database="db1" /&gt; 
+ <br>     &lt;dataHost name="localhost1" maxCon="1000" minCon="10" balance="0" 
+ <br>         writeType="0" dbType="mysql" dbDriver="native" switchType="1"  slaveThreshold="100"&gt; 
+ <br>         &lt;heartbeat&gt;select user()&lt;/heartbeat&gt; 
+ <br>         &lt;writeHost host="hostM1" url="192.168.1.201:3306" user="shopuser" 
+ <br>             password="123456"&gt; 
+ <br>         &lt;/writeHost&gt; 
+ <br>     &lt;/dataHost&gt; 
+ <br>     &lt;dataHost name="localhost2" maxCon="1000" minCon="10" balance="0" 
+ <br>         writeType="0" dbType="mysql" dbDriver="native" switchType="1"  slaveThreshold="100"&gt; 
+ <br>         &lt;heartbeat&gt;select user()&lt;/heartbeat&gt; 
+ <br>         &lt;writeHost host="hostM1" url="192.168.1.202:3306" user="shopuser" 
+ <br>             password="123456"&gt; 
+ <br>         &lt;/writeHost&gt; 
+ <br>     &lt;/dataHost&gt; 
+ <br> &lt;/mycat:schema&gt; 
+</div> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">       server.xml配置文件，本实例很简单，就只定义user， </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">       name：用户名<br> </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">       password：密码</p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">       schemas：实例名，和schema.xml定义的schema对应，这里的实例名是虚拟名，也就是对mycat服务的一种别名，是 应用程序以及客户端连接的入口。<br> </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> </p> 
+<div style="font-family:Arial; border-width:1px; border-style:solid; border-color:rgb(204,204,204); padding:4px 5px 4px 4px; background-color:rgb(238,238,238); width:927.078px; font-size:13px; word-break:break-all">
+  &lt;?xml version="1.0" encoding="UTF-8"?&gt; 
+ <br> &lt;!-- - - Licensed under the Apache License, Version 2.0 (the "License");  
+ <br>     - you may not use this file except in compliance with the License. - You  
+ <br>     may obtain a copy of the License at - - http://www.apache.org/licenses/LICENSE-2.0 
+ <br>     - - Unless required by applicable law or agreed to in writing, software -  
+ <br>     distributed under the License is distributed on an "AS IS" BASIS, - WITHOUT  
+ <br>     WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. - See the  
+ <br>     License for the specific language governing permissions and - limitations  
+ <br>     under the License. --&gt; 
+ <br> &lt;!DOCTYPE mycat:server SYSTEM "server.dtd"&gt; 
+ <br> &lt;mycat:server xmlns:mycat="http://org.opencloudb/"&gt; 
+ <br>     &lt;system&gt; 
+ <br>     &lt;property name="defaultSqlParser"&gt;druidparser&lt;/property&gt; 
+ <br>       &lt;!--  &lt;property name="useCompression"&gt;1&lt;/property&gt;--&gt; &lt;!--1为开启mysql压缩协议--&gt; 
+ <br>     &lt;!-- &lt;property name="processorBufferChunk"&gt;40960&lt;/property&gt; --&gt; 
+ <br>     &lt;!--  
+ <br>     &lt;property name="processors"&gt;1&lt;/property&gt;  
+ <br>     &lt;property name="processorExecutor"&gt;32&lt;/property&gt;  
+ <br>      --&gt; 
+ <br>         &lt;!--默认是65535 64K 用于sql解析时最大文本长度 --&gt; 
+ <br>         &lt;!--&lt;property name="maxStringLiteralLength"&gt;65535&lt;/property&gt;--&gt; 
+ <br>         &lt;!--&lt;property name="sequnceHandlerType"&gt;0&lt;/property&gt;--&gt; 
+ <br>         &lt;!--&lt;property name="backSocketNoDelay"&gt;1&lt;/property&gt;--&gt; 
+ <br>         &lt;!--&lt;property name="frontSocketNoDelay"&gt;1&lt;/property&gt;--&gt; 
+ <br>         &lt;!--&lt;property name="processorExecutor"&gt;16&lt;/property&gt;--&gt; 
+ <br>         &lt;!--  
+ <br>             &lt;property name="mutiNodeLimitType"&gt;1&lt;/property&gt; 0：开启小数量级（默认） ；1：开启亿级数据排序 
+ <br>             &lt;property name="mutiNodePatchSize"&gt;100&lt;/property&gt; 亿级数量排序批量 
+ <br>             &lt;property name="processors"&gt;32&lt;/property&gt; &lt;property name="processorExecutor"&gt;32&lt;/property&gt; 
+ <br>             &lt;property name="serverPort"&gt;8066&lt;/property&gt; &lt;property name="managerPort"&gt;9066&lt;/property&gt; 
+ <br>             &lt;property name="idleTimeout"&gt;300000&lt;/property&gt; &lt;property name="bindIp"&gt;0.0.0.0&lt;/property&gt; 
+ <br>             &lt;property name="frontWriteQueueSize"&gt;4096&lt;/property&gt; &lt;property name="processors"&gt;32&lt;/property&gt; --&gt; 
+ <br>     &lt;/system&gt; 
+ <br>     &lt;user name="test"&gt; 
+ <br>         &lt;property name="password"&gt;test&lt;/property&gt; 
+ <br>         &lt;property name="schemas"&gt;TESTDB&lt;/property&gt; 
+ <br>     &lt;/user&gt; 
+ <br> &lt;/mycat:server&gt; 
+ <span style="line-height:30px; font-size:15pt"></span> 
+</div> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px; text-indent:21pt"> </p> 
+<h4 align="left" style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t9" style="color:rgb(202,0,0)"></a><span style="line-height:30px; font-size:15pt"></span><span style="font-family:宋体"><span style="font-size:18px"><br> </span></span></h4> 
+<span style="font-family:Arial; font-size:14px">3.4 登录mycat</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">在任意有mysql的客户端的机器连接Mycat, 执行以下命令</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">       mysql -utest -ptest -h192.168.1.5 -P8066 -DTESTDB   注意：8066登录mycat数据端口，9066登录mycat管理端口(能看到mycat内的配置、以及各个数据库连接情况，很有用)</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">3.5 测试</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">全局表：company</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">mysql&gt; create table company(id int not null primary key,name varchar(100),sharding_id int not null);</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">      Query OK, 0 rows affected (0.30 sec)</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">      mysql&gt; explain create table company(id int not null primary key,name varchar(100),sharding_id int not null);</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">     +-----------+------------------------------------------------------------------------------------------------+</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">     | DATA_NODE | SQL                                                                                            |</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">     +-----------+------------------------------------------------------------------------------------------------+</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">     | dn1       | create table company(id int not null primary key,name varchar(100),sharding_id int not null) |</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">     | dn2       | create table company(id int not null primary key,name varchar(100),sharding_id int not null) |</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">     +-----------+------------------------------------------------------------------------------------------------+</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">     2 rows in set (0.04 sec)</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">mysql&gt; insert into company(id,name,sharding_id) values(1,'leader us',10000);</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">      ERROR 2006 (HY000): MySQL server has gone away</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">      No connection. Trying to reconnect...</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">      Connection id:    6</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">      Current database: TESTDB</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px"> Query OK, 1 row affected (0.03 sec)</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">       mysql&gt; explain insert into company(id,name,sharding_id) values(1,'leader us',10000);</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">       +-----------+-----------------------------------------------------------------------+</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">       | DATA_NODE | SQL                                                                   |</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">       +-----------+-----------------------------------------------------------------------+</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">      | dn1       | insert into company(id,name,sharding_id) values(1,'leader us',10000) |</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">      +-----------+-----------------------------------------------------------------------+</span> 
+<br style="font-family:Arial; font-size:14px"> 
+<span style="font-family:Arial; font-size:14px">      1 row in set (0.00 sec)</span> 
+<h4 align="left" style="margin:0px; padding:0px; font-family:Arial"><a target="_blank" name="t10" style="color:rgb(202,0,0)"></a></h4> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> <br> </p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> 水平分表：travelrecord</p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px"> mysql&gt; explain create table travelrecord(id int not null primary key,name varchar(100));<br>       +-----------+---------------------------------------------------------------------+<br>       | DATA_NODE | SQL                                                                 |<br>      +-----------+---------------------------------------------------------------------+<br>      | dn1       | create table travelrecord(id int not null primary key,name varchar(100)) |<br>      | dn2       | create table travelrecord(id int not null primary key,name varchar(100)) |<br>      | dn3       | create table travelrecord(id int not null primary key,name varchar(100)) |<br>      +-----------+---------------------------------------------------------------------+<br>      3 rows in set (0.01 sec)</p> 
+<p style="margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; font-size:14px">   (7) 三个分片上都插入了3条数据<br>      mysql&gt; explain insert into travelrecord(id,name) values(1,'hp');<br>      +-----------+---------------------------------------------+<br>      | DATA_NODE | SQL                                         |<br>      +-----------+---------------------------------------------+<br>      | dn1       | insert into travelrecord(id,name) values(1,'hp') | <br>      | dn2       | insert into travelrecord(id,name) values(1,'hp') | <br>      | dn3       | insert into travelrecord(id,name) values(1,'hp') | <br>      +-----------+---------------------------------------------+<br>      3 rows in set (0.00 sec)</p> 
+<div> 
+ <br> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/6ad36d48faad03c8172b21104918b8aa/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">并查集的使用及其实现</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/8af48443261a5b7649d0a4e8094d1224/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">TMS320C6747的I2C模块</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

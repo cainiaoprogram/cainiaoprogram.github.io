@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Web服务器——踩过的坑（一） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Web服务器——踩过的坑（一）" />
+<meta property="og:description" content="面试官：项目开发中有遇到什么苦困难吗？你是如何解决这个困难的？
+我：在这个项目的开发过程中，大大小小遇到过不少困难，从易到难大体可以分为三类：
+语法、语义、编译等bug；独立开发新的功能（日志库、定时器、数据库连接池等）；定位排查解决程序的重大bug； 像函数调用错误啊导致的错误排查，这些都不赘述了，只要是写代码的都会遇到。我说说我项目开发中让我印象比较深刻的几个问题吧，同时我也会阐述我针对项目出现的问题我是如何分析的，采用什么方式解决的，最后说说我的心得体会.
+面试官：好的，请开始你的表演
+Web服务器开发之踩过的坑（一） 在我对项目拓展了定时器和日志库模块之后，某一次我访问我的web服务器时，发现网页无法加载。在浏览器输入框内，输入服务器地址，网页会一直转圈圈但是就加载不出来。
+正常的访问过程【图片】
+服务器出现bug后的访问过程：【图片】
+我对项目进行开发时，都是使用git进行版本管理和控制的。在服务器出现问题之后，我首先想到的就是回退一个版本。回退之后并没有解决问题，尝试了回退其他版本吗，也没有解决问题。那么说明，这个bug是很早之前就埋藏在程序中了，但是由于我专注于日志库模块、定时器模块的开发，并没有及时发现。
+那么现在的问题就是：我并不知道bug在哪，也不知道bug在哪一个版本的程序中就产生了，所以，我需要做的就是：对整个服务器程序的运行过程进行一个梳理，试图分析出哪些环节的错误可能会导致现在这个局面
+我的分析是从三个方面进行的：
+检查服务器程序是否有问题（同最早的一版，能够正常访问的程序相比）；客户端和服务器之间的网络连接是否正常；客户端浏览器是否有什么限制之类的其他因素。（比如涉及到前端的我不了解的知识）； 定位问题 1. 服务器程序BUG检查 1.1 判断程序运行是否产生了错误？ 网页无法加载，首先想到的就是程序运行出问题了。打开Linux的终端，重新运行服务器程序，浏览器访问服务器IP，观察服务器程序是否发生了崩溃。这里发现服务器程序没有崩溃
+于是我就想到，程序虽然没有崩溃，但是页面没有加载出来，是否是因为程序在某个函数模块中陷入了死循环，这里我采用了两个办法：
+gdb调试 有Windows平台下写程序遇到bug后我们都知道在IDE中打断点进行调试。在Linux环境下，由于没有图形化的界面，调试相对而言比较麻烦，需要借助GDB调试工具。
+我尝试使用GDB对程序执行的函数进行打断点，然后挨个分析是不是哪个函数由问题。但是使用GDB调试有两个问题：第一是退出GDB调试后，下次再次调试需要重新打断点，程序的函数模块那么多，每一次这样的重复工作太折腾时间了；第二是程序遇到断点后被阻塞住了，无法通过GDB调试并发情况，这也是GDB调试的一个缺点。
+日志输出 基于GDB调试的缺点，我紧接着采用了第二种方法：输出日志判断程序的运行逻辑和状态。我在每一个会被执行的程序的入口和出口都打上了日志。
+在后台我打开日志文件，通过逐行的比对，就能得知函数运行的一个状态，是否发生了死循环等问题。
+遗憾的是，通过日志输出，程序运行是一切正常的。
+1.2 比较前后两个版本代码的差异？ 整个服务器的代码行数差不多是3~4K行，分成了多个子目录，很多的文件。如果要检测比对服务器的代码，没有章法，一行一行的对比肯定是不行的。所以我首先对服务器的执行过程进行一次梳理：
+epoll监听客户端的访问，并且有新连接时分配连接；读取客户端发送的请求报文；线程池的线程获取任务，进行业务逻辑的处理，也就是HTTP报文的解析、查找客户端请求的资源，装填响应报文；服务器发送响应报文。 把这四个部分所包含的程序代码，拿出来进行比对，试图找到错误产生的地方。但是由于两个版本的程序差异比较大，尝试了一两次之后，没有找到bug所在之处。
+自然而然的，我认为bug不出现在程序上，而是出现在TCP连接或者客户端浏览器上。
+2.TCP连接的检查 客户端和服务器之间的网络连接，在传输层采用的TCP协议，我是通过编写socket完成两者之间的连接的。一开始，我认为我的服务器跑在购买的云服务器上，正巧发生bug的那段时间，我给云服务器申请了域名，做了DNS解析，我分析是否是云服务器在网关、端口等方面对客户端的连接做了限制。
+但是当我检查了云服务器的设置之后，发现并没有问题。我索性将程序打包发在Ubuntu的虚拟机上运行，但是发现问题依旧存在，那问题的根源应该不是我认为的那样。
+为了验证客户端是否和服务器建立了正确的TCP连接，我之后使用wiresharks抓包软件对网络进行抓包分析。通过抓包结果发现TCP的连接是正确的，客户端也向服务器发送了数据。
+并且，在Windows的主机上，我还使用了telnet工具进行网络连通性的测试。测试结果表明能够收到服务器发送的响应报文。所以，客户端和服务器之间的TCP通信是正常的。项目的BUG也不是在这里。
+3. 浏览器前端的检查 排除了后端服务器代码的问题、底层通信的问题，最后一项就是前端网页的检查了。但我作为一名后端开发人员，对前端的了解甚少。我的项目中借鉴了一些别人的CSS组件和HTML网页。在网页加载不出来的时候，我从以下这两个方面进行问题的排查：
+第一：首先是将我不熟悉的CSS组件换成一个简单的额HTML网页： &lt;!DOCTYPE html&gt; &lt;html lang=&#34;en&#34;&gt; &lt;head&gt; &lt;meta charset=&#34;UTF-8&#34;&gt; &lt;meta http-equiv=&#34;X-UA-Compatible&#34; content=&#34;IE=edge&#34;&gt; &lt;meta name=&#34;viewport&#34; content=&#34;width=device-width, initial-scale=1.0&#34;&gt; &lt;title&gt;首页&lt;/title&gt; &lt;/head&gt; &lt;body&gt; &lt;h1&gt;欢迎来到首页~~~&lt;/h1&gt; &lt;/br&gt; &lt;img src=&#34;image.jpg&#34; alt=&#34;ces&#34; /&gt; &lt;/body&gt; &lt;/html&gt; 第二：按F12，打开浏览器的开发者工具，分析问题是出在了哪里 访问一个包含文件、图片等资源的网页时，客户端会向服务器发送多条HTTP请求，每一个请求负责请求一张图片或者其他资源。如果有多张图片，客户端就会发送多条HTTP请求。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/2e2ad2490c46dbc4ed9b79588310eb2a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-10-17T20:11:53+08:00" />
+<meta property="article:modified_time" content="2022-10-17T20:11:53+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Web服务器——踩过的坑（一）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <blockquote> 
+ <p>面试官：项目开发中有遇到什么苦困难吗？你是如何解决这个困难的？<br> 我：在这个项目的开发过程中，大大小小遇到过不少困难，从易到难大体可以分为三类：</p> 
+ <ul><li>语法、语义、编译等bug；</li><li>独立开发新的功能（日志库、定时器、数据库连接池等）；</li><li>定位排查解决程序的重大bug；</li></ul> 
+ <p>像函数调用错误啊导致的错误排查，这些都不赘述了，只要是写代码的都会遇到。我说说我项目开发中让我印象比较深刻的几个问题吧，同时我也会阐述我针对项目出现的问题我是如何分析的，采用什么方式解决的，最后说说我的心得体会.<br> 面试官：好的，请开始你的表演</p> 
+</blockquote> 
+<h2><a id="Web_10"></a>Web服务器开发之踩过的坑（一）</h2> 
+<p>在我对项目拓展了定时器和日志库模块之后，某一次我访问我的web服务器时，发现网页无法加载。在浏览器输入框内，输入服务器地址，网页会一直转圈圈但是就加载不出来。<br> 正常的访问过程【图片】<br> 服务器出现bug后的访问过程：【图片】</p> 
+<p>我对项目进行开发时，都是使用git进行版本管理和控制的。在服务器出现问题之后，我首先想到的就是回退一个版本。回退之后并没有解决问题，尝试了回退其他版本吗，也没有解决问题。那么说明，这个bug是很早之前就埋藏在程序中了，但是由于我专注于日志库模块、定时器模块的开发，并没有及时发现。</p> 
+<p>那么现在的问题就是：我并不知道bug在哪，也不知道bug在哪一个版本的程序中就产生了，所以，我需要做的就是：<strong>对整个服务器程序的运行过程进行一个梳理，试图分析出哪些环节的错误可能会导致现在这个局面</strong></p> 
+<p>我的分析是从三个方面进行的：</p> 
+<ol><li>检查服务器程序是否有问题（同最早的一版，能够正常访问的程序相比）；</li><li>客户端和服务器之间的网络连接是否正常；</li><li>客户端浏览器是否有什么限制之类的其他因素。（比如涉及到前端的我不了解的知识）；</li></ol> 
+<h2><a id="_24"></a>定位问题</h2> 
+<h3><a id="1_BUG_25"></a>1. 服务器程序BUG检查</h3> 
+<h4><a id="11__26"></a>1.1 判断程序运行是否产生了错误？</h4> 
+<p>网页无法加载，首先想到的就是程序运行出问题了。打开Linux的终端，重新运行服务器程序，浏览器访问服务器IP，观察服务器程序是否发生了崩溃。这里发现服务器程序没有崩溃</p> 
+<p>于是我就想到，程序虽然没有崩溃，但是页面没有加载出来，是否是因为程序在某个函数模块中陷入了死循环，这里我采用了两个办法：</p> 
+<ul><li>gdb调试</li></ul> 
+<p>有Windows平台下写程序遇到bug后我们都知道在IDE中打断点进行调试。在Linux环境下，由于没有图形化的界面，调试相对而言比较麻烦，需要借助GDB调试工具。</p> 
+<p>我尝试使用GDB对程序执行的函数进行打断点，然后挨个分析是不是哪个函数由问题。但是使用GDB调试有两个问题：第一是退出GDB调试后，下次再次调试需要重新打断点，程序的函数模块那么多，每一次这样的重复工作太折腾时间了；第二是程序遇到断点后被阻塞住了，无法通过GDB调试并发情况，这也是GDB调试的一个缺点。</p> 
+<ul><li>日志输出</li></ul> 
+<p>基于GDB调试的缺点，我紧接着采用了第二种方法：输出日志判断程序的运行逻辑和状态。我在每一个会被执行的程序的入口和出口都打上了日志。</p> 
+<p>在后台我打开日志文件，通过逐行的比对，就能得知函数运行的一个状态，是否发生了死循环等问题。</p> 
+<p>遗憾的是，通过日志输出，程序运行是一切正常的。</p> 
+<h4><a id="12__45"></a>1.2 比较前后两个版本代码的差异？</h4> 
+<p>整个服务器的代码行数差不多是3~4K行，分成了多个子目录，很多的文件。如果要检测比对服务器的代码，没有章法，一行一行的对比肯定是不行的。所以我首先对服务器的执行过程进行一次梳理：</p> 
+<ul><li>epoll监听客户端的访问，并且有新连接时分配连接；</li><li>读取客户端发送的请求报文；</li><li>线程池的线程获取任务，进行业务逻辑的处理，也就是HTTP报文的解析、查找客户端请求的资源，装填响应报文；</li><li>服务器发送响应报文。</li></ul> 
+<p>把这四个部分所包含的程序代码，拿出来进行比对，试图找到错误产生的地方。但是由于两个版本的程序差异比较大，尝试了一两次之后，没有找到bug所在之处。</p> 
+<p>自然而然的，我认为bug不出现在程序上，而是出现在TCP连接或者客户端浏览器上。</p> 
+<h3><a id="2TCP_58"></a>2.TCP连接的检查</h3> 
+<p>客户端和服务器之间的网络连接，在传输层采用的TCP协议，我是通过编写socket完成两者之间的连接的。一开始，我认为我的服务器跑在购买的云服务器上，正巧发生bug的那段时间，我给云服务器申请了域名，做了DNS解析，我分析是否是云服务器在网关、端口等方面对客户端的连接做了限制。</p> 
+<p>但是当我检查了云服务器的设置之后，发现并没有问题。我索性将程序打包发在Ubuntu的虚拟机上运行，但是发现问题依旧存在，那问题的根源应该不是我认为的那样。</p> 
+<p>为了验证客户端是否和服务器建立了正确的TCP连接，我之后使用wiresharks抓包软件对网络进行抓包分析。通过抓包结果发现TCP的连接是正确的，客户端也向服务器发送了数据。</p> 
+<p>并且，在Windows的主机上，我还使用了telnet工具进行网络连通性的测试。测试结果表明能够收到服务器发送的响应报文。所以，客户端和服务器之间的TCP通信是正常的。项目的BUG也不是在这里。</p> 
+<h3><a id="3__67"></a>3. 浏览器前端的检查</h3> 
+<p>排除了后端服务器代码的问题、底层通信的问题，最后一项就是前端网页的检查了。但我作为一名后端开发人员，对前端的了解甚少。我的项目中借鉴了一些别人的CSS组件和HTML网页。在网页加载不出来的时候，我从以下这两个方面进行问题的排查：</p> 
+<ul><li>第一：首先是将我不熟悉的CSS组件换成一个简单的额HTML网页：</li></ul> 
+<pre><code class="prism language-html"><span class="token doctype">&lt;!DOCTYPE html&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>html</span> <span class="token attr-name">lang</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>en<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>head</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>meta</span> <span class="token attr-name">charset</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>UTF-8<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>meta</span> <span class="token attr-name">http-equiv</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>X-UA-Compatible<span class="token punctuation">"</span></span> <span class="token attr-name">content</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>IE=edge<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>meta</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>viewport<span class="token punctuation">"</span></span> <span class="token attr-name">content</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>width=device-width, initial-scale=1.0<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>title</span><span class="token punctuation">&gt;</span></span>首页<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>title</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>head</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>body</span><span class="token punctuation">&gt;</span></span>
+
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>h1</span><span class="token punctuation">&gt;</span></span>欢迎来到首页~~~<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>h1</span><span class="token punctuation">&gt;</span></span> <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>br</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>img</span> <span class="token attr-name">src</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>image.jpg<span class="token punctuation">"</span></span>  <span class="token attr-name">alt</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>ces<span class="token punctuation">"</span></span> <span class="token punctuation">/&gt;</span></span>
+    
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>body</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>html</span><span class="token punctuation">&gt;</span></span>
+</code></pre> 
+<ul><li>第二：按F12，打开浏览器的开发者工具，分析问题是出在了哪里</li></ul> 
+<p>访问一个包含文件、图片等资源的网页时，客户端会向服务器发送多条HTTP请求，每一个请求负责请求一张图片或者其他资源。如果有多张图片，客户端就会发送多条HTTP请求。</p> 
+<p>通过F12进入浏览器的开发者模式后，我发现了一个现象，客户端请求的网页，其响应报文能够立马返回给浏览器，但是网页上的图片，却迟迟没有办法返回给浏览器。由于访问的资源没有全部获取完，所以浏览器不会立即渲染文字部分，导致整个页面都无法被加载出来了。</p> 
+<p>所以，在前端通过F12进行浏览器开发者模式后，我定位到了问题：<strong>浏览器没有获取到全部的请求资源，导致页面无法被正确的加载</strong></p> 
+<h2><a id="_95"></a>剖析问题产生的根源</h2> 
+<p>上面说到，问题是浏览器没有获取到全部的请求资源导致页面无法正确的加载。那么，到底是什么原因导致了浏览器请求资源不完整呢？</p> 
+<p>这里联想到HTTP的长连接，我猛然意识到，在HTTP/1.1协议下，浏览器访问某个网页时，会同网页背后的服务器建立一个TCP连接，然后会保持这个TCP连接不断开，无论之后是请求什么资源，都是通过这条TCP连接进行传输的，这就是HTTP/1.1的长连接状态，这个是默认开启的。可以查看HTTP请求报文的首部字段，里面有一个<code>Connection: keep-alive</code> 。</p> 
+<p>我在浏览器中请求服务器的网页时，实际上会发送两个HTTP请求，一个请求获取网页的HTML格式文件，上面有文字信息；另一个请求获取网页上的图片。</p> 
+<p>正常情况下，前一个请求获得资源后，应该是让下一个请求获得对应的请求资源。但是目前的情况下，负责网页文字的请求得到请求的资源了，但是负责图片的请求并没有得到其资源。</p> 
+<p>那第二个请求到底发生了什么？</p> 
+<ul><li>是第二个请求没有发送出去？</li><li>还是第二个请求发送了，但是服务器没有做出反应？</li><li>甚至于是，服务器收到了请求，但是给浏览器发送请求资源的过程发生了错误？</li></ul> 
+<p>HTTP请求是由浏览器控制的，总不能怀疑浏览器访问了一个页面直接导致浏览器内核的代码就发生了改变，不能正常的发出HTTP请求了吧。所以，浏览器肯定是向服务器发送了第二个HTTP请求的，所以我就把问题聚焦到了（1）服务器没有收到请求（2）服务器收到了请求，没有发送响应这两点上。</p> 
+<p>如果判断服务器是产生了哪种问题呢，还是要借助到我的日志输出（用日志排除项目问题是一个好办法）。在我的日志中，详细的记录了每一个HTTP请求的到来以及发送响应报文等流程。通过分析日志，我就发现，服务器在处理完第一个HTTP请求后，根本就没有收到第二个HTTP请求到来的通知！</p> 
+<p><strong>所以，问题还是出在服务器代码上！</strong></p> 
+<h4><a id="_115"></a>揪出问题背后的那一行代码</h4> 
+<p>这里再说一下使用<code>EPOLL</code>监听事件的工作流程：在项目中，EPOLL主要负责监听三种事件：新连接到来、读事件、写事件。新的连接到来调用Accept模块给客户端分配资源；读事件到来后调用Read模块读取数据；写事件到来后，调用Write模块将数据发送给客户端，<strong>并将该socket刷新为检测读状态</strong></p> 
+<p><strong>写事件结束后，请及时将socket刷新为检测读状态！</strong><br> <strong>写事件结束后，请及时将socket刷新为检测读状态！</strong><br> <strong>写事件结束后，请及时将socket刷新为检测读状态！</strong></p> 
+<p>导致项目产生BUG的原因，就是因为我忘记了，在写事件结束后，将该socket刷新为检测读状态。导致epoll没有检测到新的数据发送过来了，服务器就没有接收到第二个HTTP请求。</p> 
+<p>至此，项目的BUG排查终于结束，项目又能重新运行了，再也没有发生加载不了的情况了。</p> 
+<h4><a id="_127"></a>思考</h4> 
+<p>漏写了一个代码，为什么在最开始没有检查出来？你不是使用了代码比较工具吗，漏写一行代码不是很容易被发现吗？</p> 
+<ul><li>回答：我并不是在存在BUG的那一版程序中漏写了刷新为检测读状态的代码，我是在整个项目开发汇总，都漏写了！但是，为什么之前没有发生网页无法加载的问题？那可以是说错上加错，叠加导致项目看起来能够正常运行。 
+  <ul><li>具体来讲：是因为我的判断HTTP是长连接还是短连接的函数，由于解析出错，导致判断HTTP是保持短连接，也就是在每一个HTTP请求之后，都断开TCP连接。下次发送新的HTTP请求后，重新建立TCP连接。由于没有复用同一个TCP连接，所以网页能够正常的加载。</li></ul> </li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/5ec440998c336cd109c7dcc6c9378b3d/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">现代控制理论课程实验二：利用状态观测器实现状态反馈的系统设计</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/dc2331b7861beec93db7e5b267cb0c0a/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Swagger2的使用和配置</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

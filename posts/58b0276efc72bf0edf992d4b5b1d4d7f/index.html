@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>latch:cache buffers chains等待事件导致的latch争用的原理原因与检查 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="latch:cache buffers chains等待事件导致的latch争用的原理原因与检查" />
+<meta property="og:description" content="latch:cache buffers chains 原理 当一个数据块读入到sga中时，该块的块头(buffer header)会放置在一个hash bucket的链表(hash chain)中。该内存结构由一系列cache buffers chains子latch保护（又名hash latch或者cbc latch）。对Buffer cache中的块，要select或者update、insert,delete等，都得先获得cache buffers chains子latch，以保证对chain的排他访问。若在过程中发生争用，就会等待latch:cache buffers chains事件。 产生原因： 1. 低效率的SQL语句（主要体现在逻辑读过高） 在某些环境中，应用程序打开执行相同的低效率SQL语句的多个并发会话，这些SQL语句都设法得到相同的数据集，每次执行都带有高 BUFFER_GETS(逻辑读取)的SQL语句是主要的原因。相反，较小的逻辑读意味着较少的latch get操作，从而减少锁存器争用并改善性能。注意v$sql中BUFFER_GETS/EXECUTIONS大的语句。 2.Hot block 当多个会话重复访问一个或多个由同一个子cache buffers chains锁存器保护的块时，热块就会产生。当多个会话争用cache buffers chains子锁存器时，就会出现这个等待事件。 有时就算调优了SQL，但多个会话同时执行此SQL，那怕只是扫描特定少数块，也是也会出现HOT BLOCK的。 检查 看下当前active的会话中产生的比较高buffer get的SQL： select * from (select sql_text,hash_value,buffer_gets/executions from v$sql where executions&lt;&gt;0 and hash_value in (select sql_hash_value from gv$session where status=&#39;ACTIVE&#39; )order by buffer_gets/executions desc ) where rownum&lt;16; 通过 v$latch查看 自实例启动以来cache buffers chains锁存器争用是否厉害： select round((misses/gets)*100)||&#39;%&#39;,round(100*(immediate_misses/(immediate_gets&#43;immediate_misses)))||&#39; %&#39; from v$latch where name=&#39;cache buffers chains&#39;; 对于willing-to-wait,比较重要的是misses/gets，假如大于1%就应该发生争用了，大于10%，就有争用严重的情况了。对于no-wait模式，immediate_misses/(immediate_gets&#43;immediate_misses)也一样。 通过查询子锁存器视图，看看是否有Hot Block，并且获取有Hot Block的子锁存器addr select * from (select addr,child#,gets,misses,sleeps from v$latch_children where name=&#39;cache buffers chains&#39; order by sleeps desc ) where rownum&lt;=20; 如果存在倾斜明显，即某些子锁存器的GETS与SLEEPS比其他子锁存器高很多，则可以推测相应锁存器管辖的chain上有Hot Block。 另外一种判断Hot block方法，是从当前等待latch:cache buffers chains事件的会话出发。通过v$session_wait视图，获得P1RAW即子锁存器的地址。通过重复观察v$session_wait视图，发现某个子锁存器地址较多地出现，那么该子锁存器管辖的chain可能有热块。 select p1,p1raw from v$session_wait where event=&#39;latch: cache buffers chains&#39;; 所以v$session的p1raw与x$bh的laddr，以及v$latch_children的addr是同样的东西，都是子锁存器的地址。 大概思路是，通过子锁存器的热度来找到所管辖的对象，以及对象的热度。 通过子锁存器地址，即v$latch_children的addr字段，来获取这些子锁存器所管理的对象的文件号块号与热度。 注意到x$bh字典表中的tch字段表示的就是block的touch count,一般来说这个值越高那么这个块就越热，我们称这样的块就叫做热点块。 select hladdr,obj,(select object_name from dba_objects where (data_object_id is null and object_id=x." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/58b0276efc72bf0edf992d4b5b1d4d7f/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2013-12-13T20:53:30+08:00" />
+<meta property="article:modified_time" content="2013-12-13T20:53:30+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">latch:cache buffers chains等待事件导致的latch争用的原理原因与检查</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <span style="color:#ff0000; font-family:微软雅黑; font-size:18px">latch:cache buffers chains</span> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:14px; color:#0000ff">原理</span> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <span style="font-size:12px">当一个数据块读入到sga中时，该块的块头(buffer header)会放置在一个hash bucket的链表(hash chain)中。该内存结构由一系列cache buffers chains子latch保护（又名hash latch或者cbc latch）。对Buffer cache中的块，要select或者update、insert,delete等，都得先获得cache buffers chains子latch，以保证对chain的排他访问。若在过程中发生争用，就会等待latch:cache buffers chains事件。</span> 
+ </div> 
+ <div> 
+  <span style="font-size:12px"><br> </span> 
+  <div> 
+   <span style="font-size:14px; color:#0000ff">产生原因：</span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px">1. 低效率的SQL语句（主要体现在逻辑读过高） </span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px">在某些环境中，应用程序打开执行相同的低效率SQL语句的多个并发会话，这些SQL语句都设法得到相同的数据集，每次执行都带有高 BUFFER_GETS(逻辑读取)的SQL语句是主要的原因。相反，较小的逻辑读意味着较少的latch get操作，从而减少锁存器争用并改善性能。注意v$sql中BUFFER_GETS/EXECUTIONS大的语句。</span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px">2.Hot block</span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px">当多个会话重复访问一个或多个由同一个子cache buffers chains锁存器保护的块时，热块就会产生。当多个会话争用cache buffers chains子锁存器时，就会出现这个等待事件。</span> 
+   <span style="font-size:12px">有时就算调优了SQL，但多个会话同时执行此SQL，那怕只是扫描特定少数块，也是也会出现HOT BLOCK的。</span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px"><br> </span> 
+  </div> 
+  <div> 
+   <span style="font-size:14px; color:#0000ff">检查</span> 
+  </div> 
+  <div> 
+   <span style="color:#008000; font-size:12px">看下当前active的会话中产生的比较高buffer get的SQL：</span> 
+  </div> 
+  <div> 
+   <div> 
+    <span style="font-size:12px">select * from (select sql_text,hash_value,buffer_gets/executions from v$sql where executions&lt;&gt;0 and hash_value in (select sql_hash_value from gv$session where status='ACTIVE' )order by buffer_gets/executions desc ) where rownum&lt;16;</span> 
+   </div> 
+  </div> 
+  <div> 
+   <span style="font-size:12px"><br> </span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px"><span style="color:#008000">通过</span></span> 
+   <span style="color:rgb(0,128,0); font-size:12px">v$latch查看</span> 
+   <span style="color:rgb(0,128,0); font-size:12px">自实例启动以来cache buffers chains锁存器争用是否厉害：</span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px">select round((misses/gets)*100)||'%',round(100*(immediate_misses/(immediate_gets+immediate_misses)))||' %' from v$latch where name='cache buffers chains';</span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px">对于willing-to-wait,比较重要的是misses/gets，假如大于1%就应该发生争用了，大于10%，就有争用严重的情况了。对于no-wait模式，immediate_misses/(immediate_gets+immediate_misses)也一样。 </span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px"><br> </span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px"><span style="color:#008000">通过查询子锁存器视图，看看是否有Hot Block，并且获取有Hot Block的子锁存器addr</span></span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px">select * from (select addr,child#,gets,misses,sleeps from v$latch_children where name='cache buffers chains' order by sleeps desc ) where rownum&lt;=20;</span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px">如果存在倾斜明显，即某些子锁存器的GETS与SLEEPS比其他子锁存器高很多，则可以推测相应锁存器管辖的chain上有Hot Block。</span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px"><br> </span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px"><span style="color:#008000">另外一种判断Hot block方法，是从当前等待latch:cache buffers chains事件的会话出发</span>。通过v$session_wait视图，获得P1RAW即子锁存器的地址。通过重复观察v$session_wait视图，发现某个子锁存器地址较多地出现，那么该子锁存器管辖的chain可能有热块。</span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px">select p1,p1raw from v$session_wait where event='latch: cache buffers chains';</span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px"><br> </span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px"><span style="color:#a52a2a">所以v$session的p1raw与x$bh的laddr，以及v$latch_children的addr是同样的东西，都是子锁存器的地址。</span></span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px"><span style="color:#a52a2a">大概思路是，通过子锁存器的热度来找到所管辖的对象，以及对象的热度。</span></span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px"><br> </span> 
+  </div> 
+  <div> 
+   <span style="font-size:12px"><span style="color:#008000">通过子锁存器地址，即v$latch_children的addr字段，来获取这些子锁存器所管理的对象的文件号块号与热度。</span></span> 
+  </div> 
+ </div> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">注意到x$bh字典表中的tch字段表示的就是block的touch count,一般来说这个值越高那么这个块就越热，我们称这样的块就叫做热点块。</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">select hladdr,obj,(select object_name from dba_objects where (data_object_id is null and object_id=x.obj) or data_object_id=x.obj and rownum=1) as object_name,dbarfil,dbablk,tch</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">from x$bh x</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">where hladdr in ('00000000DA253C08','00000000DA380310') order by tch desc;</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <br> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"><span style="color:#008000">根据FILE#,dbablk来找出对应对象。</span></span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">select * from dba_extents where file_id=10 and 36643122 between block_id and block_id + blocks - 1;</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"><br> </span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"><span style="color:#008000">直接通过v$bh视图直接查找数据库热点块，从而找到热点的对象。</span></span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">select * from (select hladdr,ts#,file#,dbarfil,dbablk,tch from x$bh order by tch desc) where rownum&lt;16;</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">然后通过dba_extents来查找相应对象。</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">select * from dba_extents where file_id=10 and 36643122 between block_id and block_id + blocks - 1;</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"><span style="color:#008000">或者直接通过下面语句来查找数据库热点对象：</span></span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">SELECT *</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">  FROM (SELECT O.OWNER, O.OBJECT_NAME, O.OBJECT_TYPE, SUM(TCH) TOUCHTIME</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">          FROM X$BH B, DBA_OBJECTS O</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">         WHERE B.OBJ = O.DATA_OBJECT_ID</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">           AND B.TS# &gt; 0</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">         GROUP BY O.OWNER, O.OBJECT_NAME, O.OBJECT_TYPE</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">         ORDER BY SUM(TCH) DESC)</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"> WHERE ROWNUM &lt;= 10;</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"><br> </span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"><span style="color:#008000">查看引起latch: cache buffers chains的sql</span></span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">select * from (select count(*),sql_id,nvl(o.object_name,ash.current_obj#) objn,substr(o.object_type,0,10) otype,</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">CURRENT_FILE# fn,CURRENT_BLOCK# blockn from v$active_session_history ash,all_objects o where event like 'latch: cache buffers chains'</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">and o.object_id (+)= ash.CURRENT_OBJ# group by sql_id, current_obj#, current_file#,</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">current_block#, o.object_name,o.object_type order by count(*) desc )where rownum &lt;=10;</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"><span style="color:#008000">根据上面得到的sql_id信息查看sql全文</span></span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">SQL&gt;select sql_fulltext from v$sqlarea where sql_id='&amp;sqlid';</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"><br> </span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:14px; color:#0000ff">解决方法</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">1.优化SQL，如优化nested loop join，如果有可能使用hash join代替nested loop join。</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">2.可以利用对热块索引进行hash分区，或者使用hash簇的方式减缓热块现象。</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">3.调整表的pctfree值，将数据尽可能的分布到多个块中，但相同的查询要扫更多块，有负面作用。</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">4.</span> 
+ <span style="font-size:12px">并行查询是直接读数据文件，不经过SGA，即direct path read,所以就不存在锁存器争用的情况了。但其一般是为了大量数据读取而使用的，不作为一般的解决方案。</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">5.等问题自己消失</span> 
+ <span style="font-size:12px">。有时当出现latch争用时，故障时刻确实没有较好的方式解决，找到病因才是关键。</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:14px; color:#0000ff"><br> </span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:14px; color:#0000ff"><br> </span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"><br> </span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:14px; color:#0000ff">附录：</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"><span style="color:#008000">查看cache buffers chains有多少个子锁存器</span></span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">Select count(*)</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">from v$latch_children</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">where name = 'cache buffers chains';</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <br> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"><span style="color:#008000">找出前10的热点块对象：</span></span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">select /*+rule*/ owner,object_name from dba_objects</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">where data_object_id in</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">(select obj from (select obj from x$bh order by tch desc) where rownum &lt; 11)</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">or object_id in </span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">(select obj from (select obj from x$bh order by tch desc) where rownum &lt; 11)</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"><br> </span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"><span style="color:#008000">Oracle11g联机文档中摘录：</span></span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">The cache buffers chains latches are used to protect a buffer list in the buffer cache. These latches are used when searching for, adding, or removing a buffer from the buffer cache. Contention on this latch usually means that there is a block that is greatly contended for (known as a hot block).</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"></span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">To identify the heavily accessed buffer chain, and hence the contended for block, look at latch statistics for the cache buffers chains latches using the view V$LATCH_CHILDREN. If there is a specific cache buffers chains child latch that has many more GETS, MISSES, and SLEEPS when compared with the other child latches, then this is the contended for child latch.</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"></span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">This latch has a memory address, identified by the ADDR column. Use the value in the ADDR column joined with the X$BH table to identify the blocks protected by this latch. For example, given the address (V$LATCH_CHILDREN.ADDR) of a heavily contended latch, this queries the file and block numbers:</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"></span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">SELECT OBJ data_object_id, FILE#, DBABLK,CLASS, STATE, TCH</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">  FROM X$BH</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"> WHERE HLADDR = 'address of latch'</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">  ORDER BY TCH;</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">X$BH.TCH is a touch count for the buffer. A high value for X$BH.TCH indicates a hot block.</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"></span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">Many blocks are protected by each latch. One of these buffers will probably be the hot block. Any block with a high TCH value is a potential hot block. Perform this query several times, and identify the block that </span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">consistently appears in the output. After you have identified the hot block, query DBA_EXTENTS using the file number and block number, to identify the segment.</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"></span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">After you have identified the hot block, you can identify the segment it belongs to with the following query:</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"></span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">SELECT OBJECT_NAME, SUBOBJECT_NAME</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">  FROM DBA_OBJECTS</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"> WHERE DATA_OBJECT_ID = &amp;obj;</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">In the query, &amp;obj is the value of the OBJ column in the previous query on X$BH.</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"><br> </span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">Latch: cache buffers chains</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"></span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">Description:</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">Blocks in the buffer cache are placed on linked lists</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">(cache buffer chains) which hang off a hash table.</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">The hash chain that a block is placed on is based on the DBA</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">and CLASS of the block. Each hash chain is protected by a</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">single child latch. Processes need to get the relevant latch</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">to allow them the scan a hash chain for a buffer so that the</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">linked list does not change underneath them.</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"></span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">Contention: Contention for these latches can be caused by:</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"></span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">- Very long buffer chains.</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">  There is a known problem that can result in long</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">  buffer chains -</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">- very very heavy access to a single block.</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">  This would require the application to be reviewed.</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">-</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px"></span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">To identify the heavily accessed buffer chain look at</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">the latch stats for this latch under &lt;View:V$Latch_Children&gt;</span> 
+</div> 
+<div style="font-family:微软雅黑; font-size:18px"> 
+ <span style="font-size:12px">and match this to &lt;View:X$BH&gt;. </span> 
+</div> 
+<div> 
+ <span style="font-size:12px"><br> </span> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/4f829e3dee339ae77646eee16beafdf2/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">python opencv 图像尺寸变换</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/e8b4193339a9a2f11681181a2e87696e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">用位运算将a和b的值互换</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

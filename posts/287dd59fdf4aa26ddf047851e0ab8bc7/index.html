@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Nginx的负载均衡 - 一致性哈希 (Consistent Hash) - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Nginx的负载均衡 - 一致性哈希 (Consistent Hash)" />
+<meta property="og:description" content="Nginx版本：1.9.1
+我的博客：http://blog.csdn.net/zhangskd
+算法介绍
+当后端是缓存服务器时，经常使用一致性哈希算法来进行负载均衡。
+使用一致性哈希的好处在于，增减集群的缓存服务器时，只有少量的缓存会失效，回源量较小。
+在nginx&#43;ats / haproxy&#43;squid等CDN架构中，nginx/haproxy所使用的负载均衡算法便是一致性哈希。
+我们举个例子来说明一致性哈希的好处。
+假设后端集群包含三台缓存服务器，A、B、C。
+请求r1、r2落在A上。
+请求r3、r4落在B上。
+请求r5、r6落在C上。
+使用一致性哈希时，当缓存服务器B宕机时，r1/r2会仍然落在A上，r5/r6会仍然落在C上，
+也就是说这两台服务器上的缓存都不会失效。r3/r4会被重新分配给A或者C，并产生回源。
+使用其它算法，当缓存服务器B宕机时，r1/r2不再落在A上，r5/r6不再落在C上了。
+也就是说A、B、C上的缓存都失效了，所有的请求都要回源。
+这里不介绍一致性哈希算法的基本原理，如果不了解，先花个10分钟看下这篇文章：
+http://www.codeproject.com/Articles/56138/Consistent-hashing
+在分析模块代码之前，先来看下nginx所实现的一致性哈希算法。
+1. 初始化upstream块
+主要工作是创建和初始化真实节点、创建和初始化虚拟节点。
+其中真实节点是使用round robin的方法创建的。
+Q：总共有多少个虚拟节点，一个真实节点对应多少个虚拟节点？
+累加真实节点的权重，算出总的权重值total_weight，虚拟节点的个数一般为total_weight * 160。
+一个权重为weight的真实节点，对应的虚拟节点数为weight * 160。
+Q：对于每一个真实节点，是如何创建其对应的虚拟节点的？
+1. 真实节点的server成员是其server指令的第一个参数，首先把它解析为HOST和PORT。
+base_hash = crc32(HOST 0 PORT)
+一个真实节点对应weight * 160个虚拟节点，对于每个虚拟节点来说，base_hash都是一样的。
+2. 为了使每个虚拟节点的hash值都不同，又引入了PREV_HASH，它是上一个虚拟节点的hash值。
+hash = crc32(base_hash PREV_HASH)
+3. 虚拟节点的server成员，指向真实节点的server成员。如此一来，通过比较虚拟节点和真实节点的
+server成员是否相同，可以判断它们是否是相对应的。
+创建和初始化好虚拟节点数组后，对其中的虚拟节点按照hash值进行排序，对于hash值相同的虚拟节点，只保留第一个。
+经过上述步骤，我们得到一个所有虚拟节点组成的数组，其元素的hash值有序而不重复。也就是说，ring建立起来了。
+2. 初始话请求的负载均衡数据
+根据hash指令第一个参数的实时值KEY，KEY一般是$host$uri之类的，计算出本次请求的哈希值。
+hash = crc32(KEY)
+根据请求的哈希值，在虚拟节点数组中，找到“顺时针方向”最近的一个虚拟节点，其索引为i。
+什么叫顺时针方向最近？就是point[i - 1].hash &lt; hash &lt;= point[i].hash。
+本次请求就落在该虚拟节点上了，之后交由其对应的真实节点来处理。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/287dd59fdf4aa26ddf047851e0ab8bc7/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2015-12-12T23:46:40+08:00" />
+<meta property="article:modified_time" content="2015-12-12T23:46:40+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Nginx的负载均衡 - 一致性哈希 (Consistent Hash)</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>Nginx版本：1.9.1</p> 
+<p>我的博客：<a target="_blank" href="http://blog.csdn.net/zhangskd" rel="noopener noreferrer">http://blog.csdn.net/zhangskd</a></p> 
+<p> </p> 
+<p><span style="font-size:24px"><strong>算法介绍</strong></span></p> 
+<p> </p> 
+<p>当后端是缓存服务器时，经常使用一致性哈希算法来进行负载均衡。</p> 
+<p>使用一致性哈希的好处在于，增减集群的缓存服务器时，只有少量的缓存会失效，回源量较小。</p> 
+<p>在nginx+ats / haproxy+squid等CDN架构中，nginx/haproxy所使用的负载均衡算法便是一致性哈希。</p> 
+<p> </p> 
+<p>我们举个例子来说明一致性哈希的好处。</p> 
+<p>假设后端集群包含三台缓存服务器，A、B、C。</p> 
+<p>请求r1、r2落在A上。</p> 
+<p>请求r3、r4落在B上。</p> 
+<p>请求r5、r6落在C上。</p> 
+<p>使用一致性哈希时，当缓存服务器B宕机时，r1/r2会仍然落在A上，r5/r6会仍然落在C上，</p> 
+<p>也就是说这两台服务器上的缓存都不会失效。r3/r4会被重新分配给A或者C，并产生回源。</p> 
+<p>使用其它算法，当缓存服务器B宕机时，r1/r2不再落在A上，r5/r6不再落在C上了。</p> 
+<p>也就是说A、B、C上的缓存都失效了，所有的请求都要回源。</p> 
+<p> </p> 
+<p>这里不介绍一致性哈希算法的基本原理，如果不了解，先花个10分钟看下这篇文章：</p> 
+<p><a target="_blank" href="http://www.codeproject.com/Articles/56138/Consistent-hashing" rel="nofollow noopener noreferrer">http://www.codeproject.com/Articles/56138/Consistent-hashing</a></p> 
+<p> </p> 
+<p>在分析模块代码之前，先来看下nginx所实现的一致性哈希算法。</p> 
+<p> </p> 
+<p><span style="font-size:18px"><strong>1. 初始化upstream块</strong></span></p> 
+<p>主要工作是创建和初始化真实节点、创建和初始化虚拟节点。</p> 
+<p>其中真实节点是使用round robin的方法创建的。</p> 
+<p> </p> 
+<p>Q：总共有多少个虚拟节点，一个真实节点对应多少个虚拟节点？</p> 
+<p>累加真实节点的权重，算出总的权重值total_weight，虚拟节点的个数一般为total_weight * 160。</p> 
+<p>一个权重为weight的真实节点，对应的虚拟节点数为weight * 160。</p> 
+<p> </p> 
+<p>Q：对于每一个真实节点，是如何创建其对应的虚拟节点的？</p> 
+<p>1. 真实节点的server成员是其server指令的第一个参数，首先把它解析为HOST和PORT。</p> 
+<p>    base_hash = crc32(HOST 0 PORT)</p> 
+<p>    一个真实节点对应weight * 160个虚拟节点，对于每个虚拟节点来说，base_hash都是一样的。</p> 
+<p>2. 为了使每个虚拟节点的hash值都不同，又引入了PREV_HASH，它是上一个虚拟节点的hash值。</p> 
+<p>    hash = crc32(base_hash PREV_HASH)</p> 
+<p>3. 虚拟节点的server成员，指向真实节点的server成员。如此一来，通过比较虚拟节点和真实节点的</p> 
+<p>   server成员是否相同，可以判断它们是否是相对应的。</p> 
+<p> </p> 
+<p>创建和初始化好虚拟节点数组后，对其中的虚拟节点按照hash值进行排序，对于hash值相同的虚拟节点，只保留第一个。</p> 
+<p>经过上述步骤，我们得到一个所有虚拟节点组成的数组，其元素的hash值有序而不重复。也就是说，ring建立起来了。</p> 
+<p> </p> 
+<p><span style="font-size:18px"><strong>2. 初始话请求的负载均衡数据</strong></span></p> 
+<p>根据hash指令第一个参数的实时值KEY，KEY一般是$host$uri之类的，计算出本次请求的哈希值。</p> 
+<p>hash = crc32(KEY)</p> 
+<p>根据请求的哈希值，在虚拟节点数组中，找到“顺时针方向”最近的一个虚拟节点，其索引为i。</p> 
+<p>什么叫顺时针方向最近？就是point[i - 1].hash &lt; hash &lt;= point[i].hash。</p> 
+<p>本次请求就落在该虚拟节点上了，之后交由其对应的真实节点来处理。</p> 
+<p> </p> 
+<p><span style="font-size:18px"><strong>3. 选取真实节点</strong></span></p> 
+<p>在peer.init中，已经知道请求落在哪个虚拟节点上了。</p> 
+<p>在peer.get中，需要查找虚拟节点对应的真实节点。</p> 
+<p>根据虚拟节点的server成员，在真实节点数组中查找server成员相同的、可用的真实节点。</p> 
+<p>如果找不到，那么沿着顺时针方向，继续查找下一个虚拟节点对应的真实节点。</p> 
+<p>如果找到了一个，那么就是它了。</p> 
+<p>如果找到了多个，使用轮询的方法从中选取一个。</p> 
+<p> </p> 
+<p><span style="font-size:18px"><strong>4. 缺陷和改进</strong></span></p> 
+<p>一个虚拟节点和一个真实节点，是依据它们的server成员来关联的。</p> 
+<p>这会出现一种情况，一个虚拟节点对应了多个真实节点，因为：</p> 
+<p>如果server指令的第一个参数为域名，可能解析为多个真实节点，那么这些真实节点的server成员都是一样的。</p> 
+<p>对于一个请求，计算其KEY的hash值，顺时针找到最近的虚拟节点后，发现该虚拟节点对应了多个真实节点。</p> 
+<p>使用哪个真实节点呢？本模块就使用轮询的方法，来从多个真实节点中选一个。</p> 
+<p>但我们知道使用一致性哈希的场景中，真实节点一般是缓存服务器。</p> 
+<p>一个虚拟节点对应多个真实节点，会导致一个文件被缓存在多个缓存服务器上。</p> 
+<p>这会增加磁盘的使用量，以及回源量，显然不是我们希望看到的。</p> 
+<p> </p> 
+<p>解决这个问题的方法其实很简单，就是虚拟节点和真实节点通过name成员来建立关联。</p> 
+<p>因为就算对应同一条server配置，server的第一个参数为域名，各个真实节点的name成员也是唯一的。</p> 
+<p>这样一来，找到了一个虚拟节点，就能找到一个唯一的真实节点，不会有上述问题了。</p> 
+<p> </p> 
+<p><span style="font-size:24px"><strong>数据结构</strong></span></p> 
+<p> </p> 
+<p><strong><span style="font-size:18px">1. 真实节点</span></strong></p> 
+<p>就是采用round robin算法所创建的后端服务器，类型为ngx_http_upstream_rr_peer_t。</p> 
+<p>需要注意的是，如果server指令的第一个参数是IP和端口，那么一条server指令只对应一个真实节点。</p> 
+<p>如果server指令的第一个参数是域名，一条server指令可能对应多个真实节点。</p> 
+<p>它们的server成员是相同的，可以通过name成员区分。</p> 
+<pre><code class="language-java">struct ngx_http_upstream_rr_peer_s {
+    struct sockaddr *sockaddr; /* 后端服务器的地址 */
+    socklen_t socklen; /* 地址的长度*/
+    ngx_str_t name; /* 后端服务器地址的字符串，server.addrs[i].name */
+    ngx_str_t server; /* server的名称，server.name */
+     
+    ngx_int_t current_weight; /* 当前的权重，动态调整，初始值为0 */
+    ngx_int_t effective_weight; /* 有效的权重，会因为失败而降低 */
+    ngx_int_t weight; /* 配置项指定的权重，固定值 */
+
+    ngx_uint_t conns; /* 当前连接数 */
+
+    ngx_uint_t fails; /* "一段时间内"，已经失败的次数 */
+    time_t accessed; /* 最近一次失败的时间点 */
+    time_t checked; /* 用于检查是否超过了"一段时间" */
+
+    ngx_uint_t max_fails; /* "一段时间内"，最大的失败次数，固定值 */
+    time_t fail_timeout; /* "一段时间"的值，固定值 */
+    ngx_uint_t down; /* 服务器永久不可用的标志 */
+    ...
+    ngx_http_upstream_rr_peer_t *next; /* 指向下一个后端，用于构成链表 */
+    ...
+} ngx_http_upstream_rr_peer_t;</code></pre> 
+<p>ngx_http_upstream_rr_peers_t表示一组后端服务器，比如一个后端集群。</p> 
+<pre><code class="language-java">struct ngx_http_upstream_rr_peers_s {
+    ngx_uint_t number; /* 后端服务器的数量 */
+    ...
+    ngx_uint_t total_weight; /* 所有后端服务器权重的累加值 */
+
+    unsigned single:1; /* 是否只有一台后端服务器 */
+    unsigned weighted:1; /* 是否使用权重 */
+
+    ngx_str_t *name; /* upstream配置块的名称 */
+
+    ngx_http_upstream_rr_peers_t *next; /* backup服务器集群 */
+    ngx_http_upstream_rr_peer_t *peer; /* 后端服务器组成的链表 */
+};</code></pre> 
+<p> </p> 
+<p><strong><span style="font-size:18px">2. 虚拟节点</span></strong></p> 
+<p>一个真实节点，一般会对应weight * 160个虚拟节点。</p> 
+<p>虚拟节点的server成员，指向它所归属的真实节点的server成员，如此一来找到了一个虚拟节点后，</p> 
+<p>就能找到其归属的真实节点。</p> 
+<p>但这里有一个问题，通过一个虚拟节点的server成员，可能会找到多个真实节点，而不是一个。</p> 
+<p>因为如果server指令的第一个参数为域名，那么多个真实节点的server成员都是一样的。</p> 
+<pre><code class="language-java">typedef struct {
+    uint32_t hash; /* 虚拟节点的哈希值 */
+    ngx_str_t *server; /* 虚拟节点归属的真实节点，对应真实节点的server成员 */
+} ngx_http_upstream_chash_point_t;
+
+typedef struct {
+    ngx_uint_t number; /* 虚拟节点的个数 */
+    ngx_http_upstream_chash_point_t point[1]; /* 虚拟节点的数组 */
+} ngx_http_upstream_chash_points_t;
+
+typedef struct {
+    ngx_http_complex_value_t key; /* 关联hash指令的第一个参数，用于计算请求的hash值 */
+    ngx_http_upstream_chash_points_t *points; /* 虚拟节点的数组 */
+} ngx_http_upstream_chash_points_t;</code></pre> 
+<p> </p> 
+<p><span style="font-size:18px"><strong>3. 请求的一致性哈希数据</strong></span></p> 
+<pre><code class="language-java">typedef struct {
+    /* the round robin data must be first */
+    ngx_http_upstream_rr_peer_data_t rrp; /* round robin的per request负载均衡数据 */
+    ngx_http_upstream_hash_srv_conf_t *conf; /* server配置块 */
+    ngx_str_t key; /* 对于本次请求，hash指令的第一个参数的具体值，用于计算本次请求的哈希值 */
+    ngx_uint_t tries; /* 已经尝试的虚拟节点数 */
+    ngx_uint_t rehash; /* 本算法不使用此成员 */
+    uint32_t hash; /* 根据请求的哈希值，找到顺时方向最近的一个虚拟节点，hash为该虚拟节点在数组中的索引 */
+    ngx_event_get_peer_pt get_rr_peer; /* round robin算法的peer.get函数 */
+} ngx_http_upstream_hash_peer_data_t;
+</code></pre> 
+<p>round robin的per request负载均衡数据。</p> 
+<pre><code class="language-java">typedef struct {
+     ngx_http_upstream_rr_peers_t *peers; /* 后端集群 */
+     ngx_http_upstream_rr_peer_t *current; /* 当前使用的后端服务器 */
+     uintptr_t *tried; /* 指向后端服务器的位图 */
+     uintptr_t data; /* 当后端服务器的数量较少时，用于存放其位图 */
+} ngx_http_upstream_rr_peer_data_t;</code></pre> 
+<p> </p> 
+<p><span style="font-size:24px"><strong>指令的解析函数</strong></span></p> 
+<p> </p> 
+<p>在一个upstream配置块中，如果有hash指令，且它只带一个参数，则使用的负载均衡算法为哈希算法，比如：</p> 
+<p>hash $host$uri;</p> 
+<p>在一个upstream配置块中，如果有hash指令，且它带了两个参数，且第二个参数为consistent，则使用的</p> 
+<p>负载均衡算法为一致性哈希算法，比如：</p> 
+<p>hash $host$uri consistent;</p> 
+<p> </p> 
+<p>这说明hash指令所属的模块ngx_http_upstream_hash_module同时实现了两种负载均衡算法，而实际上</p> 
+<p>哈希算法、一致性哈希算法完全可以用两个独立的模块来实现，它们本身并没有多少关联。</p> 
+<p>哈希算法的实现比较简单，类似之前分析过的ip_hash，接下来分析的是一致性哈希算法。</p> 
+<p> </p> 
+<p>hash指令的解析函数主要做了：</p> 
+<p>把hash指令的第一个参数，关联到一个ngx_http_complex_value_t变量，之后可以通过该变量获取参数的实时值。</p> 
+<p>指定此upstream块中server指令支持的属性。</p> 
+<p>根据hash指令携带的参数来判断是使用哈希算法，还是一致性哈希算法。如果hash指令的第二个参数为"consistent"，</p> 
+<p>则表示使用一致性哈希算法，指定upstream块的初始化函数uscf-&gt;peer.init_upstream。</p> 
+<pre><code class="language-java">static char *ngx_http_upstream_hash(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_upstream_hash_srv_conf_t *hcf = conf;
+    ngx_str_t *value;
+    ngx_http_upstream_srv_conf_t *uscf;
+    ngx_http_compile_complex_value_t ccv;
+
+    value = cf-&gt;args-&gt;elts;
+    ngx_memzero(&amp;ccv, sizeof(ngx_http_compile_complex_value_t));
+
+    /* 把hash指令的第一个参数，关联到一个ngx_http_complex_value_t变量，
+     * 之后可以通过该变量获取参数的实时值。
+     */
+    ccv.cf = conf;
+    ccv.value = &amp;value[1];
+    ccv.complex_value = &amp;hcf-&gt;key;
+
+    if (ngx_http_compile_complex_value(&amp;ccv) != NGX_OK)
+        return NGX_CONF_ERROR;
+
+    /* 获取所在的upstream{}块 */
+    uscf = ngx_http_conf_get_module_srv_conf(cf, ngx_http_upstream_module);
+    if (uscf-&gt;peer.init_upstream)
+        ngx_conf_log_error(NGX_LOG_WARN, cf, 0, "load balancing method redefined");
+
+    /* 指定此upstream块中server指令支持的属性 */
+    uscf-&gt;flags = NGX_HTTP_UPSTREAM_CREATE
+        | NGX_HTTP_UPSTREAM_WEIGHT
+        | NGX_HTTP_UPSTREAM_MAX_FAILS
+        | NGX_HTTP_UPSTREAM_FAIL_TIMEOUT
+        | NGX_HTTP_UPSTREAM_DOWN;
+
+    /* 根据hash指令携带的参数来判断是使用哈希算法，还是一致性哈希算法。
+     * 每种算法都有自己的upstream块初始化函数。
+      */
+    if (cf-&gt;args-&gt;nelts == 2)
+        uscf-&gt;peer.init_upstream = ngx_http_upstream_init_hash;
+    else if (ngx_strcmp(value[2].data, "consistent") == 0)
+        uscf-&gt;peer.init_upstream = ngx_http_upstream_init_chash;
+    else
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "invalid parameter \"%V\"", &amp;value[2]);
+
+    return NGX_CONF_OK;
+}</code></pre> 
+<p> </p> 
+<p><span style="font-size:24px"><strong>初始化upstream块</strong></span></p> 
+<p> </p> 
+<p>执行完指令的解析函数后，紧接着会调用所有HTTP模块的init main conf函数。</p> 
+<p>在执行ngx_http_upstream_module的init main conf函数时，会调用所有upstream块的初始化函数。</p> 
+<p>对于使用一致性哈希的upstream块，其初始化函数（peer.init_upstream）就是上一步中指定</p> 
+<p>ngx_http_upstream_init_chash，它主要做了：</p> 
+<p>调用round robin的upstream块初始化函数来创建和初始化真实节点</p> 
+<p>指定per request的负载均衡初始化函数peer.init</p> 
+<p>创建和初始化虚拟节点数组，使该数组中的虚拟节点有序而不重复</p> 
+<pre><code class="language-java">static ngx_int_t ngx_http_upstream_init_chash(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
+{
+    u_char *host, *port, c;
+    size_t host_len, port_len, size;
+    uint32_t hash, base_hash;
+    ngx_str_t *server;
+    ngx_uint_t npoints, i, j;
+    ngx_http_upstream_rr_peer_t *peer;
+    ngx_http_upstream_rr_peers_t *peers;
+    ngx_http_upstream_chash_points_t *points;
+    ngx_http_upstream_hash_srv_conf_t *hcf;
+    union {
+        uint32_t value;
+        u_char byte[4];
+    } prev_hash;
+
+    /* 使用round robin的upstream块初始化函数，创建和初始化真实节点 */
+    if (ngx_http_upstream_init_round_robin(cf, us) != NGX_OK)
+        return NGX_ERROR:
+
+    /* 重新设置per request的负载均衡初始化函数 */
+    us-&gt;peer.init = ngx_http_upstream_init_chash_peer;
+
+    peers = us-&gt;peer.data; /* 真实节点的集群 */
+    npoints = peers-&gt;total_weight * 160;
+
+    /* 一共创建npoints个虚拟节点 */
+    size = sizeof(ngx_http_upstream_chash_points_t) + 
+        sizeof(ngx_http_upstream_chash_point_t) * (npoints - 1);
+
+    points = ngx_palloc(cf-&gt;pool, size);
+    if (points == NULL)
+        return NGX_ERROR;
+
+    points-&gt;number = 0;
+
+    /* 初始化所有的虚拟节点 */
+    for (peer = peers-&gt;peer; peer; peer = peer-&gt;next) {
+        server = &amp;peer-&gt;server; /* server指令的第一个参数, server.name */
+        
+        /* Hash expression is compatible with Cache::Memcached::Fast:
+         * crc32(HOST 0 PORT PREV_HASH).
+         */
+        if (server-&gt;len &gt;= 5 &amp;&amp; ngx_strncasecmp(server-&gt;data, (u_char *) "unix:", 5) == 0)
+        {
+            host = server-&gt;data + 5;
+            host_len = server-&gt;len - 5;
+            port = NULL;
+            port_len = 0;
+            goto done;
+        }
+
+        /* 把每个peer的server成员，解析为HOST和PORT */
+        for (j = 0; j &lt; server-&gt;len; j++) {
+            c = server-&gt;data[server-&gt;len - j - 1];
+
+            if (c == ":") {
+                host = server-&gt;data;
+                host_len = server-&gt;len - j - 1;
+                port = server-&gt;data + server-&gt;len - j;
+                port_len = j;
+                goto done;
+            }
+
+            if (c &lt; '0' || c &gt; '9') /* 表示没有指定端口 */
+                break;
+        }
+
+        host = server-&gt;data;
+        host_len = server-&gt;len;
+        port = NULL;
+        port_len = 0;
+
+   done:
+        /* 根据解析peer的server成员所得的HOST和PORT，计算虚拟节点的base_hash值 */
+        ngx_crc32_init(base_hash);
+        ngx_crc32_update(&amp;base_hash, host, host_len);
+        ngx_crc32_update(&amp;base_hash, (u_char *) "", 1); /* 空字符串包含字符\0 */
+        ngx_crc32_update(&amp;base_hash, port, port_len);
+        
+        /* 对于归属同一个真实节点的虚拟节点，它们的base_hash值相同，而prev_hash不同 */
+        prev_hash.value = 0;
+        npoints = peer-&gt;weight * 160;
+
+        for (j = 0; j &lt; npoints; j++) {
+            hash = base_hash;
+            ngx_crc32_update(&amp;hash, prev_hash.byte, 4);
+            ngx_crc32_final(hash);
+
+            points-&gt;point[points-&gt;number].hash = hash; /* 虚拟节点的哈希值 */
+            points-&gt;point[points-&gt;number].server = server; /* 虚拟节点所归属的真实节点，对应真实节点的server成员 */
+            points-&gt;number++;
+
+#if (NGX_HAVE_LITTLE_ENDIAN)
+           prev_hash.value = hash;
+#else
+           prev_hash.byte[0] = (u_char) (hash &amp; 0xff);
+           prev_hash.byte[1] = (u_char) ((hash &gt;&gt; 8) &amp; 0xff);
+           prev_hash.byte[2] = (u_char) ((hash &gt;&gt; 16) &amp; 0xff);
+           prev_hash.byte[3] = (u_char) ((hash &gt;&gt; 24) &amp; 0xff);
+#endif
+        }   
+    }
+
+    /* 使用快速排序，使虚拟节点数组的元素，按照其hash值从小到大有序 */
+    ngx_qsort(points-&gt;point, points-&gt;number, sizeof(ngx_http_upstream_chash_point_t),
+        ngx_http_upstream_chash_cmp_points);
+
+    /* 如果虚拟节点数组中，有多个元素的hash值相同，只保留第一个 */
+    for (i = 0, j = 1; j &lt; points-&gt;number; j++)
+        if (points-&gt;point[i].hash != points-&gt;point[j].hash)
+            points-&gt;point[++i] = points-&gt;point[j];
+
+    /* 经过上述步骤后，虚拟节点数组中的元素，有序而不重复 */
+    points-&gt;number = i + 1;
+   
+    hcf = ngx_http_conf_upstream_srv_conf(us, ngx_http_upstream_hash_module);
+    hcf-&gt;points = points; /* 保存虚拟节点数组 */
+
+    return NGX_OK;
+}</code></pre> 
+<pre><code class="language-java">static int ngx_libc_cdel ngx_http_upstream_chash_cmp_points(const void *one, const void *two)
+{
+    ngx_http_upstream_chash_point_t *first = (ngx_http_upstream_chash_point_t *) one;
+    ngx_http_upstream_chash_point_t *second = (ngx_http_upstream_chash_point_t *) two;
+
+    if (first-&gt;hash &lt; second-&gt;hash)
+        return -1;
+    else if (first-&gt;hash &gt; second-&gt;hash)
+        return 1;
+    else
+        return 0;
+}</code></pre> 
+<p> </p> 
+<p><span style="font-size:24px"><strong>初始化请求的负载均衡数据</strong></span> </p> 
+<p> </p> 
+<p>收到一个请求后，一般使用的反向代理模块（upstream模块）为ngx_http_proxy_module，</p> 
+<p>其NGX_HTTP_CONTENT_PHASE阶段的处理函数为ngx_http_proxy_handler，在初始化upstream机制的</p> 
+<p>ngx_http_upstream_init_request函数中，调用在第二步中指定的peer.init，主要用于初始化请求的负载均衡数据。</p> 
+<p>对于一致性哈希，peer.init实例为ngx_http_upstream_init_chash_peer，主要做了：</p> 
+<p>首先调用hash算法的per request负载均衡初始化函数，创建和初始化请求的负载均衡数据。</p> 
+<p>重新指定peer.get，用于选取一个真实节点来处理本次请求。</p> 
+<p>获取的本请求对应的hash指令的第一个参数值，计算请求的hash值。</p> 
+<p>寻找第一个hash值大于等于请求的哈希值的虚拟节点，即寻找“顺时针方向最近”的一个虚拟节点。</p> 
+<pre><code class="language-java">static ngx_int_t ngx_http_upstream_init_chash_peer(ngx_http_request_t *r, ngx_http_upstream_srv_conf_t *us)
+{
+    uint32_t hash;
+    ngx_http_upstream_hash_srv_conf_t *hcf;
+    ngx_http_upstream_hash_peer_data_t *hp;
+
+    /* 调用hash算法的per request负载均衡初始化函数，创建和初始化请求的负载均衡数据 */
+    if (ngx_http_upstream_init_hash_peer(r, us) != NGX_OK)
+        return NGX_ERROR;
+
+    /* 重新指定peer.get，用于选取一个真实节点 */
+    r-&gt;upstream-&gt;peer.get = ngx_http_upstream_get_chash_peer;
+
+    hp = r-&gt;upstream-&gt;peer.data;
+    hcf = ngx_http_conf_upstream_srv_conf(us, ngx_http_upstream_hash_module);
+
+    /* 根据获取的本请求对应的hash指令的第一个参数值，计算请求的hash值 */
+    hash = ngx_crc32_long(hp-&gt;key.data, hp-&gt;key.len);
+
+    /* 根据请求的hash值，找到顺时针方向最近的一个虚拟节点，hp-&gt;hash记录此虚拟节点
+     * 在数组中的索引。
+     */
+    hp-&gt;hash = ngx_http_upstream_find_chash_point(hcf-&gt;points, hash);
+
+    return NGX_OK:
+}</code></pre> 
+<p>hash算法的per request负载均衡初始化函数。</p> 
+<pre><code class="language-java">static ngx_int_t ngx_http_upstream_init_hash_peer(ngx_http_request_t *r, ngx_http_upstream_srv_conf_t *us)
+{
+    ngx_http_upstream_hash_srv_conf_t *hcf;
+    ngx_http_upstream_hash_peer_data_t *hp;
+
+    hp = ngx_palloc(r-&gt;pool, sizeof(ngx_http_upstream_hash_peer_data_t));
+    if (hp == NULL)
+        return NGX_ERROR:
+
+    /* 调用round robin的per request负载均衡初始化函数 */
+    r-&gt;upstream-&gt;peer.data = &amp;hp-&gt;rrp;
+    if (ngx_http_upstream_init_round_robin_peer(r, us) != NGX_OK)
+        return NGX_ERROR;
+
+    r-&gt;upstream-&gt;peer.get = ngx_http_upstream_get_hash_peer;
+    hcf = ngx_http_conf_upstream_srv_conf(us, ngx_http_upstream_hash_module);
+
+   /* 获取本请求对应的hash指令的第一个参数值，用于计算请求的hash值 */
+    if (ngx_http_complex_value(r, &amp;hcf-&gt;key, &amp;hp-&gt;key) != NGX_OK)
+        return NGX_ERROR;
+    ...
+    hp-&gt;conf = hcf;
+    hp-&gt;tries = 0;
+    hp-&gt;rehash = 0;
+    hp-&gt;hash = 0;
+    hp-&gt;get_rr_peer = ngx_http_upstream_get_round_robin_peer; /* round robin的peer.get函数 */
+
+    return NGX_OK;
+}</code></pre> 
+<p>我们知道虚拟节点数组是有序的，事先已按照虚拟节点的hash值从小到大排序好了。</p> 
+<p>现在使用二分查找，寻找第一个hash值大于等于请求的哈希值的虚拟节点，即“顺时针方向最近”的一个虚拟节点。</p> 
+<pre><code class="language-java">static ngx_uint_t ngx_http_upstream_find_chash_point(ngx_http_upstream_chash_points_t *points, uint32_t hash)
+{
+    ngx_uint_t i, j, k;
+    ngx_http_upstream_chash_point_t *point;
+    
+    /* find first point &gt;= hash */
+
+    point = &amp;points-&gt;point[0];
+    i = 0;
+    j = points-&gt;number;'
+
+    while(i &lt; j) {
+        k = (i + j) / 2;
+
+        if (hash &gt; point[k].hash)
+            i = k + 1;
+        else if (hash &lt; point[k].hash)
+            j = k;
+         else
+            return k;
+    }
+
+    return i;
+}</code></pre> 
+<p> </p> 
+<p><span style="font-size:24px"><strong>选取一个真实节点</strong></span></p> 
+<p> </p> 
+<p>一般upstream块中会有多个真实节点，那么对于本次请求，要选定哪一个真实节点呢？</p> 
+<p>对于一致性哈希算法，选取真实节点的peer.get函数为ngx_http_upstream_get_chash_peer。</p> 
+<p> </p> 
+<p>其实在peer.init中，已经找到了该请求对应的虚拟节点了：</p> 
+<p>根据请求对应的hash指令的第一个参数值，计算请求的hash值。</p> 
+<p>寻找第一个哈希值大于等于请求的hash值的虚拟节点，即“顺时针方向最近”的一个虚拟节点。</p> 
+<p> </p> 
+<p>在peer.get中，需查找此虚拟节点对应的真实节点。</p> 
+<p>根据虚拟节点的server成员，在真实节点数组中查找server成员一样的且可用的真实节点。</p> 
+<p>如果找不到，那么沿着顺时针方向，继续查找下一个虚拟节点对应的真实节点。</p> 
+<p>如果找到一个真实节点，那么就是它了。</p> 
+<p>如果找到多个真实节点，使用轮询的方法从中选取一个。</p> 
+<pre><code class="language-java">static ngx_http_upstream_get_chash_peer(ngx_peer_connection_t *pc, void *data)
+{
+    ngx_http_upstream_hash_peer_data_t *hp = data; /* 请求的负载均衡数据 */
+    time_t now;
+    intptr_t m;
+    ngx_str_t *server;
+    ngx_int_t total;
+    ngx_uint_t i, n, best_i;
+    ngx_http_upstream_rr_peer_t *peer, *best;
+    ngx_http_upstream_chash_point_t *point;
+    ngx_http_upstream_chash_points_t *points;
+    ngx_http_upstream_hash_srv_conf_t *hcf;
+    ...
+    pc-&gt;cached = 0;
+    pc-&gt;connection = NULL:
+    now = ngx_time();
+    hcf = hp-&gt;conf;
+    points = hcf-&gt;points; /* 虚拟节点数组 */
+    point = &amp;points-&gt;point[0]; /* 指向第一个虚拟节点 */
+
+    for ( ; ; ) {
+        /* 在peer.init中，已根据请求的哈希值，找到顺时针方向最近的一个虚拟节点，
+         * hash为该虚拟节点在数组中的索引。
+         * 一开始hash值肯定小于number，之后每尝试一个虚拟节点后，hash++。取模是为了防止越界访问。
+         */
+        server = point[hp-&gt;hash % points-&gt;number].server;
+        best = NULL;
+        best_i = 0;
+        total = 0;
+
+        /* 遍历真实节点数组，寻找可用的、该虚拟节点归属的真实节点(server成员相同)，
+          * 如果有多个真实节点同时符合条件，那么使用轮询来从中选取一个真实节点。
+          */
+        for (peer = hp-&gt;rrp.peers-&gt;peer, i = 0; peer; peer = peer-&gt;next, i++) {
+            /* 检查此真实节点在状态位图中对应的位，为1时表示不可用 */
+            n = i / (8 * sizeof(uintptr_t));
+            m = (uintptr_t) 1 &lt;&lt; i % (8 * sizeof(uintptr_t));
+            if (hp-&gt;rrp.tried[n] &amp; m)
+                continue;            
+
+            /* server指令中携带了down属性，表示后端永久不可用 */
+            if (peer-&gt;down)
+                continue;
+
+            /* 如果真实节点的server成员和虚拟节点的不同，表示虚拟节点不属于此真实节点 */
+            if (peer-&gt;server.len != server-&gt;len || 
+                ngx_strncmp(peer-&gt;server.data, server-&gt;data, server-&gt;len) != 0)
+                continue;
+
+           /* 在一段时间内，如果此真实节点的失败次数，超过了允许的最大值，那么不允许使用了 */
+           if (peer-&gt;max_fails
+                &amp;&amp; peer-&gt;fails &gt;= peer-&gt;max_fails
+                &amp;&amp; now - peer-&gt;checked &lt;= peer-&gt;fail_timeout)
+                continue;
+        
+            peer-&gt;current_weight += peer-&gt;effective_weight; /* 对每个真实节点，增加其当前权重 */
+            total += peer-&gt;effective_weight; /* 累加所有真实节点的有效权重 */
+
+            /* 如果之前此真实节点发生了失败，会减小其effective_weight来降低它的权重。          
+             * 此后又通过增加其effective_weight来恢复它的权重。          
+             */        
+            if (peer-&gt;effective_weight &lt; peer-&gt;weight) 
+                peer-&gt;effective_weight++;
+        
+            /* 选取当前权重最大者，作为本次选定的真实节点 */
+            if (best == NULL || peer-&gt;current_weight &gt; best-&gt;current_weight) {
+                best = peer;
+                best_i = i;
+            }
+        }
+
+        /* 如果选定了一个真实节点 */
+        if (best) {
+            best-&gt;current_weight -= total; /* 如果使用了轮询，需要降低选定节点的当前权重 */
+            goto found;
+        }
+
+        hp-&gt;hash++; /* 增加虚拟节点的索引，即“沿着顺时针方向” */
+        hp-&gt;tries++; /* 已经尝试的虚拟节点数 */
+
+        /* 如果把所有的虚拟节点都尝试了一遍，还找不到可用的真实节点 */
+        if (hp-&gt;tries &gt;= points-&gt;number)
+            return NGX_BUSY;
+    }
+
+found: /* 找到了和虚拟节点相对应的、可用的真实节点了 */
+    hp-&gt;rrp.current = best; /* 选定的真实节点 */
+    /* 保存选定的后端服务器的地址，之后会向这个地址发起连接 */
+    pc-&gt;sockaddr = peer-&gt;sockaddr;
+    pc-&gt;socklen = peer-&gt;socklen;
+    pc-&gt;name = &amp;peer-&gt;name;
+    best-&gt;conns++;
+
+    /* 更新checked时间 */
+    if (now - best-&gt;checked &gt; best-&gt;fail_timeout)
+        best-&gt;checked = now;
+
+    n = best_i / (8 * sizeof(uintptr_t));
+    m = (uintptr_t) 1 &lt;&lt; best_i % (8 * sizeof(uintptr_t));
+
+    /* 对于本次请求，如果之后需要再次选取真实节点，不能再选取同一个了 */    
+    hp-&gt;rrp-&gt;tried[n] |= m;
+
+    return NGX_OK;
+}</code></pre> 
+<p> </p> 
+<p> </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/513fbedfd067e044678124e29edab9b2/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">尾递归</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/da9a07f3cc0c1c31ee94aa3271fdd9ec/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">jQuery遍历之next()、nextAll()方法使用实例</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

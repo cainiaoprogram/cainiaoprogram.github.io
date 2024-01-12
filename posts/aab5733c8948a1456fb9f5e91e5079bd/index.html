@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>（pytorch进阶之路）五种归一化原理和实现 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="（pytorch进阶之路）五种归一化原理和实现" />
+<meta property="og:description" content="文章目录 LN论文导读LN论文地址五种归一化Batch Normalization及实现Layer Normalization及实现Instance normalization及实现Group normalization及实现Weight normalization及实现 LN论文导读 BN优点：批归一化(BN)技巧是基于batch的训练样本的均值和方差对mini_batch输入进行归一化，能在前馈神经网络（FNN）中显著降低训练时间
+BN缺点：批归一化依赖于batch大小，RNN中时间步骤是不确定的，通过训练，我可以确定下第1层或前几层的样本分布，但RNN可能会有N长度的时间片，出现测试样本长度大于训练的所有样本长度情况，往往长序列样本较少，越往后时间片BN越不好学习，计算的μ和σ就会非常不具有代表性
+BN和LN不同点：BN训练和测试的行为表现是不一样，训练时BN用指数滑动平均（Weighted Moving Average）的方式不断地积累均值和方差（统计变量：moving average和moving variance），测试的时候使用最后一次采集得到滑动均值和方差作为归一化的统计量
+而LN训练和测试行为表现是一样的，LN对单个样本的均值方差归一化，在循环神经网络中每个时间步骤可以看作是一层，LN可以单独在一个时间点做归一化，因此LN可以用在循环神经网络中
+BN和LN相同点：LN和BN一样，LN也在归一化之后用了自适应的仿射变换（bias和gain）
+内部协变问题：训练网络时候分布一直发生变化
+BN公式：权重系数gain，统计变量均值μ和标准差σ，计算新的α_
+一般样本集过大，公式确切的计算整个训练集不太现实，因此用经验估计μ和σ（指数滑动平均），batch越少误差越大
+LN公式：对同一层的所有神经元做平均，假设这一层的神经元个数为H，对每个神经元α求和再平均，得到第L层所有神经元的均值，标准差也是一样的，对同一层的所有神经元计算公式σ
+这样H个数是确定的，而BN的seqLen可能是不确定的
+所有神经元共享同一套归一化参数，但是每个样本有各自的归一化参数
+不同于批归一化，与mini_batch无关，只与神经元的个数有关，
+共享参数是gain和bias
+RNN中使用LN：re-center加一个偏置，re-scales乘一个系数
+LN论文地址 https://arxiv.org/pdf/1607.06450.pdf
+五种归一化 Batch Normalization及实现 BN是per channel across mini_batch，通过batch保持channel维度
+[NLC] -&gt; [C]
+[NCHW] -&gt; [C]
+看一下pytorch官网的batchNorm1D作为例子，输入是x=[N,C,L]，batchNorm2D输入是[N,C,H,W]
+torch.nn.BatchNorm1d类
+torch.nn.BatchNorm1d(num_features, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True, device=None, dtype=None)
+num_features，表示输入张量的特征维度（embedding大小）
+eps用于分母的数值稳定，防止分母为0
+momentum，用于计算滑动平均和滑动方差，对于累积移动平均值（即简单平均值），可以设置为“None”，默认为0.1
+affine，为True时做仿射变换（gain和bias）
+track_running_stats为False时，不会记录历史的移动平均值
+公式：
+均值和标准差都是通过整个mini_batch对每个维度单独计算的，可学习向量是gama和β，标准差使用的是有偏估计（1/n）， 训练过程中会不断的记录历史的均值和方差，使用0.1的momentum做一个移动的估计，当我们训练结束之后用最后一个时刻的估计量做inference
+调用API，传入emb_dim，为了方便验证关闭affine，传入的input的格式是[N,C,L]，输出格式也是[N,C,L]，我们习惯[N,L,C]，我们就转置一下
+之后我们自己实现BN，使用torch.mean计算平均值，我们需要从batch维度和时间这个维度求通道的均值，所以dim=(0,1)，同时用torch.std注意是unbiased=False，是有偏估计
+import torch batch_size, time_steps, emb_dim = 2, 3, 4 input_x = torch." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/aab5733c8948a1456fb9f5e91e5079bd/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-08-11T13:32:54+08:00" />
+<meta property="article:modified_time" content="2022-08-11T13:32:54+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">（pytorch进阶之路）五种归一化原理和实现</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><a href="#LN_2" rel="nofollow">LN论文导读</a></li><li><a href="#LN_31" rel="nofollow">LN论文地址</a></li><li><a href="#_35" rel="nofollow">五种归一化</a></li><li><ul><li><a href="#Batch_Normalization_36" rel="nofollow">Batch Normalization及实现</a></li><li><a href="#Layer_Normalization_84" rel="nofollow">Layer Normalization及实现</a></li><li><a href="#Instance_normalization_123" rel="nofollow">Instance normalization及实现</a></li><li><a href="#Group_normalization_167" rel="nofollow">Group normalization及实现</a></li><li><a href="#Weight_normalization_221" rel="nofollow">Weight normalization及实现</a></li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h2><a id="LN_2"></a>LN论文导读</h2> 
+<p>BN优点：批归一化(BN)技巧是基于batch的训练样本的均值和方差对mini_batch输入进行归一化，能在前馈神经网络（FNN）中显著降低训练时间</p> 
+<p>BN缺点：批归一化依赖于batch大小，RNN中时间步骤是不确定的，通过训练，我可以确定下第1层或前几层的样本分布，但RNN可能会有N长度的时间片，出现测试样本长度大于训练的所有样本长度情况，往往长序列样本较少，越往后时间片BN越不好学习，计算的μ和σ就会非常不具有代表性</p> 
+<p>BN和LN不同点：BN训练和测试的行为表现是不一样，训练时BN用指数滑动平均（Weighted Moving Average）的方式不断地积累均值和方差（统计变量：moving average和moving variance），测试的时候使用最后一次采集得到滑动均值和方差作为归一化的统计量</p> 
+<p>而LN训练和测试行为表现是一样的，LN对单个样本的均值方差归一化，在循环神经网络中每个时间步骤可以看作是一层，LN可以单独在一个时间点做归一化，因此LN可以用在循环神经网络中</p> 
+<p>BN和LN相同点：LN和BN一样，LN也在归一化之后用了自适应的仿射变换（bias和gain）</p> 
+<p>内部协变问题：训练网络时候分布一直发生变化</p> 
+<p>BN公式：权重系数gain，统计变量均值μ和标准差σ，计算新的α_<br> <img src="https://images2.imgbox.com/27/28/f7NJU5Cj_o.png" alt="在这里插入图片描述"><br> 一般样本集过大，公式确切的计算整个训练集不太现实，因此用经验估计μ和σ（指数滑动平均），batch越少误差越大</p> 
+<p>LN公式：对同一层的所有神经元做平均，假设这一层的神经元个数为H，对每个神经元α求和再平均，得到第L层所有神经元的均值，标准差也是一样的，对同一层的所有神经元计算公式σ<br> <img src="https://images2.imgbox.com/44/4e/VlMmaa8O_o.png" alt="在这里插入图片描述"><br> 这样H个数是确定的，而BN的seqLen可能是不确定的<br> 所有神经元共享同一套归一化参数，但是每个样本有各自的归一化参数</p> 
+<p>不同于批归一化，与mini_batch无关，只与神经元的个数有关，<br> 共享参数是gain和bias</p> 
+<p>RNN中使用LN：re-center加一个偏置，re-scales乘一个系数<br> <img src="https://images2.imgbox.com/14/f4/NgV9hJbP_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="LN_31"></a>LN论文地址</h2> 
+<p>https://arxiv.org/pdf/1607.06450.pdf</p> 
+<h2><a id="_35"></a>五种归一化</h2> 
+<h3><a id="Batch_Normalization_36"></a>Batch Normalization及实现</h3> 
+<p>BN是per channel across mini_batch，通过batch保持channel维度<br> [NLC] -&gt; [C]<br> [NCHW] -&gt; [C]</p> 
+<p>看一下pytorch官网的batchNorm1D作为例子，输入是x=[N,C,L]，batchNorm2D输入是[N,C,H,W]</p> 
+<p>torch.nn.BatchNorm1d类<br> <code>torch.nn.BatchNorm1d(num_features, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True, device=None, dtype=None)</code></p> 
+<p>num_features，表示输入张量的特征维度（embedding大小）<br> eps用于分母的数值稳定，防止分母为0<br> momentum，用于计算滑动平均和滑动方差，对于累积移动平均值（即简单平均值），可以设置为“None”，默认为0.1<br> affine，为True时做仿射变换（gain和bias）<br> track_running_stats为False时，不会记录历史的移动平均值</p> 
+<p>公式：<br> <img src="https://images2.imgbox.com/96/79/wjfS1eyn_o.png" alt="在这里插入图片描述"><br> 均值和标准差都是通过整个mini_batch对每个维度单独计算的，可学习向量是gama和β，标准差使用的是有偏估计（1/n）， 训练过程中会不断的记录历史的均值和方差，使用0.1的momentum做一个移动的估计，当我们训练结束之后用最后一个时刻的估计量做inference</p> 
+<p>调用API，传入emb_dim，为了方便验证关闭affine，传入的input的格式是[N,C,L]，输出格式也是[N,C,L]，我们习惯[N,L,C]，我们就转置一下</p> 
+<p>之后我们自己实现BN，使用torch.mean计算平均值，我们需要从batch维度和时间这个维度求通道的均值，所以dim=(0,1)，同时用torch.std注意是unbiased=False，是有偏估计</p> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> torch
+
+batch_size<span class="token punctuation">,</span> time_steps<span class="token punctuation">,</span> emb_dim <span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">4</span>
+input_x <span class="token operator">=</span> torch<span class="token punctuation">.</span>randn<span class="token punctuation">(</span><span class="token punctuation">[</span>batch_size<span class="token punctuation">,</span> time_steps<span class="token punctuation">,</span> emb_dim<span class="token punctuation">]</span><span class="token punctuation">)</span>  <span class="token comment"># [N,L,C]</span>
+eps <span class="token operator">=</span> <span class="token number">1e-5</span>
+<span class="token comment"># 调用官方的nn.BatchNorm1d</span>
+batch_norm_op <span class="token operator">=</span> torch<span class="token punctuation">.</span>nn<span class="token punctuation">.</span>BatchNorm1d<span class="token punctuation">(</span>emb_dim<span class="token punctuation">,</span> affine<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span>
+bn_y_op <span class="token operator">=</span> batch_norm_op<span class="token punctuation">(</span>input_x<span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">2</span><span class="token punctuation">)</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>bn_y_op<span class="token punctuation">)</span>
+
+
+<span class="token comment"># 手写实现BN，per channel norm</span>
+<span class="token keyword">def</span> <span class="token function">my_batch_norm</span><span class="token punctuation">(</span>inputx<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    bn_mean <span class="token operator">=</span> inputx<span class="token punctuation">.</span>mean<span class="token punctuation">(</span>dim<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">,</span> keepdim<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+    bn_std <span class="token operator">=</span> inputx<span class="token punctuation">.</span>std<span class="token punctuation">(</span>dim<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">,</span> unbiased<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> keepdim<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+    verify_bn_y <span class="token operator">=</span> <span class="token punctuation">(</span>inputx <span class="token operator">-</span> bn_mean<span class="token punctuation">)</span><span class="token operator">/</span><span class="token punctuation">(</span>bn_std <span class="token operator">+</span> eps<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> verify_bn_y
+
+
+<span class="token keyword">print</span><span class="token punctuation">(</span>my_batch_norm<span class="token punctuation">(</span>input_x<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+</code></pre> 
+<h3><a id="Layer_Normalization_84"></a>Layer Normalization及实现</h3> 
+<p>LN是per sample和per layer，保持sample和layer维度<br> [NLC] -&gt; [NL]<br> [NCHW] -&gt; [N, H, W]</p> 
+<p>有区别与BN，LN不考虑mini_batch维度，所以计算mean和var仅在dim维度，在RNN中，我们对每一个时刻每个单一样本的emb_dim计算均值和方差</p> 
+<p>我们来看官网的LN的API<br> <code>torch.nn.LayerNorm(normalized_shape, eps=1e-05, elementwise_affine=True, device=None, dtype=None)</code></p> 
+<p>normalized_shape，input shape from an expected input of size，通常传入emb_dim大小，可以理解为每次求平均和方差的公式中H大小=emb_dim大小，即神经元个数<br> elementwise_affine，是否做仿射变换</p> 
+<p>同样的使用x=[N,L,C]，因为API不要求[N,C,L]格式，我们就不用转置了，这里的均值的标准差是在最后一个维度C去计算的，dim=-1</p> 
+<p>基于以上分析，我们手写实现一下LN</p> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> torch
+
+batch_size<span class="token punctuation">,</span> time_steps<span class="token punctuation">,</span> emb_dim <span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">4</span>
+input_x <span class="token operator">=</span> torch<span class="token punctuation">.</span>randn<span class="token punctuation">(</span><span class="token punctuation">[</span>batch_size<span class="token punctuation">,</span> time_steps<span class="token punctuation">,</span> emb_dim<span class="token punctuation">]</span><span class="token punctuation">)</span>  <span class="token comment"># [N,L,C]</span>
+eps <span class="token operator">=</span> <span class="token number">1e-5</span>
+<span class="token comment"># 调用官方的API</span>
+layer_norm_op <span class="token operator">=</span> torch<span class="token punctuation">.</span>nn<span class="token punctuation">.</span>LayerNorm<span class="token punctuation">(</span>emb_dim<span class="token punctuation">,</span> elementwise_affine<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span>
+ln_y_op <span class="token operator">=</span> layer_norm_op<span class="token punctuation">(</span>input_x<span class="token punctuation">)</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>ln_y_op<span class="token punctuation">)</span>
+
+
+<span class="token keyword">def</span> <span class="token function">my_layer_norm</span><span class="token punctuation">(</span>inputx<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    mean <span class="token operator">=</span> inputx<span class="token punctuation">.</span>mean<span class="token punctuation">(</span>dim<span class="token operator">=</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> keepdim<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+    std <span class="token operator">=</span> inputx<span class="token punctuation">.</span>std<span class="token punctuation">(</span>dim<span class="token operator">=</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> unbiased<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> keepdim<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+    <span class="token keyword">return</span> <span class="token punctuation">(</span>inputx <span class="token operator">-</span> mean<span class="token punctuation">)</span><span class="token operator">/</span><span class="token punctuation">(</span>std <span class="token operator">+</span> eps<span class="token punctuation">)</span>
+
+
+<span class="token keyword">print</span><span class="token punctuation">(</span>my_layer_norm<span class="token punctuation">(</span>input_x<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+</code></pre> 
+<h3><a id="Instance_normalization_123"></a>Instance normalization及实现</h3> 
+<p>IN是per sample和per channel，保持sample和channel维度<br> [N,L,C] -&gt; [N,C]<br> [N,C,H,W]-&gt;[N,C]</p> 
+<p>实例归一化，一般用在风格迁移上，即计算均值和标准差的时候对每个样本的每个维度单独计算均值和标准差，当x=[N,L,C]时即计算dim=[1]维度</p> 
+<p>官网API<br> <code>torch.nn.InstanceNorm1d(num_features, eps=1e-05, momentum=0.1, affine=False, track_running_stats=False, device=None, dtype=None)</code></p> 
+<p>num_features，传入dim维度<br> affine，一般情况下为False，不需要再加上gamma和bias这两个仿射变换</p> 
+<p>输入x可以是[N,C,L]或者[C,L]，我们的x一般是[N,L,C]，因为我们要转置一下，和BN用法类似</p> 
+<p>我们手写实现IN，per sample per channel，计算dim=[1]维度即可，同样的标准差是有偏估计</p> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> torch
+
+batch_size<span class="token punctuation">,</span> time_steps<span class="token punctuation">,</span> emb_dim <span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">4</span>
+input_x <span class="token operator">=</span> torch<span class="token punctuation">.</span>randn<span class="token punctuation">(</span><span class="token punctuation">[</span>batch_size<span class="token punctuation">,</span> time_steps<span class="token punctuation">,</span> emb_dim<span class="token punctuation">]</span><span class="token punctuation">)</span>  <span class="token comment"># [N,L,C]</span>
+eps <span class="token operator">=</span> <span class="token number">1e-5</span>
+<span class="token comment"># 调用官方的API</span>
+instance_norm_op <span class="token operator">=</span> torch<span class="token punctuation">.</span>nn<span class="token punctuation">.</span>InstanceNorm1d<span class="token punctuation">(</span>emb_dim<span class="token punctuation">,</span> affine<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span>
+in_y_op <span class="token operator">=</span> instance_norm_op<span class="token punctuation">(</span>input_x<span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">2</span><span class="token punctuation">)</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>in_y_op<span class="token punctuation">)</span>
+
+
+<span class="token keyword">def</span> <span class="token function">my_instance_norm</span><span class="token punctuation">(</span>inputx<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    in_mean <span class="token operator">=</span> inputx<span class="token punctuation">.</span>mean<span class="token punctuation">(</span>dim<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">,</span> keepdim<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+    in_std <span class="token operator">=</span> inputx<span class="token punctuation">.</span>std<span class="token punctuation">(</span>dim<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">,</span> unbiased<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> keepdim<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+    <span class="token keyword">return</span> <span class="token punctuation">(</span>inputx <span class="token operator">-</span> in_mean<span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token punctuation">(</span>in_std <span class="token operator">+</span> eps<span class="token punctuation">)</span>
+
+
+<span class="token keyword">print</span><span class="token punctuation">(</span>my_instance_norm<span class="token punctuation">(</span>input_x<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+</code></pre> 
+<p>为什么IN能实现风格迁移，输入是[N，L，C]，我们对dim=1求均值和标准差，相当于当前这个单一样本在所有时刻不变的东西，我们减去均值再除以标准差，相当于我们把这个单一的时序样本在所有时刻中都有的东西消去了，什么东西是这个样本在所有时刻都有的呢，就是这个样本（图片）的风格，如果是音频，那就是这个人的说话的身份是不变</p> 
+<h3><a id="Group_normalization_167"></a>Group normalization及实现</h3> 
+<p>GN是per sample，per group<br> [N,G,L,C//G] -&gt; [N, G]<br> [N,G,C//G,H,W] -&gt; [N,G]</p> 
+<p>我们对channel划分成group，group的计算和LayerNorm一致，类似群卷积中的做法，将input_tensor划分成不同的group，对每个group计算均值和方差</p> 
+<p>官网API<br> <code>torch.nn.GroupNorm(num_groups, num_channels, eps=1e-05, affine=True, device=None, dtype=None)</code></p> 
+<p>num_groups，group数目，比如channel是4，那么我们可以划分成两个group<br> num_channels，传入x的通道数<br> 输入x.shape = (N,C,∗)，因此我们需要转置一下</p> 
+<p>自己实现GN，第一步，我们需要在通道这个维度给x划分成num_groups组，使用torch.split函数</p> 
+<p><code>torch.split(tensor, split_size_or_sections, dim=0)</code><br> split_size_or_sections，每一组的大小，因此是参数<br> =num_channels//num_groups</p> 
+<p>随后遍历split列表，对每个group求mean和std</p> 
+<p>最后将列表用torch.cat拼接回来</p> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> torch
+
+batch_size<span class="token punctuation">,</span> time_steps<span class="token punctuation">,</span> emb_dim <span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">4</span>
+input_x <span class="token operator">=</span> torch<span class="token punctuation">.</span>randn<span class="token punctuation">(</span><span class="token punctuation">[</span>batch_size<span class="token punctuation">,</span> time_steps<span class="token punctuation">,</span> emb_dim<span class="token punctuation">]</span><span class="token punctuation">)</span>  <span class="token comment"># [N,L,C]</span>
+eps <span class="token operator">=</span> <span class="token number">1e-5</span>
+<span class="token comment"># 调用官方的API</span>
+group_norm_op <span class="token operator">=</span> torch<span class="token punctuation">.</span>nn<span class="token punctuation">.</span>GroupNorm<span class="token punctuation">(</span>num_groups<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">,</span> num_channels<span class="token operator">=</span>emb_dim<span class="token punctuation">,</span> affine<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span>
+gn_y_op <span class="token operator">=</span> group_norm_op<span class="token punctuation">(</span>input_x<span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">2</span><span class="token punctuation">)</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>gn_y_op<span class="token punctuation">)</span>
+
+
+<span class="token keyword">def</span> <span class="token function">my_group_normalization</span><span class="token punctuation">(</span>num_groups<span class="token punctuation">,</span> num_channels<span class="token punctuation">,</span> inputx<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment"># 将inputx的最后一维切分成num_groups份</span>
+    group_inputx <span class="token operator">=</span> torch<span class="token punctuation">.</span>split<span class="token punctuation">(</span>inputx<span class="token punctuation">,</span> num_channels <span class="token operator">//</span> num_groups<span class="token punctuation">,</span> dim<span class="token operator">=</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+    results <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    <span class="token keyword">for</span> g_inputx <span class="token keyword">in</span> group_inputx<span class="token punctuation">:</span>
+        <span class="token comment"># 求的是整个group的mean，所以考虑空间维度和通道维度</span>
+        group_mean <span class="token operator">=</span> g_inputx<span class="token punctuation">.</span>mean<span class="token punctuation">(</span>dim<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">,</span> keepdim<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+        group_std <span class="token operator">=</span> g_inputx<span class="token punctuation">.</span>std<span class="token punctuation">(</span>dim<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">,</span> keepdim<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">,</span> unbiased<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span>
+        gn <span class="token operator">=</span> <span class="token punctuation">(</span>g_inputx <span class="token operator">-</span> group_mean<span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token punctuation">(</span>group_std <span class="token operator">+</span> eps<span class="token punctuation">)</span>
+        results<span class="token punctuation">.</span>append<span class="token punctuation">(</span>gn<span class="token punctuation">)</span>
+    <span class="token comment"># 最后一维度拼接回来</span>
+    <span class="token keyword">return</span> torch<span class="token punctuation">.</span>cat<span class="token punctuation">(</span>results<span class="token punctuation">,</span> dim<span class="token operator">=</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+
+
+<span class="token keyword">print</span><span class="token punctuation">(</span>my_group_normalization<span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">,</span> emb_dim<span class="token punctuation">,</span> input_x<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+</code></pre> 
+<h3><a id="Weight_normalization_221"></a>Weight normalization及实现</h3> 
+<p>对权重做一个归一化，将权重的幅度和方向解耦</p> 
+<p>官网API<br> <code>torch.nn.utils.weight_norm(module, name='weight', dim=0)</code><br> 参数是module，传入module，返回module<br> dim=0是指权重的维度，默认0就好</p> 
+<p>公式：向量v除以它的模，得到单位的方向向量，再乘以一个新的gama，gama是可学习的<br> <img src="https://images2.imgbox.com/6a/2b/2J2ujmRy_o.png" alt="在这里插入图片描述"></p> 
+<p>那么我们使用weight_norm，需要先定义一层Module，用Linear层实验</p> 
+<p>实现weight_norm，我们对Module进行一层包裹，需重设weight<br> 还新增了两个类成员<br> weight_v是方向向量，weight_v一开始就是w，除以weight_v的模后，为单位方向向量<br> weight_g是幅度g，weight_g其实一开始就是weight_v的模</p> 
+<p>之后做梯度下降只更新g和v，不再对w进行更新，因此只是对w进行了一个矩阵分解，分解为g和v，只改变了乘法方式，因此一开始并没有改变层的输出，只是后续对g和v梯度下降，原先后续是对w进行梯度下降</p> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> torch
+<span class="token keyword">import</span> torch<span class="token punctuation">.</span>nn <span class="token keyword">as</span> nn
+
+emb_dim <span class="token operator">=</span> <span class="token number">4</span>
+input_x <span class="token operator">=</span> torch<span class="token punctuation">.</span>randn<span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> emb_dim<span class="token punctuation">]</span><span class="token punctuation">)</span>
+
+<span class="token comment"># linear层：x @ w^T，x每行和w每列相乘</span>
+linear <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>emb_dim<span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> bias<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span>
+weight_norm_linear <span class="token operator">=</span> torch<span class="token punctuation">.</span>nn<span class="token punctuation">.</span>utils<span class="token punctuation">.</span>weight_norm<span class="token punctuation">(</span>linear<span class="token punctuation">)</span>
+wn_linear_output <span class="token operator">=</span> weight_norm_linear<span class="token punctuation">(</span>input_x<span class="token punctuation">)</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>wn_linear_output<span class="token punctuation">)</span>
+
+<span class="token comment"># 手写实现weight_norm，一开始v就等于w</span>
+weight_v <span class="token operator">=</span> linear<span class="token punctuation">.</span>weight
+<span class="token comment"># 这里dim=1，是和每个sample内积的那个维度，即每一列</span>
+weight_v_norm <span class="token operator">=</span> linear<span class="token punctuation">.</span>weight<span class="token punctuation">.</span>norm<span class="token punctuation">(</span>dim<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> keepdim<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+<span class="token comment"># 单位方向向量</span>
+weight_unit_direction_v <span class="token operator">=</span> weight_v <span class="token operator">/</span> weight_v_norm
+<span class="token comment"># 一开始g就等于v的模</span>
+weight_g <span class="token operator">=</span> linear<span class="token punctuation">.</span>weight<span class="token punctuation">.</span>norm<span class="token punctuation">(</span>dim<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> keepdim<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+
+<span class="token comment"># 用到了点乘广播机制，自动填充到相同维度进行相点乘</span>
+my_weight <span class="token operator">=</span> weight_g <span class="token operator">*</span> weight_unit_direction_v
+<span class="token keyword">print</span><span class="token punctuation">(</span>input_x @ my_weight<span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/ea2acaafcfd8a551009e28519797ca73/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">UTM坐标系与GPS坐标系转换笔记</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/c7f626cbfd74da8a332dc2a19c3bcaea/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">详细解决tomcat乱码 IDEA控制台乱码</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

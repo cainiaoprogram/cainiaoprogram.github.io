@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【Swin Transformer原理和源码解析】Hierarchical Vision Transformer using Shifted Windows - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【Swin Transformer原理和源码解析】Hierarchical Vision Transformer using Shifted Windows" />
+<meta property="og:description" content="目录 前言一、动机和改进点二、整体架构：SwinTransformer三、输入设置：PatchEmbed四、4个重复的Stage：BasicLayer4.1、SwinTransformerBlock4.1.1、创建mask4.1.2、shift特征4.1.3、为shift后的特征划分窗口4.1.4、W-MSA VS SW-MSA 4.2、PatchMerging 五、总结六、一些问题6.1.为什么要W-MSA和SW-MSA混合使用？ Reference 前言 ViT让Transformer第一次在视觉任务中暂露头角，而Swin Transfomer直接让Transformer在视觉任务中大放光彩，直接打败了当时的所有的CNN网络，一出来就直接是当时的Sota。现在的很多厉害的Transfomer变体都是Swin改进的，而且Swin Transformer这个网络在很多比赛上都会用它，分类、分割、检测基本上用它都不会差，我打的一个分类比赛就是用的它： 【记第一次kaggle比赛】PetFinder.my - Pawpularity Contest 宠物预测。当时打的时候是掉包的，两句话就创建了Model了，知其然不知所以然，这怎么行，所以今天有必要学习一下。
+论文地址： https://arxiv.org/pdf/2103.14030.pdf
+源码地址： https://github.com/microsoft/Swin-Transformer
+这里我用的是b站大佬 霹雳吧啦Wz 改编后（相对源码作了微小改动，增加了多尺度训练）的代码：
+WZMIAOMIAO
+注释版本代码也同样分享到了我的Github：https://github.com/HuKai97/Classification-Annotations
+一、动机和改进点 VIT为了让图像可以像词向量那样输入Encoder中，而且计算量还不能太大，就直接将图像切分成一个个小的Patch，再把每个Patch当成一个词向量，把所有Patch拼接起来送入Encoder，这样当然可以降低参数量和计算量，但是当图像变大，Patch数目变多，复杂度太大。还有没有更好的输入方式了呢？
+VIT主要是改变了一下图片的输入，让Transformer的Encoder可以适用于图像任务中，但是对于整个模型的架构（之前讲LN提前了），VIT是没有做什么改进的，用的还是原始的Transformer中的Encoder（整个Encoder内部各个encoder变换，但是特征的shape是不变的）。那么原始的Transformer的Encoder模块真的就适用于图像任务吗，还有没有更好的Encoder结构？
+所以总结下，ViT有两个问题：
+尺度问题，数据集物体大大小小，但是整个Encoder过程特征尺度是不变的，效果肯定不好；划分patch，再把整张图片的所有patch都输入Encoder中，计算量太大； 所以，Swin Transformer针对这两点做出了改进：
+Encode呈现金字塔形状。每过一个Encode图片shape变小，感受野在不停的增大，解决了尺度问题。注意力机制放在一个窗口内部。不再把整张图片的所有patch都输入Encoder，而是将各个Patch单独的输入Encoder，解决了计算量太大的问题。 二、整体架构：SwinTransformer Patch Embeded：对输入图片 [bs，3，H_，W_] 进行处理。第一步：先经过Patch Partition，将图像划分为一个个的patch，每个patch是4x4x3大小（4x4Conv实现）得到一个 [bs，48，H_/4， W_/4] 大小的特征图；第二步：经过一个Linear Embedding层，进行Linear线性变换，得到 [bs, H_/4 * W_/4, C=96]；（但是实际代码是通过一个4x4Conv s=4实现的，其实本质还是在学习参数，一样的）经过4个stage：每个stage是若干个Swin Transformer Block &#43; Patch Merging。前者计算相关性，后者进行采样，实现多尺度；最终经过4个stage后，特征下采样为 [bs，H_/32 * W_/32，8C=768]；分类：经过一个avgpool&#43;flatten&#43;Linear进行分类预测，最终得到 [bs，num_classes]； 源码：
+class SwinTransformer(nn.Module): r&#34;&#34;&#34; Swin Transformer A PyTorch impl of : `Swin Transformer: Hierarchical Vision Transformer using Shifted Windows` - https://arxiv." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/cbbeb8ade9d89724b7b674ed214277be/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-12-03T13:07:44+08:00" />
+<meta property="article:modified_time" content="2022-12-03T13:07:44+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【Swin Transformer原理和源码解析】Hierarchical Vision Transformer using Shifted Windows</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>目录</h4> 
+ <ul><li><a href="#_2" rel="nofollow">前言</a></li><li><a href="#_17" rel="nofollow">一、动机和改进点</a></li><li><a href="#SwinTransformer_32" rel="nofollow">二、整体架构：SwinTransformer</a></li><li><a href="#PatchEmbed_150" rel="nofollow">三、输入设置：PatchEmbed</a></li><li><a href="#4StageBasicLayer_198" rel="nofollow">四、4个重复的Stage：BasicLayer</a></li><li><ul><li><a href="#41SwinTransformerBlock_279" rel="nofollow">4.1、SwinTransformerBlock</a></li><li><ul><li><a href="#411mask_281" rel="nofollow">4.1.1、创建mask</a></li><li><a href="#412shift_353" rel="nofollow">4.1.2、shift特征</a></li><li><a href="#413shift_379" rel="nofollow">4.1.3、为shift后的特征划分窗口</a></li><li><a href="#414WMSA_VS_SWMSA_389" rel="nofollow">4.1.4、W-MSA VS SW-MSA</a></li></ul> 
+   </li><li><a href="#42PatchMerging_521" rel="nofollow">4.2、PatchMerging</a></li></ul> 
+  </li><li><a href="#_577" rel="nofollow">五、总结</a></li><li><a href="#_596" rel="nofollow">六、一些问题</a></li><li><ul><li><a href="#61WMSASWMSA_597" rel="nofollow">6.1.为什么要W-MSA和SW-MSA混合使用？</a></li></ul> 
+  </li><li><a href="#Reference_600" rel="nofollow">Reference</a></li></ul> 
+</div> 
+<p></p> 
+<h2><a id="_2"></a>前言</h2> 
+<p>ViT让Transformer第一次在视觉任务中暂露头角，而Swin Transfomer直接让Transformer在视觉任务中大放光彩，直接打败了当时的所有的CNN网络，一出来就直接是当时的Sota。现在的很多厉害的Transfomer变体都是Swin改进的，而且Swin Transformer这个网络在很多比赛上都会用它，分类、分割、检测基本上用它都不会差，我打的一个分类比赛就是用的它： <a href="https://blog.csdn.net/qq_38253797/article/details/126049921?spm=1001.2014.3001.5502">【记第一次kaggle比赛】PetFinder.my - Pawpularity Contest 宠物预测</a>。当时打的时候是掉包的，两句话就创建了Model了，知其然不知所以然，这怎么行，所以今天有必要学习一下。</p> 
+<p>论文地址： <a href="https://arxiv.org/pdf/2103.14030.pdf" rel="nofollow">https://arxiv.org/pdf/2103.14030.pdf</a></p> 
+<p>源码地址： <a href="https://github.com/microsoft/Swin-Transformer">https://github.com/microsoft/Swin-Transformer</a></p> 
+<p>这里我用的是b站大佬 <a href="https://space.bilibili.com/18161609/?spm_id_from=333.999.0.0" rel="nofollow">霹雳吧啦Wz</a> 改编后（相对源码作了微小改动，增加了多尺度训练）的代码：<br> <a href="https://github.com/WZMIAOMIAO/deep-learning-for-image-processing/tree/master/pytorch_classification/swin_transformer">WZMIAOMIAO<br> </a></p> 
+<p>注释版本代码也同样分享到了我的Github：<a href="https://github.com/HuKai97/Classification-Annotations">https://github.com/HuKai97/Classification-Annotations</a></p> 
+<h2><a id="_17"></a>一、动机和改进点</h2> 
+<p>VIT为了让图像可以像词向量那样输入Encoder中，而且计算量还不能太大，就直接将图像切分成一个个小的Patch，再把每个Patch当成一个词向量，把所有Patch拼接起来送入Encoder，这样当然可以降低参数量和计算量，但是当图像变大，Patch数目变多，复杂度太大。还有没有更好的输入方式了呢？</p> 
+<p>VIT主要是改变了一下图片的输入，让Transformer的Encoder可以适用于图像任务中，但是对于整个模型的架构（之前讲LN提前了），VIT是没有做什么改进的，用的还是原始的Transformer中的Encoder（整个Encoder内部各个encoder变换，但是特征的shape是不变的）。那么原始的Transformer的Encoder模块真的就适用于图像任务吗，还有没有更好的Encoder结构？</p> 
+<p>所以总结下，ViT有两个问题：</p> 
+<ol><li>尺度问题，数据集物体大大小小，但是整个Encoder过程特征尺度是不变的，效果肯定不好；</li><li>划分patch，再把整张图片的所有patch都输入Encoder中，计算量太大；</li></ol> 
+<p>所以，Swin Transformer针对这两点做出了改进：</p> 
+<ol><li>Encode呈现金字塔形状。每过一个Encode图片shape变小，感受野在不停的增大，解决了尺度问题。</li><li>注意力机制放在一个窗口内部。不再把整张图片的所有patch都输入Encoder，而是将各个Patch单独的输入Encoder，解决了计算量太大的问题。</li></ol> 
+<h2><a id="SwinTransformer_32"></a>二、整体架构：SwinTransformer</h2> 
+<p><img src="https://images2.imgbox.com/57/2c/TAUe8etO_o.png" alt="在这里插入图片描述"></p> 
+<ol><li>Patch Embeded：对输入图片 [bs，3，H_，W_] 进行处理。第一步：先经过Patch Partition，将图像划分为一个个的patch，每个patch是4x4x3大小（4x4Conv实现）得到一个 [bs，48，H_/4， W_/4] 大小的特征图；第二步：经过一个Linear Embedding层，进行Linear线性变换，得到 [bs, H_/4 * W_/4, C=96]；（但是实际代码是通过一个4x4Conv s=4实现的，其实本质还是在学习参数，一样的）</li><li>经过4个stage：每个stage是若干个Swin Transformer Block + Patch Merging。前者计算相关性，后者进行采样，实现多尺度；最终经过4个stage后，特征下采样为 [bs，H_/32 * W_/32，8C=768]；</li><li>分类：经过一个avgpool+flatten+Linear进行分类预测，最终得到 [bs，num_classes]；</li></ol> 
+<p>源码：</p> 
+<pre><code class="prism language-py"><span class="token keyword">class</span> <span class="token class-name">SwinTransformer</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token triple-quoted-string string">r""" Swin Transformer
+        A PyTorch impl of : `Swin Transformer: Hierarchical Vision Transformer using Shifted Windows`  -
+          https://arxiv.org/pdf/2103.14030
+    """</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> patch_size<span class="token operator">=</span><span class="token number">4</span><span class="token punctuation">,</span> in_chans<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span> num_classes<span class="token operator">=</span><span class="token number">1000</span><span class="token punctuation">,</span>
+                 embed_dim<span class="token operator">=</span><span class="token number">96</span><span class="token punctuation">,</span> depths<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">6</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">,</span> num_heads<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">6</span><span class="token punctuation">,</span> <span class="token number">12</span><span class="token punctuation">,</span> <span class="token number">24</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                 window_size<span class="token operator">=</span><span class="token number">7</span><span class="token punctuation">,</span> mlp_ratio<span class="token operator">=</span><span class="token number">4.</span><span class="token punctuation">,</span> qkv_bias<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">,</span>
+                 drop_rate<span class="token operator">=</span><span class="token number">0.</span><span class="token punctuation">,</span> attn_drop_rate<span class="token operator">=</span><span class="token number">0.</span><span class="token punctuation">,</span> drop_path_rate<span class="token operator">=</span><span class="token number">0.1</span><span class="token punctuation">,</span>
+                 norm_layer<span class="token operator">=</span>nn<span class="token punctuation">.</span>LayerNorm<span class="token punctuation">,</span> patch_norm<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">,</span>
+                 use_checkpoint<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> <span class="token operator">**</span>kwargs<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token triple-quoted-string string">"""
+        patch_size: 每个patch的大小  4x4
+        in_chans: 输入图像的通道数 3
+        num_classes: 分类类别数 默认1000
+        embed_dim: 通过Linear Embedding后映射得到的通道数 也就是图片中的C 默认96
+        depths: 每个stage中重复swin-transformer block的次数 默认(2, 2, 6, 2)
+        num_heads: 每个stage中swin-transformer block的muti-head的个数 默认(3, 6, 12, 24)
+        window_size: 滑动窗口的大小 默认7x7
+        mlp_ratio: MLP中第一个全连接层Linear会将channel翻多少倍 默认4倍
+        qkv_bias: 在muti-head self-attention中是否使用偏置 默认使用True
+        drop_rate:
+        attn_drop_rate: 在muti-head self-attention中使用的drop rate
+        drop_path_rate: 在每个swin-transformer block中使用的drop rate  从0慢慢增加到0.1
+        norm_layer: LN
+        patch_norm:
+        use_checkpoint: 使用可以节省内存 默认不使用
+        """</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+        self<span class="token punctuation">.</span>num_classes <span class="token operator">=</span> num_classes   <span class="token comment"># 5</span>
+        self<span class="token punctuation">.</span>num_layers <span class="token operator">=</span> <span class="token builtin">len</span><span class="token punctuation">(</span>depths<span class="token punctuation">)</span>    <span class="token comment"># 4</span>
+        self<span class="token punctuation">.</span>embed_dim <span class="token operator">=</span> embed_dim       <span class="token comment"># C = 96</span>
+        self<span class="token punctuation">.</span>patch_norm <span class="token operator">=</span> patch_norm     <span class="token comment"># True</span>
+        <span class="token comment"># stage4输出特征矩阵的channels</span>
+        self<span class="token punctuation">.</span>num_features <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>embed_dim <span class="token operator">*</span> <span class="token number">2</span> <span class="token operator">**</span> <span class="token punctuation">(</span>self<span class="token punctuation">.</span>num_layers <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span>   <span class="token comment"># 768 = 8C</span>
+        self<span class="token punctuation">.</span>mlp_ratio <span class="token operator">=</span> mlp_ratio       <span class="token comment"># 4.0</span>
+
+        <span class="token comment"># split image into non-overlapping patches</span>
+        self<span class="token punctuation">.</span>patch_embed <span class="token operator">=</span> PatchEmbed<span class="token punctuation">(</span>
+            patch_size<span class="token operator">=</span>patch_size<span class="token punctuation">,</span> in_c<span class="token operator">=</span>in_chans<span class="token punctuation">,</span> embed_dim<span class="token operator">=</span>embed_dim<span class="token punctuation">,</span>
+            norm_layer<span class="token operator">=</span>norm_layer <span class="token keyword">if</span> self<span class="token punctuation">.</span>patch_norm <span class="token keyword">else</span> <span class="token boolean">None</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>pos_drop <span class="token operator">=</span> nn<span class="token punctuation">.</span>Dropout<span class="token punctuation">(</span>p<span class="token operator">=</span>drop_rate<span class="token punctuation">)</span>  <span class="token comment"># p=0</span>
+
+        <span class="token comment"># stochastic depth</span>
+        <span class="token comment"># [0.0, 0.00909090880304575, 0.0181818176060915, 0.027272727340459824, 0.036363635212183, 0.045454543083906174, 0.054545458406209946, 0.06363636255264282, 0.0727272778749466, 0.08181818574666977, 0.09090909361839294, 0.10000000149011612]</span>
+        dpr <span class="token operator">=</span> <span class="token punctuation">[</span>x<span class="token punctuation">.</span>item<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">for</span> x <span class="token keyword">in</span> torch<span class="token punctuation">.</span>linspace<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> drop_path_rate<span class="token punctuation">,</span> <span class="token builtin">sum</span><span class="token punctuation">(</span>depths<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">]</span>  <span class="token comment"># stochastic depth decay rule</span>
+
+        <span class="token comment"># build layers/stages   4个</span>
+        self<span class="token punctuation">.</span>layers <span class="token operator">=</span> nn<span class="token punctuation">.</span>ModuleList<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token keyword">for</span> i_layer <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span>self<span class="token punctuation">.</span>num_layers<span class="token punctuation">)</span><span class="token punctuation">:</span>
+            <span class="token comment"># 注意这里构建的stage和论文图中有些差异</span>
+            <span class="token comment"># 这里的stage不包含该stage的patch_merging层，包含的是下个stage的</span>
+            <span class="token comment"># stage1-3: Swin Transformer Block + Patch Merging</span>
+            <span class="token comment"># Stage4: Swin Transformer Block</span>
+            layers <span class="token operator">=</span> BasicLayer<span class="token punctuation">(</span>dim<span class="token operator">=</span><span class="token builtin">int</span><span class="token punctuation">(</span>embed_dim <span class="token operator">*</span> <span class="token number">2</span> <span class="token operator">**</span> i_layer<span class="token punctuation">)</span><span class="token punctuation">,</span>
+                                depth<span class="token operator">=</span>depths<span class="token punctuation">[</span>i_layer<span class="token punctuation">]</span><span class="token punctuation">,</span>
+                                num_heads<span class="token operator">=</span>num_heads<span class="token punctuation">[</span>i_layer<span class="token punctuation">]</span><span class="token punctuation">,</span>
+                                window_size<span class="token operator">=</span>window_size<span class="token punctuation">,</span>
+                                mlp_ratio<span class="token operator">=</span>self<span class="token punctuation">.</span>mlp_ratio<span class="token punctuation">,</span>
+                                qkv_bias<span class="token operator">=</span>qkv_bias<span class="token punctuation">,</span>
+                                drop<span class="token operator">=</span>drop_rate<span class="token punctuation">,</span>
+                                attn_drop<span class="token operator">=</span>attn_drop_rate<span class="token punctuation">,</span>
+                                drop_path<span class="token operator">=</span>dpr<span class="token punctuation">[</span><span class="token builtin">sum</span><span class="token punctuation">(</span>depths<span class="token punctuation">[</span><span class="token punctuation">:</span>i_layer<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">:</span><span class="token builtin">sum</span><span class="token punctuation">(</span>depths<span class="token punctuation">[</span><span class="token punctuation">:</span>i_layer <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+                                norm_layer<span class="token operator">=</span>norm_layer<span class="token punctuation">,</span>
+                                downsample<span class="token operator">=</span>PatchMerging <span class="token keyword">if</span> <span class="token punctuation">(</span>i_layer <span class="token operator">&lt;</span> self<span class="token punctuation">.</span>num_layers <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token keyword">else</span> <span class="token boolean">None</span><span class="token punctuation">,</span>
+                                use_checkpoint<span class="token operator">=</span>use_checkpoint<span class="token punctuation">)</span>
+            self<span class="token punctuation">.</span>layers<span class="token punctuation">.</span>append<span class="token punctuation">(</span>layers<span class="token punctuation">)</span>
+
+        self<span class="token punctuation">.</span>norm <span class="token operator">=</span> norm_layer<span class="token punctuation">(</span>self<span class="token punctuation">.</span>num_features<span class="token punctuation">)</span>   <span class="token comment"># LN(768)</span>
+        self<span class="token punctuation">.</span>avgpool <span class="token operator">=</span> nn<span class="token punctuation">.</span>AdaptiveAvgPool1d<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>head <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>self<span class="token punctuation">.</span>num_features<span class="token punctuation">,</span> num_classes<span class="token punctuation">)</span> <span class="token keyword">if</span> num_classes <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token keyword">else</span> nn<span class="token punctuation">.</span>Identity<span class="token punctuation">(</span><span class="token punctuation">)</span>  <span class="token comment"># 分类头  768 -&gt; 5</span>
+
+        self<span class="token punctuation">.</span><span class="token builtin">apply</span><span class="token punctuation">(</span>self<span class="token punctuation">.</span>_init_weights<span class="token punctuation">)</span>   <span class="token comment"># 初始化</span>
+
+    <span class="token keyword">def</span> <span class="token function">_init_weights</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> m<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">if</span> <span class="token builtin">isinstance</span><span class="token punctuation">(</span>m<span class="token punctuation">,</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">)</span><span class="token punctuation">:</span>
+            nn<span class="token punctuation">.</span>init<span class="token punctuation">.</span>trunc_normal_<span class="token punctuation">(</span>m<span class="token punctuation">.</span>weight<span class="token punctuation">,</span> std<span class="token operator">=</span><span class="token number">.02</span><span class="token punctuation">)</span>
+            <span class="token keyword">if</span> <span class="token builtin">isinstance</span><span class="token punctuation">(</span>m<span class="token punctuation">,</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">)</span> <span class="token keyword">and</span> m<span class="token punctuation">.</span>bias <span class="token keyword">is</span> <span class="token keyword">not</span> <span class="token boolean">None</span><span class="token punctuation">:</span>
+                nn<span class="token punctuation">.</span>init<span class="token punctuation">.</span>constant_<span class="token punctuation">(</span>m<span class="token punctuation">.</span>bias<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span>
+        <span class="token keyword">elif</span> <span class="token builtin">isinstance</span><span class="token punctuation">(</span>m<span class="token punctuation">,</span> nn<span class="token punctuation">.</span>LayerNorm<span class="token punctuation">)</span><span class="token punctuation">:</span>
+            nn<span class="token punctuation">.</span>init<span class="token punctuation">.</span>constant_<span class="token punctuation">(</span>m<span class="token punctuation">.</span>bias<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span>
+            nn<span class="token punctuation">.</span>init<span class="token punctuation">.</span>constant_<span class="token punctuation">(</span>m<span class="token punctuation">.</span>weight<span class="token punctuation">,</span> <span class="token number">1.0</span><span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> x<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token triple-quoted-string string">"""
+        x: [bs, 3, H_, W_]
+        """</span>
+        <span class="token comment"># 1、Patch Partition + Linear Embedding</span>
+        <span class="token comment"># [bs, 3, H_, W_] -&gt; [bs, H_/4 * W_/4, C] -&gt; [bs, H_/4 * W_/4, C]   C=96</span>
+        x<span class="token punctuation">,</span> H<span class="token punctuation">,</span> W <span class="token operator">=</span> self<span class="token punctuation">.</span>patch_embed<span class="token punctuation">(</span>x<span class="token punctuation">)</span>  <span class="token comment"># H = H_/4  W = W_/4</span>
+        x <span class="token operator">=</span> self<span class="token punctuation">.</span>pos_drop<span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+
+        <span class="token comment"># 2、4 stage = 4 x (Swin Transformer Block x n + Patch Merging)</span>
+        <span class="token comment"># x: [bs, H_/4 * W_/4, C] -&gt; [bs, H_/8 * W_/8, 2C] -&gt; [bs, H_/16 * W_/16, 4C] -&gt; [bs, H_/32 * W_/32, 8C]</span>
+        <span class="token keyword">for</span> layer <span class="token keyword">in</span> self<span class="token punctuation">.</span>layers<span class="token punctuation">:</span>
+            x<span class="token punctuation">,</span> H<span class="token punctuation">,</span> W <span class="token operator">=</span> layer<span class="token punctuation">(</span>x<span class="token punctuation">,</span> H<span class="token punctuation">,</span> W<span class="token punctuation">)</span>
+        
+        <span class="token comment"># 3、分类</span>
+        x <span class="token operator">=</span> self<span class="token punctuation">.</span>norm<span class="token punctuation">(</span>x<span class="token punctuation">)</span>  <span class="token comment"># LN(8C=768)</span>
+        x <span class="token operator">=</span> self<span class="token punctuation">.</span>avgpool<span class="token punctuation">(</span>x<span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span>  <span class="token comment"># [bs, H_/32 * W_/32, 8C] -&gt; [bs, 8C, H_/32 * W_/32] -&gt; [bs, 8C, 1]</span>
+        x <span class="token operator">=</span> torch<span class="token punctuation">.</span>flatten<span class="token punctuation">(</span>x<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span>  <span class="token comment"># [bs, 8C, 1] -&gt; [bs, 8C]</span>
+        x <span class="token operator">=</span> self<span class="token punctuation">.</span>head<span class="token punctuation">(</span>x<span class="token punctuation">)</span>  <span class="token comment"># [bs, num_classes]</span>
+        <span class="token keyword">return</span> x
+</code></pre> 
+<h2><a id="PatchEmbed_150"></a>三、输入设置：PatchEmbed</h2> 
+<p>源码和论文有出入，这里直接使用一个4x4Conv s=4，实现下采样的过程。对输入图片 [bs，3，H_，W_]进行初步处理，得到一个[bs, H_/4 * W_/4, C=96]大小的特征图。源码如下：</p> 
+<pre><code class="prism language-py"><span class="token keyword">class</span> <span class="token class-name">PatchEmbed</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token triple-quoted-string string">"""
+    2D Image to Patch Embedding  [bs, 3, H_, W_] -&gt; [B, H_/4 * W_/4, C=96]
+    """</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> patch_size<span class="token operator">=</span><span class="token number">4</span><span class="token punctuation">,</span> in_c<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span> embed_dim<span class="token operator">=</span><span class="token number">96</span><span class="token punctuation">,</span> norm_layer<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token triple-quoted-string string">"""
+        patch_size: 每个patch的大小 4x4
+        in_c: 输入图像的channel 3
+        embed_dim: 96 = C
+        norm_layer: LN
+        """</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        patch_size <span class="token operator">=</span> <span class="token punctuation">(</span>patch_size<span class="token punctuation">,</span> patch_size<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>patch_size <span class="token operator">=</span> patch_size
+        self<span class="token punctuation">.</span>in_chans <span class="token operator">=</span> in_c
+        self<span class="token punctuation">.</span>embed_dim <span class="token operator">=</span> embed_dim
+        self<span class="token punctuation">.</span>proj <span class="token operator">=</span> nn<span class="token punctuation">.</span>Conv2d<span class="token punctuation">(</span>in_c<span class="token punctuation">,</span> embed_dim<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span>patch_size<span class="token punctuation">,</span> stride<span class="token operator">=</span>patch_size<span class="token punctuation">)</span>  <span class="token comment"># 4x4Conv 下采样4倍 c：3-&gt;96</span>
+        self<span class="token punctuation">.</span>norm <span class="token operator">=</span> norm_layer<span class="token punctuation">(</span>embed_dim<span class="token punctuation">)</span> <span class="token keyword">if</span> norm_layer <span class="token keyword">else</span> nn<span class="token punctuation">.</span>Identity<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> x<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment"># x: [bs, 3, H_, W_]</span>
+        _<span class="token punctuation">,</span> _<span class="token punctuation">,</span> H<span class="token punctuation">,</span> W <span class="token operator">=</span> x<span class="token punctuation">.</span>shape
+
+        <span class="token comment"># padding</span>
+        <span class="token comment"># 如果输入图片的H，W不是patch_size的整数倍，需要进行padding</span>
+        pad_input <span class="token operator">=</span> <span class="token punctuation">(</span>H <span class="token operator">%</span> self<span class="token punctuation">.</span>patch_size<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">!=</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token keyword">or</span> <span class="token punctuation">(</span>W <span class="token operator">%</span> self<span class="token punctuation">.</span>patch_size<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">!=</span> <span class="token number">0</span><span class="token punctuation">)</span>  <span class="token comment"># False</span>
+        <span class="token keyword">if</span> pad_input<span class="token punctuation">:</span>
+            <span class="token comment"># to pad the last 3 dimensions,</span>
+            <span class="token comment"># (W_left, W_right, H_top,H_bottom, C_front, C_back)</span>
+            x <span class="token operator">=</span> F<span class="token punctuation">.</span>pad<span class="token punctuation">(</span>x<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> self<span class="token punctuation">.</span>patch_size<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">-</span> W <span class="token operator">%</span> self<span class="token punctuation">.</span>patch_size<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+                          <span class="token number">0</span><span class="token punctuation">,</span> self<span class="token punctuation">.</span>patch_size<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">-</span> H <span class="token operator">%</span> self<span class="token punctuation">.</span>patch_size<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+                          <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+        <span class="token comment"># 1、Patch Partition</span>
+        <span class="token comment"># 下采样patch_size倍  [bs, 3, H_, W_] -&gt; [bs, C=96, H_/4, W_/4]</span>
+        x <span class="token operator">=</span> self<span class="token punctuation">.</span>proj<span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+        _<span class="token punctuation">,</span> _<span class="token punctuation">,</span> H<span class="token punctuation">,</span> W <span class="token operator">=</span> x<span class="token punctuation">.</span>shape  <span class="token comment"># H=H_/4  W=W_/4</span>
+        <span class="token comment"># flatten: [B, C, H_/4, W_/4] -&gt; [B, C, H_/4 * W_/4]</span>
+        <span class="token comment"># transpose: [B, C, H_/4 * W_/4] -&gt; [B, H_/4 * W_/4, C]</span>
+        x <span class="token operator">=</span> x<span class="token punctuation">.</span>flatten<span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span>
+        x <span class="token operator">=</span> self<span class="token punctuation">.</span>norm<span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> x<span class="token punctuation">,</span> H<span class="token punctuation">,</span> W
+</code></pre> 
+<h2><a id="4StageBasicLayer_198"></a>四、4个重复的Stage：BasicLayer</h2> 
+<p>每个stage都由若干个Swin Transformer Block 和 1个Patch Merging组成。</p> 
+<pre><code class="prism language-py"><span class="token keyword">class</span> <span class="token class-name">BasicLayer</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token triple-quoted-string string">"""A basic Swin Transformer layer for one stage."""</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> dim<span class="token punctuation">,</span> depth<span class="token punctuation">,</span> num_heads<span class="token punctuation">,</span> window_size<span class="token punctuation">,</span>
+                 mlp_ratio<span class="token operator">=</span><span class="token number">4.</span><span class="token punctuation">,</span> qkv_bias<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">,</span> drop<span class="token operator">=</span><span class="token number">0.</span><span class="token punctuation">,</span> attn_drop<span class="token operator">=</span><span class="token number">0.</span><span class="token punctuation">,</span>
+                 drop_path<span class="token operator">=</span><span class="token number">0.</span><span class="token punctuation">,</span> norm_layer<span class="token operator">=</span>nn<span class="token punctuation">.</span>LayerNorm<span class="token punctuation">,</span> downsample<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">,</span> use_checkpoint<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token triple-quoted-string string">"""
+        dim: C = 96
+        depth: 重叠的Swin Transformer Block个数
+        num_heads: muti-head self-transformer的头数
+        window_size: 窗口大小7x7
+        mlp_ratio: MLP中第一个全连接层Linear会将channel翻多少倍 默认4倍
+        qkv_bias: 在muti-head self-attention中是否使用偏置 默认使用True
+        drop: patch_embed之后一般要接一个Dropout 但是默认是 0.0
+        attn_drop: 在muti-head self-attention中使用的drop rate  0.0
+        drop_path: list: depth  存放这个stage中depth个transformer block的drop rate
+        norm_layer: LN
+        downsample: Pathc Merging进行下采样
+        use_checkpoint: Whether to use checkpointing to save memory. Default: False
+        """</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>dim <span class="token operator">=</span> dim
+        self<span class="token punctuation">.</span>depth <span class="token operator">=</span> depth
+        self<span class="token punctuation">.</span>window_size <span class="token operator">=</span> window_size
+        self<span class="token punctuation">.</span>use_checkpoint <span class="token operator">=</span> use_checkpoint
+        self<span class="token punctuation">.</span>shift_size <span class="token operator">=</span> window_size <span class="token operator">//</span> <span class="token number">2</span>  <span class="token comment"># 3</span>
+
+        <span class="token comment"># 调用depth个swin transformer block</span>
+        self<span class="token punctuation">.</span>blocks <span class="token operator">=</span> nn<span class="token punctuation">.</span>ModuleList<span class="token punctuation">(</span><span class="token punctuation">[</span>
+            SwinTransformerBlock<span class="token punctuation">(</span>
+                dim<span class="token operator">=</span>dim<span class="token punctuation">,</span>
+                num_heads<span class="token operator">=</span>num_heads<span class="token punctuation">,</span>
+                window_size<span class="token operator">=</span>window_size<span class="token punctuation">,</span>
+                shift_size<span class="token operator">=</span><span class="token number">0</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>i <span class="token operator">%</span> <span class="token number">2</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token keyword">else</span> self<span class="token punctuation">.</span>shift_size<span class="token punctuation">,</span>
+                mlp_ratio<span class="token operator">=</span>mlp_ratio<span class="token punctuation">,</span>
+                qkv_bias<span class="token operator">=</span>qkv_bias<span class="token punctuation">,</span>
+                drop<span class="token operator">=</span>drop<span class="token punctuation">,</span>
+                attn_drop<span class="token operator">=</span>attn_drop<span class="token punctuation">,</span>
+                drop_path<span class="token operator">=</span>drop_path<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token keyword">if</span> <span class="token builtin">isinstance</span><span class="token punctuation">(</span>drop_path<span class="token punctuation">,</span> <span class="token builtin">list</span><span class="token punctuation">)</span> <span class="token keyword">else</span> drop_path<span class="token punctuation">,</span>
+                norm_layer<span class="token operator">=</span>norm_layer<span class="token punctuation">)</span>
+            <span class="token keyword">for</span> i <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span>depth<span class="token punctuation">)</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+
+        <span class="token comment"># patch merging layer</span>
+        <span class="token keyword">if</span> downsample <span class="token keyword">is</span> <span class="token keyword">not</span> <span class="token boolean">None</span><span class="token punctuation">:</span>
+            self<span class="token punctuation">.</span>downsample <span class="token operator">=</span> downsample<span class="token punctuation">(</span>dim<span class="token operator">=</span>dim<span class="token punctuation">,</span> norm_layer<span class="token operator">=</span>norm_layer<span class="token punctuation">)</span>
+        <span class="token keyword">else</span><span class="token punctuation">:</span>
+            self<span class="token punctuation">.</span>downsample <span class="token operator">=</span> <span class="token boolean">None</span>
+
+    <span class="token keyword">def</span> <span class="token function">create_mask</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> x<span class="token punctuation">,</span> H<span class="token punctuation">,</span> W<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> x<span class="token punctuation">,</span> H<span class="token punctuation">,</span> W<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment"># 1、depth个swin transformer block</span>
+        <span class="token comment"># 因为每个stage中的特征图大小是不变的，所以每个block的mask大小是相同的 所以只需要创建一次即可</span>
+        <span class="token comment"># [64,49,49]  64个网格  49x49每个网格中的每个位置(49个位置)对该网格中所有位置(49个位置)的注意力蒙版</span>
+        attn_mask <span class="token operator">=</span> self<span class="token punctuation">.</span>create_mask<span class="token punctuation">(</span>x<span class="token punctuation">,</span> H<span class="token punctuation">,</span> W<span class="token punctuation">)</span>  <span class="token comment"># [nW, Mh*Mw, Mh*Mw]</span>
+        <span class="token keyword">for</span> blk <span class="token keyword">in</span> self<span class="token punctuation">.</span>blocks<span class="token punctuation">:</span>
+            blk<span class="token punctuation">.</span>H<span class="token punctuation">,</span> blk<span class="token punctuation">.</span>W <span class="token operator">=</span> H<span class="token punctuation">,</span> W
+            <span class="token keyword">if</span> <span class="token keyword">not</span> torch<span class="token punctuation">.</span>jit<span class="token punctuation">.</span>is_scripting<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">and</span> self<span class="token punctuation">.</span>use_checkpoint<span class="token punctuation">:</span>
+                x <span class="token operator">=</span> checkpoint<span class="token punctuation">.</span>checkpoint<span class="token punctuation">(</span>blk<span class="token punctuation">,</span> x<span class="token punctuation">,</span> attn_mask<span class="token punctuation">)</span>
+            <span class="token keyword">else</span><span class="token punctuation">:</span>
+                <span class="token comment"># 默认执行 调用swin transformer block</span>
+                x <span class="token operator">=</span> blk<span class="token punctuation">(</span>x<span class="token punctuation">,</span> attn_mask<span class="token punctuation">)</span>
+
+        <span class="token comment"># 2、下采样 Patch Merging</span>
+        <span class="token comment"># 最后一个stage是None 不执行下采样</span>
+        <span class="token keyword">if</span> self<span class="token punctuation">.</span>downsample <span class="token keyword">is</span> <span class="token keyword">not</span> <span class="token boolean">None</span><span class="token punctuation">:</span>
+            x <span class="token operator">=</span> self<span class="token punctuation">.</span>downsample<span class="token punctuation">(</span>x<span class="token punctuation">,</span> H<span class="token punctuation">,</span> W<span class="token punctuation">)</span>
+            H<span class="token punctuation">,</span> W <span class="token operator">=</span> <span class="token punctuation">(</span>H <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token operator">//</span> <span class="token number">2</span><span class="token punctuation">,</span> <span class="token punctuation">(</span>W <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token operator">//</span> <span class="token number">2</span>  <span class="token comment"># 下采样 重新计算H W</span>
+
+        <span class="token keyword">return</span> x<span class="token punctuation">,</span> H<span class="token punctuation">,</span> W
+</code></pre> 
+<p>值得注意的是创建attention mask（create_mask）的步骤，这一步是下面SW-MSA和W-MSA的关键点，下面再详细讲解。</p> 
+<h3><a id="41SwinTransformerBlock_279"></a>4.1、SwinTransformerBlock</h3> 
+<h4><a id="411mask_281"></a>4.1.1、创建mask</h4> 
+<p>在SwinTransformerBlock中，主要是负责创建attention mask，只在shift windows muti-head attention中使用，主要是告诉我们当前位置和哪些其他位置是同属于一个windows的（因为之前有一步shift window的操作），同属于一个windows的位置的mask=0，不同属于一个位置的mask=-100。</p> 
+<p>这样到后面计算出attention之后，同一个windows位置的attention + mask再softmax值是不变的，但是不同windows位置的attention + mask(-100)，再softmax值就趋近于0了。</p> 
+<pre><code class="prism language-py"><span class="token keyword">class</span> <span class="token class-name">BasicLayer</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token triple-quoted-string string">"""A basic Swin Transformer layer for one stage."""</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token keyword">def</span> <span class="token function">create_mask</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> x<span class="token punctuation">,</span> H<span class="token punctuation">,</span> W<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token triple-quoted-string string">"""calculate attention mask for SW-MSA（shift window muti-head self-attention）
+        以第一个stage为例
+        x: [bs, 56x56, 96]
+        H: 56
+        W: 56
+        返回attn_mask: [64,49,49] 64个网格  49x49每个网格中的每个位置(49个位置)对该网格中所有位置(49个位置)的注意力蒙版
+                     记录每个位置需要在哪些位置计算attention
+        """</span>
+        <span class="token comment"># 保证Hp和Wp是window_size的整数倍</span>
+        Hp <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>np<span class="token punctuation">.</span>ceil<span class="token punctuation">(</span>H <span class="token operator">/</span> self<span class="token punctuation">.</span>window_size<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">*</span> self<span class="token punctuation">.</span>window_size   <span class="token comment"># 56</span>
+        Wp <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>np<span class="token punctuation">.</span>ceil<span class="token punctuation">(</span>W <span class="token operator">/</span> self<span class="token punctuation">.</span>window_size<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">*</span> self<span class="token punctuation">.</span>window_size   <span class="token comment"># 56</span>
+        <span class="token comment"># 拥有和feature map一样的通道排列顺序，方便后续window_partition</span>
+        img_mask <span class="token operator">=</span> torch<span class="token punctuation">.</span>zeros<span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> Hp<span class="token punctuation">,</span> Wp<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">,</span> device<span class="token operator">=</span>x<span class="token punctuation">.</span>device<span class="token punctuation">)</span>  <span class="token comment"># [1, 56, 56, 1]</span>
+        <span class="token comment"># 对h和w先进行切片 划分为3个区域  0=(0,-7) (-7,-3) (-3,-1)</span>
+        h_slices <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token builtin">slice</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token operator">-</span>self<span class="token punctuation">.</span>window_size<span class="token punctuation">)</span><span class="token punctuation">,</span>
+                    <span class="token builtin">slice</span><span class="token punctuation">(</span><span class="token operator">-</span>self<span class="token punctuation">.</span>window_size<span class="token punctuation">,</span> <span class="token operator">-</span>self<span class="token punctuation">.</span>shift_size<span class="token punctuation">)</span><span class="token punctuation">,</span>
+                    <span class="token builtin">slice</span><span class="token punctuation">(</span><span class="token operator">-</span>self<span class="token punctuation">.</span>shift_size<span class="token punctuation">,</span> <span class="token boolean">None</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        w_slices <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token builtin">slice</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token operator">-</span>self<span class="token punctuation">.</span>window_size<span class="token punctuation">)</span><span class="token punctuation">,</span>
+                    <span class="token builtin">slice</span><span class="token punctuation">(</span><span class="token operator">-</span>self<span class="token punctuation">.</span>window_size<span class="token punctuation">,</span> <span class="token operator">-</span>self<span class="token punctuation">.</span>shift_size<span class="token punctuation">)</span><span class="token punctuation">,</span>
+                    <span class="token builtin">slice</span><span class="token punctuation">(</span><span class="token operator">-</span>self<span class="token punctuation">.</span>shift_size<span class="token punctuation">,</span> <span class="token boolean">None</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token comment"># 对3x3=9个区域进行划分 编号 0-8</span>
+        cnt <span class="token operator">=</span> <span class="token number">0</span>
+        <span class="token keyword">for</span> h <span class="token keyword">in</span> h_slices<span class="token punctuation">:</span>
+            <span class="token keyword">for</span> w <span class="token keyword">in</span> w_slices<span class="token punctuation">:</span>
+                img_mask<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span> h<span class="token punctuation">,</span> w<span class="token punctuation">,</span> <span class="token punctuation">:</span><span class="token punctuation">]</span> <span class="token operator">=</span> cnt
+                cnt <span class="token operator">+=</span> <span class="token number">1</span>
+
+        <span class="token comment"># 将img_mask划分为一个个的窗口   64个7x7大小的窗口</span>
+        <span class="token comment"># [1,56,56,1] -&gt; [64,7,7,1] -&gt; [64,7,7]</span>
+        mask_windows <span class="token operator">=</span> window_partition<span class="token punctuation">(</span>img_mask<span class="token punctuation">,</span> self<span class="token punctuation">.</span>window_size<span class="token punctuation">)</span>  <span class="token comment"># [nW, Mh, Mw, 1]</span>
+        mask_windows <span class="token operator">=</span> mask_windows<span class="token punctuation">.</span>view<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> self<span class="token punctuation">.</span>window_size <span class="token operator">*</span> self<span class="token punctuation">.</span>window_size<span class="token punctuation">)</span>  <span class="token comment"># [nW, Mh*Mw]</span>
+        <span class="token comment"># [nW, 1, Mh*Mw] - [nW, Mh*Mw, 1] -&gt; [nW, Mh*Mw, Mh*Mw]=[64,49,49]</span>
+        <span class="token comment"># 数字相同的位置代表是同一个区域  我们就是要计算同一个区域的attention  相减之后为0的区域就是我们需要计算attention的地方</span>
+        <span class="token comment"># 64个网格  49x49每个网格中的每个位置(49个位置)对该网格中所有位置(49个位置)的注意力蒙版</span>
+        attn_mask <span class="token operator">=</span> mask_windows<span class="token punctuation">.</span>unsqueeze<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token operator">-</span> mask_windows<span class="token punctuation">.</span>unsqueeze<span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span>
+        <span class="token comment"># 对于非零区域填上-100  这些区域是不需要计算attention的  所以在之后的softmax后就会为0</span>
+        attn_mask <span class="token operator">=</span> attn_mask<span class="token punctuation">.</span>masked_fill<span class="token punctuation">(</span>attn_mask <span class="token operator">!=</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token builtin">float</span><span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">100.0</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span>masked_fill<span class="token punctuation">(</span>attn_mask <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token builtin">float</span><span class="token punctuation">(</span><span class="token number">0.0</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token keyword">return</span> attn_mask
+</code></pre> 
+<p>这里涉及到划分窗口的操作：</p> 
+<pre><code class="prism language-py"><span class="token keyword">def</span> <span class="token function">window_partition</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span> window_size<span class="token punctuation">:</span> <span class="token builtin">int</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token triple-quoted-string string">"""
+    将feature map按照window_size划分成一个个没有重叠的window
+    Args:
+        x: (B, H, W, C)
+        window_size (int): window size(M)
+
+    Returns:
+        windows: (num_windows*B, window_size, window_size, C)
+    """</span>
+    B<span class="token punctuation">,</span> H<span class="token punctuation">,</span> W<span class="token punctuation">,</span> C <span class="token operator">=</span> x<span class="token punctuation">.</span>shape   <span class="token comment"># 1  56  56  1</span>
+    x <span class="token operator">=</span> x<span class="token punctuation">.</span>view<span class="token punctuation">(</span>B<span class="token punctuation">,</span> H <span class="token operator">//</span> window_size<span class="token punctuation">,</span> window_size<span class="token punctuation">,</span> W <span class="token operator">//</span> window_size<span class="token punctuation">,</span> window_size<span class="token punctuation">,</span> C<span class="token punctuation">)</span>  <span class="token comment"># [1,56,56,1] -&gt; [1,8,7,8,7,1]</span>
+    <span class="token comment"># permute: [B, H//Mh, Mh, W//Mw, Mw, C] -&gt; [B, H//Mh, W//Mh, Mw, Mw, C]</span>
+    <span class="token comment"># view: [B, H//Mh, W//Mw, Mh, Mw, C] -&gt; [B*num_windows, Mh, Mw, C]</span>
+    windows <span class="token operator">=</span> x<span class="token punctuation">.</span>permute<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">,</span> <span class="token number">5</span><span class="token punctuation">)</span><span class="token punctuation">.</span>contiguous<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>view<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> window_size<span class="token punctuation">,</span> window_size<span class="token punctuation">,</span> C<span class="token punctuation">)</span>  <span class="token comment"># [1,8,7,8,7,1] -&gt; [1,8,8,7,7,1] -&gt; [64,7,7,1]</span>
+    <span class="token keyword">return</span> windows
+</code></pre> 
+<h4><a id="412shift_353"></a>4.1.2、shift特征</h4> 
+<pre><code class="prism language-py"><span class="token keyword">class</span> <span class="token class-name">SwinTransformerBlock</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> x<span class="token punctuation">,</span> attn_mask<span class="token punctuation">)</span><span class="token punctuation">:</span>
+		<span class="token comment"># cyclic shift</span>
+        <span class="token keyword">if</span> self<span class="token punctuation">.</span>shift_size <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">:</span>  <span class="token comment"># SW-MSA</span>
+            <span class="token comment"># 对x特征进行移动  0-shift_size列移动到最右侧   0-shift_size行移动到最下面</span>
+            <span class="token comment"># -的就是从上往下 从左往右  +的就是从下往上 从右往左了</span>
+            <span class="token comment"># 对应的attn_mask就是传入的attn_mask</span>
+            shifted_x <span class="token operator">=</span> torch<span class="token punctuation">.</span>roll<span class="token punctuation">(</span>x<span class="token punctuation">,</span> shifts<span class="token operator">=</span><span class="token punctuation">(</span><span class="token operator">-</span>self<span class="token punctuation">.</span>shift_size<span class="token punctuation">,</span> <span class="token operator">-</span>self<span class="token punctuation">.</span>shift_size<span class="token punctuation">)</span><span class="token punctuation">,</span> dims<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token keyword">else</span><span class="token punctuation">:</span>  <span class="token comment"># W-MSA  不需要移动</span>
+            shifted_x <span class="token operator">=</span> x
+            attn_mask <span class="token operator">=</span> <span class="token boolean">None</span>
+</code></pre> 
+<p>最后计算完SW-MSA后需要将shift过的特征进行还原：</p> 
+<pre><code class="prism language-py">		<span class="token comment"># 之前shift过windows 再还原  从下往上 从右往左 +</span>
+        <span class="token keyword">if</span> self<span class="token punctuation">.</span>shift_size <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">:</span>
+            x <span class="token operator">=</span> torch<span class="token punctuation">.</span>roll<span class="token punctuation">(</span>shifted_x<span class="token punctuation">,</span> shifts<span class="token operator">=</span><span class="token punctuation">(</span>self<span class="token punctuation">.</span>shift_size<span class="token punctuation">,</span> self<span class="token punctuation">.</span>shift_size<span class="token punctuation">)</span><span class="token punctuation">,</span> dims<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token keyword">else</span><span class="token punctuation">:</span>
+            x <span class="token operator">=</span> shifted_x
+</code></pre> 
+<h4><a id="413shift_379"></a>4.1.3、为shift后的特征划分窗口</h4> 
+<pre><code class="prism language-py">		<span class="token comment"># 为shifted_x划分窗口  与attn_mask划分的窗口对应  [bs,56,56,96] -&gt; [512,7,7,96]  8x8xbs个7x7的窗口 x 96个通道</span>
+        x_windows <span class="token operator">=</span> window_partition<span class="token punctuation">(</span>shifted_x<span class="token punctuation">,</span> self<span class="token punctuation">.</span>window_size<span class="token punctuation">)</span>  <span class="token comment"># [nW*B, Mh, Mw, C]</span>
+        x_windows <span class="token operator">=</span> x_windows<span class="token punctuation">.</span>view<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> self<span class="token punctuation">.</span>window_size <span class="token operator">*</span> self<span class="token punctuation">.</span>window_size<span class="token punctuation">,</span> C<span class="token punctuation">)</span>  <span class="token comment"># [nW*B, Mh*Mw, C]=[512,49,96]</span>
+</code></pre> 
+<p>这里的划分窗口和上面mask的划分窗口一样，就不赘述。</p> 
+<h4><a id="414WMSA_VS_SWMSA_389"></a>4.1.4、W-MSA VS SW-MSA</h4> 
+<pre><code class="prism language-py"><span class="token keyword">class</span> <span class="token class-name">WindowAttention</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token triple-quoted-string string">r"""W-MSA/SW-MSA
+    Window based multi-head self attention (W-MSA) module with relative position bias.
+    It supports both of shifted and non-shifted window.
+    """</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> dim<span class="token punctuation">,</span> window_size<span class="token punctuation">,</span> num_heads<span class="token punctuation">,</span> qkv_bias<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">,</span> attn_drop<span class="token operator">=</span><span class="token number">0.</span><span class="token punctuation">,</span> proj_drop<span class="token operator">=</span><span class="token number">0.</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token triple-quoted-string string">"""
+        dim: C = 96
+        window_size: 窗口大小7x7
+        num_heads: muti-head self-transformer的头数
+        qkv_bias: 在muti-head self-attention中是否使用偏置 默认使用True
+        proj_drop: 在muti-head self-attention中使用的drop rate  0.0
+        """</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>dim <span class="token operator">=</span> dim
+        self<span class="token punctuation">.</span>window_size <span class="token operator">=</span> window_size  <span class="token comment"># [7, 7]</span>
+        self<span class="token punctuation">.</span>num_heads <span class="token operator">=</span> num_heads
+        head_dim <span class="token operator">=</span> dim <span class="token operator">//</span> num_heads
+        self<span class="token punctuation">.</span>scale <span class="token operator">=</span> head_dim <span class="token operator">**</span> <span class="token operator">-</span><span class="token number">0.5</span>
+
+        <span class="token comment"># 初始化relative_position_bias_table</span>
+        self<span class="token punctuation">.</span>relative_position_bias_table <span class="token operator">=</span> nn<span class="token punctuation">.</span>Parameter<span class="token punctuation">(</span>
+            torch<span class="token punctuation">.</span>zeros<span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token number">2</span> <span class="token operator">*</span> window_size<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token punctuation">(</span><span class="token number">2</span> <span class="token operator">*</span> window_size<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">,</span> num_heads<span class="token punctuation">)</span><span class="token punctuation">)</span>  <span class="token comment"># [2*7-1 * 2*7-1, num_heads]</span>
+
+        <span class="token comment"># 1、生成绝对位置坐标索引</span>
+        coords_h <span class="token operator">=</span> torch<span class="token punctuation">.</span>arange<span class="token punctuation">(</span>self<span class="token punctuation">.</span>window_size<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span>  <span class="token comment"># tensor([0, 1, 2, 3, 4, 5, 6])</span>
+        coords_w <span class="token operator">=</span> torch<span class="token punctuation">.</span>arange<span class="token punctuation">(</span>self<span class="token punctuation">.</span>window_size<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>  <span class="token comment"># tensor([0, 1, 2, 3, 4, 5, 6])</span>
+        <span class="token comment"># coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))</span>
+        <span class="token comment"># [2, 7, 7]  7x7窗口的xy坐标</span>
+        coords <span class="token operator">=</span> torch<span class="token punctuation">.</span>stack<span class="token punctuation">(</span>torch<span class="token punctuation">.</span>meshgrid<span class="token punctuation">(</span><span class="token punctuation">[</span>coords_h<span class="token punctuation">,</span> coords_w<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token comment"># [2, 7, 7] -&gt; [2, 49]  第一个是所有位置的行坐标  第二个是所有位置的列坐标</span>
+        coords_flatten <span class="token operator">=</span> torch<span class="token punctuation">.</span>flatten<span class="token punctuation">(</span>coords<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span>
+
+        <span class="token comment"># 2、生成相对位置坐标索引</span>
+        <span class="token comment"># [2, Mh*Mw, 1] - [2, 1, Mh*Mw] -&gt; [2, Mh*Mw, Mh*Mw]</span>
+        relative_coords <span class="token operator">=</span> coords_flatten<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token boolean">None</span><span class="token punctuation">]</span> <span class="token operator">-</span> coords_flatten<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token boolean">None</span><span class="token punctuation">,</span> <span class="token punctuation">:</span><span class="token punctuation">]</span>
+
+        <span class="token comment"># [2, Mh*Mw, Mh*Mw] -&gt; [Mh*Mw, Mh*Mw, 2]</span>
+        relative_coords <span class="token operator">=</span> relative_coords<span class="token punctuation">.</span>permute<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">.</span>contiguous<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+        <span class="token comment"># 3、将二元相对位置坐标索引转变成一元相对位置坐标索引</span>
+        <span class="token comment"># 原始相对位置行/列标 = -6~6 + (window_size-1) -&gt; 0~12</span>
+        <span class="token comment"># 行标 + (2 * window_size - 1) -&gt; 13~25</span>
+        <span class="token comment"># 这时直接把行标 + 列标 直接把2D索引转换为1D索引 就不会出现(-1,0) (0,-1) 相加都是-1 无法区分的情况了</span>
+        relative_coords<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">+=</span> self<span class="token punctuation">.</span>window_size<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">-</span> <span class="token number">1</span>      <span class="token comment"># 行标 + (window_size-1)</span>
+        relative_coords<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">+=</span> self<span class="token punctuation">.</span>window_size<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">-</span> <span class="token number">1</span>      <span class="token comment"># 列标 + (window_size-1)</span>
+        relative_coords<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">*=</span> <span class="token number">2</span> <span class="token operator">*</span> self<span class="token punctuation">.</span>window_size<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">-</span> <span class="token number">1</span>  <span class="token comment"># 行标 + (2 * window_size - 1)</span>
+        <span class="token comment"># [Mh*Mw, Mh*Mw, 2] -&gt; [Mh*Mw, Mh*Mw]   行标 + 列标   直接转换为1元索引  与relative_position_bias_table一一对应</span>
+        relative_position_index <span class="token operator">=</span> relative_coords<span class="token punctuation">.</span><span class="token builtin">sum</span><span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+
+        <span class="token comment"># 把relative_position_index放到缓存中  因为relative_position_index是固定值  不会变的  不需要修改</span>
+        <span class="token comment"># 我们网络训练的其实是relative_position_bias_table中的参数  我们每次循环都从relative_position_bias_table中拿对应idx的值即可</span>
+        self<span class="token punctuation">.</span>register_buffer<span class="token punctuation">(</span><span class="token string">"relative_position_index"</span><span class="token punctuation">,</span> relative_position_index<span class="token punctuation">)</span>
+
+        self<span class="token punctuation">.</span>qkv <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>dim<span class="token punctuation">,</span> dim <span class="token operator">*</span> <span class="token number">3</span><span class="token punctuation">,</span> bias<span class="token operator">=</span>qkv_bias<span class="token punctuation">)</span>   <span class="token comment"># 生成qkv  3倍dim = q+k+v</span>
+        self<span class="token punctuation">.</span>attn_drop <span class="token operator">=</span> nn<span class="token punctuation">.</span>Dropout<span class="token punctuation">(</span>attn_drop<span class="token punctuation">)</span>             <span class="token comment"># p=0.0</span>
+        self<span class="token punctuation">.</span>proj <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>dim<span class="token punctuation">,</span> dim<span class="token punctuation">)</span>                    <span class="token comment"># linear</span>
+        self<span class="token punctuation">.</span>proj_drop <span class="token operator">=</span> nn<span class="token punctuation">.</span>Dropout<span class="token punctuation">(</span>proj_drop<span class="token punctuation">)</span>             <span class="token comment"># linear dropout p=0</span>
+
+        nn<span class="token punctuation">.</span>init<span class="token punctuation">.</span>trunc_normal_<span class="token punctuation">(</span>self<span class="token punctuation">.</span>relative_position_bias_table<span class="token punctuation">,</span> std<span class="token operator">=</span><span class="token number">.02</span><span class="token punctuation">)</span>  <span class="token comment"># 初始化relative_position_bias_table参数</span>
+
+        self<span class="token punctuation">.</span>softmax <span class="token operator">=</span> nn<span class="token punctuation">.</span>Softmax<span class="token punctuation">(</span>dim<span class="token operator">=</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>   <span class="token comment"># softmax层</span>
+
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> x<span class="token punctuation">,</span> mask<span class="token punctuation">:</span> Optional<span class="token punctuation">[</span>torch<span class="token punctuation">.</span>Tensor<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token boolean">None</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token triple-quoted-string string">"""
+        x: [bsx8x8, 49, 96]  bsx  8x8个7x7大小的window size  x96channel
+        mask: W-MSA和SW-MSA交替出现 None/[8x8,49,49]  记录8x8个7x7大小的window size  中 每个位置需要和哪些位置计算attention
+              =0的位置表示是需要计算attention的
+        Attention(Q,K,V) = SoftMax(Q*K的转置/scale + B)*V
+        """</span>
+        B_<span class="token punctuation">,</span> N<span class="token punctuation">,</span> C <span class="token operator">=</span> x<span class="token punctuation">.</span>shape  <span class="token comment"># batch_size*num_windows=bsx8x8, Mh*Mw=7x7, total_embed_dim=96</span>
+
+        <span class="token comment"># 生成qkv 和vit中的一样  和原始的transformer有区别  但是本质都是相同的 都是通过学习参数把输入的x映射到3个空间上</span>
+        <span class="token comment"># qkv(): -&gt; [batch_size*num_windows, Mh*Mw, 3 * total_embed_dim]</span>
+        <span class="token comment"># reshape: -&gt; [batch_size*num_windows, Mh*Mw, 3, num_heads, embed_dim_per_head]</span>
+        <span class="token comment"># permute: -&gt; [3, batch_size*num_windows, num_heads, Mh*Mw, embed_dim_per_head] = [3,bsx8x8,3,7x7,32]</span>
+        qkv <span class="token operator">=</span> self<span class="token punctuation">.</span>qkv<span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">.</span>reshape<span class="token punctuation">(</span>B_<span class="token punctuation">,</span> N<span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> self<span class="token punctuation">.</span>num_heads<span class="token punctuation">,</span> C <span class="token operator">//</span> self<span class="token punctuation">.</span>num_heads<span class="token punctuation">)</span><span class="token punctuation">.</span>permute<span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">)</span>
+
+        <span class="token comment"># 分别获得q k v</span>
+        <span class="token comment"># [batch_size*num_windows, num_heads, Mh*Mw, embed_dim_per_head] = [bsx8x8,3,7x7,32]</span>
+        q<span class="token punctuation">,</span> k<span class="token punctuation">,</span> v <span class="token operator">=</span> qkv<span class="token punctuation">.</span>unbind<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>  <span class="token comment"># make torchscript happy (cannot use tensor as tuple)</span>
+
+        <span class="token comment"># 这里是先缩放再乘以k的转置  其实是一样的</span>
+        <span class="token comment"># transpose: -&gt; [batch_size*num_windows, num_heads, embed_dim_per_head, Mh*Mw]</span>
+        <span class="token comment"># @: multiply -&gt; [batch_size*num_windows, num_heads, Mh*Mw, Mh*Mw]</span>
+        q <span class="token operator">=</span> q <span class="token operator">*</span> self<span class="token punctuation">.</span>scale
+        attn <span class="token operator">=</span> <span class="token punctuation">(</span>q @ k<span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+        <span class="token comment"># relative_position_bias_table.view: [Mh*Mw*Mh*Mw,nH] -&gt; [Mh*Mw,Mh*Mw,nH]</span>
+        <span class="token comment"># 生成相对位置偏置：生成相对位置index + 去relative_position_bias_table中去取相应的可学习的bias参数</span>
+        relative_position_bias <span class="token operator">=</span> self<span class="token punctuation">.</span>relative_position_bias_table<span class="token punctuation">[</span>self<span class="token punctuation">.</span>relative_position_index<span class="token punctuation">.</span>view<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">]</span><span class="token punctuation">.</span>view<span class="token punctuation">(</span>
+            self<span class="token punctuation">.</span>window_size<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">*</span> self<span class="token punctuation">.</span>window_size<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">,</span> self<span class="token punctuation">.</span>window_size<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">*</span> self<span class="token punctuation">.</span>window_size<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+        relative_position_bias <span class="token operator">=</span> relative_position_bias<span class="token punctuation">.</span>permute<span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">.</span>contiguous<span class="token punctuation">(</span><span class="token punctuation">)</span>  <span class="token comment"># [nH, Mh*Mw, Mh*Mw]</span>
+
+        <span class="token comment"># att + B</span>
+        attn <span class="token operator">=</span> attn <span class="token operator">+</span> relative_position_bias<span class="token punctuation">.</span>unsqueeze<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>
+
+        <span class="token comment"># softmax处理</span>
+        <span class="token keyword">if</span> mask <span class="token keyword">is</span> <span class="token keyword">not</span> <span class="token boolean">None</span><span class="token punctuation">:</span>
+            <span class="token comment"># SW-MSA</span>
+            <span class="token comment"># mask: [nW, Mh*Mw, Mh*Mw]=[8x8,49,49]  记录8x8个7x7大小的window中每个位置需要和哪些位置计算attention</span>
+            <span class="token comment">#       =0的位置表示是需要计算attention的   不相同的区域位置是接近-100表示的</span>
+            nW <span class="token operator">=</span> mask<span class="token punctuation">.</span>shape<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>  <span class="token comment"># num_windows</span>
+            <span class="token comment"># attn.view: [batch_size, num_windows, num_heads, Mh*Mw, Mh*Mw]</span>
+            <span class="token comment"># mask.unsqueeze: [1, nW, 1, Mh*Mw, Mh*Mw]</span>
+            <span class="token comment"># 相同区域位置attn+0没有影响   不同区域位置attn+(-100)  再进行softmax   这个位置的attn就-&gt;0</span>
+            attn <span class="token operator">=</span> attn<span class="token punctuation">.</span>view<span class="token punctuation">(</span>B_ <span class="token operator">//</span> nW<span class="token punctuation">,</span> nW<span class="token punctuation">,</span> self<span class="token punctuation">.</span>num_heads<span class="token punctuation">,</span> N<span class="token punctuation">,</span> N<span class="token punctuation">)</span> <span class="token operator">+</span> mask<span class="token punctuation">.</span>unsqueeze<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">.</span>unsqueeze<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>
+            attn <span class="token operator">=</span> attn<span class="token punctuation">.</span>view<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> self<span class="token punctuation">.</span>num_heads<span class="token punctuation">,</span> N<span class="token punctuation">,</span> N<span class="token punctuation">)</span>
+            attn <span class="token operator">=</span> self<span class="token punctuation">.</span>softmax<span class="token punctuation">(</span>attn<span class="token punctuation">)</span>
+        <span class="token keyword">else</span><span class="token punctuation">:</span>
+            <span class="token comment"># W-MSA</span>
+            attn <span class="token operator">=</span> self<span class="token punctuation">.</span>softmax<span class="token punctuation">(</span>attn<span class="token punctuation">)</span>
+
+        attn <span class="token operator">=</span> self<span class="token punctuation">.</span>attn_drop<span class="token punctuation">(</span>attn<span class="token punctuation">)</span>
+
+        <span class="token comment"># attn * v</span>
+        <span class="token comment"># @: multiply -&gt; [batch_size*num_windows, num_heads, Mh*Mw, embed_dim_per_head]</span>
+        <span class="token comment"># transpose: -&gt; [batch_size*num_windows, Mh*Mw, num_heads, embed_dim_per_head]</span>
+        <span class="token comment"># reshape: -&gt; [batch_size*num_windows, Mh*Mw, total_embed_dim]</span>
+        x <span class="token operator">=</span> <span class="token punctuation">(</span>attn @ v<span class="token punctuation">)</span><span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">.</span>reshape<span class="token punctuation">(</span>B_<span class="token punctuation">,</span> N<span class="token punctuation">,</span> C<span class="token punctuation">)</span>
+        x <span class="token operator">=</span> self<span class="token punctuation">.</span>proj<span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+        x <span class="token operator">=</span> self<span class="token punctuation">.</span>proj_drop<span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> x
+</code></pre> 
+<p>这个步骤和ViT中的其实差不多，只不过ViT是计算每个位置和所有位置的attention，而WindowAttention是按照窗口来计算每个位置和当前windows内所有位置的attention，计算量更小。</p> 
+<h3><a id="42PatchMerging_521"></a>4.2、PatchMerging</h3> 
+<p>这部分主要功能就是进行下采样，操作：每个一个元素取一个像素，有点类似YOLOv5中的Focus层。最后将4个特征拼接起来，再接一个Linear缩放通道。</p> 
+<p><img src="https://images2.imgbox.com/90/73/LyDTGksp_o.png" alt="在这里插入图片描述"></p> 
+<pre><code class="prism language-py"><span class="token keyword">class</span> <span class="token class-name">PatchMerging</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token triple-quoted-string string">r""" Patch Merging Layer. 下采样
+    输入[bs, H_/4 * W/4, C=96]  -&gt;  输出[bs, H_/8 * W/8, 2C] 
+    """</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> dim<span class="token punctuation">,</span> norm_layer<span class="token operator">=</span>nn<span class="token punctuation">.</span>LayerNorm<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>dim <span class="token operator">=</span> dim  <span class="token comment"># 输入特征的channel = 96/192/384</span>
+        self<span class="token punctuation">.</span>reduction <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span><span class="token number">4</span> <span class="token operator">*</span> dim<span class="token punctuation">,</span> <span class="token number">2</span> <span class="token operator">*</span> dim<span class="token punctuation">,</span> bias<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>norm <span class="token operator">=</span> norm_layer<span class="token punctuation">(</span><span class="token number">4</span> <span class="token operator">*</span> dim<span class="token punctuation">)</span>  <span class="token comment"># LN</span>
+
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> x<span class="token punctuation">,</span> H<span class="token punctuation">,</span> W<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token triple-quoted-string string">"""
+        x: [bs, H_/4 * W/4, C=96]
+        """</span>
+        B<span class="token punctuation">,</span> L<span class="token punctuation">,</span> C <span class="token operator">=</span> x<span class="token punctuation">.</span>shape   <span class="token comment"># B=8 C=96 L= H_/4*W/4</span>
+        <span class="token keyword">assert</span> L <span class="token operator">==</span> H <span class="token operator">*</span> W<span class="token punctuation">,</span> <span class="token string">"input feature has wrong size"</span>
+
+        x <span class="token operator">=</span> x<span class="token punctuation">.</span>view<span class="token punctuation">(</span>B<span class="token punctuation">,</span> H<span class="token punctuation">,</span> W<span class="token punctuation">,</span> C<span class="token punctuation">)</span>  <span class="token comment"># [bs, H_/4 * W/4, C=96] -&gt; [bs, H_/4, W_/4, C=96]</span>
+
+        <span class="token comment"># padding</span>
+        <span class="token comment"># 如果输入feature map的H，W不是2的整数倍，需要进行padding</span>
+        pad_input <span class="token operator">=</span> <span class="token punctuation">(</span>H <span class="token operator">%</span> <span class="token number">2</span> <span class="token operator">==</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token keyword">or</span> <span class="token punctuation">(</span>W <span class="token operator">%</span> <span class="token number">2</span> <span class="token operator">==</span> <span class="token number">1</span><span class="token punctuation">)</span>  <span class="token comment"># False</span>
+        <span class="token keyword">if</span> pad_input<span class="token punctuation">:</span>  <span class="token comment"># 跳过</span>
+            <span class="token comment"># to pad the last 3 dimensions, starting from the last dimension and moving forward.</span>
+            <span class="token comment"># (C_front, C_back, W_left, W_right, H_top, H_bottom)</span>
+            <span class="token comment"># 注意这里的Tensor通道是[B, H, W, C]，所以会和官方文档有些不同</span>
+            x <span class="token operator">=</span> F<span class="token punctuation">.</span>pad<span class="token punctuation">(</span>x<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> W <span class="token operator">%</span> <span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> H <span class="token operator">%</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+        <span class="token comment"># 每隔一个像素取一个元素 有点像yolov5的focus层 最后一个特征 -&gt; 4个下采样的特征</span>
+        <span class="token comment"># [bs, H_/4, W_/4, C=96]  -&gt;  4 x [bs, H_/8, W_/8, C=96]</span>
+        x0 <span class="token operator">=</span> x<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">:</span><span class="token punctuation">:</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">:</span><span class="token punctuation">:</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token punctuation">:</span><span class="token punctuation">]</span>  
+        x1 <span class="token operator">=</span> x<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token punctuation">:</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">:</span><span class="token punctuation">:</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token punctuation">:</span><span class="token punctuation">]</span> 
+        x2 <span class="token operator">=</span> x<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">:</span><span class="token punctuation">:</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token punctuation">:</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token punctuation">:</span><span class="token punctuation">]</span>  
+        x3 <span class="token operator">=</span> x<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token punctuation">:</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token punctuation">:</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token punctuation">:</span><span class="token punctuation">]</span>  
+        
+        <span class="token comment"># 4 x [bs, H_/8, W_/8, 96] -&gt; [bs, H_/8, W_/8, 96*4] -&gt; [bs, H_/8 * W_/8, 4*C]</span>
+        x <span class="token operator">=</span> torch<span class="token punctuation">.</span>cat<span class="token punctuation">(</span><span class="token punctuation">[</span>x0<span class="token punctuation">,</span> x1<span class="token punctuation">,</span> x2<span class="token punctuation">,</span> x3<span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>  
+        x <span class="token operator">=</span> x<span class="token punctuation">.</span>view<span class="token punctuation">(</span>B<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">4</span> <span class="token operator">*</span> C<span class="token punctuation">)</span>  
+
+        x <span class="token operator">=</span> self<span class="token punctuation">.</span>norm<span class="token punctuation">(</span>x<span class="token punctuation">)</span>  <span class="token comment"># LN</span>
+        
+        <span class="token comment"># Linear 将通道从4C -&gt; 2C  [bs, H_/8 * W_/8, C*4] -&gt; [bs, H_/8 * W_/8, 2*C]</span>
+        x <span class="token operator">=</span> self<span class="token punctuation">.</span>reduction<span class="token punctuation">(</span>x<span class="token punctuation">)</span>  
+
+        <span class="token keyword">return</span> x
+</code></pre> 
+<h2><a id="_577"></a>五、总结</h2> 
+<p>为了解决ViT存在的问题：</p> 
+<ul><li>尺度问题：数据集物体大大小小，但是整个Encoder过程特征尺度是不变的，效果肯定不好；</li><li>计算量大：划分patch，再把整张图片的所有patch都输入Encoder中，计算量太大；</li></ul> 
+<p>改进点：</p> 
+<ul><li>Encode呈现金字塔形状。每过一个Stage对特征进行一次下采样，感受野在不停的增大，解决了尺度问题。所以Swin-Transformer不进适合分类任务，在下游检测、分割任务可以充分利用这种多尺度信息，检测效果很好；</li><li>注意力机制放在一个窗口内部。不再把整张图片的所有patch都输入Encoder，而是将各个Patch单独的输入Encoder，解决了计算量太大的问题。</li></ul> 
+<p>关于第二点改进点还有很多的细节：</p> 
+<ul><li>提出Window Muti-head Self-Attention（W-MSA)：把输入特征划分为一个个的windows窗口，只计算每个位置和当前windows窗口的所有位置的相关性Attention，其他窗口的不关心，这样就大大减少了计算量了；</li><li>W-MSA有一个问题，不同窗口完全不相关了，那不同窗口的位置之间不就没法交互了，所以作者又提出了Shift-Window Muti-head Self-Attention（SW-MSA)。</li><li>特征图Shift操作其实很简单，就是特征某些行列平移，但是Shift了之后就会产生更多的窗口，计算量还是增加了，作者为了解决这个问题，引入了Mask，仍然是使用原先的窗口划分方式，但是用mask记录每个位置属于哪个窗口，相同窗口的位置mask=0，不同窗口的位置mask=-100，那么最后再用计算好的attention + mask，再softmax。于是，相同窗口的attention不变，不同窗口的attention=0，完美解决所有问题；</li><li>作者还在WindowAttention中引入了relative_position_bias，使用Attention(Q,K,V) = SoftMax(Q*K的转置/scale + B)*V计算公式；</li></ul> 
+<h2><a id="_596"></a>六、一些问题</h2> 
+<h3><a id="61WMSASWMSA_597"></a>6.1.为什么要W-MSA和SW-MSA混合使用？</h3> 
+<p>我的理解：单独的W-MSA和单独的SW-MSA其实都是固定的位置窗口（SW-MSA是对固定的区域进行shift，但是如果单独只使用SW-MSA，那么不还是固定的窗口），这样使用还是会有不同窗口无法信息交互的问题，但是混合起来使用，才能真正的起到交互作用。</p> 
+<h2><a id="Reference_600"></a>Reference</h2> 
+<p>b站: <a href="https://www.bilibili.com/video/BV13L4y1475U/?spm_id_from=333.337.search-card.all.click&amp;vd_source=5f6bbc1038b075757cb446f800f3cd56" rel="nofollow">Swin Transformer论文精读【论文精读】</a></p> 
+<p>b站: <a href="https://www.bilibili.com/video/BV1pL4y1v7jC/?spm_id_from=333.999.0.0&amp;vd_source=5f6bbc1038b075757cb446f800f3cd56" rel="nofollow">12.1 Swin-Transformer网络结构详解</a></p> 
+<p>b站: <a href="https://www.bilibili.com/video/BV1yg411K7Yc/?spm_id_from=333.788&amp;vd_source=5f6bbc1038b075757cb446f800f3cd56" rel="nofollow">12.2 使用Pytorch搭建Swin-Transformer网络</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/21197bf8af8e0b967ceca00d553c6e14/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Ubuntu安装Typora</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/345638f41bc5c350a2068f5536664904/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">yocto machine class解析之flashlayout-stm32mp</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

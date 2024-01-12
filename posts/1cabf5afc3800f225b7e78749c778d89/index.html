@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>LLVM学习笔记（30） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="LLVM学习笔记（30）" />
+<meta property="og:description" content="3.4.4.3. 生成代码如何辅助指令选择
+3.4.4.3.1. 概述
+我们首先以一个例子来说明这个过程是怎么开始的，这个例子来自Eli Bendersky的a deeper look into the llvm code generator part I：
+Eli Bendersky给出了这样一些简单的IR：
+define i64 @imul(i64 %a, i64 %b) nounwind readnone {
+entry:
+%mul = mul nsw i64 %b, %a
+ret i64 %mul
+}
+它是在x64机器上用Clang（选项-emit-llvm）编译下面的C代码得到的：
+long imul(long a, long b) {
+return a * b;
+}
+代码生成器完成的第一件事是把IR转换为一个selectionDAG表示。下图是刚开始的DAG，就在构建出来之后。
+实际上这个SelectionDAG是从最顶上的EntryToken开始构建的（即以函数的语句顺序），节点保存在ilist&lt;SDNode&gt;类型的容器里（SelectionDAG的AllNodes，这个容器是一个链式容器，图中没有显示将各个节点连接起来的边）。
+在进行指令选择之前，会对这个容器进行一次拓扑排序，然后以反拓扑序对SelectionDAG遍历，即从最底下的GraphRoot节点开始，自底向上遍历。需要这个次序，是因为指令选择后得到的节点将替换被选中的节点，即被选中节点的使用者需要使用选择得到节点来代替被选中的节点。而且这个次序对维持节点间chain与glue的关联关系也是最高效的。这样的次序使得只要一次遍历就能完成指令选择与替换。
+在指令选择后DAG的外观如下。在图中原有的mul节点被X86特定的IMUL64rr指令节点所替代。另外RET_FLAG节点被X86的RET指令节点替代。
+注意，其中chain节点间的次序是受保护的，而glue节点所连接的节点则是：在调度期间，指令调度器不会在它们中间插入其他代码。关于chain与glue属性的声明，一方面，我们可以在声明描述操作的SDNode定义时通过SDNPHasChain与SDNPInGlue，SDNPOutGlue来声明这些属性。另一方面，部分操作节点目前还不是通过SDNode来描述的，比如上面的CopyToReg及CopyFromReg，则在构建具体的节点时确定其chain与glue属性。基本上访问内存的操作节点会带有chain属性，操作数进行算术操作的节点一般会带有glue属性。
+Chain操作数如果存在的话，总是第一个操作数，而glue操作数如果存在的话，则总是最后一个操作数。这是TableGen强制的规定。
+3.4.4.2. 基本数据结构
+3.4.4.2.1. SDNode
+在被前端处理后，源代码会被转换为LLVM IR形式，在经过一系列优化处理后，在指令选择前，这个形式被称为SelectionDAG。此时，这个DAG中的节点是SDNode的实例。类SDNode定义在文件SelectionDAGNodes.h中，它包含了下列的数据：
+324 class SDNode : public FoldingSetNode, public ilist_node&lt;SDNode&gt; {" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/1cabf5afc3800f225b7e78749c778d89/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-12-20T10:16:02+08:00" />
+<meta property="article:modified_time" content="2023-12-20T10:16:02+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">LLVM学习笔记（30）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>3.4.4.3. 生成代码如何辅助指令选择</p> 
+<p>3.4.4.3.1. 概述</p> 
+<p style="margin-left:0cm;">我们首先以一个例子来说明这个过程是怎么开始的，这个例子来自Eli Bendersky的<span style="color:#0000ff;"><u><a href="http://eli.thegreenplace.net/2013/02/25/a-deeper-look-into-the-llvm-code-generator-part-1/" rel="nofollow" title="a deeper look into the llvm code generator part I">a deeper look into the llvm code generator part I</a></u></span>：</p> 
+<p style="margin-left:0cm;">Eli Bendersky给出了这样一些简单的IR：</p> 
+<p style="margin-left:0cm;">define i64 @imul(i64 %a, i64 %b) nounwind readnone {<!-- --></p> 
+<p style="margin-left:0cm;">entry:</p> 
+<p style="margin-left:0cm;">  %mul = mul nsw i64 %b, %a</p> 
+<p style="margin-left:0cm;">  ret i64 %mul</p> 
+<p style="margin-left:0cm;">}</p> 
+<p style="margin-left:0cm;">它是在x64机器上用Clang（选项-emit-llvm）编译下面的C代码得到的：</p> 
+<p style="margin-left:0cm;">long imul(long a, long b) {<!-- --></p> 
+<p style="margin-left:0cm;">    return a * b;</p> 
+<p style="margin-left:0cm;">}</p> 
+<p style="margin-left:0cm;"><br> 代码生成器完成的第一件事是把IR转换为一个selectionDAG表示。下图是刚开始的DAG，就在构建出来之后。</p> 
+<p style="margin-left:0cm;"><img alt="" height="740" src="https://images2.imgbox.com/81/42/iXwiZXcn_o.png" width="589"></p> 
+<p style="margin-left:0cm;">实际上这个SelectionDAG是从最顶上的EntryToken开始构建的（即以函数的语句顺序），节点保存在ilist&lt;SDNode&gt;类型的容器里（SelectionDAG的AllNodes，这个容器是一个链式容器，图中没有显示将各个节点连接起来的边）。</p> 
+<p style="margin-left:0cm;">在进行指令选择之前，会对这个容器进行一次拓扑排序，然后以反拓扑序对SelectionDAG遍历，即从最底下的GraphRoot节点开始，自底向上遍历。需要这个次序，是因为指令选择后得到的节点将替换被选中的节点，即被选中节点的使用者需要使用选择得到节点来代替被选中的节点。而且这个次序对维持节点间chain与glue的关联关系也是最高效的。这样的次序使得只要一次遍历就能完成指令选择与替换。</p> 
+<p style="margin-left:0cm;">在指令选择后DAG的外观如下。在图中原有的mul节点被X86特定的IMUL64rr指令节点所替代。另外RET_FLAG节点被X86的RET指令节点替代。</p> 
+<p style="margin-left:0cm;">注意，其中chain节点间的次序是受保护的，而glue节点所连接的节点则是：在调度期间，指令调度器不会在它们中间插入其他代码。关于chain与glue属性的声明，一方面，我们可以在声明描述操作的SDNode定义时通过SDNPHasChain与SDNPInGlue，SDNPOutGlue来声明这些属性。另一方面，部分操作节点目前还不是通过SDNode来描述的，比如上面的CopyToReg及CopyFromReg，则在构建具体的节点时确定其chain与glue属性。基本上访问内存的操作节点会带有chain属性，操作数进行算术操作的节点一般会带有glue属性。</p> 
+<p style="margin-left:0cm;">Chain操作数如果存在的话，总是第一个操作数，而glue操作数如果存在的话，则总是最后一个操作数。这是TableGen强制的规定。</p> 
+<p style="margin-left:0cm;"><img alt="" height="738" src="https://images2.imgbox.com/f9/c1/xyJ81txN_o.png" width="558"></p> 
+<p>3.4.4.2. 基本数据结构</p> 
+<p>3.4.4.2.1. SDNode</p> 
+<p style="margin-left:0cm;">在被前端处理后，源代码会被转换为LLVM IR形式，在经过一系列优化处理后，在指令选择前，这个形式被称为SelectionDAG。此时，这个DAG中的节点是SDNode的实例。类SDNode定义在文件SelectionDAGNodes.h中，它包含了下列的数据：</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">324     </span></em><span style="color:#0000ff;">class</span> SDNode : <span style="color:#0000ff;">public</span> FoldingSetNode, <span style="color:#0000ff;">public</span> ilist_node&lt;SDNode&gt; {<!-- --></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">325     </span></em><span style="color:#0000ff;">private</span>:</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">326     </span></em>  <span style="color:#007f00;">/// The operation that this node performs.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">327     </span></em>  int16_t NodeType;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">328     </span></em></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">329     </span></em>  <span style="color:#007f00;">/// This is true if OperandList was new[]'d.  If true,</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">330     </span></em><span style="color:#007f00;">  /// then they will be delete[]'d when the node is destroyed.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">331     </span></em>  uint16_t OperandsNeedDelete : 1;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">332     </span></em></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">333     </span></em>  <span style="color:#007f00;">/// This tracks whether this node has one or more dbg_value</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">334     </span></em><span style="color:#007f00;">  /// nodes corresponding to it.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">335     </span></em>  uint16_t HasDebugValue : 1;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">336     </span></em></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">337     </span></em><span style="color:#0000ff;">protected</span>:</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">338     </span></em>  <span style="color:#007f00;">/// This member is defined by this class, but is not used for</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">339     </span></em><span style="color:#007f00;">  /// anything.  Subclasses can use it to hold whatever state they find useful.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">340     </span></em><span style="color:#007f00;">  /// This field is initialized to zero by the ctor.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">341     </span></em>  uint16_t SubclassData : 14;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">342     </span></em></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">343     </span></em><span style="color:#0000ff;">private</span>:</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">344     </span></em>  <span style="color:#007f00;">/// Unique id per SDNode in the DAG.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">345     </span></em>  int NodeId;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">346     </span></em></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">347     </span></em>  <span style="color:#007f00;">/// The values that are used by this operation.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">348     </span></em>  SDUse *OperandList;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">349     </span></em></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">350     </span></em>  <span style="color:#007f00;">/// The types of the values this node defines.  SDNode's may</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">351     </span></em>  <span style="color:#007f00;">/// define multiple values simultaneously.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">352     </span></em>  <span style="color:#0000ff;">const</span> EVT *ValueList;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">353     </span></em></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">354     </span></em>  <span style="color:#007f00;">/// List of uses for this SDNode.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">355     </span></em>  SDUse *UseList;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">356     </span></em></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">357     </span></em>  <span style="color:#007f00;">/// The number of entries in the Operand/Value list.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">358     </span></em>  unsigned short NumOperands, NumValues;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">359     </span></em></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">360     </span></em>  <span style="color:#007f00;">/// Source line information.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">361     </span></em>  DebugLoc debugLoc;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">362     </span></em></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">363     </span></em>  <span style="color:#007f00;">// The ordering of the SDNodes. It roughly corresponds to the ordering of the</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">364     </span></em><span style="color:#007f00;">  // original LLVM instructions.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">365     </span></em><span style="color:#007f00;">  // This is used for turning off scheduling, because we'll forgo</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">366     </span></em><span style="color:#007f00;">  // the normal scheduling algorithms and output the instructions according to</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">367     </span></em><span style="color:#007f00;">  // this ordering.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">368     </span></em>  unsigned IROrder;</p> 
+<p style="margin-left:0cm;">SDNode派生自FoldingSetNode与模板类ilist_node。后者提供了类似于一个双向链表的功能，它也是LLVM用于表示基本块的BasicBlock的基类。前者则是类FoldingSetImpl定义的嵌套类Node的typedef，FoldingSetImpl的派生类FoldingSet提供一个以FoldingSetNode为单元的哈希表。在类SelectionDAG里，成员CSEMap就是保存这些代表DAG的SDNode对象的所在（CSE是Common Subexpression Elimination的缩写，公共子表达式消除）。从这两个类派生，SDNode就可以同时置身于BasicBlock与CSEMap里。</p> 
+<p style="margin-left:0cm;">345行的NodeId用于在CSEMap里唯一地识别SDNode实例。在完成指令选择后，NodeId将被设置为-1。在编译优化中，变量（值）的定义与使用是非常重要的信息。为此在编译理论中，对一个变量有所谓的定义链，而对某个特定的变量定义则有所谓的使用链。SelectionDAG是SSA形式的，一个SDNode可能代表了变量的一个定义，也可能使用了变量的某个定义。如果是变量的某个定义，它就需要维护一个使用链，记录对它的使用，这就是355行的UseList的用处——构成Def-Use链。而如果它使用了某些变量的特定定义，也需要维护一个使用链来记录这些操作数（348行OperandList）。它们的类型SDUse包含了如下的成员：</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">233     </span></em><span style="color:#0000ff;">class</span> SDUse {<!-- --></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">234     </span></em>  <span style="color:#007f00;">/// Val - The value being used.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">235     </span></em>  SDValue Val;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">236     </span></em>  <span style="color:#007f00;">/// User - The user of this value.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">237     </span></em>  SDNode *User;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">238     </span></em>  <span style="color:#007f00;">/// Prev, Next - Pointers to the uses list of the SDNode referred by</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">239     </span></em><span style="color:#007f00;">  /// this operand.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">240     </span></em>  SDUse **Prev, *Next;</p> 
+<p style="margin-left:0cm;">235行所援引的SDValue实际上包含了一个指向产生这个值的SDNode实例，因为SDNode所代表的操作可以有多个结果，因此还包含了一个成员ResNo来指示使用第几个结果。</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">105     </span></em><span style="color:#0000ff;">class</span> SDValue {<!-- --></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">106     </span></em>  <span style="color:#0000ff;">friend</span> <span style="color:#0000ff;">struct</span> DenseMapInfo&lt;SDValue&gt;;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">107     </span></em></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">108     </span></em>  SDNode *Node;       <span style="color:#007f00;">// The node defining the value we are using.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">109     </span></em>  unsigned ResNo;     <span style="color:#007f00;">// Which return value of the node we are using.</span></p> 
+<p style="margin-left:0cm;">在SDUse定义237行，User指向使用Val的SDNode对象，这就形成了Use-Def链（SDNode本身可以构成一个双向链表）。</p> 
+<table border="1" cellspacing="0"><tbody><tr><td style="vertical-align:top;width:467.5pt;"> <p style="margin-left:0cm;"><span style="color:#0000ff;">V7.0</span><span style="color:#0000ff;">大幅改造了</span><span style="color:#0000ff;">SDNode</span><span style="color:#0000ff;">的定义，使之更科学。现在这个类定义有下列数据成员：</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">482     </span></em><span style="color:#0000ff;">class</span> SDNode : <span style="color:#0000ff;">public</span> FoldingSetNode, <span style="color:#0000ff;">public</span> ilist_node&lt;SDNode&gt; {<!-- --></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">483     </span></em><span style="color:#0000ff;">private</span>:</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">484     </span></em>  <span style="color:#007f00;">/// The operation that this node performs.</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">485     </span></em>  int16_t NodeType;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">486     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">487     </span></em><span style="color:#0000ff;">protected</span>:</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">488     </span></em>  <span style="color:#007f00;">// We define a set of mini-helper classes to help us interpret the bits in our</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">489     </span></em><span style="color:#007f00;">  // SubclassData.  These are designed to fit within a uint16_t so they pack</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">490     </span></em><span style="color:#007f00;">  // with NodeType.</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">491     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">492     </span></em>  <span style="color:#0000ff;">class</span> SDNodeBitfields {<!-- --></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">493     </span></em>    <span style="color:#0000ff;">friend</span> <span style="color:#0000ff;">class</span> SDNode;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">494     </span></em>    <span style="color:#0000ff;">friend</span> <span style="color:#0000ff;">class</span> MemIntrinsicSDNode;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">495     </span></em>    <span style="color:#0000ff;">friend</span> <span style="color:#0000ff;">class</span> MemSDNode;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">496     </span></em>    <span style="color:#0000ff;">friend</span> <span style="color:#0000ff;">class</span> SelectionDAG;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">497     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">498     </span></em>    uint16_t HasDebugValue : 1;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">499     </span></em>    uint16_t IsMemIntrinsic : 1;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">500     </span></em>    uint16_t IsDivergent : 1;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">501     </span></em>  };</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">502     </span></em>  <span style="color:#0000ff;">enum</span> { NumSDNodeBits = 3 };</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">503     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">504     </span></em>  <span style="color:#0000ff;">class</span> ConstantSDNodeBitfields {<!-- --></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">505     </span></em>    <span style="color:#0000ff;">friend</span> <span style="color:#0000ff;">class</span> ConstantSDNode;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">506     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">507     </span></em>    uint16_t : NumSDNodeBits;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">508     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">509     </span></em>    uint16_t IsOpaque : 1;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">510     </span></em>  };</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">511     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">512     </span></em>  <span style="color:#0000ff;">class</span> MemSDNodeBitfields {<!-- --></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">513     </span></em>    <span style="color:#0000ff;">friend</span> <span style="color:#0000ff;">class</span> MemSDNode;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">514     </span></em>    <span style="color:#0000ff;">friend</span> <span style="color:#0000ff;">class</span> MemIntrinsicSDNode;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">515     </span></em>    <span style="color:#0000ff;">friend</span> <span style="color:#0000ff;">class</span> AtomicSDNode;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">516     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">517     </span></em>    uint16_t : NumSDNodeBits;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">518     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">519     </span></em>    uint16_t IsVolatile : 1;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">520     </span></em>    uint16_t IsNonTemporal : 1;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">521     </span></em>    uint16_t IsDereferenceable : 1;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">522     </span></em>    uint16_t IsInvariant : 1;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">523     </span></em>  };</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">524     </span></em>  <span style="color:#0000ff;">enum</span> { NumMemSDNodeBits = NumSDNodeBits + 4 };</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">525     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">526     </span></em>  <span style="color:#0000ff;">class</span> LSBaseSDNodeBitfields {<!-- --></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">527     </span></em>    <span style="color:#0000ff;">friend</span> <span style="color:#0000ff;">class</span> LSBaseSDNode;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">528     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">529     </span></em>    uint16_t : NumMemSDNodeBits;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">530     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">531     </span></em>    uint16_t AddressingMode : 3; <span style="color:#007f00;">// enum ISD::MemIndexedMode</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">532     </span></em>  };</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">533     </span></em>  <span style="color:#0000ff;">enum</span> { NumLSBaseSDNodeBits = NumMemSDNodeBits + 3 };</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">534     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">535     </span></em>  <span style="color:#0000ff;">class</span> LoadSDNodeBitfields {<!-- --></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">536     </span></em>    <span style="color:#0000ff;">friend</span> <span style="color:#0000ff;">class</span> LoadSDNode;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">537     </span></em>    <span style="color:#0000ff;">friend</span> <span style="color:#0000ff;">class</span> MaskedLoadSDNode;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">538     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">539     </span></em>    uint16_t : NumLSBaseSDNodeBits;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">540     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">541     </span></em>    uint16_t ExtTy : 2; <span style="color:#007f00;">// enum ISD::LoadExtType</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">542     </span></em>    uint16_t IsExpanding : 1;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">543     </span></em>  };</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">544     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">545     </span></em>  <span style="color:#0000ff;">class</span> StoreSDNodeBitfields {<!-- --></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">546     </span></em>    <span style="color:#0000ff;">friend</span> <span style="color:#0000ff;">class</span> StoreSDNode;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">547     </span></em>    <span style="color:#0000ff;">friend</span> <span style="color:#0000ff;">class</span> MaskedStoreSDNode;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">548     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">549     </span></em>    uint16_t : NumLSBaseSDNodeBits;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">550     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">551     </span></em>    uint16_t IsTruncating : 1;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">552     </span></em>    uint16_t IsCompressing : 1;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">553     </span></em>  };</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">554     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">555     </span></em>  <span style="color:#0000ff;">union</span> {<!-- --></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">556     </span></em>    char RawSDNodeBits[<span style="color:#0000ff;">sizeof</span>(uint16_t)];</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">557     </span></em>    SDNodeBitfields SDNodeBits;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">558     </span></em>    ConstantSDNodeBitfields ConstantSDNodeBits;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">559     </span></em>    MemSDNodeBitfields MemSDNodeBits;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">560     </span></em>    LSBaseSDNodeBitfields LSBaseSDNodeBits;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">561     </span></em>    LoadSDNodeBitfields LoadSDNodeBits;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">562     </span></em>    StoreSDNodeBitfields StoreSDNodeBits;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">563     </span></em>  };</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">564     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">565     </span></em>  <span style="color:#007f00;">// RawSDNodeBits must cover the entirety of the union.  This means that all of</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">566     </span></em><span style="color:#007f00;">  // the union's members must have size &lt;= RawSDNodeBits.  We write the RHS as</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">567     </span></em><span style="color:#007f00;">  // "2" instead of sizeof(RawSDNodeBits) because MSVC can't handle the latter.</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">568     </span></em>  static_assert(<span style="color:#0000ff;">sizeof</span>(SDNodeBitfields) &lt;= 2, "field too wide");</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">569     </span></em>  static_assert(<span style="color:#0000ff;">sizeof</span>(ConstantSDNodeBitfields) &lt;= 2, "field too wide");</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">570     </span></em>  static_assert(<span style="color:#0000ff;">sizeof</span>(MemSDNodeBitfields) &lt;= 2, "field too wide");</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">571     </span></em>  static_assert(<span style="color:#0000ff;">sizeof</span>(LSBaseSDNodeBitfields) &lt;= 2, "field too wide");</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">572     </span></em>  static_assert(<span style="color:#0000ff;">sizeof</span>(LoadSDNodeBitfields) &lt;= 2, "field too wide");</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">573     </span></em>  static_assert(<span style="color:#0000ff;">sizeof</span>(StoreSDNodeBitfields) &lt;= 2, "field too wide");</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">574     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">575     </span></em><span style="color:#0000ff;">private</span>:</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">576     </span></em>  <span style="color:#0000ff;">friend</span> <span style="color:#0000ff;">class</span> SelectionDAG;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">577     </span></em>  <span style="color:#007f00;">// TODO: unfriend HandleSDNode once we fix its operand handling.</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">578     </span></em>  <span style="color:#0000ff;">friend</span> <span style="color:#0000ff;">class</span> HandleSDNode;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">579     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">580     </span></em>  <span style="color:#007f00;">/// Unique id per SDNode in the DAG.</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">581     </span></em>  int NodeId = -1;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">582     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">583     </span></em>  <span style="color:#007f00;">/// The values that are used by this operation.</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">584     </span></em>  SDUse *OperandList = nullptr;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">585     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">586     </span></em>  <span style="color:#007f00;">/// The types of the values this node defines.  SDNode's may</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">587     </span></em><span style="color:#007f00;">  /// define multiple values simultaneously.</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">588     </span></em>  <span style="color:#0000ff;">const</span> EVT *ValueList;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">589     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">590     </span></em>  <span style="color:#007f00;">/// List of uses for this SDNode.</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">591     </span></em>  SDUse *UseList = nullptr;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">592     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">593     </span></em>  <span style="color:#007f00;">/// The number of entries in the Operand/Value list.</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">594     </span></em>  unsigned short NumOperands = 0;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">595     </span></em>  unsigned short NumValues;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">596     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">597     </span></em>  <span style="color:#007f00;">// The ordering of the SDNodes. It roughly corresponds to the ordering of the</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">598     </span></em><span style="color:#007f00;">  // original LLVM instructions.</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">599     </span></em><span style="color:#007f00;">  // This is used for turning off scheduling, because we'll forgo</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">600     </span></em><span style="color:#007f00;">  // the normal scheduling algorithms and output the instructions according to</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">601     </span></em><span style="color:#007f00;">  // this ordering.</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">602     </span></em>  unsigned IROrder;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">603     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">604     </span></em>  <span style="color:#007f00;">/// Source line information.</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">605     </span></em>  DebugLoc debugLoc;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">606     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">607     </span></em> <span style="color:#007f00;"> /// Return a pointer to the specified value type.</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">608     </span></em>  <span style="color:#0000ff;">static</span> <span style="color:#0000ff;">const</span> EVT *getValueTypeList(EVT VT);</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">609     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">610     </span></em>  SDNodeFlags Flags;</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">611     </span></em></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">612     </span></em><span style="color:#0000ff;">public</span>:</p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">613     </span></em><span style="color:#007f00;">  /// Unique and persistent id per SDNode in the DAG.</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">614     </span></em><span style="color:#007f00;">  /// Used for debug printing.</span></p> <p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">615     </span></em>  uint16_t PersistentId;</p> <p style="margin-left:0cm;"><span style="color:#0000ff;">现在的定义干净整洁了不少，也更紧凑，便于日后的扩展。</span></p> </td></tr></tbody></table> 
+<p>3.4.4.2.2. SDNode的派生定义</p> 
+<p style="margin-left:0cm;">在指令选择后创建的MachineSDNode是SDNode的一个简单派生类。最主要的改变是加入了对内容使用的描述。</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2149  </span></em><span style="color:#0000ff;">class</span> MachineSDNode : <span style="color:#0000ff;">public</span> SDNode {<!-- --></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2150  </span></em><span style="color:#0000ff;">public</span>:</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2151  </span></em>  <span style="color:#0000ff;">typedef</span> MachineMemOperand **mmo_iterator;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2152  </span></em></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2153  </span></em><span style="color:#0000ff;">private</span>:</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2154  </span></em>  <span style="color:#0000ff;">friend</span> <span style="color:#0000ff;">class</span> SelectionDAG;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2155  </span></em>  MachineSDNode(unsigned Opc, unsigned Order, <span style="color:#0000ff;">const</span> DebugLoc DL, SDVTList VTs)</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2156  </span></em>    : SDNode(Opc, Order, DL, VTs), MemRefs(nullptr), MemRefsEnd(nullptr) {}</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2157  </span></em></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2158  </span></em>  <span style="color:#007f00;">/// Operands for this instruction, if they fit here. If</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2159  </span></em><span style="color:#007f00;">  /// they don't, this field is unused.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2160  </span></em>  SDUse LocalOperands[4];</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2161  </span></em></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2162  </span></em>  <span style="color:#007f00;">/// Memory reference descriptions for this instruction.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2163  </span></em>  mmo_iterator MemRefs;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2164  </span></em>  mmo_iterator MemRefsEnd;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2165  </span></em></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2166  </span></em><span style="color:#0000ff;">public</span>:</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2167  </span></em>  mmo_iterator memoperands_begin() <span style="color:#0000ff;">const</span> { <span style="color:#0000ff;">return</span> MemRefs; }</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2168  </span></em>  mmo_iterator memoperands_end() <span style="color:#0000ff;">const</span> { <span style="color:#0000ff;">return</span> MemRefsEnd; }</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2168  </span></em>  bool memoperands_empty() <span style="color:#0000ff;">const</span> { <span style="color:#0000ff;">return</span> MemRefsEnd == MemRefs; }</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2170  </span></em></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2171  </span></em>  <span style="color:#007f00;">/// Assign this MachineSDNodes's memory reference descriptor</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2172  </span></em><span style="color:#007f00;">  /// list. This does not transfer ownership.</span></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2173  </span></em>  void setMemRefs(mmo_iterator NewMemRefs, mmo_iterator NewMemRefsEnd) {<!-- --></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2174  </span></em>    <span style="color:#0000ff;">for</span> (mmo_iterator MMI = NewMemRefs, MME = NewMemRefsEnd; MMI != MME; ++MMI)</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2175  </span></em>      <span style="color:#0000ff;">assert</span>(*MMI &amp;&amp; "Null mem ref detected!");</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2176  </span></em>    MemRefs = NewMemRefs;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2177  </span></em>    MemRefsEnd = NewMemRefsEnd;</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2178  </span></em>  }</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2179  </span></em></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2180  </span></em>  <span style="color:#0000ff;">static</span> bool classof(<span style="color:#0000ff;">const</span> SDNode *N) {<!-- --></p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2181  </span></em>    <span style="color:#0000ff;">return</span> N-&gt;isMachineOpcode();</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2182  </span></em>  }</p> 
+<p style="margin-left:0cm;"><em><span style="color:#bfbfbf;">2183  </span></em>};</p> 
+<p style="margin-left:0cm;">MemRefs与MemRefsEnd可视为指向一些内存片段。这些内存片段由MachineMemOperand描述。</p> 
+<table border="1" cellspacing="0"><tbody><tr><td style="vertical-align:top;width:467.5pt;"> <p style="margin-left:0cm;"><span style="color:#0000ff;">在</span><span style="color:#0000ff;">v7.0</span><span style="color:#0000ff;">中</span><span style="color:#0000ff;">SDNode</span><span style="color:#0000ff;">的派生类有：</span><span style="color:#0000ff;">MachineSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">HandleSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">AddrSpaceCastSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">MemSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">AtomicSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">MemIntrinsicSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">ShuffleVectorSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">ConstantSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">ConstantFPSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">GlobalAddressSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">FrameIndexSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">JumpTableSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">ConstantPoolSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">TargetIndexSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">BasicBlockSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">BuildVectorSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">SrcValueSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">MDNodeSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">RegisterSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">BlockAddressSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">LabelSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">ExternalSymbolSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">MCSymbolSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">CondCodeSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">VTSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">LSBaseSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">LoadSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">StoreSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">MaskedLoadStoreSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">MaskedLoadSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">MaskedStoreSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">MaskedGatherScatterSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">MaskedGatherSDNode</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">MaskedScatterSDNode</span><span style="color:#0000ff;">。</span></p> <p style="margin-left:0cm;"><span style="color:#0000ff;">在</span><span style="color:#0000ff;">LLVM</span><span style="color:#0000ff;">架构里，它自己构造了一个类型转换体系，由</span><span style="color:#0000ff;">cast()</span><span style="color:#0000ff;">，</span><span style="color:#0000ff;">dyn_cast()</span><span style="color:#0000ff;">这类函数支持。这些函数通过类的静态方法</span><span style="color:#0000ff;">classof()</span><span style="color:#0000ff;">来判定一个对象是否为指定的派生类型。</span><span style="color:#0000ff;">Cast()</span><span style="color:#0000ff;">等的具体实现我们不在这里讨论，可以参考以前的文章《</span><span style="color:#0000ff;"><u><span style="color:#0000ff;"><a href="https://blog.csdn.net/wuhui_gdnt/article/details/24970449" title="Llvm的类型转换系统">Llvm的类型转换系统</a></span></u></span><span style="color:#0000ff;">》。</span></p> <p style="margin-left:0cm;"><span style="color:#0000ff;">这里特别注意</span><span style="color:#0000ff;">MachineSDNode</span><span style="color:#0000ff;">的</span><span style="color:#0000ff;">classof()</span><span style="color:#0000ff;">调用</span><span style="color:#0000ff;">SDNode</span><span style="color:#0000ff;">的</span><span style="color:#0000ff;">isMachineOpcode()</span><span style="color:#0000ff;">方法，即</span><span style="color:#0000ff;">NodeType</span><span style="color:#0000ff;">小于</span><span style="color:#0000ff;">0</span><span style="color:#0000ff;">时成立——在被选中时，对应</span><span style="color:#0000ff;">SDNode</span><span style="color:#0000ff;">对象的</span><span style="color:#0000ff;">NodeType</span><span style="color:#0000ff;">被置为</span><span style="color:#0000ff;">-1</span><span style="color:#0000ff;">。其他派生类型的</span><span style="color:#0000ff;">classof()</span><span style="color:#0000ff;">方法，如果有定义，都很简单。我们不一一列举。</span></p> </td></tr></tbody></table>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/d813ecf6dded683557b2701c25cb7cd8/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">需求：通过按钮的点击事件控制另一个输出框/按钮的点击</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/4a5ecbbae8070eb9b10910b858038d8f/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">hive命令启动出现classnotfound</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

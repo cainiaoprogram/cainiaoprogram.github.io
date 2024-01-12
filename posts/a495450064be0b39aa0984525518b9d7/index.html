@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>mq服务器与客户端消息同步,RocketMQ：主从同步的实现 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="mq服务器与客户端消息同步,RocketMQ：主从同步的实现" />
+<meta property="og:description" content="分布式系统的三大理论CAP就不说了，但是作为分布式消息系统的rocketmq, 主从功能是最最基础的保证可用性的手段了。也许该功能现在已经不是很常用了，但是对于我们理解一些分布式系统的常用工作原理还是有些积极意义的。
+今天就一起来挖挖rocketmq是如何实现主从数据同步的吧。
+1. 主从同步概述
+主从同步这个概念相信大家在平时的工作中，多少都会听到。其目的主要是用于做一备份类操作，以及一些读写分离场景。比如我们常用的关系型数据库mysql，就有主从同步功能在。
+主从同步，就是将主服务器上的数据同步到从服务器上，也就是相当于新增了一个副本。
+而具体的主从同步的实现也各有千秋，如mysql中通过binlog实现主从同步，es中通过translog实现主从同步，redis中通过aof实现主从同步。那么，rocketmq又是如何实现的主从同步呢？
+另外，主从同步需要考虑的问题是哪些呢？
+1. 数据同步的及时性？(延迟与一致性)
+2. 对主服务器的影响性？(可用性)
+3. 是否可替代主服务器？(可用性或者分区容忍性)
+前面两个点是必须要考虑的，但对于第3个点，则可能不会被考虑。因为通过系统可能无法很好的做到这一点，所以很多系统就直接忽略这一点了，简单嘛。即很多时候只把从服务器当作是一个备份存在，不会接受写请求。如果要进行主从切换，必须要人工介入，做预知的有损切换。但随着技术的发展，现在已有非常多的自动切换主从的服务存在，这是在分布式系统满天下的当今的必然趋势。
+2. rocketmq主从同步配置
+在rocketmq中，最核心的组件是 broker, 它负责几乎所有的存储读取业务。所以，要谈主从同步，那必然是针对broker进行的。我们再来回看rocketmq的部署架构图，以便全局观察：
+非常清晰的架构，无须多言。因为我们讲的是主从同步，所以只看broker这个组件，那么整个架构就可以简化为: BrokerMaster -&gt; BrokerSlave 了。同样，再简化，主从同步就是如何将Master的数据同步到Slave这么个过程。
+那么，如何配置使用主从同步呢？
+conf/broker-a.properties (master配置)
+conf/broker-a-s.properties (slave配置)
+实际上具体配置文件叫什么名字不重要，重要的是要在启动时指定指定对应的配置文件位置即可。启动master/slave命令如下:
+以上配置，如果怕启动命令出错，也可以统一使用一个 broker.properties (默认查找), 里面写不同的内容，这样就无需在不同机器上使用不同的命令启动了，也避免了一定程度的误操作。
+当然要在启动broker之前启动nameserver节点。这样，一个rocketmq的主从集群就配置好了。配置项看起来有点多，但核心实际上只有一个：在保持brokderName相同的前提下配置brokerRole=ASYNC_MASTER|SLAVE|SYNC_MASTER, 通过这个值就可以确定是主是从。从向主复制数据或者主向从同步数据。
+3. rocketmq主从同步的实现
+了解完主从配置，才是我们理解实现的开始。也从上面的说明中，我们看出，一个broker是master或者slave是在配置文件中就指定了的，也就是说这个性质是改不了的了。所以，这个主从相关的动作，会在broker启动时就表现出不一样了。
+我们先看看broker运行同步的大体框架如何：
+基本上，master与slave差别不大，各broker需要的功能，都会具有的。比如都会开启各服务端口，都会进行文件清理动作，都会向nameserver注册自身等等。唯一的差别在于，slave会另外开启一个同步的定时任务，每10秒向master发送一次同步请求，即 syncAll(); 那么，所谓的同步，到底是同步个啥？即其如何实现同步？
+所有的主从同步的实现都在这里了：syncAll();
+以上，就是rocketmq的主从同步的主体框架代码了。回答上面的几个疑问：同步个啥？同步4种数据：topic信息、消费偏移信息、延迟信息、订阅组信息；同步的及时性如何？每10秒发起一步同步请求，即延迟是10秒级的。
+等等，以上同步的信息，看起来都是元数据信息。那么消息数据的同步去哪里了？这可是我们最关心的啊！
+4. rocketmq消息数据的同步实现
+经过上一节的分析，我们好像摸到了点皮毛，然后发现不是想要的。因为定时任务只同步了元数据信息，而真正的数据信息同步去了哪里呢？实际上，它是由一个HAService去承载该功能的，HAService会使用的一个主循环，一直不停地向master拉取数据，然后添加到自身的commitlog文件中，从而实现真正的数据同步。
+4.1. HAService的开启
+同步服务是一系列专门的实现的，它包括server端，客户端以及一些维护线程。这需要我们分开理解。同步服务的开启，是在messageStore初始化时做的。它会读取一个单独的端口配置，开启HA同步服务。
+HAService作为rocketmq中的一个小型服务，运行在后台线程中，为了简单起见或者资源隔离，它使用一些单独的端口和通信实现处理。也可谓麻雀虽小，五脏俱全。下面我就分三个单独的部分讲解下如何实现数据同步。
+4.2. 从节点同步实现
+从节点负责主动拉取主节点数据，是一个比较重要的步骤。它的实现是在 HAClient 中的，该client启动起来之后，会一直不停地向master请求新的数据，然后同步到自己的commitlog中。
+从slave节点的处理流程，我们基本上已经完全搞清楚了rocketmq如何同步数据的了。单独开启一个端口用于同步数据，slave一直不停地轮询master, 拿到新数据后，就将其添加到自身的commitlog中，构造自身的数据集。从而保持与master的同步。(请需要注意数据一致性)
+4.3. master的数据同步服务
+从节点负责不停从主节点拉取数据，所以主节点只要给到数据就可以了。但至少，主节点还是有一个网络服务，以便接受从节点的请求。
+这同样是在 HAService中，它直接以nio的形式开启一个服务端口，从而接收请求：
+端口开启及接受请求很容易，但如何响应客户端还是有点复杂的。各自同学自行深入吧！
+GroupCommitService 通过一个写队列和读队列，在有消息写入时将被调用，从而达到实时通知的目的。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/a495450064be0b39aa0984525518b9d7/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-08-12T15:24:04+08:00" />
+<meta property="article:modified_time" content="2021-08-12T15:24:04+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">mq服务器与客户端消息同步,RocketMQ：主从同步的实现</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div style="font-size:16px;"> 
+ <p>分布式系统的三大理论CAP就不说了，但是作为分布式消息系统的rocketmq, 主从功能是最最基础的保证可用性的手段了。也许该功能现在已经不是很常用了，但是对于我们理解一些分布式系统的常用工作原理还是有些积极意义的。</p> 
+ <p>今天就一起来挖挖rocketmq是如何实现主从数据同步的吧。</p> 
+ <p>1. 主从同步概述</p> 
+ <p>主从同步这个概念相信大家在平时的工作中，多少都会听到。其目的主要是用于做一备份类操作，以及一些读写分离场景。比如我们常用的关系型数据库mysql，就有主从同步功能在。</p> 
+ <p>主从同步，就是将主服务器上的数据同步到从服务器上，也就是相当于新增了一个副本。</p> 
+ <p>而具体的主从同步的实现也各有千秋，如mysql中通过binlog实现主从同步，es中通过translog实现主从同步，redis中通过aof实现主从同步。那么，rocketmq又是如何实现的主从同步呢？</p> 
+ <p>另外，主从同步需要考虑的问题是哪些呢？</p> 
+ <p>1. 数据同步的及时性？(延迟与一致性)</p> 
+ <p>2. 对主服务器的影响性？(可用性)</p> 
+ <p>3. 是否可替代主服务器？(可用性或者分区容忍性)</p> 
+ <p>前面两个点是必须要考虑的，但对于第3个点，则可能不会被考虑。因为通过系统可能无法很好的做到这一点，所以很多系统就直接忽略这一点了，简单嘛。即很多时候只把从服务器当作是一个备份存在，不会接受写请求。如果要进行主从切换，必须要人工介入，做预知的有损切换。但随着技术的发展，现在已有非常多的自动切换主从的服务存在，这是在分布式系统满天下的当今的必然趋势。</p> 
+ <p>2. rocketmq主从同步配置</p> 
+ <p>在rocketmq中，最核心的组件是 broker, 它负责几乎所有的存储读取业务。所以，要谈主从同步，那必然是针对broker进行的。我们再来回看rocketmq的部署架构图，以便全局观察：</p> 
+ <p>非常清晰的架构，无须多言。因为我们讲的是主从同步，所以只看broker这个组件，那么整个架构就可以简化为: BrokerMaster -&gt; BrokerSlave 了。同样，再简化，主从同步就是如何将Master的数据同步到Slave这么个过程。</p> 
+ <p>那么，如何配置使用主从同步呢？</p> 
+ <p>conf/broker-a.properties (master配置)</p> 
+ <p>conf/broker-a-s.properties (slave配置)</p> 
+ <p>实际上具体配置文件叫什么名字不重要，重要的是要在启动时指定指定对应的配置文件位置即可。启动master/slave命令如下:</p> 
+ <p>以上配置，如果怕启动命令出错，也可以统一使用一个 broker.properties (默认查找), 里面写不同的内容，这样就无需在不同机器上使用不同的命令启动了，也避免了一定程度的误操作。</p> 
+ <p>当然要在启动broker之前启动nameserver节点。这样，一个rocketmq的主从集群就配置好了。配置项看起来有点多，但核心实际上只有一个：在保持brokderName相同的前提下配置brokerRole=ASYNC_MASTER|SLAVE|SYNC_MASTER, 通过这个值就可以确定是主是从。从向主复制数据或者主向从同步数据。</p> 
+ <p>3. rocketmq主从同步的实现</p> 
+ <p>了解完主从配置，才是我们理解实现的开始。也从上面的说明中，我们看出，一个broker是master或者slave是在配置文件中就指定了的，也就是说这个性质是改不了的了。所以，这个主从相关的动作，会在broker启动时就表现出不一样了。</p> 
+ <p>我们先看看broker运行同步的大体框架如何：</p> 
+ <p>基本上，master与slave差别不大，各broker需要的功能，都会具有的。比如都会开启各服务端口，都会进行文件清理动作，都会向nameserver注册自身等等。唯一的差别在于，slave会另外开启一个同步的定时任务，每10秒向master发送一次同步请求，即 syncAll(); 那么，所谓的同步，到底是同步个啥？即其如何实现同步？</p> 
+ <p>所有的主从同步的实现都在这里了：syncAll();</p> 
+ <p>以上，就是rocketmq的主从同步的主体框架代码了。回答上面的几个疑问：同步个啥？同步4种数据：topic信息、消费偏移信息、延迟信息、订阅组信息；同步的及时性如何？每10秒发起一步同步请求，即延迟是10秒级的。</p> 
+ <p>等等，以上同步的信息，看起来都是元数据信息。那么消息数据的同步去哪里了？这可是我们最关心的啊！</p> 
+ <p>4. rocketmq消息数据的同步实现</p> 
+ <p>经过上一节的分析，我们好像摸到了点皮毛，然后发现不是想要的。因为定时任务只同步了元数据信息，而真正的数据信息同步去了哪里呢？实际上，它是由一个HAService去承载该功能的，HAService会使用的一个主循环，一直不停地向master拉取数据，然后添加到自身的commitlog文件中，从而实现真正的数据同步。</p> 
+ <p>4.1. HAService的开启</p> 
+ <p>同步服务是一系列专门的实现的，它包括server端，客户端以及一些维护线程。这需要我们分开理解。同步服务的开启，是在messageStore初始化时做的。它会读取一个单独的端口配置，开启HA同步服务。</p> 
+ <p>HAService作为rocketmq中的一个小型服务，运行在后台线程中，为了简单起见或者资源隔离，它使用一些单独的端口和通信实现处理。也可谓麻雀虽小，五脏俱全。下面我就分三个单独的部分讲解下如何实现数据同步。</p> 
+ <p>4.2. 从节点同步实现</p> 
+ <p>从节点负责主动拉取主节点数据，是一个比较重要的步骤。它的实现是在 HAClient 中的，该client启动起来之后，会一直不停地向master请求新的数据，然后同步到自己的commitlog中。</p> 
+ <p>从slave节点的处理流程，我们基本上已经完全搞清楚了rocketmq如何同步数据的了。单独开启一个端口用于同步数据，slave一直不停地轮询master, 拿到新数据后，就将其添加到自身的commitlog中，构造自身的数据集。从而保持与master的同步。(请需要注意数据一致性)</p> 
+ <p>4.3. master的数据同步服务</p> 
+ <p>从节点负责不停从主节点拉取数据，所以主节点只要给到数据就可以了。但至少，主节点还是有一个网络服务，以便接受从节点的请求。</p> 
+ <p>这同样是在 HAService中，它直接以nio的形式开启一个服务端口，从而接收请求：</p> 
+ <p>端口开启及接受请求很容易，但如何响应客户端还是有点复杂的。各自同学自行深入吧！</p> 
+ <p>GroupCommitService 通过一个写队列和读队列，在有消息写入时将被调用，从而达到实时通知的目的。</p> 
+ <p>至此，rocketmq主从同步解析完成。rocketmq基于commitlog实现核心主从同步，以及其他多个元数据信息的简单定时同步，并以两个缓冲buffer的形式，及时将数据推送到从节点。保证了尽量好的数据一致性。</p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/62aaedc5c837d213febe6f862fd4202d/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">电脑参数,台式电脑怎么查看配置参数|如何查询台式机硬件配置</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/1ed5c4b16d5b35833b82f4722b8c4cdc/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">300英雄11月服务器维护,11月6日6:00-9:00全区停机更新公告</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

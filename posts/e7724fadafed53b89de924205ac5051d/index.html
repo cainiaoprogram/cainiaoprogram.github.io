@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>RabbitMQ自学之路（七）—— RabbitMQ消息发送确认与消息接收确认机制 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="RabbitMQ自学之路（七）—— RabbitMQ消息发送确认与消息接收确认机制" />
+<meta property="og:description" content="通常，一个消息被消费者消费后，就会从Queue中移除了。这是因为RabbitMQ默认会在消息被消费者接收后，立即确认。
+但存在丢失消息的可能，如果消费端消费逻辑抛出异常，也就是消费端没有处理成功这条消息，那么就相当于丢失了消息。
+另外一种情况就是，我们在spring中处理消息时，即使消息处理没出异常，但是后续代码出异常造成回滚，这样其实也相当于丢失消息。
+所以一般情况下，手动确认要比较好一些。
+达broker之前出现意外，那就造成消息丢失
+一、消息发送确认 1、为什么要进行消息确认? 主要原因是为了防止消息的丢失。
+对于消息发送方来说：
+生产者发送一条消息，正常情况下是通过交换机发送到队列中，再由消费者接受队列中消息，由消费者进行逻辑操作。
+但是RabbitMQ在收到消息后，还需要有一段时间才能将消息存入磁盘之中。
+并且也并不是为每条消息都做fsync的处理，可能仅仅保存到cache中而不是物理磁盘上。如果RabbitMQ broker正巧发生了崩溃，因为消息还没来得及保存磁盘，消息将会丢失。
+2、发送的消息怎么样才算失败或成功？ 当消息无法路由到任何队列时，确认消息路由失败。
+消息成功路由时，当需要发送的队列都发送成功后，进行确认消息，对于持久化队列意味着写入磁盘，对于镜像队列意味着所有镜像接收成功
+3、如何确定发送的消息是否成功？ RabbitMQ引入发送端消息确认机制，主要通过事务和publisher Confirm机制。
+3.1、AMQP事务使用 RabbitMQ支持事务(transaction)，RabbitMQ中与事务机制有关的方法有三个：txSelect(), txCommit()以及txRollback()。
+（1）txSelect用于将当前channel设置成transaction模式，通过调用tx.select方法开启事务模式。
+（2）txCommit用于提交事务。当开启了事务模式后，只有当一个消息被所有的镜像队列保存完毕后，RabbitMQ才会调用tx.commit-ok返回给客户端。
+（3）txRollback用于回滚事务，在通过txSelect开启事务之后，我们便可以发布消息给broker代理服务器了，如果txCommit提交成功了，则消息一定到达了broker了，如果在txCommit执行之前broker异常崩溃或者由于其他原因抛出异常，这个时候我们便可以捕获异常通过txRollback回滚事务了。
+关键代码：
+channel.txSelect(); //ConfirmConfig.exchangeName(交换机名称) //ConfirmConfig.routingKey(路由键) //message （消息内容） channel.basicPublish(ConfirmConfig.exchangeName, ConfirmConfig.routingKey, MessageProperties.PERSISTENT_TEXT_PLAIN, message)); channel.txCommit(); 事务确实能够解决producer与broker之间消息确认的问题，只有消息成功被broker接受，事务提交才能成功，否则我们便可以在捕获异常进行事务回滚操作同时进行消息重发。
+事务机制的缺点 ：
+使用事务机制的话会降低RabbitMQ的性能。
+会导致生产者和RabbitMq之间产生同步(等待确认)，这也违背了我们使用RabbitMq的初衷。所以一般很少采用
+3.2、publisher Confirm机制（发送者确认） 那么有没有更好的方法既能保障producer知道消息已经正确送到，又能基本上不带来性能上的损失呢？从AMQP协议的层面看是没有更好的方法，但是RabbitMQ提供了一个更好的方案，即将channel信道设置成confirm模式。
+发送确认分为两步，一是确认是否到达交换器，二是确认是否到达队列。
+confirm模式的实现原理
+生产者将信道设置成confirm模式，一旦信道进入confirm模式，所有在该信道上面发布的消息都会被指派一个唯一的ID(从1开始)，一旦消息被投递到所有匹配的队列之后，broker就会发送一个确认给生产者（包含消息的唯一ID）,这就使得生产者知道消息已经正确到达目的队列了，如果消息和队列是可持久化的，那么确认消息会将消息写入磁盘之后发出，broker回传给生产者的确认消息中deliver-tag域包含了确认消息的序列号，此外broker也可以设置basic.ack的multiple域，表示到这个序列号之前的所有消息都已经得到了处理。
+ConfirmCallback和ReturnCallback
+对于ConfirmCallback来说： 如果消息没有到exchange,则confirm回调,ack=false 如果消息到达exchange,则confirm回调,ack=true 对于ReturnCallback来说： exchange到queue成功,则不回调return exchange到queue失败,则回调return(需设置mandatory=true,否则不回回调,消息就丢了) 比如路由不到队列时触发回调 使用该功能需要开启确认，spring-boot中配置如下：
+spring: rabbitmq: #服务器ip host: 127.0.0.1 #端口号 port: 5672 #用户名 username: admin #密码 password: 123456 #开启消息发送确认机制，默认为false #如果没有本条配置信息，当消费者收到生产者发送的消息后，生产者无法收到确认成功的回调信息 publisher-confirms: true #支持消息发送失败返回队列,默认为false publisher-returns: true #虚拟空间地址 virtual-host: / RabbitConfig配置项" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/e7724fadafed53b89de924205ac5051d/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2019-06-26T23:43:44+08:00" />
+<meta property="article:modified_time" content="2019-06-26T23:43:44+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">RabbitMQ自学之路（七）—— RabbitMQ消息发送确认与消息接收确认机制</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>通常，一个消息被消费者消费后，就会从Queue中移除了。这是因为RabbitMQ默认会在消息被消费者接收后，立即确认。</p> 
+<p>但存在丢失消息的可能，如果消费端消费逻辑抛出异常，也就是消费端没有处理成功这条消息，那么就相当于丢失了消息。<br> 另外一种情况就是，我们在spring中处理消息时，即使消息处理没出异常，但是后续代码出异常造成回滚，这样其实也相当于丢失消息。<br> 所以一般情况下，手动确认要比较好一些。</p> 
+<p>达broker之前出现意外，那就造成消息丢失</p> 
+<h3><a id="_10"></a>一、消息发送确认</h3> 
+<h3><a id="nbspnbspnbspnbsp1_12"></a>    1、为什么要进行消息确认?</h3> 
+<blockquote> 
+ <p>主要原因是为了防止消息的丢失。</p> 
+</blockquote> 
+<p><strong>对于消息发送方来说</strong>：</p> 
+<p>生产者发送一条消息，正常情况下是通过交换机发送到队列中，再由消费者接受队列中消息，由消费者进行逻辑操作。</p> 
+<p>但是RabbitMQ在收到消息后，还需要有一段时间才能将消息存入磁盘之中。<br> 并且也并不是为每条消息都做fsync的处理，可能仅仅保存到cache中而不是物理磁盘上。如果RabbitMQ broker正巧发生了崩溃，因为消息还没来得及保存磁盘，消息将会丢失。</p> 
+<h3><a id="nbspnbspnbspnbsp2_27"></a>    2、发送的消息怎么样才算失败或成功？</h3> 
+<blockquote> 
+ <p>当消息无法路由到任何队列时，确认消息路由失败。<br> 消息成功路由时，当需要发送的队列都发送成功后，进行确认消息，对于持久化队列意味着写入磁盘，对于镜像队列意味着所有镜像接收成功</p> 
+</blockquote> 
+<h3><a id="nbspnbspnbspnbsp3_32"></a>    3、如何确定发送的消息是否成功？</h3> 
+<blockquote> 
+ <p>RabbitMQ引入发送端消息确认机制，主要通过事务和publisher Confirm机制。</p> 
+</blockquote> 
+<h3><a id="nbspnbspnbspnbsp31AMQP_37"></a>    3.1、AMQP事务使用</h3> 
+<blockquote> 
+ <p>RabbitMQ支持事务(transaction)，RabbitMQ中与事务机制有关的方法有三个：txSelect(), txCommit()以及txRollback()。</p> 
+</blockquote> 
+<p>（1）<strong>txSelect</strong>用于将当前channel设置成transaction模式，通过调用tx.select方法开启事务模式。</p> 
+<p>（2）<strong>txCommit</strong>用于提交事务。当开启了事务模式后，只有当一个消息被所有的镜像队列保存完毕后，RabbitMQ才会调用tx.commit-ok返回给客户端。</p> 
+<p>（3）<strong>txRollback</strong>用于回滚事务，在通过txSelect开启事务之后，我们便可以发布消息给broker代理服务器了，如果txCommit提交成功了，则消息一定到达了broker了，如果在txCommit执行之前broker异常崩溃或者由于其他原因抛出异常，这个时候我们便可以捕获异常通过txRollback回滚事务了。</p> 
+<p><strong>关键代码</strong>：</p> 
+<pre><code>channel.txSelect();
+ //ConfirmConfig.exchangeName(交换机名称)
+ //ConfirmConfig.routingKey(路由键)
+ //message （消息内容）
+channel.basicPublish(ConfirmConfig.exchangeName, ConfirmConfig.routingKey, MessageProperties.PERSISTENT_TEXT_PLAIN, message));
+channel.txCommit();
+</code></pre> 
+<p>事务确实能够解决producer与broker之间消息确认的问题，只有消息成功被broker接受，事务提交才能成功，否则我们便可以在捕获异常进行事务回滚操作同时进行消息重发。</p> 
+<p><strong>事务机制的缺点</strong> ：<br> 使用事务机制的话会降低RabbitMQ的性能。<br> 会导致生产者和RabbitMq之间产生同步(等待确认)，这也违背了我们使用RabbitMq的初衷。所以一般很少采用</p> 
+<h3><a id="nbspnbspnbspnbsp32publisher_Confirm_66"></a>    3.2、publisher Confirm机制（发送者确认）</h3> 
+<blockquote> 
+ <p>那么有没有更好的方法既能保障producer知道消息已经正确送到，又能基本上不带来性能上的损失呢？从AMQP协议的层面看是没有更好的方法，但是RabbitMQ提供了一个更好的方案，即将channel信道设置成confirm模式。</p> 
+</blockquote> 
+<p><strong>发送确认分为两步，一是确认是否到达交换器，二是确认是否到达队列。</strong></p> 
+<p><strong>confirm模式的实现原理</strong></p> 
+<blockquote> 
+ <p>生产者将信道设置成confirm模式，一旦信道进入confirm模式，所有在该信道上面发布的消息都会被指派一个唯一的ID(从1开始)，一旦消息被投递到所有匹配的队列之后，broker就会发送一个确认给生产者（包含消息的唯一ID）,这就使得生产者知道消息已经正确到达目的队列了，如果消息和队列是可持久化的，那么确认消息会将消息写入磁盘之后发出，broker回传给生产者的确认消息中deliver-tag域包含了确认消息的序列号，此外broker也可以设置basic.ack的multiple域，表示到这个序列号之前的所有消息都已经得到了处理。</p> 
+</blockquote> 
+<p><strong>ConfirmCallback和ReturnCallback</strong></p> 
+<pre><code>对于ConfirmCallback来说：
+如果消息没有到exchange,则confirm回调,ack=false
+如果消息到达exchange,则confirm回调,ack=true
+
+对于ReturnCallback来说：
+exchange到queue成功,则不回调return
+exchange到queue失败,则回调return(需设置mandatory=true,否则不回回调,消息就丢了)
+比如路由不到队列时触发回调
+</code></pre> 
+<p>使用该功能需要开启确认，spring-boot中配置如下：</p> 
+<pre><code>spring:
+  rabbitmq: 
+    #服务器ip
+    host: 127.0.0.1
+    #端口号
+    port: 5672
+    #用户名
+    username: admin
+    #密码
+    password: 123456
+    #开启消息发送确认机制，默认为false
+    #如果没有本条配置信息，当消费者收到生产者发送的消息后，生产者无法收到确认成功的回调信息
+    publisher-confirms: true
+    #支持消息发送失败返回队列,默认为false
+    publisher-returns: true
+    #虚拟空间地址
+    virtual-host: /
+</code></pre> 
+<p><img src="https://images2.imgbox.com/ff/37/WpeKNHJR_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>RabbitConfig配置项</strong></p> 
+<p>若使用confirm-callback则必须要配置publisherConfirms为true<br> 若要使用return-callback则必须配置publisherReturns为true</p> 
+<p>使用return-callback时必须设置mandatory为true，或者在配置中设置mandatory-expression的值为true</p> 
+<pre><code>package com.springboot.rabbitmq.example.demo2.config;
+
+import org.springframework.amqp.core.Binding;
+import org.springframework.amqp.core.BindingBuilder;
+import org.springframework.amqp.core.DirectExchange;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
+import org.springframework.amqp.rabbit.connection.CorrelationData;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import lombok.extern.slf4j.Slf4j;
+
+/**
+ * @method
+ * @author Mr yi
+ * @time 2019年6月23日
+ */
+@Configuration
+@Slf4j
+public class RabbitConfigDemo2    {
+
+	@Autowired
+    private CachingConnectionFactory connectionFactory;
+ 
+	// 消息队列名称
+	final static String queue = "queue_demo3";
+
+	//交换机名称
+	final static String exchange = "deom3Exchange";
+
+	@Bean
+	public Queue queueDemo2() {
+		return new Queue(RabbitConfigDemo2.queue);
+	}
+
+	/**
+	 * 
+	 * @method 声明一个direct类型的交换机
+	 * @author Mr yi
+	 * @time 2019年6月19日
+	 * @return
+	 */
+	@Bean
+	DirectExchange exchangeDemo2() {
+		return new DirectExchange(RabbitConfigDemo2.exchange);
+	}
+
+	/**
+	 * 
+	 * @method 绑定Queue队列到交换机,并且指定routingKey
+	 * @author Mr yi
+	 * @time 2019年6月19日
+	 * @param queueDemo1    对应注入queueDemo1()方法
+	 * @param exchangeDemo1 对应exchangeDemo1()
+	 * @return
+	 */
+	@Bean
+	Binding bindingDirectExchangeDemo2(Queue queueDemo2, DirectExchange exchangeDemo2) {
+		return BindingBuilder.bind(queueDemo2).to(exchangeDemo2).with("keyDemo2");
+	}
+
+
+	@Bean
+    public RabbitTemplate rabbitTemplate(){
+		//若使用confirm-callback ，必须要配置publisherConfirms 为true
+		connectionFactory.setPublisherConfirms(true);
+		//若使用return-callback，必须要配置publisherReturns为true
+        connectionFactory.setPublisherReturns(true);
+        RabbitTemplate rabbitTemplate = new RabbitTemplate(connectionFactory);
+        //使用return-callback时必须设置mandatory为true，或者在配置中设置mandatory-expression的值为true
+        rabbitTemplate.setMandatory(true);
+ 
+        // 如果消息没有到exchange,则confirm回调,ack=false; 如果消息到达exchange,则confirm回调,ack=true
+        rabbitTemplate.setConfirmCallback(new RabbitTemplate.ConfirmCallback() {
+            @Override
+            public void confirm(CorrelationData correlationData, boolean ack, String cause) {
+                if(ack){
+                    log.info("消息发送成功:correlationData({}),ack({}),cause({})",correlationData,ack,cause);
+                }else{
+                    log.info("消息发送失败:correlationData({}),ack({}),cause({})",correlationData,ack,cause);
+                }
+            }
+        });
+        
+        //如果exchange到queue成功,则不回调return;如果exchange到queue失败,则回调return(需设置mandatory=true,否则不回回调,消息就丢了)
+        rabbitTemplate.setReturnCallback(new RabbitTemplate.ReturnCallback() {
+            @Override
+            public void returnedMessage(Message message, int replyCode, String replyText, String exchange, String routingKey) {
+                log.info("消息丢失:exchange({}),route({}),replyCode({}),replyText({}),message:{}",exchange,routingKey,replyCode,replyText,message);
+            }
+        });
+        return rabbitTemplate;
+    }
+
+}
+
+</code></pre> 
+<p><strong>生产者实现</strong></p> 
+<p>AmqpTemplate是RabbitTemplate父类，RabbitTemplate实现类RabbitOperations接口，RabbitOperations继承了AmqpTemplate接口，所以这里也可以使用AmqpTemplate</p> 
+<pre><code>package com.springboot.rabbitmq.example.demo2.produceers;
+
+import java.util.Date;
+import org.springframework.amqp.core.AmqpTemplate;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+/**
+ * 
+ * @method 生产者
+ * @author Mr yi
+ * @time 2019年6月19日
+ */
+@Component
+public class ProducersDemo2  {
+
+	/**
+     * AmqpTemplate可是RabbitTemplate父类，RabbitTemplate实现类RabbitOperations接口，RabbitOperations继承了AmqpTemplate接口
+     */
+    @Autowired
+    private AmqpTemplate rabbitTemplate1;
+    
+    @Autowired
+    private RabbitTemplate rabbitTemplate;
+    
+	/**
+	 * @method 生产者发送消息,direct模式下需要传递一个routingKey
+	 * @author Mr yi
+	 * @time 2019年6月19日
+	 * @throws Exception
+	 */
+	public void send( ) throws Exception {
+		String sendMsg = "Hello World " + new Date();
+        System.out.println("生产者发送的消息是 : " + sendMsg);
+        //routingKey 为 keyDemo2
+        this.rabbitTemplate.convertAndSend("deom3Exchange", "keyDemo2", sendMsg);
+	}
+	 
+}
+
+
+</code></pre> 
+<p><strong>消费者</strong></p> 
+<pre><code>package com.springboot.rabbitmq.example.demo2.consumers;
+
+import org.springframework.amqp.rabbit.annotation.RabbitHandler;
+import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.stereotype.Component;
+
+/**
+ * 
+ * @method  消费者
+ * @author Mr yi
+ * @time 2019年6月19日
+ */
+@Component
+@RabbitListener(queues = "queue_demo3")
+public class ConsumersDemo2 {
+	
+	@RabbitHandler
+    public void process(String message) {
+		System.out.println("消费者接收消息成功,接收到的消息是:"+message);
+    }
+	
+}
+
+</code></pre> 
+<p><strong>测试</strong></p> 
+<pre><code>@Controller
+@Slf4j
+@RequestMapping("/demo2")
+public class RabbimMqDemo2Test {
+
+	@Autowired
+	private ProducersDemo2 producers;
+	
+	@RequestMapping("/send")
+    public String send() throws Exception {
+    	producers.send();
+    	return "success";
+    }
+}
+</code></pre> 
+<p>控制台打印 结果，当然如何这里你将生产者rounkey换一个试试，发现rounkey无法匹配，会打印消息丢失:信息</p> 
+<p><img src="https://images2.imgbox.com/e5/33/egNvhcTM_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="_322"></a>二、消息接收确认</h3> 
+<h3><a id="nbspnbspnbspnbsp1_324"></a>    1、消息接收确认的实现机制</h3> 
+<blockquote> 
+ <p>1、通过 ACK机制（消息确认机制）确认消息是否被正确接收，每个 Message 都要被确认（acknowledged），可以手动去 ACK 或自动 ACK<br> 2、默认情况下，一个消息被消费者正确消费就会从队列中移除<br> 3、自动确认会在消息发送给消费者后立即确认，但存在丢失消息的可能，如果消费端消费逻辑抛出异常，也就是消费端没有处理成功这条消息，那么就相当于丢失了消息<br> 4、如果消息已经被处理，但后续代码抛出异常，使用 Spring 进行管理的话消费端业务逻辑会进行回滚，这也同样造成了实际意义的消息丢失<br> 5、如果手动确认则当消费者调用 ack、nack、reject 几种方法进行确认，手动确认可以在业务失败后进行一些操作<br> 6、如果某个服务忘记确认 ACK 了，则 RabbitMQ 不会再发送此消息数据给它，只要程序还在运行，没确认的消息就一直是 Unacked 状态，无法被 RabbitMQ 重新投递。<br> 7、ACK 机制还可以起到限流作用，比如在接收到某条消息时休眠几秒钟</p> 
+</blockquote> 
+<h3><a id="nbspnbspnbspnbsp2ACK_334"></a>    2、ACK确认模式</h3> 
+<p>确认模式有三种：</p> 
+<p><strong>1、AcknowledgeMode.NONE：不确认</strong></p> 
+<p>默认情况下消息消费者是NONE模式，默认所有消息消费成功，会不断的向消费者推送消息。<br> 因为rabbitMq认为所有消息都被消费成功，所以队列中不在存有消息，消息存在丢失的危险</p> 
+<p><strong>2、AcknowledgeMode.AUTO：自动确认</strong></p> 
+<p>在自动确认模式下，消息发送后即被认为成功投递，不管消费者端是否成功处理本次投递</p> 
+<p><strong>优点</strong>：这种模式下吞吐量非常高。</p> 
+<p><strong>缺点</strong>：</p> 
+<ol><li> <p>有可能出现投递丢失的情况，不同于手动确认模式，如果消费者的TCP连接或通道在消息成功交互之前关闭，则此消息会丢失</p> </li><li> <p>消费者端过载的问题。在手动确认模式中，可以设置一次最多同时处理多少消息，而自动模式不能设置此值。因此，消费者有可能因为消息无法及时处理，堆积中内存中，内存耗尽而奔溃</p> </li><li> <p>此种模式只推荐在消费者可以快速且稳定处理投递的消息的场景中使用</p> </li></ol> 
+<p><strong>3、AcknowledgeMode.MANUAL：手动确认</strong></p> 
+<p>消费者收到消息后，手动调用basic.ack/basic.nack/basic.reject后，RabbitMQ收到这些消息后，才认为本次投递成功</p> 
+<p>手动确认模式可以使用 prefetch，限制通道上未完成的（“正在进行中的”）发送的数量</p> 
+<h3><a id="nbspnbspnbspnbsp3_363"></a>    3、局部消息确认</h3> 
+<p>开启手动ack确认</p> 
+<pre><code>spring:
+  rabbitmq: 
+    #服务器ip
+    host: 127.0.0.1
+    #端口号
+    port: 5672
+    #用户名
+    username: admin
+    #密码
+    password: 123456
+    #开启消息发送确认机制，默认为false
+    #如果没有本条配置信息，当消费者收到生产者发送的消息后，生产者无法收到确认成功的回调信息
+    publisher-confirms: true
+    #支持消息发送失败返回队列,默认为false
+    publisher-returns: true
+    #虚拟空间地址
+    virtual-host: demoHost
+    #消息确认机制 --- 是否开启手ack动确认模式   manual 开启
+    listener:
+      simple:
+        acknowledge-mode: manual
+</code></pre> 
+<p>根据前面章节例子，启动程序<br> <a href="http://127.0.0.1:8009/spring-rabbitmq/demo2/send" rel="nofollow">http://127.0.0.1:8009/spring-rabbitmq/demo2/send</a></p> 
+<p>启动两次，发现有两条消息未ack确认</p> 
+<p><img src="https://images2.imgbox.com/64/0e/mnzBCxNn_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>消费者 channel.basicAck(tag,false); ack确认消息</strong></p> 
+<pre><code>@Component
+@RabbitListener(queues = "queue_demo3")
+public class ConsumersDemo2 {
+	
+	@RabbitHandler
+    public void process(Channel channel,String message,@Header(AmqpHeaders.DELIVERY_TAG) long tag) throws IOException {
+		System.out.println("消费者接收消息成功,接收到的消息是:"+message);
+		channel.basicAck(tag,false);
+    }
+	
+}
+</code></pre> 
+<p>发现rabbitmq服务器上队列带确认消息没有了。<br> <img src="https://images2.imgbox.com/c3/f7/Ou8chN7N_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>1、channel.basicAck(deliveryTag, false);</strong></p> 
+<blockquote> 
+ <p>deliveryTag:deliveryTag（唯一标识 ID）：当一个消费者向 RabbitMQ 注册后，会建立起一个 Channel ，RabbitMQ 会用 basic.deliver 方法向消费者推送消息，这个方法携带了一个 delivery tag， 它代表了 RabbitMQ 向该 Channel 投递的这条消息的唯一标识 ID，是一个单调递增的正整数，delivery tag 的范围仅限于 Channel</p> 
+</blockquote> 
+<p>multiple：是否批量.true:将一次性ack所有小于deliveryTag的消息</p> 
+<p><strong>2、channel.basicNack(deliveryTag, false, true);</strong></p> 
+<blockquote> 
+ <p>deliveryTag:该消息的index<br> multiple：是否批量.true:将一次性拒绝所有小于deliveryTag的消息。<br> requeue：被拒绝的是否重新入队列</p> 
+</blockquote> 
+<pre><code>@RabbitHandler
+    public void process(Channel channel,String message,@Header(AmqpHeaders.DELIVERY_TAG) long tag,@Headers Map&lt;String,Object&gt; map) throws IOException {
+		System.out.println("消费者接收消息成功,接收到的消息是:"+message);
+		System.out.println("tag:"+tag+"map:"+map.toString());
+		//channel.basicAck(tag,false);// 确认消息
+		channel.basicNack((Long)map.get(AmqpHeaders.DELIVERY_TAG),false,true);//手动否认
+    }
+</code></pre> 
+<p>执行程序发现：消息被拒绝后，重回队列，然后不断重新发送给消费者。导致死循环<br> <img src="https://images2.imgbox.com/ba/29/BmlUHXSK_o.png" alt="在这里插入图片描述"></p> 
+<p><img src="https://images2.imgbox.com/e7/5d/ZS69Gw8j_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>3、channel.basicReject(deliveryTag:, false);</strong></p> 
+<blockquote> 
+ <p>deliveryTag:该消息的index<br> requeue：被拒绝的是否重新入队列<br> channel.basicNack 与 channel.basicReject 的区别在于basicNack可以批量拒绝多条消息，而basicReject一次只能拒绝一条消息。</p> 
+</blockquote> 
+<h3><a id="nbspnbspnbspnbsp4_449"></a>    4、全局处理消息</h3> 
+<p>自动确认涉及到一个问题就是如果在处理消息的时候抛出异常，消息处理失败，但是因为自动确认而导致 Rabbit 将该消息删除了，造成消息丢失</p> 
+<p>手动确认消息</p> 
+<pre><code>@Bean
+public SimpleMessageListenerContainer messageListenerContainer(ConnectionFactory connectionFactory){
+    SimpleMessageListenerContainer container = new SimpleMessageListenerContainer();
+    container.setConnectionFactory(connectionFactory);
+    container.setQueueNames("demo3_queue");              // 监听的队列
+    container.setAcknowledgeMode(AcknowledgeMode.MANUAL);        // 手动确认
+    container.setMessageListener((ChannelAwareMessageListener) (message, channel) -&gt; {      //消息处理
+        System.out.println("====接收到消息=====");
+        System.out.println(new String(message.getBody()));
+        if(message.getMessageProperties().getHeaders().get("error") == null){
+        channel.basicAck(message.getMessageProperties().getDeliveryTag(),false);
+            System.out.println("消息已经确认");
+        }else {
+            //channel.basicNack(message.getMessageProperties().getDeliveryTag(),false,false);
+            channel.basicReject(message.getMessageProperties().getDeliveryTag(),false);
+            System.out.println("消息拒绝");
+        }
+
+    });
+    return container;
+}
+</code></pre> 
+<p>AcknowledgeMode 除了 NONE 和 MANUAL 之外还有 AUTO ，它会根据方法的执行情况来决定是否确认还是拒绝（是否重新入queue）</p> 
+<p>如果消息成功被消费（成功的意思是在消费的过程中没有抛出异常），则自动确认<br> 当抛出 AmqpRejectAndDontRequeueException 异常的时候，则消息会被拒绝，且 requeue = false（不重新入队列）<br> 当抛出 ImmediateAcknowledgeAmqpException 异常，则消费者会被确认<br> 其他的异常，则消息会被拒绝，且 requeue = true（如果此时只有一个消费者监听该队列，则有发生死循环的风险，多消费端也会造成资源的极大浪费，这个在开发过程中一定要避免的）。可以通过 setDefaultRequeueRejected（默认是true）去设置</p> 
+<p>源码下载：<a href="https://download.csdn.net/download/qq_29914837/11262135">https://download.csdn.net/download/qq_29914837/11262135</a></p> 
+<hr> 
+<p>如果你觉得本篇文章对你有所帮助的话，麻烦请点击头像右边的关注按钮，谢谢！</p> 
+<p>技术在交流中进步，知识在分享中传播</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/91ef4e71a1650718c12d0e569cc8fc3d/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">MySQL数据类型详解:tinyint,smallint,mediumint,int,bigint的区别</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/ad4d3a791f957fdd9478fdf72162e78a/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">并发事务带来哪些问题</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

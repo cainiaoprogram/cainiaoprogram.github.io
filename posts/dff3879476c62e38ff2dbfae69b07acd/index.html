@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>2022-05-12 Druid源码阅读——poolPreparedStatements是如何控制缓存游标的？ - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="2022-05-12 Druid源码阅读——poolPreparedStatements是如何控制缓存游标的？" />
+<meta property="og:description" content="在Druid预编译SQL时，会检查是否开启poolPreparedStatements参数缓存预编译SQL，这些预编译的SQL存放在哪里？在什么时候进行存放？
+1.如何开启poolPreparedStatements(PSCache)功能 需要注意的是，maxPoolPreparedStatementPerConnectionSize的加载顺序在poolPreparedStatements之后，如果将maxPoolPreparedStatementPerConnectionSize设置为负数，则poolPreparedStatements无法生效。
+将druid.poolPreparedStatements配置项设置为true,此时maxPoolPreparedStatementPerConnectionSize默认为10。将druid.maxPoolPreparedStatementPerConnectionSize参数值设置为&gt;0的整数，也会开启此功能 2.预编译的SQL缓存在哪里？ 通过分析预编译SQL部分，可以发现这些内容被存放在连接持有者的statementPool属性中。
+public final class DruidConnectionHolder { protected PreparedStatementPool statementPool; /** * 获得语句池 */ public PreparedStatementPool getStatementPool() { //如果语句池为空，则新建语句池，否则返回当前所持有的 if (statementPool == null) { statementPool = new PreparedStatementPool(this); } return statementPool; } } 也就是说，预编译的SQL，会被存放在当前连接的持有者中，这些预编译的内容不会被其他连接所共享。
+3.预编译的SQL是什么时候被添加进缓存的？ 由于预编译SQL时，没有将语句缓存到语句池中，推测是在语句关闭时进行处理。
+@Override public void close() throws SQLException { //如果当前语句已经被关闭(内部状态判断),则不进行处理 if (isClosed()) { return; } //判断当前连接是否被关闭(同样通过内部状态进行判断，此时如果为true，该连接处于等待回收或正在回收) boolean connectionClosed = this.conn.isClosed(); // Reset the defaults //如果当前开启了PSCache，并且连接没有被关闭，重置数值到默认 if (pooled &amp;&amp; !connectionClosed) { try { if (defaultMaxFieldSize !" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/dff3879476c62e38ff2dbfae69b07acd/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-05-12T23:56:19+08:00" />
+<meta property="article:modified_time" content="2022-05-12T23:56:19+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">2022-05-12 Druid源码阅读——poolPreparedStatements是如何控制缓存游标的？</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <blockquote> 
+ <p>在Druid预编译SQL时，会检查是否开启poolPreparedStatements参数缓存预编译SQL，这些预编译的SQL存放在哪里？在什么时候进行存放？</p> 
+</blockquote> 
+<h2><a id="1poolPreparedStatementsPSCache_1"></a>1.如何开启poolPreparedStatements(PSCache)功能</h2> 
+<blockquote> 
+ <p>需要注意的是，maxPoolPreparedStatementPerConnectionSize的加载顺序在poolPreparedStatements之后，如果将maxPoolPreparedStatementPerConnectionSize设置为负数，则poolPreparedStatements无法生效。</p> 
+</blockquote> 
+<ul><li>将<code>druid.poolPreparedStatements</code>配置项设置为true,此时maxPoolPreparedStatementPerConnectionSize默认为10。</li><li>将<code>druid.maxPoolPreparedStatementPerConnectionSize</code>参数值设置为&gt;0的整数，也会开启此功能</li></ul> 
+<h2><a id="2SQL_5"></a>2.预编译的SQL缓存在哪里？</h2> 
+<p>通过分析预编译SQL部分，可以发现这些内容被存放在连接持有者的statementPool属性中。</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">final</span> <span class="token keyword">class</span> <span class="token class-name">DruidConnectionHolder</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">protected</span> <span class="token class-name">PreparedStatementPool</span> statementPool<span class="token punctuation">;</span>
+    <span class="token comment">/**
+     * 获得语句池
+     */</span>
+    <span class="token keyword">public</span> <span class="token class-name">PreparedStatementPool</span> <span class="token function">getStatementPool</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//如果语句池为空，则新建语句池，否则返回当前所持有的</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>statementPool <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            statementPool <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">PreparedStatementPool</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">return</span> statementPool<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>也就是说，预编译的SQL，会被存放在当前连接的持有者中，这些预编译的内容不会被其他连接所共享。</p> 
+<h2><a id="3SQL_23"></a>3.预编译的SQL是什么时候被添加进缓存的？</h2> 
+<p>由于预编译SQL时，没有将语句缓存到语句池中，推测是在语句关闭时进行处理。</p> 
+<pre><code class="prism language-java"> <span class="token annotation punctuation">@Override</span>
+ <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">close</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">SQLException</span> <span class="token punctuation">{<!-- --></span>
+     <span class="token comment">//如果当前语句已经被关闭(内部状态判断),则不进行处理</span>
+     <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">isClosed</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+         <span class="token keyword">return</span><span class="token punctuation">;</span>
+     <span class="token punctuation">}</span>
+     <span class="token comment">//判断当前连接是否被关闭(同样通过内部状态进行判断，此时如果为true，该连接处于等待回收或正在回收)</span>
+     <span class="token keyword">boolean</span> connectionClosed <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>conn<span class="token punctuation">.</span><span class="token function">isClosed</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+     <span class="token comment">// Reset the defaults</span>
+     <span class="token comment">//如果当前开启了PSCache，并且连接没有被关闭，重置数值到默认</span>
+     <span class="token keyword">if</span> <span class="token punctuation">(</span>pooled <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>connectionClosed<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+         <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+             <span class="token keyword">if</span> <span class="token punctuation">(</span>defaultMaxFieldSize <span class="token operator">!=</span> currentMaxFieldSize<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                 stmt<span class="token punctuation">.</span><span class="token function">setMaxFieldSize</span><span class="token punctuation">(</span>defaultMaxFieldSize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                 currentMaxFieldSize <span class="token operator">=</span> defaultMaxFieldSize<span class="token punctuation">;</span>
+             <span class="token punctuation">}</span>
+             <span class="token keyword">if</span> <span class="token punctuation">(</span>defaultMaxRows <span class="token operator">!=</span> currentMaxRows<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                 stmt<span class="token punctuation">.</span><span class="token function">setMaxRows</span><span class="token punctuation">(</span>defaultMaxRows<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                 currentMaxRows <span class="token operator">=</span> defaultMaxRows<span class="token punctuation">;</span>
+             <span class="token punctuation">}</span>
+             <span class="token keyword">if</span> <span class="token punctuation">(</span>defaultQueryTimeout <span class="token operator">!=</span> currentQueryTimeout<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                 stmt<span class="token punctuation">.</span><span class="token function">setQueryTimeout</span><span class="token punctuation">(</span>defaultQueryTimeout<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                 currentQueryTimeout <span class="token operator">=</span> defaultQueryTimeout<span class="token punctuation">;</span>
+             <span class="token punctuation">}</span>
+             <span class="token keyword">if</span> <span class="token punctuation">(</span>defaultFetchDirection <span class="token operator">!=</span> currentFetchDirection<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                 stmt<span class="token punctuation">.</span><span class="token function">setFetchDirection</span><span class="token punctuation">(</span>defaultFetchDirection<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                 currentFetchDirection <span class="token operator">=</span> defaultFetchDirection<span class="token punctuation">;</span>
+             <span class="token punctuation">}</span>
+             <span class="token keyword">if</span> <span class="token punctuation">(</span>defaultFetchSize <span class="token operator">!=</span> currentFetchSize<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                 stmt<span class="token punctuation">.</span><span class="token function">setFetchSize</span><span class="token punctuation">(</span>defaultFetchSize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                 currentFetchSize <span class="token operator">=</span> defaultFetchSize<span class="token punctuation">;</span>
+             <span class="token punctuation">}</span>
+         <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+             <span class="token keyword">this</span><span class="token punctuation">.</span>conn<span class="token punctuation">.</span><span class="token function">handleException</span><span class="token punctuation">(</span>e<span class="token punctuation">,</span> <span class="token keyword">null</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+         <span class="token punctuation">}</span>
+     <span class="token punctuation">}</span>
+     <span class="token comment">//由连接对象对预编译语句进行处理</span>
+     conn<span class="token punctuation">.</span><span class="token function">closePoolableStatement</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+ <span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token comment">/**
+ * 关闭预编译语句
+ */</span>
+<span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">closePoolableStatement</span><span class="token punctuation">(</span><span class="token class-name">DruidPooledPreparedStatement</span> stmt<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">SQLException</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//获得原始的预编译语句对象</span>
+    <span class="token class-name">PreparedStatement</span> rawStatement <span class="token operator">=</span> stmt<span class="token punctuation">.</span><span class="token function">getRawPreparedStatement</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//获得当前连接的持有者</span>
+    <span class="token keyword">final</span> <span class="token class-name">DruidConnectionHolder</span> holder <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>holder<span class="token punctuation">;</span>
+    <span class="token comment">//如果当前连接不再被持有，则不处理</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>holder <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">//判断是否开启了缓存预编译语句</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>stmt<span class="token punctuation">.</span><span class="token function">isPooled</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//清空预编译语句中所有的参数</span>
+            rawStatement<span class="token punctuation">.</span><span class="token function">clearParameters</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">SQLException</span> ex<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//处理异常</span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">handleException</span><span class="token punctuation">(</span>ex<span class="token punctuation">,</span> <span class="token keyword">null</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//判断当前连接是否被放弃，如果放弃不继续处理</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>rawStatement<span class="token punctuation">.</span><span class="token function">getConnection</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">isClosed</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">return</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            LOG<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"clear parameter error"</span><span class="token punctuation">,</span> ex<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//清除所有的批处理</span>
+            rawStatement<span class="token punctuation">.</span><span class="token function">clearBatch</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">SQLException</span> ex<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">handleException</span><span class="token punctuation">(</span>ex<span class="token punctuation">,</span> <span class="token keyword">null</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>rawStatement<span class="token punctuation">.</span><span class="token function">getConnection</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">isClosed</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">return</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            LOG<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"clear batch error"</span><span class="token punctuation">,</span> ex<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">//获得当前语句的持有者</span>
+    <span class="token class-name">PreparedStatementHolder</span> stmtHolder <span class="token operator">=</span> stmt<span class="token punctuation">.</span><span class="token function">getPreparedStatementHolder</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//释放当前语句，使其可以被再次获取</span>
+    stmtHolder<span class="token punctuation">.</span><span class="token function">decrementInUseCount</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//如果开启了PSCache，并且当前语句没有发生过异常</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>stmt<span class="token punctuation">.</span><span class="token function">isPooled</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> holder<span class="token punctuation">.</span><span class="token function">isPoolPreparedStatements</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> stmt<span class="token punctuation">.</span>exceptionCount <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//置入语句池</span>
+        holder<span class="token punctuation">.</span><span class="token function">getStatementPool</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>stmtHolder<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//清空其返回集合</span>
+        stmt<span class="token punctuation">.</span><span class="token function">clearResultSet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//取消对这个语句的跟踪</span>
+        holder<span class="token punctuation">.</span><span class="token function">removeTrace</span><span class="token punctuation">(</span>stmt<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//记录当前语句的的查询峰值(监控用)</span>
+        stmtHolder<span class="token punctuation">.</span><span class="token function">setFetchRowPeak</span><span class="token punctuation">(</span>stmt<span class="token punctuation">.</span><span class="token function">getFetchRowPeak</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//软关闭当前语句</span>
+        stmt<span class="token punctuation">.</span><span class="token function">setClosed</span><span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// soft set close</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>stmt<span class="token punctuation">.</span><span class="token function">isPooled</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> holder<span class="token punctuation">.</span><span class="token function">isPoolPreparedStatements</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// the PreparedStatement threw an exception</span>
+        <span class="token comment">//进入此分支时，则当前语句抛出过异常</span>
+        <span class="token comment">//清除所有的返回集合</span>
+        stmt<span class="token punctuation">.</span><span class="token function">clearResultSet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//删除跟踪</span>
+        holder<span class="token punctuation">.</span><span class="token function">removeTrace</span><span class="token punctuation">(</span>stmt<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//从语句池中删除这条语句并关闭，因为这条语句不再健康</span>
+        holder<span class="token punctuation">.</span><span class="token function">getStatementPool</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+                <span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>stmtHolder<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//Connection behind the statement may be in invalid state, which will throw a SQLException.</span>
+            <span class="token comment">//In this case, the exception is desired to be properly handled to remove the unusable connection from the pool.</span>
+            <span class="token comment">//真正关闭当前预编译过的语句</span>
+            stmt<span class="token punctuation">.</span><span class="token function">closeInternal</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">SQLException</span> ex<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">handleException</span><span class="token punctuation">(</span>ex<span class="token punctuation">,</span> <span class="token keyword">null</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">throw</span> ex<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//增加计数(关闭了多少预编译语句)</span>
+            holder<span class="token punctuation">.</span><span class="token function">getDataSource</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">incrementClosedPreparedStatementCount</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>经过查阅代码，发现其确实是在语句关闭时进行处理，对一条被预编译过的语句有以下三种处理方式</p> 
+<ol><li>开启PSCache并且这条语句没有抛出过异常时，将其添加进缓存池</li><li>开启PSCache但是这条语句发生过异常，从缓存池中移除并关闭</li><li>没有开启PSCache，直接关闭这条SQL</li></ol> 
+<h2><a id="4MySQLPSCache_153"></a>4.为什么官方文档中不推荐在MySQL中开启PSCache</h2> 
+<p>在查询这方面问题时，关于MySQL不同版本有不同的说法，究其原因是因为在MySQL某一版本之前不支持PSCache。<a href="https://github.com/alibaba/druid/issues/1256">关于poolPreparedStatements问题。 #1256</a><br> 是否要在线上开启可以参考Druid监控中查看PSCache命中数据来决定。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/27ff9371177d000c582b2a4a57411d55/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">docker-compose快速部署clickhouse</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/03f166b1a0bddb8440f5a6ce21a08677/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">机器学习图像特征提取—Hu矩（Hu不变矩）原理及代码</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

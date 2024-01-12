@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>heap pwn 入门大全 - 2：glibc heap机制与源码阅读(下) - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="heap pwn 入门大全 - 2：glibc heap机制与源码阅读(下)" />
+<meta property="og:description" content="本文对glibc堆管理器的各项主要内存操作，以及glibc 2.26后引入的tcache机制进行源码级分析，可作为查找使用。
+glibc memory operations 第一次malloc，会初始分配一个0x290的chunk，top chunk split返回给user后，剩余部分继续作为top chunk通常heap的第一个chunk，prev_inuse都为1，防止非法内存访问 unlink 将双向链表中的一个chunk取出，也就是链表中的删除元素维护fd, bk链表，若为large bin，则同时维护nextsize链表可能的泄漏点：不会修改两个链表的指针，可能会造成chunk地址泄漏 libc地址（通过main_arena）
+Chunk 为head chunk，bk泄漏bins地址chunk 为tail chunk，fd泄漏bins地址 泄漏堆地址（中间的chunk都可）
+static void unlink_chunk (mstate av, mchunkptr p) { // check chunk size in 2 positions if (chunksize (p) != prev_size (next_chunk (p))) malloc_printerr (&#34;corrupted size vs. prev_size&#34;); mchunkptr fd = p-&gt;fd; mchunkptr bk = p-&gt;bk; // check double-linked list if (__builtin_expect (fd-&gt;bk != p || bk-&gt;fd != p, 0)) malloc_printerr (&#34;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/861a095774428b3452891031a2a8e271/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-08-13T23:40:20+08:00" />
+<meta property="article:modified_time" content="2023-08-13T23:40:20+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">heap pwn 入门大全 - 2：glibc heap机制与源码阅读(下)</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <blockquote> 
+ <p>本文对glibc堆管理器的各项主要内存操作，以及glibc 2.26后引入的tcache机制进行源码级分析，可作为查找使用。</p> 
+</blockquote> 
+<h3><a id="glibc_memory_operations_1"></a>glibc memory operations</h3> 
+<ul><li>第一次malloc，会初始分配一个<code>0x290</code>的chunk，top chunk split返回给user后，剩余部分继续作为top chunk</li><li>通常heap的第一个chunk，<code>prev_inuse</code>都为1，防止非法内存访问</li></ul> 
+<h4><a id="unlink_6"></a>unlink</h4> 
+<ul><li>将双向链表中的一个chunk取出，也就是链表中的删除元素</li><li>维护<code>fd, bk</code>链表，若为large bin，则同时维护<code>nextsize</code>链表</li><li><strong>可能的泄漏点</strong>：不会修改两个链表的指针，可能会<strong>造成chunk地址泄漏</strong> 
+  <ul><li> <p>libc地址（通过<code>main_arena</code>）</p> 
+    <ul><li>Chunk 为head chunk，<strong>bk泄漏bins地址</strong></li><li>chunk 为tail chunk，<strong>fd泄漏bins地址</strong></li></ul> </li><li> <p>泄漏堆地址（中间的chunk都可）</p> </li></ul> </li></ul> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">void</span>
+<span class="token function">unlink_chunk</span> <span class="token punctuation">(</span>mstate av<span class="token punctuation">,</span> mchunkptr p<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// check chunk size in 2 positions</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">chunksize</span> <span class="token punctuation">(</span>p<span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token function">prev_size</span> <span class="token punctuation">(</span><span class="token function">next_chunk</span> <span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token function">malloc_printerr</span> <span class="token punctuation">(</span><span class="token string">"corrupted size vs. prev_size"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+  mchunkptr fd <span class="token operator">=</span> p<span class="token operator">-&gt;</span>fd<span class="token punctuation">;</span>
+  mchunkptr bk <span class="token operator">=</span> p<span class="token operator">-&gt;</span>bk<span class="token punctuation">;</span>
+
+  <span class="token comment">// check double-linked list</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">__builtin_expect</span> <span class="token punctuation">(</span>fd<span class="token operator">-&gt;</span>bk <span class="token operator">!=</span> p <span class="token operator">||</span> bk<span class="token operator">-&gt;</span>fd <span class="token operator">!=</span> p<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token function">malloc_printerr</span> <span class="token punctuation">(</span><span class="token string">"corrupted double-linked list"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+  <span class="token comment">// unlink</span>
+  fd<span class="token operator">-&gt;</span>bk <span class="token operator">=</span> bk<span class="token punctuation">;</span>
+  bk<span class="token operator">-&gt;</span>fd <span class="token operator">=</span> fd<span class="token punctuation">;</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">in_smallbin_range</span> <span class="token punctuation">(</span><span class="token function">chunksize_nomask</span> <span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> p<span class="token operator">-&gt;</span>fd_nextsize <span class="token operator">!=</span> <span class="token constant">NULL</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>		<span class="token comment">// 维护nextsize双向链表，仅有large bin使用</span>
+      <span class="token keyword">if</span> <span class="token punctuation">(</span>p<span class="token operator">-&gt;</span>fd_nextsize<span class="token operator">-&gt;</span>bk_nextsize <span class="token operator">!=</span> p
+	  <span class="token operator">||</span> p<span class="token operator">-&gt;</span>bk_nextsize<span class="token operator">-&gt;</span>fd_nextsize <span class="token operator">!=</span> p<span class="token punctuation">)</span>
+	<span class="token function">malloc_printerr</span> <span class="token punctuation">(</span><span class="token string">"corrupted double-linked list (not small)"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+      <span class="token keyword">if</span> <span class="token punctuation">(</span>fd<span class="token operator">-&gt;</span>fd_nextsize <span class="token operator">==</span> <span class="token constant">NULL</span><span class="token punctuation">)</span>	
+	<span class="token punctuation">{<!-- --></span>			<span class="token comment">// 下一个块不在nextsize链表中，即size与p相同</span>
+	  <span class="token keyword">if</span> <span class="token punctuation">(</span>p<span class="token operator">-&gt;</span>fd_nextsize <span class="token operator">==</span> p<span class="token punctuation">)</span> <span class="token comment">// nextsize链表仅有一个元素</span>
+	    fd<span class="token operator">-&gt;</span>fd_nextsize <span class="token operator">=</span> fd<span class="token operator">-&gt;</span>bk_nextsize <span class="token operator">=</span> fd<span class="token punctuation">;</span>	<span class="token comment">// 重新构建，将下一个块作为nextsize链表</span>
+	  <span class="token keyword">else</span>
+	    <span class="token punctuation">{<!-- --></span>		<span class="token comment">// nextsize链表不只一个元素，将fd插入nextsize链表（代替当前size）</span>
+	      fd<span class="token operator">-&gt;</span>fd_nextsize <span class="token operator">=</span> p<span class="token operator">-&gt;</span>fd_nextsize<span class="token punctuation">;</span>
+	      fd<span class="token operator">-&gt;</span>bk_nextsize <span class="token operator">=</span> p<span class="token operator">-&gt;</span>bk_nextsize<span class="token punctuation">;</span>
+	      p<span class="token operator">-&gt;</span>fd_nextsize<span class="token operator">-&gt;</span>bk_nextsize <span class="token operator">=</span> fd<span class="token punctuation">;</span>
+	      p<span class="token operator">-&gt;</span>bk_nextsize<span class="token operator">-&gt;</span>fd_nextsize <span class="token operator">=</span> fd<span class="token punctuation">;</span>
+	    <span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+      <span class="token keyword">else</span>
+	<span class="token punctuation">{<!-- --></span> <span class="token comment">// 下一个块也在链表中，直接进行元素删除即可</span>
+	  p<span class="token operator">-&gt;</span>fd_nextsize<span class="token operator">-&gt;</span>bk_nextsize <span class="token operator">=</span> p<span class="token operator">-&gt;</span>bk_nextsize<span class="token punctuation">;</span>
+	  p<span class="token operator">-&gt;</span>bk_nextsize<span class="token operator">-&gt;</span>fd_nextsize <span class="token operator">=</span> p<span class="token operator">-&gt;</span>fd_nextsize<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="malloc_63"></a>malloc</h4> 
+<p>handler entry: <code>__libc_malloc</code>, finally invokes <code>_int_malloc</code></p> 
+<h5><a id="__libc_malloc_69"></a>__libc_malloc</h5> 
+<ol><li>检查memory hook，若有，则直接执行 
+  <ul><li>初始化时，将<code>memory_hook</code>设为<code>malloc_hook_ini</code>，执行<code>ptmalloc_init</code></li></ul> </li><li>若配置tcache，使用tache</li><li>若程序为单线程，则直接调用<code>_int_malloc(main_arena, size)</code>进行内存分配，并直接返回</li><li><code>arena_get</code>获取可用arena，<a href="#arena_get" rel="nofollow">inpage ref</a></li><li>调用<code>_int_malloc</code>进行实际malloc调用</li></ol> 
+<h5><a id="_int_mallloc_80"></a>_int_mallloc</h5> 
+<ul><li> <p>调整request size到<code>nb</code>（+<code>SIZE_SZ</code>，只需要一个，因为数据可以存储在下一个chunk的top <code>SIZE_SZ</code> bytes）</p> 
+  <ul><li>如果没有可用的arena，fallback到<code>sysmalloc</code>，使用mmap来分配chunk</li></ul> </li><li> <p>如果size满足fast bin，则直接到fast bin进行分配，有结果就直接返回</p> </li><li> <p>若在small bin 范围内，则尝试small bin，有结果就直接返回</p> </li><li> <p>否则调用large bin，只计算index，不直接搜索结果</p> </li><li> <p>在unsorted bin中遍历，从后（bk）往前 (av)</p> 
+  <ul><li>对于每一个unsorted bin中的chunk，检查其next块的属性(size)等是否与其匹配，检查fd和bk双向链表是否损坏</li><li>如果请求的是一个small bin，并且当前unsorted bin中只有一个last remainder chunk，就直接使用它。<em>这将有助于提升在频繁malloc 小块时的效率</em>。这是唯一没有使用<strong>best fit</strong>策略的地方，并且只有在没有合适的small chunk能够匹配当前请求时才会使用。</li><li>将chunk移出 unsorted bin，<em>即使没有被直接使用，也会被放回对应的bin中</em></li><li>如果<strong>大小匹配，则直接使用该块</strong>，不放回</li><li>否则将该块放回bin 
+    <ul><li>若为small bin，直接找到位置</li><li>若为large bin，则还需要保持其有序，还需要另行处理<code>nextsize</code>双链表</li></ul> </li></ul> </li><li> <p>遍历结束，所有unsorted bin被清空，若没有刚好匹配上的chunk，则进行下一步</p> </li><li> <p>若request为large bin</p> 
+  <ul><li>若在当前bin 中找到第一个合适大小的chunk，将其移出队列（若有多个符合，取第二个，否则会破坏nextsize链表）</li><li>剩余部分不足MIN_SIZE，则使用整块</li><li>否则进行split，剩余部分组成一个remainder，加入unsorted bin头部，并设置chunk 内容</li><li>否则<strong>基于bitmap寻找下一个非空bin</strong> 
+    <ul><li>注意bitmap延迟响应，偏否的蒙特卡洛，只有为0时才一定为空</li><li>所以检验得到false alarm后，需要更新bit</li></ul> </li></ul> </li><li> <p>否则最后一步，使用 top chunk <code>use_top</code></p> 
+  <ul><li>若top chunk不足，则会进行fast bin碎片整理<code>consolidate</code></li><li>若没有fast bin，则调用sysmalloc进行堆扩容</li><li>以上两种例外情况结束后，都将返回上面重新检查bin等</li></ul> </li><li> <p><strong>通用</strong></p> 
+  <ul><li>当一个chunk被选中使用，会执行以下操作 
+    <ul><li>对应位置位（inuse，main_arena）</li><li>操作tcache，优先fill tcache，若已满则返回给用户</li><li><code>check_malloced_chunk</code> 为debug预留接口，默认不开启</li><li><code>chunk2mem</code>将chunk地址转换为user data首地址（加上header偏移<code>0x20</code>）</li></ul> </li></ul> </li></ul> 
+<h5><a id="ptmalloc_init_119"></a>ptmalloc_init</h5> 
+<ul><li>第一次运行malloc时，作为memory hook内容（<code>malloc_hook_ini</code>）被调用，<strong>所有线程和起来只用一次</strong></li><li>所有线程的<code>main_arena</code>相同，都指向主线程的那个</li><li>初始化<code>main_arena</code>：<code>malloc_init_state</code>，主要初始化bins链表头，设置top为unsorted bin（假top）</li></ul> 
+<h5><a id="arena_get_125"></a>arena_get</h5> 
+<p>获取一个可用arena，并上锁。<strong>如果没有找到可用的arena，则新建一个<code>arena_get2</code></strong></p> 
+<pre><code class="prism language-c"><span class="token comment">/* arena_get() acquires an arena and locks the corresponding mutex.
+   First, try the one last locked successfully by this thread.  (This
+   is the common case and handled with a macro for speed.)  Then, loop
+   once over the circularly linked list of arenas.  If no arena is
+   readily available, create a new one.  In this latter case, `size'
+   is just a hint as to how much memory will be required immediately
+   in the new arena. */</span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">arena_get</span><span class="token expression"><span class="token punctuation">(</span>ptr<span class="token punctuation">,</span> size<span class="token punctuation">)</span> <span class="token keyword">do</span> <span class="token punctuation">{<!-- --></span> </span><span class="token punctuation">\</span>
+      <span class="token expression">ptr <span class="token operator">=</span> thread_arena<span class="token punctuation">;</span>						      </span><span class="token punctuation">\</span>
+      <span class="token expression"><span class="token function">arena_lock</span> <span class="token punctuation">(</span>ptr<span class="token punctuation">,</span> size<span class="token punctuation">)</span><span class="token punctuation">;</span>						      </span><span class="token punctuation">\</span>
+  <span class="token expression"><span class="token punctuation">}</span> <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span></span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">arena_lock</span><span class="token expression"><span class="token punctuation">(</span>ptr<span class="token punctuation">,</span> size<span class="token punctuation">)</span> <span class="token keyword">do</span> <span class="token punctuation">{<!-- --></span>					      </span><span class="token punctuation">\</span>
+      <span class="token expression"><span class="token keyword">if</span> <span class="token punctuation">(</span>ptr<span class="token punctuation">)</span>								      </span><span class="token punctuation">\</span>
+        <span class="token expression"><span class="token function">__libc_lock_lock</span> <span class="token punctuation">(</span>ptr<span class="token operator">-&gt;</span>mutex<span class="token punctuation">)</span><span class="token punctuation">;</span>					      </span><span class="token punctuation">\</span>
+      <span class="token expression"><span class="token keyword">else</span>								      </span><span class="token punctuation">\</span>
+        <span class="token expression">ptr <span class="token operator">=</span> <span class="token function">arena_get2</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>size<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>				      </span><span class="token punctuation">\</span>
+  <span class="token expression"><span class="token punctuation">}</span> <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span></span></span>
+</code></pre> 
+<p><code>Arena_get2</code>:</p> 
+<ul><li>若当前存在空闲arena in <code>free_list</code>，则直接返回</li><li>若当前无空闲，并且当前arena数量没有超过限制，则新建一个arena - <code>_int_new_arena</code></li><li>否则复用一个现有的arena</li></ul> 
+<p><code>_int_new_arena</code></p> 
+<ul><li><code>new_heap</code> 调用<code>mmap</code>来分配arena空间，<code>top_pad</code>由multi thread配置，默认<code>0x20000</code>，用于指定top chunk的padding 
+  <ul><li>前部size包含heap info以及arena 结构体(<code>mstate</code>)，经过align up后对其到页（后面需要进行mmap操作），共<code>0x21000</code></li><li>mmap内存区间，映射size 为<code>HEAP_MAX_SIZE</code>，为<code>DEFAULT_MMAP_THRESHOLD_MAX*2 = 64MB</code>，初始不赋予权限 
+    <ul><li>需要对齐到<code>HEAP_MAX_SIZE</code>，所以一开始mmap 2倍空间，并使用中间经过对齐的一段（类似align up），如果一开始mmap的2倍空间已经对齐，在下次申请新arena时，会使用原来剩余的部分，<em>减少heap对内存空间的碎片化</em></li></ul> </li><li>对申请部分（包括<code>align_top</code>）进行<code>mprotect</code>，赋予<strong>读写权限</strong></li><li>初始化<code>heap_info</code>其他信息</li></ul> </li><li>将arena放置在<code>heap_info</code>之后，并设置参数</li><li>将top chunk 放置在arena之后，并设置参数</li></ul> 
+<table><thead><tr><th>Offset</th><th>Name</th><th>Type</th><th>Size</th></tr></thead><tbody><tr><td>0x0</td><td>Heap info</td><td>Heap_info</td><td>0x20</td></tr><tr><td>0x20</td><td>arena</td><td>Malloc_state</td><td>0x898</td></tr><tr><td>0x8c0 (aligned)</td><td>Top chunk</td><td>malloc_chunk</td><td></td></tr></tbody></table> 
+<h5><a id="sysmalloc_174"></a>sysmalloc</h5> 
+<ol><li>若request size过大（<code>&gt;= mp_.mmap_threshold</code> (<code>0x20000</code>)），并且当前mmap块数量少于上限，<strong>则直接使用mmap为request分配，而不是扩展top</strong> 
+  <ul><li>mmap分配的空间对齐到page size</li><li>由于不能使用下一个chunk的<code>prev_size</code>位置，所以当前chunk存在<code>size_sz</code>的overhead</li><li>同样将mmap内容作为chunk，需要初始化prev，以及size</li></ul> </li><li>正常拓展top 
+  <ul><li>首先记录初始top信息，并检查top情况</li><li>若为main_arena 
+    <ul><li>为top留出足够空间（<code>top_pad</code>）</li><li>调用<code>MORECORE</code>来获取更多内存，系统中使用<code>_sbrk</code> 
+      <ul><li>（若存在）调用hook</li><li>若brk失败，则尝试mmap 
+        <ul><li>使用mmap后，sbrk region为非连续段</li></ul> </li></ul> </li><li>若sbrk为拓展已有的top，简单拓展top即可</li><li>否则对堆做出调整 
+      <ul><li>若为contiguous，且已有旧堆（比较奇怪），则需要增加旧堆的大小（增加到<code>old_sz + size</code>，即拓展新需求的空间），且记录新的brk位置到<code>snd_brk</code></li><li>若非contiguous，需要建立fencepost</li><li>建立新的top chunk，并将原top chunk free掉</li></ul> </li></ul> </li><li>若非 main_arena 
+    <ul><li>尝试使用mmap来拓展已有堆<code>grow_heap</code>，heap最大不超过<code>HEAP_MAX_SIZE</code></li><li>若失败，建立新堆 <code>new_heap</code></li><li>将旧有的top chunk free掉，设置fence post</li><li>将heap的arena等属性设置好，将新开辟的空间初始化为top chunk</li></ul> </li></ul> </li><li>完成拓展，将top chunk split，并返回给user</li></ol> 
+<h5><a id="_200"></a>其他封装函数</h5> 
+<ul><li><code>calloc</code>返回n个元素和指定大小的内存，全部初始化为0</li></ul> 
+<h4><a id="free_206"></a>free</h4> 
+<p>entry: <code>__libc_free</code></p> 
+<h5><a id="libc_free_210"></a>libc_free</h5> 
+<ol><li>检查hook （通常没有）</li><li>将pointer转换为chunk ptr</li><li>若为mmap chunk (检查<code>mmaped bit</code> - <code>chunk_is_mmaped</code>) 
+  <ol><li>调整mmap threshold，后续大小更小的（不超过最大阈值）的request不会触发mmap</li><li><code>__munmap</code>解除块映射</li></ol> </li><li>调用<code>_int_free</code></li></ol> 
+<h5><a id="_int_free_219"></a>_int_free</h5> 
+<ol><li>检查chunk各项参数</li><li>处理tcache</li><li>检查fast bin 
+  <ul><li>将chunk 插入bin头部，若非单线程，则需要使用原子操作</li></ul> </li><li>检查非mmapped chunk 
+  <ol><li>尝试合并前面的chunk(如果<code>!prev_inuse</code>) 
+    <ul><li>若可以合并，则<code>unlink</code>前面的chunk</li></ul> </li><li>尝试合并后面的chunk 
+    <ul><li>若后面为top chunk，则直接修改当前chunk参数，将其合并，直接结束 
+      <ul><li>否则，若后面chunk正在使用，则将其<code>prev_inuse</code>清空，否则同样<code>unlink</code></li></ul> </li></ul> </li><li>将可能合并后的chunk重新设置头，并将其插入unsorted bin头部（仅需要维护fd/bk链表即可，若为large chunk，还需要清空<code>next_size</code>位置）</li></ol> </li><li>如果目前free的size（合并后）大于<code>FASTBIN_CONSOLIDATION_THRESHOLD</code>，则进行consolidate 
+  <ul><li>首先调用<code>malloc_consolidate</code>进行整理</li><li>若为main arena，则使用<code>systrim</code>缩小arena体积，缩小量为top pad</li><li>否则使用<code>heap_trim</code>缩小mmap堆</li></ul> </li></ol> 
+<h5><a id="malloc_consolidate_237"></a>malloc_consolidate</h5> 
+<ul><li>对所有fast bin中的bin进行遍历 
+  <ul><li>对每一个bin中的chunk进行遍历 
+    <ul><li>合并前后chunk，与<code>_int_free</code>中第4步（检查非mmapped chunk）完全相同</li></ul> </li></ul> </li></ul> 
+<h5><a id="systrim_243"></a>systrim</h5> 
+<ul><li>只在当前top chunk末尾与<code>current_brk</code>相同时使用，避免外部sbrk对外部数据的影响</li><li>调用<code>MORECORE(-extra)</code>将多余部分裁剪</li><li>update top chunk and heap</li></ul> 
+<h5><a id="heap_trim_249"></a>heap_trim</h5> 
+<ul><li>如果当前heap仅剩top chunk，说明整个heap都可以被删除 
+  <ul><li>清除上一个heap的fencepost，检查后将上一个heap的大小拓宽fencepost大小</li><li>删除当前heap</li><li>consolidate previous chunk</li><li>更新 top</li></ul> </li><li>尝试收缩当前heap 
+  <ul><li><code>shrink_heap</code>将多余部分重新映射为不可访问区域，用于节约内存</li></ul> </li></ul> 
+<h4><a id="Other_Operations_260"></a>Other Operations</h4> 
+<h5><a id="realloc_262"></a>realloc</h5> 
+<blockquote> 
+ <p>重新分配该内存块，提供两个参数oldmem和size，分别制定原内存块指针地址和需要修改的大小</p> 
+</blockquote> 
+<ol><li>若oldmem为空，直接转malloc，若size为0并且oldmem不为空，直接转free</li><li>进行相关安全检查，如wrap around，size等</li><li>若为mmaped chunk 
+  <ul><li>尝试mremap (linux syscall)，成功即返回<code>mremap_chunk</code></li><li>否则malloc，并进行<code>memcpy</code>，复制内存内容</li></ul> </li><li>否则 
+  <ul><li>若为单线程，则直接调用<code>_int_realloc</code></li><li>若为多线程，则尝试在该arena上进行<code>_int_realloc</code>，失败则在其他arena上尝试malloc</li></ul> </li></ol> 
+<p><code>_int_realloc</code></p> 
+<ul><li>check size</li><li>if new_size &lt; old_size， 直接选择该块待用</li><li>若下一个chunk是top chunk，则缩减top chunk 直接使用，直接return</li><li>若下一个chunk 空闲且空间足够，直接使用下一个chunk，先unlink</li><li>否则，allocate, copy, free</li><li>若当前选择的chunk（该块，或与下一个合并块）较大，则需要split</li></ul> 
+<h3><a id="tcache_284"></a>tcache</h3> 
+<p>tcache是glibc 2.26后引入技术，用于提升堆小块管理性能，<em>但是缺乏检查，存在较多漏洞</em></p> 
+<h4><a id="structure_288"></a>structure</h4> 
+<p>tcache引入两个新结构体<code>tcache_entry</code>, <code>tcache_perthread_struct</code></p> 
+<pre><code class="prism language-c"><span class="token comment">/* We overlay this structure on the user-data portion of a chunk when
+   the chunk is stored in the per-thread cache.  */</span>
+<span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token class-name">tcache_entry</span>
+<span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">struct</span> <span class="token class-name">tcache_entry</span> <span class="token operator">*</span>next<span class="token punctuation">;</span>
+  <span class="token comment">/* This field exists to detect double frees.  */</span>
+  <span class="token keyword">struct</span> <span class="token class-name">tcache_perthread_struct</span> <span class="token operator">*</span>key<span class="token punctuation">;</span>
+<span class="token punctuation">}</span> tcache_entry<span class="token punctuation">;</span>
+
+<span class="token comment">/* There is one of these for each thread, which contains the
+   per-thread cache (hence "tcache_perthread_struct").  Keeping
+   overall size low is mildly important.  Note that COUNTS and ENTRIES
+   are redundant (we could have just counted the linked list each
+   time), this is for performance reasons.  */</span>
+<span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token class-name">tcache_perthread_struct</span>
+<span class="token punctuation">{<!-- --></span>
+  <span class="token class-name">uint16_t</span> counts<span class="token punctuation">[</span>TCACHE_MAX_BINS<span class="token punctuation">]</span><span class="token punctuation">;</span>		<span class="token comment">// count for entries</span>
+  tcache_entry <span class="token operator">*</span>entries<span class="token punctuation">[</span>TCACHE_MAX_BINS<span class="token punctuation">]</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span> tcache_perthread_struct<span class="token punctuation">;</span>
+</code></pre> 
+<ul><li><code>tcache_entry</code>用于<strong>指向下一个chunk的user data部分</strong></li><li>将<code>tcache_entry</code>放在chunk的user data部分，并且会复用该部分（<code>tcache_entry</code>结构体）</li></ul> 
+<h4><a id="_317"></a>工作原理</h4> 
+<ul><li>第一次 malloc 时，会先 malloc 一块内存用来存放 <code>tcache_perthread_struct</code> - <code>MAYBE_INIT_TCACHE</code></li><li>free 内存，且 size 小于 small bin maxsize 时 
+  <ul><li>tcache 之前会放到 fastbin 或者 unsorted bin 中</li><li>在tcache出现后： 
+    <ul><li>先放到对应的 tcache 中，直到 tcache 被填满（<em>mp_.tcache_count</em>， 默认是 7 个）</li><li>tcache 被填满之后，再次 free 的内存和之前一样被放到 fastbin 或者 unsorted bin 中</li><li>tcache 中的 chunk 不会合并（不取消 inuse bit，<em>fastbin也不会</em>）</li></ul> </li></ul> </li><li>malloc 内存，且 size 在 tcache 范围内</li><li>先从 tcache 取 chunk，直到 tcache 为空</li><li>tcache 为空后，从 bin 中找</li><li>tcache 为空时，如果 <code>fastbin/smallbin/unsorted bin</code> 中有 size 符合的 chunk，会先把 <code>fastbin/smallbin/unsorted bin</code> 中的 chunk 放到 tcache 中，直到填满。之后再从 tcache 中取；因此 chunk 在 bin 中和 tcache 中的顺序会反过来</li></ul> 
+<h4><a id="Source_Code_331"></a>Source Code</h4> 
+<h5><a id="MAYBE_INIT_TCACHE_333"></a>MAYBE_INIT_TCACHE</h5> 
+<p><code>tcache_init()</code>初始化tcache</p> 
+<ol><li>获取一个可用arena，并malloc <code>tcache_perthread_struct</code></li><li>设置tcache变量，并memset清空区域</li></ol> 
+<h5><a id="free_342"></a>free</h5> 
+<p>in <code>_int_free</code></p> 
+<ol><li>在user data部分建立一个entry</li><li>检查tcache double free</li><li><code>tcache_put</code> 将chunk 放入tcache</li></ol> 
+<p><code>tcache_put</code></p> 
+<ul><li>将chunk插入tcache单链表</li><li>设置entry的key为<code>tcache</code>，以便检查double free</li></ul> 
+<h5><a id="malloc_356"></a>malloc</h5> 
+<ul><li>若对应位置(<code>tcidx</code>)count不为0，则可以使用tcache （可在bins命令中查看）</li><li>使用FIFO机制，同样从头部取一个块返还给user</li><li>由于entry直接为user data头部指针，所以直接返还给用户空间</li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/a9d7526f49d372e707faa3726281bbe4/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【嵌入式环境下linux内核及驱动学习笔记-（19）LCD驱动框架2-FrameBuffer】</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/12ecd9107f4ba40dda071f376abf528f/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">nginx如何获取真实的ip</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

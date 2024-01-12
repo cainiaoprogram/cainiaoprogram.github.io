@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>libevent 定制——libevent 定制多线程 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="libevent 定制——libevent 定制多线程" />
+<meta property="og:description" content="libevent 定制多线程 文章目录 libevent 定制多线程开启多线程定制多线程调试锁的使用 编写多线程程序的时候,在多个线程中同时访问同样的数据并不总是安全的。 libevent 的结构体在多线程下通常有三种工作方式: 某些结构体内在地是单线程的:同时在多个线程中使用它们总是不安全的。
+某些结构体具有可选的锁:可以告知 libevent 是否需要在多个线程中使用每个对象。
+某些结构体总是锁定的:如果 libevent 在支持锁的配置下运行,在多个线程中使用它们总是安全的。
+开启多线程 目前默认编译生成的libevent是支持多线程的，这一点可以从他的cmake过程文件(build/CMakeCache.txt)中看出：
+EVENT__DISABLE_THREAD_SUPPORT:BOOL=OFF 之后这个宏会在libevent-2.1.12-stable/include/event2/thread.h这个提供给用户的头文件中用到：
+#if !defined(EVENT__DISABLE_THREAD_SUPPORT) || defined(EVENT_IN_DOXYGEN_) #define EVTHREAD_LOCK_API_VERSION 1 #define EVTHREAD_LOCKTYPE_RECURSIVE 1 #define EVTHREAD_LOCKTYPE_READWRITE 2 struct evthread_lock_callbacks { int lock_api_version; unsigned supported_locktypes; void *(*alloc)(unsigned locktype); void (*free)(void *lock, unsigned locktype); int (*lock)(unsigned mode, void *lock); int (*unlock)(unsigned mode, void *lock); }; EVENT2_EXPORT_SYMBOL int evthread_set_lock_callbacks(const struct evthread_lock_callbacks *); #define EVTHREAD_CONDITION_API_VERSION 1 struct timeval; struct evthread_condition_callbacks { int condition_api_version; void *(*alloc_condition)(unsigned condtype); void (*free_condition)(void *cond); int (*signal_condition)(void *cond, int broadcast); int (*wait_condition)(void *cond, void *lock, const struct timeval *timeout); }; EVENT2_EXPORT_SYMBOL int evthread_set_condition_callbacks( const struct evthread_condition_callbacks *); EVENT2_EXPORT_SYMBOL void evthread_set_id_callback( unsigned long (*id_fn)(void)); #if (defined(_WIN32) &amp;&amp; !" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/008e6f77301c36900d5300d790e35a09/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-09-19T00:01:47+08:00" />
+<meta property="article:modified_time" content="2023-09-19T00:01:47+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">libevent 定制——libevent 定制多线程</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="libevent__0"></a>libevent 定制多线程</h2> 
+<p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><a href="#libevent__0" rel="nofollow">libevent 定制多线程</a></li><li><ul><li><a href="#_11" rel="nofollow">开启多线程</a></li><li><a href="#_310" rel="nofollow">定制多线程</a></li><li><a href="#_359" rel="nofollow">调试锁的使用</a></li></ul> 
+ </li></ul> 
+</div> 
+<br> 编写多线程程序的时候,在多个线程中同时访问同样的数据并不总是安全的。 
+<br> libevent 的结构体在多线程下通常有三种工作方式: 
+<p></p> 
+<ul><li> <p>某些结构体内在地是单线程的:同时在多个线程中使用它们总是不安全的。</p> </li><li> <p>某些结构体具有可选的锁:可以告知 libevent 是否需要在多个线程中使用每个对象。</p> </li><li> <p>某些结构体总是锁定的:如果 libevent 在支持锁的配置下运行,在多个线程中使用它们总是安全的。</p> </li></ul> 
+<h3><a id="_11"></a>开启多线程</h3> 
+<p>目前默认编译生成的libevent是支持多线程的，这一点可以从他的cmake过程文件(<code>build/CMakeCache.txt</code>)中看出：</p> 
+<pre><code class="prism language-makefile">EVENT__DISABLE_THREAD_SUPPORT:BOOL=OFF
+</code></pre> 
+<p>之后这个宏会在<code>libevent-2.1.12-stable/include/event2/thread.h</code>这个提供给用户的头文件中用到：</p> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression"><span class="token operator">!</span><span class="token function">defined</span><span class="token punctuation">(</span>EVENT__DISABLE_THREAD_SUPPORT<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token function">defined</span><span class="token punctuation">(</span>EVENT_IN_DOXYGEN_<span class="token punctuation">)</span></span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">EVTHREAD_LOCK_API_VERSION</span> <span class="token expression"><span class="token number">1</span></span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">EVTHREAD_LOCKTYPE_RECURSIVE</span> <span class="token expression"><span class="token number">1</span></span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">EVTHREAD_LOCKTYPE_READWRITE</span> <span class="token expression"><span class="token number">2</span></span></span>
+
+<span class="token keyword">struct</span> <span class="token class-name">evthread_lock_callbacks</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">int</span> lock_api_version<span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> supported_locktypes<span class="token punctuation">;</span>
+	<span class="token keyword">void</span> <span class="token operator">*</span><span class="token punctuation">(</span><span class="token operator">*</span>alloc<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> locktype<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">void</span> <span class="token punctuation">(</span><span class="token operator">*</span>free<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span>lock<span class="token punctuation">,</span> <span class="token keyword">unsigned</span> locktype<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>lock<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> mode<span class="token punctuation">,</span> <span class="token keyword">void</span> <span class="token operator">*</span>lock<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>unlock<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> mode<span class="token punctuation">,</span> <span class="token keyword">void</span> <span class="token operator">*</span>lock<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+EVENT2_EXPORT_SYMBOL
+<span class="token keyword">int</span> <span class="token function">evthread_set_lock_callbacks</span><span class="token punctuation">(</span><span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">evthread_lock_callbacks</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">EVTHREAD_CONDITION_API_VERSION</span> <span class="token expression"><span class="token number">1</span></span></span>
+
+<span class="token keyword">struct</span> <span class="token class-name">timeval</span><span class="token punctuation">;</span>
+
+<span class="token keyword">struct</span> <span class="token class-name">evthread_condition_callbacks</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">int</span> condition_api_version<span class="token punctuation">;</span>
+	<span class="token keyword">void</span> <span class="token operator">*</span><span class="token punctuation">(</span><span class="token operator">*</span>alloc_condition<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> condtype<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">void</span> <span class="token punctuation">(</span><span class="token operator">*</span>free_condition<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span>cond<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>signal_condition<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span>cond<span class="token punctuation">,</span> <span class="token keyword">int</span> broadcast<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>wait_condition<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span>cond<span class="token punctuation">,</span> <span class="token keyword">void</span> <span class="token operator">*</span>lock<span class="token punctuation">,</span>
+	    <span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">timeval</span> <span class="token operator">*</span>timeout<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+EVENT2_EXPORT_SYMBOL
+<span class="token keyword">int</span> <span class="token function">evthread_set_condition_callbacks</span><span class="token punctuation">(</span>
+	<span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">evthread_condition_callbacks</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+EVENT2_EXPORT_SYMBOL
+<span class="token keyword">void</span> <span class="token function">evthread_set_id_callback</span><span class="token punctuation">(</span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">long</span> <span class="token punctuation">(</span><span class="token operator">*</span>id_fn<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression"><span class="token punctuation">(</span><span class="token function">defined</span><span class="token punctuation">(</span>_WIN32<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span><span class="token function">defined</span><span class="token punctuation">(</span>EVENT__DISABLE_THREAD_SUPPORT<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token function">defined</span><span class="token punctuation">(</span>EVENT_IN_DOXYGEN_<span class="token punctuation">)</span></span></span>
+<span class="token comment">/** Sets up Libevent for use with Windows builtin locking and thread ID
+    functions.  Unavailable if Libevent is not built for Windows.
+
+    @return 0 on success, -1 on failure. */</span>
+EVENT2_EXPORT_SYMBOL
+<span class="token keyword">int</span> <span class="token function">evthread_use_windows_threads</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">/**
+   Defined if Libevent was built with support for evthread_use_windows_threads()
+*/</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">EVTHREAD_USE_WINDOWS_THREADS_IMPLEMENTED</span> <span class="token expression"><span class="token number">1</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression"><span class="token function">defined</span><span class="token punctuation">(</span>EVENT__HAVE_PTHREADS<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token function">defined</span><span class="token punctuation">(</span>EVENT_IN_DOXYGEN_<span class="token punctuation">)</span></span></span>
+<span class="token comment">/** Sets up Libevent for use with Pthreads locking and thread ID functions.
+    Unavailable if Libevent is not build for use with pthreads.  Requires
+    libraries to link against Libevent_pthreads as well as Libevent.
+
+    @return 0 on success, -1 on failure. */</span>
+EVENT2_EXPORT_SYMBOL
+<span class="token keyword">int</span> <span class="token function">evthread_use_pthreads</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">/** Defined if Libevent was built with support for evthread_use_pthreads() */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">EVTHREAD_USE_PTHREADS_IMPLEMENTED</span> <span class="token expression"><span class="token number">1</span></span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+
+<span class="token comment">/** Enable debugging wrappers around the current lock callbacks.  If Libevent
+ * makes one of several common locking errors, exit with an assertion failure.
+ *
+ * If you're going to call this function, you must do so before any locks are
+ * allocated.
+ **/</span>
+EVENT2_EXPORT_SYMBOL
+<span class="token keyword">void</span> <span class="token function">evthread_enable_lock_debugging</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">/* Old (misspelled) version: This is deprecated; use
+ * evthread_enable_log_debugging instead. */</span>
+EVENT2_EXPORT_SYMBOL
+<span class="token keyword">void</span> <span class="token function">evthread_enable_lock_debuging</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span> <span class="token comment">/* EVENT__DISABLE_THREAD_SUPPORT */</span></span>
+
+</code></pre> 
+<p>从具体的代码可以看出，<code>EVENT__DISABLE_THREAD_SUPPORT</code>宏直接关系到libevent是否支持多线程，以及用户能够定制自己的多线程相关函数。</p> 
+<p>同时在<code>thread.h</code>文件中，还可以看到其对不同系统线程的支持（windows线程和pthread线程）。</p> 
+<ul><li>使用windows的线程</li></ul> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression"><span class="token punctuation">(</span><span class="token function">defined</span><span class="token punctuation">(</span>_WIN32<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span><span class="token function">defined</span><span class="token punctuation">(</span>EVENT__DISABLE_THREAD_SUPPORT<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token function">defined</span><span class="token punctuation">(</span>EVENT_IN_DOXYGEN_<span class="token punctuation">)</span></span></span>
+<span class="token comment">/** Sets up Libevent for use with Windows builtin locking and thread ID
+    functions.  Unavailable if Libevent is not built for Windows.
+
+    @return 0 on success, -1 on failure. */</span>
+EVENT2_EXPORT_SYMBOL
+<span class="token keyword">int</span> <span class="token function">evthread_use_windows_threads</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">/**
+   Defined if Libevent was built with support for evthread_use_windows_threads()
+*/</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">EVTHREAD_USE_WINDOWS_THREADS_IMPLEMENTED</span> <span class="token expression"><span class="token number">1</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+</code></pre> 
+<ul><li>使用pthread线程</li></ul> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression"><span class="token function">defined</span><span class="token punctuation">(</span>EVENT__HAVE_PTHREADS<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token function">defined</span><span class="token punctuation">(</span>EVENT_IN_DOXYGEN_<span class="token punctuation">)</span></span></span>
+<span class="token comment">/** Sets up Libevent for use with Pthreads locking and thread ID functions.
+    Unavailable if Libevent is not build for use with pthreads.  Requires
+    libraries to link against Libevent_pthreads as well as Libevent.
+
+    @return 0 on success, -1 on failure. */</span>
+EVENT2_EXPORT_SYMBOL
+<span class="token keyword">int</span> <span class="token function">evthread_use_pthreads</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">/** Defined if Libevent was built with support for evthread_use_pthreads() */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">EVTHREAD_USE_PTHREADS_IMPLEMENTED</span> <span class="token expression"><span class="token number">1</span></span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+</code></pre> 
+<p>只有当你调用了<code>evthread_use_windows_threads()</code>或者<code>evthread_use_pthreads()</code>或者调用<code>evthread_set_lock_callbacks</code>函数定制自己的多线程、锁、条件变量才会开启多线程功能。其实，前面的那两个函数其内部实现也是定制，在函数的内部，libevent封装的一套Win32线程、pthreads线程。然后调用<code>evthread_set_lock_callbacks</code>函数，进行定制。以<code>evthread_use_pthreads</code>函数为例（<code>libevent-2.1.12-stable/evthread_pthread.c</code>），如果想了解windows可以查看<code>evthread_use_windows_threads</code>函数(<code>libevent-2.1.12-stable/evthread_win32.c</code>)：</p> 
+<pre><code class="prism language-c"><span class="token keyword">int</span>
+<span class="token function">evthread_use_pthreads</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">struct</span> <span class="token class-name">evthread_lock_callbacks</span> cbs <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+		EVTHREAD_LOCK_API_VERSION<span class="token punctuation">,</span>
+		EVTHREAD_LOCKTYPE_RECURSIVE<span class="token punctuation">,</span>
+		evthread_posix_lock_alloc<span class="token punctuation">,</span>
+		evthread_posix_lock_free<span class="token punctuation">,</span>
+		evthread_posix_lock<span class="token punctuation">,</span>
+		evthread_posix_unlock
+	<span class="token punctuation">}</span><span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">evthread_condition_callbacks</span> cond_cbs <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+		EVTHREAD_CONDITION_API_VERSION<span class="token punctuation">,</span>
+		evthread_posix_cond_alloc<span class="token punctuation">,</span>
+		evthread_posix_cond_free<span class="token punctuation">,</span>
+		evthread_posix_cond_signal<span class="token punctuation">,</span>
+		evthread_posix_cond_wait
+	<span class="token punctuation">}</span><span class="token punctuation">;</span>
+	<span class="token comment">/* Set ourselves up to get recursive locks. */</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">pthread_mutexattr_init</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>attr_recursive<span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">pthread_mutexattr_settype</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>attr_recursive<span class="token punctuation">,</span> PTHREAD_MUTEX_RECURSIVE<span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+
+	<span class="token function">evthread_set_lock_callbacks</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>cbs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">evthread_set_condition_callbacks</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>cond_cbs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">evthread_set_id_callback</span><span class="token punctuation">(</span>evthread_posix_get_id<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>从上面的代码可以看出，定制线程其实就定义了三类相关操作：</p> 
+<ul><li>锁相关操作，<code>evthread_set_lock_callbacks</code> 
+  <ul><li>锁</li><li>锁定</li><li>解锁</li><li>分配锁</li><li>析构锁</li></ul> </li><li>条件变量相关操作，<code>evthread_set_condition_callbacks</code> 
+  <ul><li>条件变量</li><li>创建条件变量</li><li>析构条件变量</li><li>等待条件变量</li><li>触发/广播条件变量</li></ul> </li><li>线程ID相关操作，<code>evthread_set_id_callback</code></li></ul> 
+<p><strong>下面针对这三种操作详细说明</strong></p> 
+<ul><li><code>evthread_lock_callbacks</code>结构体：</li></ul> 
+<pre><code class="prism language-c"><span class="token comment">/** This structure describes the interface a threading library uses for
+ * locking.   It's used to tell evthread_set_lock_callbacks() how to use
+ * locking on this platform.
+ */</span>
+<span class="token keyword">struct</span> <span class="token class-name">evthread_lock_callbacks</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">/** The current version of the locking API.  Set this to
+	 * EVTHREAD_LOCK_API_VERSION */</span>
+	<span class="token keyword">int</span> lock_api_version<span class="token punctuation">;</span>
+	<span class="token comment">/** Which kinds of locks does this version of the locking API
+	 * support?  A bitfield of EVTHREAD_LOCKTYPE_RECURSIVE and
+	 * EVTHREAD_LOCKTYPE_READWRITE.
+	 *
+	 * (Note that RECURSIVE locks are currently mandatory, and
+	 * READWRITE locks are not currently used.)
+	 **/</span>
+	<span class="token keyword">unsigned</span> supported_locktypes<span class="token punctuation">;</span>
+	<span class="token comment">/** Function to allocate and initialize new lock of type 'locktype'.
+	 * Returns NULL on failure. */</span>
+	<span class="token keyword">void</span> <span class="token operator">*</span><span class="token punctuation">(</span><span class="token operator">*</span>alloc<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> locktype<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">/** Funtion to release all storage held in 'lock', which was created
+	 * with type 'locktype'. */</span>
+	<span class="token keyword">void</span> <span class="token punctuation">(</span><span class="token operator">*</span>free<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span>lock<span class="token punctuation">,</span> <span class="token keyword">unsigned</span> locktype<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">/** Acquire an already-allocated lock at 'lock' with mode 'mode'.
+	 * Returns 0 on success, and nonzero on failure. */</span>
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>lock<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> mode<span class="token punctuation">,</span> <span class="token keyword">void</span> <span class="token operator">*</span>lock<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">/** Release a lock at 'lock' using mode 'mode'.  Returns 0 on success,
+	 * and nonzero on failure. */</span>
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>unlock<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> mode<span class="token punctuation">,</span> <span class="token keyword">void</span> <span class="token operator">*</span>lock<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><code>evthread_lock_callbacks</code> 结构体描述的锁回调函数及其能力。</p> 
+<ul><li>对于上述版本,<code>lock_api_version</code> 字段必须设置为 <code>EVTHREAD_LOCK_API_VERSION</code>。</li><li>必须设置<code>supported_locktypes</code> 字段为 <code>EVTHREAD_LOCKTYPE_*</code>常量(<code>EVTHREAD_LOCKTYPE_RECURSIVE</code>、<code>EVTHREAD_LOCKTYPE_READWRITE</code>)的组合以描述支持的锁类型(在2.0.4-alpha版本中 , EVTHREAD_LOCK_RECURSIVE是必须的,EVTHREAD_LOCK_READWRITE 则没有使用)。</li><li>alloc函数必须返回指定类型的新锁;</li><li>free函数必须释放指定类型锁持有的所有资源;</li><li>lock函数必须试图以指定模式请求锁定,如果成功则返回0,失败则返回非零;</li><li>unlock 函数必须试图解锁,成功则返回0,否则返回非零。</li></ul> 
+<p>可识别的锁类型有:</p> 
+<ul><li> <p>0:通常的,不必递归的锁。</p> </li><li> <p><code>EVTHREAD_LOCKTYPE_RECURSIVE</code>:不会阻塞已经持有它的线程的锁。一旦持有它的线程进行原来锁定次数的解锁,其他线程立刻就可以请求它了。</p> </li><li> <p><code>EVTHREAD_LOCKTYPE_READWRITE</code>:可以让多个线程同时因为读而持有它,但是任何时刻只有一个线程因为写而持有它。写操作排斥所有读操作。</p> </li></ul> 
+<p>可识别的锁模式有:</p> 
+<ul><li> <p><code>EVTHREAD_READ</code>:仅用于读写锁:为读操作请求或者释放锁</p> </li><li> <p><code>EVTHREAD_WRITE</code>:仅用于读写锁:为写操作请求或者释放锁</p> </li><li> <p><code>EVTHREAD_TRY</code>:仅用于锁定:仅在可以立刻锁定的时候才请求锁定</p> </li><li> <p><code>evthread_condition_callbacks</code>结构体：</p> </li></ul> 
+<pre><code class="prism language-c"><span class="token comment">/** This structure describes the interface a threading library uses for
+ * condition variables.  It's used to tell evthread_set_condition_callbacks
+ * how to use locking on this platform.
+ */</span>
+<span class="token keyword">struct</span> <span class="token class-name">evthread_condition_callbacks</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">/** The current version of the conditions API.  Set this to
+	 * EVTHREAD_CONDITION_API_VERSION */</span>
+	<span class="token keyword">int</span> condition_api_version<span class="token punctuation">;</span>
+	<span class="token comment">/** Function to allocate and initialize a new condition variable.
+	 * Returns the condition variable on success, and NULL on failure.
+	 * The 'condtype' argument will be 0 with this API version.
+	 */</span>
+	<span class="token keyword">void</span> <span class="token operator">*</span><span class="token punctuation">(</span><span class="token operator">*</span>alloc_condition<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> condtype<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">/** Function to free a condition variable. */</span>
+	<span class="token keyword">void</span> <span class="token punctuation">(</span><span class="token operator">*</span>free_condition<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span>cond<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">/** Function to signal a condition variable.  If 'broadcast' is 1, all
+	 * threads waiting on 'cond' should be woken; otherwise, only on one
+	 * thread is worken.  Should return 0 on success, -1 on failure.
+	 * This function will only be called while holding the associated
+	 * lock for the condition.
+	 */</span>
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>signal_condition<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span>cond<span class="token punctuation">,</span> <span class="token keyword">int</span> broadcast<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">/** Function to wait for a condition variable.  The lock 'lock'
+	 * will be held when this function is called; should be released
+	 * while waiting for the condition to be come signalled, and
+	 * should be held again when this function returns.
+	 * If timeout is provided, it is interval of seconds to wait for
+	 * the event to become signalled; if it is NULL, the function
+	 * should wait indefinitely.
+	 *
+	 * The function should return -1 on error; 0 if the condition
+	 * was signalled, or 1 on a timeout. */</span>
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>wait_condition<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span>cond<span class="token punctuation">,</span> <span class="token keyword">void</span> <span class="token operator">*</span>lock<span class="token punctuation">,</span>
+	    <span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">timeval</span> <span class="token operator">*</span>timeout<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><code>evthread_condition_callbacks</code> 结构体描述了与条件变量相关的回调函数。</p> 
+<ul><li>对于上述版本,<code>condition_api_version</code>字段必须设置为 <code>EVTHREAD_CONDITION_API_VERSION</code>。</li><li><code>alloc_condition</code> 函数必须返回到新条件变量的指针。它接受0作为其参数。</li><li><code>free_condition</code> 函数必须释放条件变量持有的存储器和资源.</li><li><code>wait_condition</code> 函数要求三个参数:一个由<code>alloc_condition</code> 分配的条件变量,一个由你提供的 <code>evthread_lock_callbacks</code>.<code>alloc</code> 函数分配的锁,以及一个可选的超时值。调用本函数时,必须已经持有参数指定的锁;本函数应该释放指定的锁,等待条件变量成为授信状态,或者直到指定的超时时间已经流逝(可选 )。<code>wait_condition</code> 应该在错误时返回-1,条件变量授信时返回0,超时时返回1。返回之前,函数应该确定其再次持有锁。</li><li>最后,<code>signal_condition</code> 函数应该唤醒等待该条件变量的某个线程(broadcast 参数为 false 时),或者唤醒等待条件变量的所有线程(broadcast 参数为 true时)。只有在持有与条件变量相关的锁的时候,才能够进行这些操作。</li></ul> 
+<p>关于条件变量的更多信息,请查看 pthreads 的 pthread_cond_*函数文档,或者 Windows的 CONDITION_VARIABLE(Windows Vista 新引入的)函数文档。</p> 
+<ul><li><code>id_fn</code></li></ul> 
+<pre><code class="prism language-c"><span class="token comment">/**
+   Sets the function for determining the thread id.
+
+   @param base the event base for which to set the id function
+   @param id_fn the identify function Libevent should invoke to
+     determine the identity of a thread.
+*/</span>
+EVENT2_EXPORT_SYMBOL
+<span class="token keyword">void</span> <span class="token function">evthread_set_id_callback</span><span class="token punctuation">(</span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">long</span> <span class="token punctuation">(</span><span class="token operator">*</span>id_fn<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><code>id_fn</code> 参数必须是一个函数,它返回一个无符号长整数,标识调用此函数的线程。对于相同线程,这个函数应该总是返回同样的值;而对于同时调用该函数的不同线程,必须返回不同的值。</p> 
+<p>如果用户为libevent开启了多线程，那么libevent里面的函数就会变成线程安全的。此时主线程在使用event_base_dispatch，别的线程是可以线程安全地使用event_add把一个event添加到主线程的event_base中。</p> 
+<h3><a id="_310"></a>定制多线程</h3> 
+<p>libevent定制多线程其实就是定制多线程中会使用到的锁、条件变量、id，这点可以从<code>libevent-2.1.12-stable/include/event2/thread.h</code>文件中知道：</p> 
+<ul><li><code>evthread_set_lock_callbacks</code></li></ul> 
+<pre><code class="prism language-c"><span class="token comment">/** Sets a group of functions that Libevent should use for locking.
+ * For full information on the required callback API, see the
+ * documentation for the individual members of evthread_lock_callbacks.
+ *
+ * Note that if you're using Windows or the Pthreads threading library, you
+ * probably shouldn't call this function; instead, use
+ * evthread_use_windows_threads() or evthread_use_posix_threads() if you can.
+ */</span>
+EVENT2_EXPORT_SYMBOL
+<span class="token keyword">int</span> <span class="token function">evthread_set_lock_callbacks</span><span class="token punctuation">(</span><span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">evthread_lock_callbacks</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<ul><li><code>evthread_set_condition_callbacks</code></li></ul> 
+<pre><code class="prism language-c"><span class="token comment">/** Sets a group of functions that Libevent should use for condition variables.
+ * For full information on the required callback API, see the
+ * documentation for the individual members of evthread_condition_callbacks.
+ *
+ * Note that if you're using Windows or the Pthreads threading library, you
+ * probably shouldn't call this function; instead, use
+ * evthread_use_windows_threads() or evthread_use_pthreads() if you can.
+ */</span>
+EVENT2_EXPORT_SYMBOL
+<span class="token keyword">int</span> <span class="token function">evthread_set_condition_callbacks</span><span class="token punctuation">(</span>
+	<span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">evthread_condition_callbacks</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<ul><li><code>evthread_set_id_callback</code></li></ul> 
+<pre><code class="prism language-c"><span class="token comment">/**
+   Sets the function for determining the thread id.
+
+   @param base the event base for which to set the id function
+   @param id_fn the identify function Libevent should invoke to
+     determine the identity of a thread.
+*/</span>
+EVENT2_EXPORT_SYMBOL
+<span class="token keyword">void</span> <span class="token function">evthread_set_id_callback</span><span class="token punctuation">(</span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">long</span> <span class="token punctuation">(</span><span class="token operator">*</span>id_fn<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>一旦用户调用<code>evthread_use_windows_threads()</code>或者<code>evthread_use_pthreads()</code>函数，那么用户就为libevent定制了自己的线程锁操作。libevent的其他代码中，如果需要用到锁，就会去调用这些线程锁操作。在实现上，当调用<code>evthread_use_windows_threads()</code>或者<code>evthread_use_pthreads()</code>函数时，两个函数的内部都会调用<code>evthread_set_lock_callbacks</code>函数。而这个设置函数会把前面两个e<code>vthread_use_xxx</code>函数中定义的cbs变量值复制到一个<code>evthread_lock_callbacks</code>类型的<code>_evthread_lock_fns</code>全局变量保存起来。以后，libevent需要用到多线程锁操作，直接访问这个<code>_evthread_lock_fn</code>变量即可。对于条件变量，也是用这样方式实现的。</p> 
+<blockquote> 
+ <p>为获取锁,在调用分配需要在多个线程间共享的结构体的 libevent 函数之前,必须告知libevent 使用哪个锁函数。如果使用 pthreads 库,或者使用 Windows 本地线程代码，那么已经有设置libevent 使用正确的 pthreads 或者 Windows 函数的预定义函数。</p> 
+</blockquote> 
+<h3><a id="_359"></a>调试锁的使用</h3> 
+<p>为帮助调试锁的使用,libevent 有一个可选的“锁调试”特征。这个特征包装了锁调用,以便捕获典型的锁错误,包括:</p> 
+<ul><li> <p>解锁并没有持有的锁</p> </li><li> <p>重新锁定一个非递归锁<br> 如果发生这些错误中的某一个,libevent 将给出断言失败并且退出。</p> </li></ul> 
+<pre><code class="prism language-c"><span class="token comment">/** Enable debugging wrappers around the current lock callbacks.  If Libevent
+ * makes one of several common locking errors, exit with an assertion failure.
+ *
+ * If you're going to call this function, you must do so before any locks are
+ * allocated.
+ **/</span>
+EVENT2_EXPORT_SYMBOL
+<span class="token keyword">void</span> <span class="token function">evthread_enable_lock_debugging</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<blockquote> 
+ <p>必须在创建或者使用任何锁之前调用这个函数。为安全起见,请在设置完线程函数后立即调用这个函数。</p> 
+</blockquote>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/7a1b8af06fc7bc6d70de1431617ad62a/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">element-plus修改英语语言模式为中文方法</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/9fd92de9c3bbe05e24aec16983490055/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">docker部署最新版nacos(2.2.3)设置登录密码</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

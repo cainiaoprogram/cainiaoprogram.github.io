@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>一文看懂YOLO v2 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="一文看懂YOLO v2" />
+<meta property="og:description" content="概述 新的YOLO版本论文全名叫“YOLO9000: Better, Faster, Stronger”，相较于YOLO主要有两个大方面的改进：
+第一，作者使用了一系列的方法对原来的YOLO多目标检测框架进行了改进，在保持原有速度的优势之下，精度上得以提升。
+第二，作者提出了一种目标分类与检测的联合训练方法，通过这种方法，YOLO9000可以同时在COCO和ImageNet数据集中进行训练，训练后的模型可以实现多达9000种物体的实时检测。
+我们根据论文中Better，Faster，Stronger三个方面来阐述YOLOv2的算法细节，其中会提到YOLO一些算法YOLO讲解。
+Better Batch Normalization
+神经网络学习过程本质就是为了学习数据分布,一旦训练数据与测试数据的分布不同,那么网络的泛化能力也大大降低;另外一方面，一旦每批训练数据的分布各不相同(batch 梯度下降),那么网络就要在每次迭代都去学习适应不同的分布,这样将会大大降低网络的训练速度。
+解决办法之一是对数据都要做一个归一化预处理。YOLOv2网络通过在每一个卷积层后添加batch normalization，极大的改善了收敛速度同时减少了对其它regularization方法的依赖（舍弃了dropout优化后依然没有过拟合），使得mAP获得了2%的提升。
+先建立这样一个观点： 对数据进行预处理（统一格式、均衡化、去噪等）能够大大提高训练速度，提升训练效果。批量规范化 正是基于这个假设的实践，对每一层输入的数据进行加工。示意图：
+BN 的做法是 在卷积池化之后，激活函数之前，对每个数据输出进行规范化（均值为 0，方差为 1）。
+公式很简单，第一部分是 Batch内数据归一化（其中 E为Batch均值，Var为方差），Batch数据近似代表了整体训练数据。
+第二部分是亮点，即引入 附加参数 γ 和 β（Scale &amp; Shift），Why？ 因为简单的归一化 相当于只使用了激活函数中近似线性的部分（如下图红色虚线），破坏了原始数据的特征分布，这会降低模型表达能力。
+High Resolution Classifier
+预训练分类模型采用了更高分辨率的图片
+YOLOv1先在ImageNet（224x224）分类数据集上预训练模型的主体部分（大部分目标检测算法），获得较好的分类效果，然后再训练网络的时候将网络的输入从224x224增加为448x448。但是直接切换分辨率，检测模型可能难以快速适应高分辨率。所以YOLOv2增加了在ImageNet数据集上使用448x448的输入来finetune分类网络这一中间过程（10 epochs），这可以使得模型在检测数据集上finetune之前已经适用高分辨率输入。使用高分辨率分类器后，YOLOv2的mAP提升了约4%。
+Convolutional With Anchor Boxes
+YOLOv1是利用全连接层直接预测bounding box的坐标。
+YOLOv2则借鉴了Faster R-CNN的思想，引入anchor。
+YOLOv2移除了YOLOv1中的全连接层而采用了卷积和anchor boxes来预测边界框。为了使检测所用的特征图分辨率更高，移除其中的一个pool层。在检测模型中，YOLOv2不是采418×418图片作为输入，而是采用416×416大小。因为YOLOv2模型下采样的总步长为32,对于416×416大小的图片，最终得到的特征图大小为13×13，维度是奇数，这样特征图恰好只有一个中心位置。对于一些大物体，它们中心点往往落入图片中心位置，此时使用特征图的一个中心点去预测这些物体的边界框相对容易些。所以在YOLOv2设计中要保证最终的特征图有奇数个位置。
+YOLOv2中引入anchor boxes，输出feature map大小为13×13，每个cell有5个anchor box预测得到5个bounding box，一共有13×13×5=845个box。增加box数量是为了提高目标的定位准确率。
+Dimension Clusters（维度聚类）
+为了方便理解我们先讲解一下k-means。
+K-Means算法的思想很简单，对于给定的样本集，按照样本之间的距离大小，将样本集划分为K个簇。让簇内的点尽量紧密的连在一起，而让簇间的距离尽量的大。如果用数据表达式表示，假设簇划分为(C1,C2,…Ck)，则我们的目标是最小化平方误差E：
+其中μi是簇Ci的均值向量，有时也称为质心，表达式为：
+K-Means采用的启发式方式很简单，用下面一组图就可以形象的描述。
+了解了K-means，我们再来看看YOLOv2中的Dimension Clusters。
+k-means需要有数据，中心点个数是需要人为指定的，位置可以随机初始化，但是还需要度量到聚类中心的距离。这里怎么度量这个距离是很关键的。
+距离度量如果使用标准的欧氏距离，大盒子会比小盒子产生更多的错误。例(100-95)^2=25, (5-2.5)^2=6.25。因此这里使用其他的距离度量公式。聚类的目的是anchor boxes和临近的ground truth有更大的IOU值，这和anchor box的尺寸没有直接关系。自定义的距离度量公式：d(box,centroid)=1-IOU(box,centroid)" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/573e20c8f260171281b7a42df10725f3/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2019-03-27T19:02:19+08:00" />
+<meta property="article:modified_time" content="2019-03-27T19:02:19+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">一文看懂YOLO v2</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="_0"></a>概述</h3> 
+<p>新的YOLO版本论文全名叫“YOLO9000: Better, Faster, Stronger”，相较于YOLO主要有两个大方面的改进：<br> 第一，作者使用了一系列的方法对原来的YOLO多目标检测框架进行了改进，在保持原有速度的优势之下，精度上得以提升。<br> 第二，作者提出了一种目标分类与检测的联合训练方法，通过这种方法，YOLO9000可以同时在COCO和ImageNet数据集中进行训练，训练后的模型可以实现多达9000种物体的实时检测。<br> 我们根据论文中Better，Faster，Stronger三个方面来阐述YOLOv2的算法细节，其中会提到YOLO一些算法<a href="https://mp.csdn.net/mdeditor/88814417#">YOLO讲解</a>。</p> 
+<h3><a id="Better_6"></a>Better</h3> 
+<p><strong>Batch Normalization</strong><br> 神经网络学习过程本质就是为了学习数据分布,一旦训练数据与测试数据的分布不同,那么网络的泛化能力也大大降低;另外一方面，一旦每批训练数据的分布各不相同(batch 梯度下降),那么网络就要在每次迭代都去学习适应不同的分布,这样将会大大降低网络的训练速度。</p> 
+<p>解决办法之一是对数据都要做一个归一化预处理。YOLOv2网络通过在每一个卷积层后添加batch normalization，极大的改善了收敛速度同时减少了对其它regularization方法的依赖（舍弃了dropout优化后依然没有过拟合），使得mAP获得了2%的提升。</p> 
+<p>先建立这样一个观点： 对数据进行预处理（统一格式、均衡化、去噪等）能够大大提高训练速度，提升训练效果。批量规范化 正是基于这个假设的实践，对每一层输入的数据进行加工。示意图：<img src="https://images2.imgbox.com/0e/4c/X0NEpQrB_o.png" alt="在这里插入图片描述"><br> BN 的做法是 在卷积池化之后，激活函数之前，对每个数据输出进行规范化（均值为 0，方差为 1）。<img src="https://images2.imgbox.com/88/20/hrqZiEiD_o.png" alt="在这里插入图片描述"><br> 公式很简单，第一部分是 Batch内数据归一化（其中 E为Batch均值，Var为方差），Batch数据近似代表了整体训练数据。</p> 
+<p>第二部分是亮点，即引入 附加参数 γ 和 β（Scale &amp; Shift），Why？ 因为简单的归一化 相当于只使用了激活函数中近似线性的部分（如下图红色虚线），破坏了原始数据的特征分布，这会降低模型表达能力。<br> <img src="https://images2.imgbox.com/c0/e5/xDBdzH9N_o.png" alt="在这里插入图片描述"><br> <strong>High Resolution Classifier</strong><br> 预训练分类模型采用了更高分辨率的图片<br> YOLOv1先在ImageNet（224x224）分类数据集上预训练模型的主体部分（大部分目标检测算法），获得较好的分类效果，然后再训练网络的时候将网络的输入从224x224增加为448x448。但是直接切换分辨率，检测模型可能难以快速适应高分辨率。所以YOLOv2增加了在ImageNet数据集上使用448x448的输入来finetune分类网络这一中间过程（10 epochs），这可以使得模型在检测数据集上finetune之前已经适用高分辨率输入。使用高分辨率分类器后，YOLOv2的mAP提升了约4%。</p> 
+<p><strong>Convolutional With Anchor Boxes</strong><br> YOLOv1是利用全连接层直接预测bounding box的坐标。<br> YOLOv2则借鉴了Faster R-CNN的思想，引入anchor。<br> YOLOv2移除了YOLOv1中的全连接层而采用了卷积和anchor boxes来预测边界框。为了使检测所用的特征图分辨率更高，移除其中的一个pool层。在检测模型中，YOLOv2不是采418×418图片作为输入，而是采用416×416大小。因为YOLOv2模型下采样的总步长为32,对于416×416大小的图片，最终得到的特征图大小为13×13，维度是奇数，这样特征图恰好只有一个中心位置。对于一些大物体，它们中心点往往落入图片中心位置，此时使用特征图的一个中心点去预测这些物体的边界框相对容易些。所以在YOLOv2设计中要保证最终的特征图有奇数个位置。<br> YOLOv2中引入anchor boxes，输出feature map大小为13×13，每个cell有5个anchor box预测得到5个bounding box，一共有13×13×5=845个box。增加box数量是为了提高目标的定位准确率。<br> <img src="https://images2.imgbox.com/d6/e6/p1cdnP1G_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>Dimension Clusters（维度聚类）</strong><br> 为了方便理解我们先讲解一下k-means。<br> K-Means算法的思想很简单，对于给定的样本集，按照样本之间的距离大小，将样本集划分为K个簇。让簇内的点尽量紧密的连在一起，而让簇间的距离尽量的大。如果用数据表达式表示，假设簇划分为(C1,C2,…Ck)，则我们的目标是最小化平方误差E：<img src="https://images2.imgbox.com/4a/86/r98NHEYL_o.png" alt="在这里插入图片描述"><br> 其中μi是簇Ci的均值向量，有时也称为质心，表达式为：<br> <img src="https://images2.imgbox.com/d5/1d/wawZuXUh_o.png" alt="在这里插入图片描述"><br> K-Means采用的启发式方式很简单，用下面一组图就可以形象的描述。<img src="https://images2.imgbox.com/82/30/iflkCZ7o_o.png" alt="在这里插入图片描述"><br> 了解了K-means，我们再来看看YOLOv2中的Dimension Clusters。<br> k-means需要有数据，中心点个数是需要人为指定的，位置可以随机初始化，但是还需要度量到聚类中心的距离。这里怎么度量这个距离是很关键的。<br> 距离度量如果使用标准的欧氏距离，大盒子会比小盒子产生更多的错误。例(100-95)^2=25, (5-2.5)^2=6.25。因此这里使用其他的距离度量公式。聚类的目的是anchor boxes和临近的ground truth有更大的IOU值，这和anchor box的尺寸没有直接关系。自定义的距离度量公式：d(box,centroid)=1-IOU(box,centroid)<br> 到聚类中心的距离越小越好，但IOU值是越大越好，所以使用 1 - IOU，这样就保证距离越小，IOU值越大。<br> <img src="https://images2.imgbox.com/3f/22/qX3lMPMW_o.png" alt="在这里插入图片描述"><br> 作者最终选取5个聚类中心作为先验框。对于两个数据集，5个先验框的width和height如下：<br> COCO: (0.57273, 0.677385), (1.87446, 2.06253), (3.33843, 5.47434), (7.88282, 3.52778), (9.77052, 9.16828)<br> VOC: (1.3221, 1.73145), (3.19275, 4.00944), (5.05587, 8.09892), (9.47112, 4.84053), (11.2364, 10.0071)</p> 
+<p><strong>Direct Location prediction</strong><br> 作者在引入anchor box的时候遇到的第二个问题：模型不稳定，尤其是在训练刚开始的时候。作者认为这种不稳定主要来自预测box的中心坐标(x,y)值。<br> 在基于region proposal的目标检测算法中，是通过预测tx和ty来得到(x,y)值，也就是预测的是offsets。<img src="https://images2.imgbox.com/00/48/JSQ49iTF_o.png" alt="在这里插入图片描述"><br> 这个公式是无约束的，预测的边界框很容易向任何方向偏移。因此，每个位置预测的边界框可以落在图片任何位置，这导致模型的不稳定性，在训练时需要很长时间来预测出正确的offsets。</p> 
+<p>YOLOv2中没有采用这种预测方式，而是沿用了YOLOv1的方法，就是预测边界框中心点相对于对应cell左上角位置的相对偏移值。<br> 网络在最后一个卷积层输出13<em>13的feature map，有13</em>13个cell，每个cell有5个anchor box来预测5个bounding box，每个bounding box预测得到5个值。<br> 分别为：tx、ty、tw、th和to（类似YOLOv1的confidence）<br> 为了将bounding box的中心点约束在当前cell中，使用sigmoid函数将tx、ty归一化处理，将值约束在0~1，这使得模型训练更稳定。<br> <img src="https://images2.imgbox.com/91/c3/2aWC6mQ9_o.png" alt="在这里插入图片描述"><img src="https://images2.imgbox.com/39/bd/f9W1UaeW_o.png" alt="在这里插入图片描述"><br> 其实这与BBR回归本质上差不多，BBR回归<a href="https://blog.csdn.net/litt1e/article/details/88344738">（相关内容点此链接）</a>的参数是offset偏移值，而YOLO v2回归的是tx，ty，tw，th。它们都需要编码解码的过程来得到最终的坐标信息，差别只是已知信息的不同。</p> 
+<p><strong>Fine-Grained Features</strong><br> YOLOv2的输入图片大小为416×416，经过5次maxpooling之后得到13×13大小的特征图，并以此特征图采用卷积做预测。13×13大小的特征图对检测大物体是足够了，但是对于小物体还需要更精细的特征图（Fine-Grained Features）。因此SSD使用了多尺度的特征图来分别检测不同大小的物体，前面更精细的特征图可以用来预测小物体。YOLOv2提出了一种passthrough层来利用更精细的特征图。YOLOv2所利用的Fine-Grained Features是26×26大小的特征图（最后一个maxpooling层的输入），对于Darknet-19模型来说就是大小为26×26×512的特征图。passthrough层与ResNet网络的shortcut类似，以前面更高分辨率的特征图为输入，然后将其连接到后面的低分辨率特征图上。前面的特征图维度是后面的特征图的2倍，passthrough层抽取前面层的每个2×2的局部区域，然后将其转化为channel维度，对于26×26×512的特征图，经passthrough层处理之后就变成了13×13×2048的新特征图（特征图大小降低4倍，而channles增加4倍，图6为一个实例），这样就可以与后面的13×13×1024特征图连接在一起形成13×13×3072的特征图，然后在此特征图基础上卷积做预测。<br> <img src="https://images2.imgbox.com/9d/51/k4t4J4mU_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>Multi-Scale Training</strong><br> YOLOv2中只有卷积层和池化层，因此不需要固定的输入图片的大小。<br> 为了让模型更有鲁棒性，作者引入了多尺度训练。就是在训练过程中，每迭代一定的次数，改变模型的输入图片大小。<br> 注意：这一步是在检测数据集上fine-tuning时候采用的，不要跟前面在Imagenet数据集上的两步预训练分类模型混淆。<br> 网络输入是416×416，经过5次max pooling之后会输出13×13的feature map，也就是下采样32倍，因此作者采用32的倍数作为输入的size，具体采用320、352、384、416、448、480、512、544、576、608共10种size。</p> 
+<p>输入图片大小为320×320时，特征图大小为10×10，输入图片大小为608×608时，特征图大小为19×19。<br> 每次改变输入图片大小还需要对最后检测层进行处理，然后开始训练。<br> 这种网络训练方式使得相同网络可以对不同分辨率的图像做检测。<br> 在输入size较大时，训练速度较慢，在输入size较小时，训练速度较快，而multi-scale training又可以提高准确率，因此算是准确率和速度都取得一个不错的平衡。<img src="https://images2.imgbox.com/a5/b8/9wL8Q9Om_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="Faster_71"></a>Faster</h3> 
+<p><strong>Darknet-19</strong><br> 网络包含19个卷积层和5个max pooling层，而在YOLOv1中采用的GooleNet，包含24个卷积层和2个全连接层，因此Darknet-19整体上卷积卷积操作比YOLOv1中用的GoogleNet要少，这是计算量减少的关键。最后用average pooling层代替全连接层进行预测。<br> <img src="https://images2.imgbox.com/7d/d9/rtsOMLRP_o.png" alt="在这里插入图片描述"><br> <strong>YOLOv2的训练</strong><br> YOLOv2的训练主要包括三个阶段。<br> 第一阶段就是先在ImageNet分类数据集上预训练Darknet-19，此时模型输入为224×224,共训练160个epochs。<br> 第二阶段将网络的输入调整为448*448,继续在ImageNet数据集上finetune分类模型，训练10个epochs，此时分类模型的top-1准确度为76.5%，而top-5准确度为93.3%。<br> 第三个阶段就是修改Darknet-19分类模型为检测模型，并在检测数据集上继续finetune网络。</p> 
+<p><strong>LOSS</strong><br> （1）和YOLOv1一样，对于训练图片中的ground truth，若其中心点落在某个cell内，那么该cell内的5个先验框所对应的边界框负责预测它，具体是哪个边界框预测它，需要在训练中确定，即由那个与ground truth的IOU最大的边界框预测它，而剩余的4个边界框不与该ground truth匹配。YOLOv2同样需要假定每个cell至多含有一个grounth truth，而在实际上基本不会出现多于1个的情况。与ground truth匹配的先验框计算坐标误差、置信度误差（此时target为1）以及分类误差，而其它的边界框只计算置信度误差（此时target为0）。</p> 
+<p>（2）YOLOv2和YOLOv1的损失函数一样，为均方差函数。但是看了YOLOv2的源码（训练样本处理与loss计算都包含在文件region_layer.c中），并且参考国外的blog以及allanzelener/YAD2K（Ng深度学习教程所参考的那个Keras实现）上的实现，发现YOLOv2的处理比原来的v1版本更加复杂。</p> 
+<p>loss计算公式：<br> <img src="https://images2.imgbox.com/0e/dc/ylv2AEEM_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="Stronger_89"></a>Stronger</h3> 
+<p>带标注的检测数据集量比较少，而带标注的分类数据集量比较大，因此YOLO9000主要通过结合分类和检测数据集使得训练得到的检测模型可以检测约9000类物体。<br> 一方面要构造数据集（采用WordTree解决），另一方面要解决模型训练问题（采用Joint classification and detection）。</p> 
+<p>参考文章：<br> <a href="https://blog.csdn.net/lwplwf/article/details/82895409">https://blog.csdn.net/lwplwf/article/details/82895409</a><br> <a href="https://blog.csdn.net/l7H9JA4/article/details/79955903">https://blog.csdn.net/l7H9JA4/article/details/79955903</a><br> <a href="https://www.cnblogs.com/stingsl/p/6428694.html" rel="nofollow">https://www.cnblogs.com/stingsl/p/6428694.html</a><br> <a href="https://www.jianshu.com/p/032b1eecb335" rel="nofollow">https://www.jianshu.com/p/032b1eecb335</a><br> <a href="https://blog.csdn.net/oppo62258801/article/details/76796717">https://blog.csdn.net/oppo62258801/article/details/76796717</a><br> <a href="https://blog.csdn.net/jesse_mx/article/details/53925356">https://blog.csdn.net/jesse_mx/article/details/53925356</a><br> <a href="https://zhuanlan.zhihu.com/p/25167153" rel="nofollow">https://zhuanlan.zhihu.com/p/25167153</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/d795af4ebb6f3a2a04004784f6e74d97/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">闭包的快速了解</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/7b7d82109c3b16e351ff11cfa085f7aa/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Tensorflow下使用SSD训练自己的数据集</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Redis 有序集合(sorted set)实现消息重试 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Redis 有序集合(sorted set)实现消息重试" />
+<meta property="og:description" content="先了解Redis 有序集合(sorted set)**
+Redis 有序集合和集合一样也是string类型元素的集合,且不允许重复的成员。
+不同的是每个元素都会关联一个double类型的分数。redis正是通过分数来为集合中的成员进行从小到大的排序。
+有序集合的成员是唯一的,但分数(score)却可以重复。
+集合是通过哈希表实现的，所以添加，删除，查找的复杂度都是O(1)。 集合中最大的成员数为 232 - 1 (4294967295, 每个集合可存储40多亿个成员)。
+常用Redis sorted_set 命令：
+http://doc.redisfans.com/sorted_set/index.html
+实现简要消息重试
+实现思路：
+消息重试要考虑消息发送的优先级，高优先级的需要先进先出，但是实际情况发送消息消息发送时候优先级是不均匀的，有的时候会一大波峰消息过来，如果某一段时间高优先级消息一直在发送，那么早发送的低优先级的消息一直无法发送，导致实际情况是一直在发高优先级的，低优先级的一直在积压。
+这里通过流程讲解一下通过Redis 有序集合(sorted set) 来解决这个问题,score存入消息优先级1-5，优先级为5的在指定区间范围内优先发送，具体解决思路如下：
+1、对重试数据进行拆分 A sorted set和 B sorted set，按照优先级存入sorted set A或 B
+2、设置状态机器来记录A sorted set和 B sorted set的读写状态，进而识别是写入A还是B
+3、当读取A为空的时候 且 B 也为空的情况下，休眠指定时间（可配置，例如5分钟）,这个时候读队列进行休眠，写入数据通过状态机器识别写入B
+4、5分钟休眠（可配置，例如5分钟）完成后状态机切换到A写，B读取，如果队列都为空则继续休眠5分钟（可配置，例如5分钟），则等待数据写入A
+5、第4、5步 逻辑通过状态机器进行反复切换，可以达到在指定时间范围内数据高优先级读取 GetRangeFromSortedSetDesc
+6、同时考虑到数据量太大情况，每天消息写入量设置最大限额2000万，超量不写入队列
+7、考虑到sorted set读取并发问题，每个队列写入的时候进行sharding 拆分到较小的key中，例如WaitSend1-10个管道、
+每个管道都分A、B读写队列，例如：如WaitSend1A、如WaitSend1B 、如WaitSend2A、如WaitSend2B等，通过job对每个管道进行消费，逻辑实现中自动识别读取A、B队列
+实现流程
+状态机为0 的情况Sort Set A写入，B读取，B读取时候跟进条件设置状态机状态值，达到切换队列切换效果。如果写队列和读取队列同时为空的情况下休眠指定时间，
+到达指定休眠时间到到后自动切换状态机状态，否则直接切换状态机。
+状态机为1 的情况Sort Set B写入,A读取，A读取时候跟进条件设置状态机状态值，达到切换队列切换效果。如果写队列和读取队列同时为空的情况下休眠指定时间，
+到达指定休眠时间到到后自动切换状态机状态，否则直接切换状态机。
+验证状态机状态，状态机=0 A写入 B读取，反之 A读取、B写入，状态机切换时候验证A、B是否都为空进行休眠操作，否则则直接读取队列中数据" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/86c3765d1778401e93dc116d74a73089/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2018-10-12T13:52:58+08:00" />
+<meta property="article:modified_time" content="2018-10-12T13:52:58+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Redis 有序集合(sorted set)实现消息重试</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>先了解Redis 有序集合(sorted set)**<br> Redis 有序集合和集合一样也是string类型元素的集合,且不允许重复的成员。<br> 不同的是每个元素都会关联一个double类型的分数。redis正是通过分数来为集合中的成员进行从小到大的排序。<br> 有序集合的成员是唯一的,但分数(score)却可以重复。<br> 集合是通过哈希表实现的，所以添加，删除，查找的复杂度都是O(1)。 集合中最大的成员数为 232 - 1 (4294967295, 每个集合可存储40多亿个成员)。</p> 
+<p>常用Redis sorted_set 命令：<br> <a href="http://doc.redisfans.com/sorted_set/index.html" rel="nofollow">http://doc.redisfans.com/sorted_set/index.html</a></p> 
+<p><strong>实现简要消息重试</strong></p> 
+<p>实现思路：<br> 消息重试要考虑消息发送的优先级，高优先级的需要先进先出，但是实际情况发送消息消息发送时候优先级是不均匀的，有的时候会一大波峰消息过来，如果某一段时间高优先级消息一直在发送，那么早发送的低优先级的消息一直无法发送，导致实际情况是一直在发高优先级的，低优先级的一直在积压。</p> 
+<p>这里通过流程讲解一下通过Redis 有序集合(sorted set) 来解决这个问题,score存入消息优先级1-5，优先级为5的在指定区间范围内优先发送，具体解决思路如下：</p> 
+<p>1、对重试数据进行拆分 A sorted set和 B sorted set，按照优先级存入sorted set A或 B</p> 
+<p>2、设置状态机器来记录A sorted set和 B sorted set的读写状态，进而识别是写入A还是B</p> 
+<p>3、当读取A为空的时候 且 B 也为空的情况下，休眠指定时间（可配置，例如5分钟）,这个时候读队列进行休眠，写入数据通过状态机器识别写入B</p> 
+<p>4、5分钟休眠（可配置，例如5分钟）完成后状态机切换到A写，B读取，如果队列都为空则继续休眠5分钟（可配置，例如5分钟），则等待数据写入A</p> 
+<p>5、第4、5步 逻辑通过状态机器进行反复切换，可以达到在指定时间范围内数据高优先级读取 GetRangeFromSortedSetDesc</p> 
+<p>6、同时考虑到数据量太大情况，每天消息写入量设置最大限额2000万，超量不写入队列</p> 
+<p>7、考虑到sorted set读取并发问题，每个队列写入的时候进行sharding 拆分到较小的key中，例如WaitSend1-10个管道、<br> 每个管道都分A、B读写队列，例如：如WaitSend1A、如WaitSend1B 、如WaitSend2A、如WaitSend2B等，通过job对每个管道进行消费，逻辑实现中自动识别读取A、B队列</p> 
+<p><strong>实现流程</strong></p> 
+<p>状态机为0 的情况Sort Set A写入，B读取，B读取时候跟进条件设置状态机状态值，达到切换队列切换效果。如果写队列和读取队列同时为空的情况下休眠指定时间，<br> 到达指定休眠时间到到后自动切换状态机状态，否则直接切换状态机。</p> 
+<p><img src="https://images2.imgbox.com/09/b0/HfVh4ypg_o.jpg" alt="在这里插入图片描述"></p> 
+<p>状态机为1 的情况Sort Set B写入,A读取，A读取时候跟进条件设置状态机状态值，达到切换队列切换效果。如果写队列和读取队列同时为空的情况下休眠指定时间，<br> 到达指定休眠时间到到后自动切换状态机状态，否则直接切换状态机。</p> 
+<p><img src="https://images2.imgbox.com/19/3a/25ASW81d_o.jpg" alt="在这里插入图片描述"></p> 
+<p>验证状态机状态，状态机=0 A写入 B读取，反之 A读取、B写入，状态机切换时候验证A、B是否都为空进行休眠操作，否则则直接读取队列中数据</p> 
+<p><img src="https://images2.imgbox.com/cc/e3/9EGXngKT_o.jpg" alt="在这里插入图片描述"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/1f2d2ad66629066a80e5d4cf2dc18a10/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">spring在web.xml中的配置</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/bc40e55a0006755106c2202ee9a864e4/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Spring配置过程出现的错误</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

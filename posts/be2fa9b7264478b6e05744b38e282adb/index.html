@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>一篇文章带你弄懂Kafka基本原理 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="一篇文章带你弄懂Kafka基本原理" />
+<meta property="og:description" content="目录
+一、Kafka介绍
+1、Kafka的定义
+2、消息队列应用场景
+3、Kafka结构
+4、zk和Kafka
+二、Kafka生产者
+1、基本原理介绍
+2、Kafka的异步发送
+3、生产者分区原理
+4、提高生产者吞吐，发送能力
+5、生产者数据可靠性
+6、生产者数据去重
+7、消息有序
+8、数据乱序
+三、Kafka的broker
+1、kafka的borker和zk的关系
+2、broker总体流程
+3、Kafka的副本
+4、分区副本分配
+5、手动调整分区
+6、leader partition自动平衡
+7、kafka文件存储（重要）
+8、文件清除策略
+9、Kafka如何保证高效读写
+三、Kafka消费者
+1、Kafka的消费方式
+2、消费者组
+3、消费者组初始化流程
+4、消费者组消费流程
+5、消费者消费分区分配和再平衡
+6、offset维护位置
+7、自动提交offset
+8、制定offset来消费
+9、重复消费和漏消费
+10、数据积压
+10、Kafka的Kraft模式（需要补充）
+一、Kafka介绍 1、Kafka的定义 老定义：分布式的基于发布/订阅的消息队列，主要用于大数据实时处理，发布的消息分为不同的类别，订阅者只接收感兴趣的消息。
+新定义：Kafka是一个开源的分布式事件流平台，高性能数据管道、流分析、数据集成和关键任务应用。
+2、消息队列应用场景 缓冲消峰、解耦
+3、Kafka结构 Kafka是分主题topic的，一个topic又分为多个broker，broker中有多个partition
+一个partition的数据只能有一个消费者来消费，为了防止一个partition数据可能会丢失的风险，他也有partition副本的概念，每个partition分为leader和follower，生产和消费只会针对leader来进行0，follower只是负责数据同步的，只有leader挂掉之后，follower有机会变成leader。partition的leader和follower是不会存在同一个broker中的（为了防止一个borker宕机都丢失）
+broke中的partition是只能增加不能减少的，因为消费者消费进度可能是不同的。
+4、zk和Kafka 2.8以前必须要用zk搭配使用，zk负责记录整个集群中哪些broke运行的状态，上下线信息，也会记录leader相关信息，帮助选主。
+2.8之后还可以karaft模式，随着kafka的不断发展，zk已经成为他的性能瓶颈。
+二、Kafka生产者 1、基本原理介绍 首先producer调用send方法到Interceptors拦截器，然后到序列化器，partitioner分区器，然后分配到对应的队列里面，整个这些操作都是在内存里面完成的，每个分区在内存中都会对应一个队列方便管理，总内存的大小默认是32m，没一批次的大小是16k。
+然后有个专门的sender线程去读取缓冲队列中的消息然后发送到集群，每批次的数据满了16k之后才会开始拉取数据，或者达到了一定的毫秒数，也会拉取（批次大小达到16k或达到时间）默认是0毫秒，也就是缓冲大小没用了，来一条就发一条，没有延迟，也可以自己设置时间。
+拉取是以节点的方式来拉取的，每个内存队列都是一个节点，以这个为key，然后value是数据，发送到对应的broker，然后根据参数来看是直接返回ack还是leader收到返回还是全部接受才返回。
+拉取发送的时候是允许还没有应答继续发的，比如现场拉去队列1到broker1，他前面那个没ack还是可以发送后面的，但是最多只有5个，直到有应答了才能发，最多缓冲5个；应答级别0表示生产者发送数据，不需要数据落盘应答，1leader收到后应答，-1 all要leader和isr队列所有节点收集后才应答。
+2、Kafka的异步发送 只要把消息放到内存队列就代表有了，后期都是由sender线程异步去拉取不需要等kafka集群ack
+有带回调的异步发送，发送完成之后可以给我们返回：主题、分区等信息，发到缓存队列里面，缓存队列返回的。
+同步发送：需要发送到队列之后，等待sender发送到kafka集群，然后返回ack就清楚队列才能发送下一批，如果没有发送到kafka还需要重试，所以效率很低。在异步方法调用后加个get就是同步了。
+3、生产者分区原理 发送先走拦截器，序列化器，然后分区器，然后就会到队列了。分区器可以合理使用存储资源，把每个pratition在一个broker上存储，把海量数据切割成一块块存储到多个broker上，合理的分区可以实现负载均衡。可以提高并行度，以分区为单位发送数据，消费者可以以分区为单位进行消费数据。
+默认是defaultParttioner分区器，如果你指定了分区规则就用自己的，如果没有就会根据patition的数量根据key的hash去映射。如果没有partition也没有key值，那就粘性分区发往一个满了再建
+4、提高生产者吞吐，发送能力 批量发送：默认的应答级别为0表示来一个在队列就拉取一个，这样效率很低，我们可以设置批次大小，然后时间修改了，等批次大小满了再发也可以异步发送分区并行压缩消息 5、生产者数据可靠性 应答模式acks是0，这种就是不需要等数据落盘，应答直接继续发，这种是最不可靠的，生产环境一般不用。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/be2fa9b7264478b6e05744b38e282adb/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-10-04T13:46:45+08:00" />
+<meta property="article:modified_time" content="2023-10-04T13:46:45+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">一篇文章带你弄懂Kafka基本原理</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p id="main-toc"><strong>目录</strong></p> 
+<p id="%E4%B8%80%E3%80%81Kafka%E4%BB%8B%E7%BB%8D-toc" style="margin-left:0px;"><a href="#%E4%B8%80%E3%80%81Kafka%E4%BB%8B%E7%BB%8D" rel="nofollow">一、Kafka介绍</a></p> 
+<p id="1%E3%80%81Kafka%E7%9A%84%E5%AE%9A%E4%B9%89-toc" style="margin-left:80px;"><a href="#1%E3%80%81Kafka%E7%9A%84%E5%AE%9A%E4%B9%89" rel="nofollow">1、Kafka的定义</a></p> 
+<p id="2%E3%80%81%E6%B6%88%E6%81%AF%E9%98%9F%E5%88%97%E5%BA%94%E7%94%A8%E5%9C%BA%E6%99%AF-toc" style="margin-left:80px;"><a href="#2%E3%80%81%E6%B6%88%E6%81%AF%E9%98%9F%E5%88%97%E5%BA%94%E7%94%A8%E5%9C%BA%E6%99%AF" rel="nofollow">2、消息队列应用场景</a></p> 
+<p id="3%E3%80%81Kafka%E7%BB%93%E6%9E%84-toc" style="margin-left:80px;"><a href="#3%E3%80%81Kafka%E7%BB%93%E6%9E%84" rel="nofollow">3、Kafka结构</a></p> 
+<p id="4%E3%80%81zk%E5%92%8CKafka-toc" style="margin-left:80px;"><a href="#4%E3%80%81zk%E5%92%8CKafka" rel="nofollow">4、zk和Kafka</a></p> 
+<p id="%E4%BA%8C%E3%80%81Kafka%E7%94%9F%E4%BA%A7%E8%80%85-toc" style="margin-left:0px;"><a href="#%E4%BA%8C%E3%80%81Kafka%E7%94%9F%E4%BA%A7%E8%80%85" rel="nofollow">二、Kafka生产者</a></p> 
+<p id="1%E3%80%81%E5%9F%BA%E6%9C%AC%E5%8E%9F%E7%90%86%E4%BB%8B%E7%BB%8D-toc" style="margin-left:80px;"><a href="#1%E3%80%81%E5%9F%BA%E6%9C%AC%E5%8E%9F%E7%90%86%E4%BB%8B%E7%BB%8D" rel="nofollow">1、基本原理介绍</a></p> 
+<p id="2%E3%80%81Kafka%E7%9A%84%E5%BC%82%E6%AD%A5%E5%8F%91%E9%80%81-toc" style="margin-left:80px;"><a href="#2%E3%80%81Kafka%E7%9A%84%E5%BC%82%E6%AD%A5%E5%8F%91%E9%80%81" rel="nofollow">2、Kafka的异步发送</a></p> 
+<p id="3%E3%80%81%E7%94%9F%E4%BA%A7%E8%80%85%E5%88%86%E5%8C%BA%E5%8E%9F%E7%90%86-toc" style="margin-left:80px;"><a href="#3%E3%80%81%E7%94%9F%E4%BA%A7%E8%80%85%E5%88%86%E5%8C%BA%E5%8E%9F%E7%90%86" rel="nofollow">3、生产者分区原理</a></p> 
+<p id="4%E3%80%81%E6%8F%90%E9%AB%98%E7%94%9F%E4%BA%A7%E8%80%85%E5%90%9E%E5%90%90%EF%BC%8C%E5%8F%91%E9%80%81%E8%83%BD%E5%8A%9B-toc" style="margin-left:80px;"><a href="#4%E3%80%81%E6%8F%90%E9%AB%98%E7%94%9F%E4%BA%A7%E8%80%85%E5%90%9E%E5%90%90%EF%BC%8C%E5%8F%91%E9%80%81%E8%83%BD%E5%8A%9B" rel="nofollow">4、提高生产者吞吐，发送能力</a></p> 
+<p id="5%E3%80%81%E7%94%9F%E4%BA%A7%E8%80%85%E6%95%B0%E6%8D%AE%E5%8F%AF%E9%9D%A0%E6%80%A7-toc" style="margin-left:80px;"><a href="#5%E3%80%81%E7%94%9F%E4%BA%A7%E8%80%85%E6%95%B0%E6%8D%AE%E5%8F%AF%E9%9D%A0%E6%80%A7" rel="nofollow">5、生产者数据可靠性</a></p> 
+<p id="6%E3%80%81%E7%94%9F%E4%BA%A7%E8%80%85%E6%95%B0%E6%8D%AE%E5%8E%BB%E9%87%8D-toc" style="margin-left:80px;"><a href="#6%E3%80%81%E7%94%9F%E4%BA%A7%E8%80%85%E6%95%B0%E6%8D%AE%E5%8E%BB%E9%87%8D" rel="nofollow">6、生产者数据去重</a></p> 
+<p id="7%E3%80%81%E6%B6%88%E6%81%AF%E6%9C%89%E5%BA%8F-toc" style="margin-left:80px;"><a href="#7%E3%80%81%E6%B6%88%E6%81%AF%E6%9C%89%E5%BA%8F" rel="nofollow">7、消息有序</a></p> 
+<p id="8%E3%80%81%E6%95%B0%E6%8D%AE%E4%B9%B1%E5%BA%8F-toc" style="margin-left:80px;"><a href="#8%E3%80%81%E6%95%B0%E6%8D%AE%E4%B9%B1%E5%BA%8F" rel="nofollow">8、数据乱序</a></p> 
+<p id="%E4%B8%89%E3%80%81Kafka%E7%9A%84broker-toc" style="margin-left:0px;"><a href="#%E4%B8%89%E3%80%81Kafka%E7%9A%84broker" rel="nofollow">三、Kafka的broker</a></p> 
+<p id="1%E3%80%81kafka%E7%9A%84borker%E5%92%8Czk%E7%9A%84%E5%85%B3%E7%B3%BB-toc" style="margin-left:80px;"><a href="#1%E3%80%81kafka%E7%9A%84borker%E5%92%8Czk%E7%9A%84%E5%85%B3%E7%B3%BB" rel="nofollow">1、kafka的borker和zk的关系</a></p> 
+<p id="2%E3%80%81broker%E6%80%BB%E4%BD%93%E6%B5%81%E7%A8%8B-toc" style="margin-left:80px;"><a href="#2%E3%80%81broker%E6%80%BB%E4%BD%93%E6%B5%81%E7%A8%8B" rel="nofollow">2、broker总体流程</a></p> 
+<p id="3%E3%80%81Kafka%E7%9A%84%E5%89%AF%E6%9C%AC-toc" style="margin-left:80px;"><a href="#3%E3%80%81Kafka%E7%9A%84%E5%89%AF%E6%9C%AC" rel="nofollow">3、Kafka的副本</a></p> 
+<p id="4%E3%80%81%E5%88%86%E5%8C%BA%E5%89%AF%E6%9C%AC%E5%88%86%E9%85%8D-toc" style="margin-left:80px;"><a href="#4%E3%80%81%E5%88%86%E5%8C%BA%E5%89%AF%E6%9C%AC%E5%88%86%E9%85%8D" rel="nofollow">4、分区副本分配</a></p> 
+<p id="5%E3%80%81%E6%89%8B%E5%8A%A8%E8%B0%83%E6%95%B4%E5%88%86%E5%8C%BA-toc" style="margin-left:80px;"><a href="#5%E3%80%81%E6%89%8B%E5%8A%A8%E8%B0%83%E6%95%B4%E5%88%86%E5%8C%BA" rel="nofollow">5、手动调整分区</a></p> 
+<p id="6%E3%80%81leader%20partition%E8%87%AA%E5%8A%A8%E5%B9%B3%E8%A1%A1-toc" style="margin-left:80px;"><a href="#6%E3%80%81leader%20partition%E8%87%AA%E5%8A%A8%E5%B9%B3%E8%A1%A1" rel="nofollow">6、leader partition自动平衡</a></p> 
+<p id="7%E3%80%81kafka%E6%96%87%E4%BB%B6%E5%AD%98%E5%82%A8%EF%BC%88%E9%87%8D%E8%A6%81%EF%BC%89-toc" style="margin-left:80px;"><a href="#7%E3%80%81kafka%E6%96%87%E4%BB%B6%E5%AD%98%E5%82%A8%EF%BC%88%E9%87%8D%E8%A6%81%EF%BC%89" rel="nofollow">7、kafka文件存储（重要）</a></p> 
+<p id="8%E3%80%81%E6%96%87%E4%BB%B6%E6%B8%85%E9%99%A4%E7%AD%96%E7%95%A5-toc" style="margin-left:80px;"><a href="#8%E3%80%81%E6%96%87%E4%BB%B6%E6%B8%85%E9%99%A4%E7%AD%96%E7%95%A5" rel="nofollow">8、文件清除策略</a></p> 
+<p id="9%E3%80%81Kafka%E5%A6%82%E4%BD%95%E4%BF%9D%E8%AF%81%E9%AB%98%E6%95%88%E8%AF%BB%E5%86%99-toc" style="margin-left:80px;"><a href="#9%E3%80%81Kafka%E5%A6%82%E4%BD%95%E4%BF%9D%E8%AF%81%E9%AB%98%E6%95%88%E8%AF%BB%E5%86%99" rel="nofollow">9、Kafka如何保证高效读写</a></p> 
+<p id="%E4%B8%89%E3%80%81Kafka%E6%B6%88%E8%B4%B9%E8%80%85-toc" style="margin-left:0px;"><a href="#%E4%B8%89%E3%80%81Kafka%E6%B6%88%E8%B4%B9%E8%80%85" rel="nofollow">三、Kafka消费者</a></p> 
+<p id="1%E3%80%81Kafka%E7%9A%84%E6%B6%88%E8%B4%B9%E6%96%B9%E5%BC%8F-toc" style="margin-left:80px;"><a href="#1%E3%80%81Kafka%E7%9A%84%E6%B6%88%E8%B4%B9%E6%96%B9%E5%BC%8F" rel="nofollow">1、Kafka的消费方式</a></p> 
+<p id="2%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E7%BB%84-toc" style="margin-left:80px;"><a href="#2%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E7%BB%84" rel="nofollow">2、消费者组</a></p> 
+<p id="3%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E7%BB%84%E5%88%9D%E5%A7%8B%E5%8C%96%E6%B5%81%E7%A8%8B-toc" style="margin-left:80px;"><a href="#3%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E7%BB%84%E5%88%9D%E5%A7%8B%E5%8C%96%E6%B5%81%E7%A8%8B" rel="nofollow">3、消费者组初始化流程</a></p> 
+<p id="4%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E7%BB%84%E6%B6%88%E8%B4%B9%E6%B5%81%E7%A8%8B-toc" style="margin-left:80px;"><a href="#4%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E7%BB%84%E6%B6%88%E8%B4%B9%E6%B5%81%E7%A8%8B" rel="nofollow">4、消费者组消费流程</a></p> 
+<p id="5%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E6%B6%88%E8%B4%B9%E5%88%86%E5%8C%BA%E5%88%86%E9%85%8D%E5%92%8C%E5%86%8D%E5%B9%B3%E8%A1%A1-toc" style="margin-left:80px;"><a href="#5%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E6%B6%88%E8%B4%B9%E5%88%86%E5%8C%BA%E5%88%86%E9%85%8D%E5%92%8C%E5%86%8D%E5%B9%B3%E8%A1%A1" rel="nofollow">5、消费者消费分区分配和再平衡</a></p> 
+<p id="6%E3%80%81offset%E7%BB%B4%E6%8A%A4%E4%BD%8D%E7%BD%AE-toc" style="margin-left:80px;"><a href="#6%E3%80%81offset%E7%BB%B4%E6%8A%A4%E4%BD%8D%E7%BD%AE" rel="nofollow">6、offset维护位置</a></p> 
+<p id="7%E3%80%81%E8%87%AA%E5%8A%A8%E6%8F%90%E4%BA%A4offset-toc" style="margin-left:80px;"><a href="#7%E3%80%81%E8%87%AA%E5%8A%A8%E6%8F%90%E4%BA%A4offset" rel="nofollow">7、自动提交offset</a></p> 
+<p id="8%E3%80%81%E5%88%B6%E5%AE%9Aoffset%E6%9D%A5%E6%B6%88%E8%B4%B9-toc" style="margin-left:80px;"><a href="#8%E3%80%81%E5%88%B6%E5%AE%9Aoffset%E6%9D%A5%E6%B6%88%E8%B4%B9" rel="nofollow">8、制定offset来消费</a></p> 
+<p id="9%E3%80%81%E9%87%8D%E5%A4%8D%E6%B6%88%E8%B4%B9%E5%92%8C%E6%BC%8F%E6%B6%88%E8%B4%B9-toc" style="margin-left:80px;"><a href="#9%E3%80%81%E9%87%8D%E5%A4%8D%E6%B6%88%E8%B4%B9%E5%92%8C%E6%BC%8F%E6%B6%88%E8%B4%B9" rel="nofollow">9、重复消费和漏消费</a></p> 
+<p id="10%E3%80%81%E6%95%B0%E6%8D%AE%E7%A7%AF%E5%8E%8B-toc" style="margin-left:80px;"><a href="#10%E3%80%81%E6%95%B0%E6%8D%AE%E7%A7%AF%E5%8E%8B" rel="nofollow">10、数据积压</a></p> 
+<p id="10%E3%80%81Kafka%E7%9A%84Kraft%E6%A8%A1%E5%BC%8F%EF%BC%88%E9%9C%80%E8%A6%81%E8%A1%A5%E5%85%85%EF%BC%89-toc" style="margin-left:80px;"><a href="#10%E3%80%81Kafka%E7%9A%84Kraft%E6%A8%A1%E5%BC%8F%EF%BC%88%E9%9C%80%E8%A6%81%E8%A1%A5%E5%85%85%EF%BC%89" rel="nofollow">10、Kafka的Kraft模式（需要补充）</a></p> 
+<hr id="hr-toc"> 
+<h2>一、Kafka介绍</h2> 
+<h4 id="1%E3%80%81Kafka%E7%9A%84%E5%AE%9A%E4%B9%89">1、Kafka的定义</h4> 
+<p>老定义：分布式的基于发布/订阅的消息队列，主要用于大数据实时处理，发布的消息分为不同的类别，订阅者只接收感兴趣的消息。</p> 
+<p>新定义：Kafka是一个开源的分布式事件流平台，高性能数据管道、流分析、数据集成和关键任务应用。</p> 
+<h4 id="2%E3%80%81%E6%B6%88%E6%81%AF%E9%98%9F%E5%88%97%E5%BA%94%E7%94%A8%E5%9C%BA%E6%99%AF">2、消息队列应用场景</h4> 
+<p>缓冲消峰、解耦</p> 
+<h4 id="3%E3%80%81Kafka%E7%BB%93%E6%9E%84">3、Kafka结构</h4> 
+<p>Kafka是分主题topic的，一个topic又分为多个broker，broker中有多个partition</p> 
+<p>一个partition的数据只能有一个消费者来消费，为了防止一个partition数据可能会丢失的风险，他也有partition副本的概念，每个partition分为leader和follower，生产和消费只会针对leader来进行0，follower只是负责数据同步的，只有leader挂掉之后，follower有机会变成leader。partition的leader和follower是不会存在同一个broker中的（为了防止一个borker宕机都丢失）</p> 
+<p>broke中的partition是只能增加不能减少的，因为消费者消费进度可能是不同的。</p> 
+<h4 id="4%E3%80%81zk%E5%92%8CKafka">4、zk和Kafka</h4> 
+<p>2.8以前必须要用zk搭配使用，zk负责记录整个集群中哪些broke运行的状态，上下线信息，也会记录leader相关信息，帮助选主。</p> 
+<p>2.8之后还可以karaft模式，随着kafka的不断发展，zk已经成为他的性能瓶颈。</p> 
+<h2 id="%E4%BA%8C%E3%80%81Kafka%E7%94%9F%E4%BA%A7%E8%80%85">二、Kafka生产者</h2> 
+<h4 id="1%E3%80%81%E5%9F%BA%E6%9C%AC%E5%8E%9F%E7%90%86%E4%BB%8B%E7%BB%8D">1、基本原理介绍</h4> 
+<p>首先producer调用send方法到Interceptors拦截器，然后到序列化器，partitioner分区器，然后分配到对应的队列里面，整个这些操作都是在内存里面完成的，每个分区在内存中都会对应一个队列方便管理，总内存的大小默认是32m，没一批次的大小是16k。</p> 
+<p>然后有个专门的sender线程去读取缓冲队列中的消息然后发送到集群，每批次的数据满了16k之后才会开始拉取数据，或者达到了一定的毫秒数，也会拉取（批次大小达到16k或达到时间）默认是0毫秒，也就是缓冲大小没用了，来一条就发一条，没有延迟，也可以自己设置时间。</p> 
+<p>拉取是以节点的方式来拉取的，每个内存队列都是一个节点，以这个为key，然后value是数据，发送到对应的broker，然后根据参数来看是直接返回ack还是leader收到返回还是全部接受才返回。</p> 
+<p>拉取发送的时候是允许还没有应答继续发的，比如现场拉去队列1到broker1，他前面那个没ack还是可以发送后面的，但是最多只有5个，直到有应答了才能发，最多缓冲5个；应答级别0表示生产者发送数据，不需要数据落盘应答，1leader收到后应答，-1 all要leader和isr队列所有节点收集后才应答。</p> 
+<h4 id="2%E3%80%81Kafka%E7%9A%84%E5%BC%82%E6%AD%A5%E5%8F%91%E9%80%81">2、Kafka的异步发送</h4> 
+<p>只要把消息放到内存队列就代表有了，后期都是由sender线程异步去拉取不需要等kafka集群ack</p> 
+<p>有带回调的异步发送，发送完成之后可以给我们返回：主题、分区等信息，发到缓存队列里面，缓存队列返回的。</p> 
+<p>同步发送：需要发送到队列之后，等待sender发送到kafka集群，然后返回ack就清楚队列才能发送下一批，如果没有发送到kafka还需要重试，所以效率很低。在异步方法调用后加个get就是同步了。</p> 
+<h4 id="3%E3%80%81%E7%94%9F%E4%BA%A7%E8%80%85%E5%88%86%E5%8C%BA%E5%8E%9F%E7%90%86">3、生产者分区原理</h4> 
+<p>发送先走拦截器，序列化器，然后分区器，然后就会到队列了。分区器可以合理使用存储资源，把每个pratition在一个broker上存储，把海量数据切割成一块块存储到多个broker上，合理的分区可以实现负载均衡。可以提高并行度，以分区为单位发送数据，消费者可以以分区为单位进行消费数据。</p> 
+<p>默认是defaultParttioner分区器，如果你指定了分区规则就用自己的，如果没有就会根据patition的数量根据key的hash去映射。如果没有partition也没有key值，那就粘性分区发往一个满了再建</p> 
+<h4 id="4%E3%80%81%E6%8F%90%E9%AB%98%E7%94%9F%E4%BA%A7%E8%80%85%E5%90%9E%E5%90%90%EF%BC%8C%E5%8F%91%E9%80%81%E8%83%BD%E5%8A%9B">4、提高生产者吞吐，发送能力</h4> 
+<ol><li>批量发送：默认的应答级别为0表示来一个在队列就拉取一个，这样效率很低，我们可以设置批次大小，然后时间修改了，等批次大小满了再发也可以</li><li>异步发送</li><li>分区并行</li><li>压缩消息</li></ol> 
+<h4 id="5%E3%80%81%E7%94%9F%E4%BA%A7%E8%80%85%E6%95%B0%E6%8D%AE%E5%8F%AF%E9%9D%A0%E6%80%A7">5、生产者数据可靠性</h4> 
+<p>应答模式acks是0，这种就是不需要等数据落盘，应答直接继续发，这种是最不可靠的，生产环境一般不用。</p> 
+<p>1为leader落盘后就可以ack，这种是比较推荐的可靠性还可以，用于传输普通日志，允许丢失个别数据。</p> 
+<p>-1就是全部都要收到才行，主从都要同步完成才可以ack，但是效率低，一般只用于传输重要钱相关数据</p> 
+<p>但是-1也可能有数据重复问题，比如leader收到同步完给follower了，这个时候准备返回ack挂了，因为没收到ack新主又会收到消息。</p> 
+<h4 id="6%E3%80%81%E7%94%9F%E4%BA%A7%E8%80%85%E6%95%B0%E6%8D%AE%E5%8E%BB%E9%87%8D">6、生产者数据去重</h4> 
+<p>至少一次：ack等于-1，保证数据不丢失</p> 
+<p>最多一次：ack等于0，不需要ack应答有点像udp了</p> 
+<p>精确一次：幂等性事务，不管发送到broker多少个一样的数据，broker只会持久化一条，只要pid、parttion、seqNumber相等就认为是一条消息，只会持久化一次，pid是kafka每次重启一次就会生成新id，一旦挂掉就不能通过这个判断，所以他只能保证单次会话幂等，seq是单调递增的。所以他这个幂等只能保证单分区单会话内不重复。</p> 
+<p>开启事务，必须得开启幂等性，事务协调器来处理，每个borker都会有专门的事务协调器，事务的划分是根据事务id的，然后通过事务id进行hash来知道是哪个分区，该分区leader所在的broker的那个事务协调器就是用的协调器。生产者在使用事务钱必须指定事务id先，客户端挂了也能继续处理未完成的事务。</p> 
+<h4 id="7%E3%80%81%E6%B6%88%E6%81%AF%E6%9C%89%E5%BA%8F">7、消<strong>息</strong>有序</h4> 
+<p>生产者是发送到多个分区的，消息只能是单分区内有序，如果消费者同时消费多个分区，是不能保证有序的，但是可以通过全部拉取过来再排序，但是这样需要等数据都到齐后再消费，效率可能还不如消费单分区。</p> 
+<h4 id="8%E3%80%81%E6%95%B0%E6%8D%AE%E4%B9%B1%E5%BA%8F">8、数据乱序</h4> 
+<p>生产者在发送的时候是有5个ack缓存的，就是12345全部成功才可以6，但是12没成功可以34，所以可能34先到12才到，就是乱序的了，这种怎么办呢，可以让缓存队列的缓存设置为1，这样就保证一定是有序的，每次ack才能发下一个</p> 
+<p>但是在kafka1.x启用幂等性后，kafka服务端会缓存producer发来的最近5个元数据，无论如何都能保证最近5个有序，因为他幂等也是要看是否和之前一样所以会缓存一些。</p> 
+<h2 id="%E4%B8%89%E3%80%81Kafka%E7%9A%84broker">三、Kafka的broker</h2> 
+<h4 id="1%E3%80%81kafka%E7%9A%84borker%E5%92%8Czk%E7%9A%84%E5%85%B3%E7%B3%BB">1、kafka的borker和zk的关系</h4> 
+<p>Zk存了kafka哪些信息：有哪些服务器，记录每个分区谁是leader，有哪些服务器可用</p> 
+<p>还会存放消费者信息，保存消费者消费到哪里了，但是要频繁更新比较慢，0.9版本后就放到kafka自己存了。还会存放辅助选举注册权，谁先抢到这个注册权，谁就当新主。</p> 
+<h4 id="2%E3%80%81broker%E6%80%BB%E4%BD%93%E6%B5%81%E7%A8%8B">2、broker总体流程</h4> 
+<p>每个borker启动都会像zk注册，启动3台，zk就会有3个节点，然后谁先把自己controller写到zk谁就是主节点，其他从节点的controller会主动跟zk拉取信息，如果主挂了他们可以随时上位。选leader的时候是在存活的里面按照启动的时候固定顺序排在前面的优先。然后生产者会往leader发送信息，follower去同步，底层采用segment1个g一个g的存储，有index索引文件来加快查询，</p> 
+<h4 id="3%E3%80%81Kafka%E7%9A%84%E5%89%AF%E6%9C%AC">3、Kafka的副本</h4> 
+<p>分区副本提高可靠性，默认是1个副本，生产环境一般配置两个，太多副本会增加磁盘存储空间，增加网络上数据传输，降低效率</p> 
+<p>副本分为leader和follower，生产者只会发送leader，follower找leader同步</p> 
+<p>当有人先注册到Zk，那么那个分区就是leader，其余分区去zk拉取信息，当zk监控到leader挂了，就会根据按照启动的时候固定顺序排在前面的优先，由他成为新主。</p> 
+<p>如果从挂了，会先从isr队列里面踢除，然后其他的主从继续接受同步，当挂的从恢复了，会先同步之前共同的达到最低节点offer就可以重新加入队列</p> 
+<p>主挂了，从队列踢出，会有新的主，但是新主可能没有同步完全，可能会少数据，然后其他从跟他看齐，也就是可能存在数据丢失，只能保证数据一致，不能保证丢失</p> 
+<h4 id="4%E3%80%81%E5%88%86%E5%8C%BA%E5%89%AF%E6%9C%AC%E5%88%86%E9%85%8D">4、分区副本分配</h4> 
+<p>他会把不同partition的leader尽可能分开存到不同的broker，尽可能保证复杂均衡，比如有3台机器，9个leader那么就会3个3这样的</p> 
+<h4 id="5%E3%80%81%E6%89%8B%E5%8A%A8%E8%B0%83%E6%95%B4%E5%88%86%E5%8C%BA">5、手动调整分区</h4> 
+<p>Kafka自己是按照机器数量去分配的，但是实际上可能有些机器32t有些4t，所以有时候需要我们人为手动去进行分配。</p> 
+<h4 id="6%E3%80%81leader%20partition%E8%87%AA%E5%8A%A8%E5%B9%B3%E8%A1%A1">6、leader partition自动平衡</h4> 
+<p>正常情况下kafka会自动把leader partition均匀分散在各个机器上，保证读写吞吐均匀，但是如果某些broker故障，会导致leader partition过于集中在其他少部分几台broker上，这会导致少数几台broker读写请求压力过高，造成集群负载不均衡</p> 
+<p>Kafka提供了自动平衡，由参数配置默认true，有个参数可以调节超过不平衡比例就会出发broker平衡，默认10%，还有个参数配置检测不平衡率时间，默认300秒。</p> 
+<p>他是怎么算不平衡率呢？他会判断本来应该是哪个当主节点，发现broker中有的本来应该是当主但是不是，最后看多少个不满足/总的分区数就是不平衡率。</p> 
+<h4 id="7%E3%80%81kafka%E6%96%87%E4%BB%B6%E5%AD%98%E5%82%A8%EF%BC%88%E9%87%8D%E8%A6%81%EF%BC%89">7、kafka文件存储（重要）</h4> 
+<p>Topic是逻辑概念，分区是物理概念，每个partition都会对应一个log文件，log也是逻辑概念，在log里面具体数据是存在一个个segment里（1segment是1g，由log日志文件，index偏移量索引文件，timeindex时间戳索引文件（用来删除的）组成）partition生产的数据会不断追加到log文件末尾，这也算其中高效读写的原因之一。</p> 
+<p>Index为稀疏索引，每往log文件写入4kb数据，会忘index文件写入一条索引，有参数可以配置</p> 
+<h4 id="8%E3%80%81%E6%96%87%E4%BB%B6%E6%B8%85%E9%99%A4%E7%AD%96%E7%95%A5">8、文件清除策略</h4> 
+<p>Kafka默认日志保存7天，可以通过参数修改，默认是7天删除，检测周期5min，日志清楚策略有delete和compact两种</p> 
+<ol><li>delete日志删除：以segment所有记录的最大时间戳作文segment的时间戳来删除，比如一个segment有很多条日志，取他最新的如果超过7天，删除整个segment，没有就不删。还有个默认关闭的配置，就是超过总大小就淘汰最早的segment，生产环境一般不会打开</li><li>compact压缩策略：有点像aof按照，就是相同的key只留最新的那个，这样offer压缩后就可能是不连续的，中间可能少了，这种策略只适用特殊场景，比如消息key为用户id，value为他的资料，他更新了旧的就没用了。</li></ol> 
+<h4 id="9%E3%80%81Kafka%E5%A6%82%E4%BD%95%E4%BF%9D%E8%AF%81%E9%AB%98%E6%95%88%E8%AF%BB%E5%86%99">9、Kafka如何保证高效读写</h4> 
+<p>Kafka本身是分布式集群可以用分区技术提高并行，读数据采用稀疏索引可以快速定位要消费数据，写数据是采用顺序的追加的方式，这样说很快的</p> 
+<p>零缓存+零拷贝：Kafka的数据加工处理给kafka生产者和消费者处理，broker应用层不关心存储数据，索引不用走应用层，传输效率高。他要发给消费者得走网卡，通过网卡给消费者。pageCache页缓存：kafka重度依赖底层操作系统提供的pagecache，当上层有写数据时，操作系统只是将数据写入pagecache，当读操作时，先从pagecache查找，如果找不到再走磁盘。如果找到数据是直接给网卡的，不再经过应用层，这种就是零拷贝。他不关心数据，所有拦截器序列化什么都交给生产者和消费者了，kafka中间什么都不做。</p> 
+<h2 id="%E4%B8%89%E3%80%81Kafka%E6%B6%88%E8%B4%B9%E8%80%85">三、Kafka消费者</h2> 
+<h4 id="1%E3%80%81Kafka%E7%9A%84%E6%B6%88%E8%B4%B9%E6%96%B9%E5%BC%8F">1、Kafka的消费方式</h4> 
+<p>消息队列消费者有推送和拉取两种方式，Kafka采用主动拉取的方式，因为每个人的消费速度都不一样，主动拉取可以更好兼容不同消费速度都消费者，缺点是如果kafka没有数据，消费者会一直循环返回空。独立的消费者可以消费一个或者多个分区，但是每个分区只能由消费者组中一个消费者消费。offset来标识消费到哪里了，所有的offset都会存到对应的topic里，老版本放到zk的，但是消费者都要和zk通信获取offset这样交互太频繁了所以直接放到topic了。</p> 
+<h4 id="2%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E7%BB%84">2、消费者组</h4> 
+<p>组内每个消费者消费不同分区，一个分区只能有一个消费者消费，消费者组之间不影响。</p> 
+<h4 id="3%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E7%BB%84%E5%88%9D%E5%A7%8B%E5%8C%96%E6%B5%81%E7%A8%8B">3、消费者组初始化流程</h4> 
+<p>Coordinator辅助实现消费者组的初始化和分区分配，每个broker都有coordinator，Coordinator选择是按照hashcode对50取%拿到的，然后所有消费者都会去Coordinator注册，然后coordinate会随机选出一个消费者作为leader，会把信息都同步给他，让他制定消费计划发给coordinator，coordinator广播给组内所有消费者，后续都按照这个计划消费，然后有心跳机制去保活，默认3秒发送一次保活机制，一旦超过45秒没消费，就会被移除，并触发平衡，或者处理时间过长5分钟，也触发再平衡。</p> 
+<h4 id="4%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E7%BB%84%E6%B6%88%E8%B4%B9%E6%B5%81%E7%A8%8B">4、消费者组消费流程</h4> 
+<p>首先会初始化，消费者组向消费者网络客户端发送sendFetches，确定每次抓取大小，默认1字节，如果调大了没到并不会抓取，还有个条件是超时时间如果超过这个时间也会抓取，前面两个条件满足一个就可以拉取，还有个参数是每次最大抓取大小默认50m。接着就由消费者网络客户端向kafka集群发送send，主动拉取消息，集群会通过回调方法发消息发到消息队列里，消费者会取消息队列拉取，他拉取完会先过反序列化器，然后拦截器，再处理数据。</p> 
+<h4 id="5%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E6%B6%88%E8%B4%B9%E5%88%86%E5%8C%BA%E5%88%86%E9%85%8D%E5%92%8C%E5%86%8D%E5%B9%B3%E8%A1%A1">5、消费者消费分区分配和再平衡</h4> 
+<p>到底哪个消费者消费哪个分区，怎么分配？</p> 
+<p>kafka提供四种分配策略：range、roundRobin、sticky、cooperativeSticky</p> 
+<p>默认采用的是range+cooperativeSticky，可以同时使用多个叠加</p> 
+<ol><li>range：他首先会对topic的分区变化，然后对消费者组的消费者也编号，然后分区除消费者得到每个消费者消费多少个，多出来的都给第一个。这样有个缺点，当很多topic的时候，他们所有多出来的分区都会给第一个消费者，这样会造成数据倾斜。</li><li>roundRobin：针对所有的topic，他会把所有topic和分区还有消费者都放一起排好序，然后根据hashcode来进行分配</li><li>sticky粘性分区：首先会尽量均匀放置分区到消费者上，在原本消费者出现问题，尽量保持原有分配到分区不变化</li></ol> 
+<h4 id="6%E3%80%81offset%E7%BB%B4%E6%8A%A4%E4%BD%8D%E7%BD%AE">6、offset维护位置</h4> 
+<p>生产者发送消息到leader分区，然后消费者会消费，消费了多少有个offset来标识，offset0.9后存在kafka的topic上的，0.9之前存在zk，他存储是根据key value存储的，key为groupid+topic+分区号，value为offset，每一段时间会compact，只保留最新的key</p> 
+<h4 id="7%E3%80%81%E8%87%AA%E5%8A%A8%E6%8F%90%E4%BA%A4offset">7、自动提交offset</h4> 
+<p>默认自动提交，自动提交间隔默认5s，这些都可以配置，生产者和消费者就是发和拉，然后每隔5s消费者还会去kafak提交一下offset消费到哪里，分同步提交和异步提交，同步提交必须等待offset提交完毕再去消费下一批数据，异步提交offset请求后就可以消费下一批，同步会阻塞当前线程，异步没有失败重试机制，默认的自动提交是异步的。</p> 
+<h4 id="8%E3%80%81%E5%88%B6%E5%AE%9Aoffset%E6%9D%A5%E6%B6%88%E8%B4%B9">8、制定offset来消费</h4> 
+<p>消费方式有3种，earliest、latest、none。默认是latest。earliest自动将偏移量重置为最早的偏移量from beginning，latest默认的是自动重置到最新偏移量，none如果未找到消费者组的先前偏移量，则抛出异常。</p> 
+<h4 id="9%E3%80%81%E9%87%8D%E5%A4%8D%E6%B6%88%E8%B4%B9%E5%92%8C%E6%BC%8F%E6%B6%88%E8%B4%B9">9、重复消费和漏消费</h4> 
+<p>重复消费：自动提交offset，每5s提交了一下，现在提交到3，消费者会继续消费消费到45然后挂了，但没有自动提交，就会出现重启重新从4开始消费，45就重新消费了。</p> 
+<p>漏消费：设置手动提交，当offset提交还没落盘，此时消费者刚好挂，那么offset已经提交，但数据未落盘，导致这部分数据内存中丢失，下次启动会以为已经消费了。</p> 
+<p>采用事务的方式才能精确消费，消费者采用事务，而且下游的必须是mysql和kafka这种也支持事务的才可以，前面的生产者和kafka也要用幂等和事务才行。</p> 
+<h4 id="10%E3%80%81%E6%95%B0%E6%8D%AE%E7%A7%AF%E5%8E%8B">10、数据积压</h4> 
+<p>消费太慢了，但是kafka的数据7天就会消失，超过7天未消费就被删除了</p> 
+<p>可以增加分区和消费者个数，还可以提高每批次拉取的数量</p> 
+<h4 id="10%E3%80%81Kafka%E7%9A%84Kraft%E6%A8%A1%E5%BC%8F%EF%BC%88%E9%9C%80%E8%A6%81%E8%A1%A5%E5%85%85%EF%BC%89">10、Kafka的Kraft模式（需要补充）</h4> 
+<p>2.8后才有的，终于不需要zk来配合了，之前需要zk来配合做很多事情通信，网络开销非常厉害，那么现在就不需要了，这个模式应该是未来的趋势。</p> 
+<p>他把集群分为了broker节点用来存数据，controller节点用来选举等，机器可以又是broker又是controller，controller3个以上就行，然后也会有leader controller的概念。</p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/27ee7d35c77f0cb7e09298a6830d6b88/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">STM32物联网项目——TM1620驱动数码管显示</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/fb2cd4e3f3c6bf9d593f2dac584de14e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">二进制ply点云文件转ascii格式</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>MySQL 主从复制与读写分离 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="MySQL 主从复制与读写分离" />
+<meta property="og:description" content="一、概念 1.1 什么是读写分离? 读写分离，基本的原理是让主数据库处理事务性增、改、删操作( INSERT、UPDATE、DELETE) ，而从数据库处理SELECT查询操作。数据库复制被用来把事务性操作导致的变更同步到集群中的从数据库。
+1.2 为什么要读写分离呢? 因为数据库的“写”（写10000条数据可能要3分钟）操作是比较耗时的。
+但是数据库的“读”（读10000条数据可能只要5秒钟）；
+所以读写分离，解决的是，数据库的写入，影响了查询的效率。
+1.3 什么时候要读写分离? 数据库不一定要读写分离，如果程序使用数据库较多时，而更新少，查询多的情况下会考虑使用。利用数据库主从同步，再通过读写分离可以分担数据库压力，提高性能。
+1.4 主从复制与读写分离 在实际的生产环境中，对数据库的读和写都在同一个数据库服务器中，是不能满足实际需求的。无论是在安全性、高可用性还是高并发等各个方面都是完全不能满足实际需求的。
+因此，通过主从复制的方式来同步数据，再通过读写分离来提升数据库的并发负载能力。有点类似于rsync（文件同步工具），但是不同的是rsync是对磁盘文件做备份，而mysql主从复制是对数据库中的数据、语句做备份。
+1.5 mysql支持的复制类型 （1） STATEMENT：基于语句的复制。在服务器上执行sql语句，在从服务器上执行同样的语句，mysql默认采用基于语句的复制（5.7版本之前），执行效率高。高并发的情况可能会出现执行顺序的误差，事务的死锁。
+（2）ROW：基于行的复制。把改变的内容复制过去，而不是把命令在从服务器上执行一 遍。精确，但效率低，保存的文件会更大。（5.7版本之后默认采用ROW模式）
+（3）MIXED：混合类型的复制。默认采用基于语句的复制，一旦发现基于语句无法精确复制时，就会采用基于行的复制。更智能，所以大部分情况下使用MIXED。
+1.6 主从复制的工作过程 Master节点需要开启二进制日志，Slave节点需要开启中继日志。
+（1）Master 节点将数据的改变记录成二进制日志（bin log） ，当Master上的数据发生改变时（增删改），则将其改变写入二进制日志中。
+（2）Slave节点会在一定时间间隔内对Master的二进制日志进行探测其是否发生改变，如果发生改变，则开始一个I/O线程请求Master的二进制事件。（请求二进制数据）
+（3）同时Master 节点为每个I/O线程启动一个dump线程，用于通知和向其发送二进制事件，I/O线程接收到bin-log内容后，将内容保存至slave节点本地的中继日志（Relay log）中，Slave节点将启动SQL线程从中继日志中读取二进制事件，在本地重放，即解析成sql 语句逐一执行，使得其数据和Master节点的保持一致。最后I/O线程和SQL线程将进入睡眠状态，等待下一次被唤醒。
+记住两个日志和三个线程：
+两个日志：二进制日志（bin log） 、中继日志（Relay log）
+三个线程：I/O线程、dump线程、SQL线程
+注意：
+中继日志通常会位于 OS 缓存中，所以中继日志的开销很小。复制过程有一个很重要的限制，即复制在 Slave上是串行化的，也就是说 Master上的并行更新操作不能在 Slave上并行操作。半同步复制，会多一个ack确认线程（ack collector thread），专门用于接收slave 的反馈信息（收集slave节点返回的ack信息） 1.7 数据库主从数据不一致解决方案 方法一：忽略错误后，继续同步
+该方法适用于主从库数据相差不大，或者要求数据可以不完全统一的情况，数据要求不严格的情况。
+方式二：重新做主从，完全同步
+该方法适用于主从库数据相差较大，或者要求数据完全统一的情况。
+1.8 mysql从服务器挂了 恢复后怎么保证数据同步？ 物理方法： rsync 磁盘文件同步。 使用文件恢复，主节点需要停服务。主从复制： 将从节点原有库删除，通过偏移量，重新做一次主从复制。 1.9 半同步复制什么情况下会降为异步复制？什么时候又会恢复同步复制？ 当半同步复制发生超时（由rpl_semi_sync_master_timeout 参数控制，默认为10000ms， 即10s），会暂时关闭半同步复制，转而使用异步复制，也就是会自动降为异步工作。当master dump 线程发送完一个事务的所有事件之后，如果在rpl_ semi_sync_master_ timeout 内，收到了从库的响应，则主从又重新恢复为半同步复制。 二、MySQL主从复制延迟原因和优化方法 主从复制延迟原因：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/355421b04263345d5993e551eebc5335/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-05-14T23:12:23+08:00" />
+<meta property="article:modified_time" content="2023-05-14T23:12:23+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">MySQL 主从复制与读写分离</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h2>一、概念</h2> 
+<h4>1.1 什么是读写分离?</h4> 
+<p>读写分离，基本的原理是让主数据库处理事务性增、改、删操作( INSERT、UPDATE、DELETE) ，而从数据库处理SELECT查询操作。数据库复制被用来把事务性操作导致的变更同步到集群中的从数据库。</p> 
+<h4>1.2 为什么要读写分离呢?</h4> 
+<p>因为数据库的“写”（写10000条数据可能要3分钟）操作是比较耗时的。</p> 
+<p>但是数据库的“读”（读10000条数据可能只要5秒钟）；</p> 
+<p>所以读写分离，解决的是，数据库的写入，影响了查询的效率。</p> 
+<h4>1.3 什么时候要读写分离?</h4> 
+<p>数据库不一定要读写分离，如果程序使用数据库较多时，而更新少，查询多的情况下会考虑使用。利用数据库主从同步，再通过读写分离可以分担数据库压力，提高性能。</p> 
+<h4>1.4 主从复制与读写分离</h4> 
+<p>在实际的生产环境中，对数据库的读和写都在同一个数据库服务器中，是不能满足实际需求的。无论是在安全性、高可用性还是高并发等各个方面都是完全不能满足实际需求的。</p> 
+<p>因此，通过主从复制的方式来同步数据，再通过读写分离来提升数据库的并发负载能力。有点类似于rsync（文件同步工具），但是不同的是rsync是对磁盘文件做备份，而mysql主从复制是对数据库中的数据、语句做备份。</p> 
+<h4>1.5 mysql支持的复制类型</h4> 
+<p>（1） <strong>STATEMENT</strong>：基于语句的复制。在服务器上执行sql语句，在从服务器上执行同样的语句，mysql默认采用基于语句的复制（5.7版本之前），执行效率高。高并发的情况可能会出现执行顺序的误差，事务的死锁。</p> 
+<p>（2）<strong>ROW</strong>：基于行的复制。把改变的内容复制过去，而不是把命令在从服务器上执行一 遍。精确，但效率低，保存的文件会更大。（5.7版本之后默认采用ROW模式）</p> 
+<p>（3）<strong>MIXED</strong>：混合类型的复制。默认采用基于语句的复制，一旦发现基于语句无法精确复制时，就会采用基于行的复制。更智能，所以大部分情况下使用MIXED。</p> 
+<h4>1.6 主从复制的工作过程</h4> 
+<p>Master节点需要开启二进制日志，Slave节点需要开启中继日志。</p> 
+<p>（1）Master 节点将数据的改变记录成<strong>二进制日志（bin log）</strong> ，当Master上的数据发生改变时（增删改），则将其改变写入二进制日志中。</p> 
+<p>（2）Slave节点会在一定时间间隔内对Master的二进制日志进行探测其是否发生改变，如果发生改变，则开始一个<strong>I/O线程</strong>请求Master的二进制事件。（请求二进制数据）</p> 
+<p>（3）同时Master 节点为每个I/O线程启动一个<strong>dump线程</strong>，用于通知和向其发送二进制事件，I/O线程接收到bin-log内容后，将内容保存至slave节点本地的<strong>中继日志（Relay log</strong>）中，Slave节点将启动<strong>SQL线程</strong>从中继日志中读取二进制事件，在本地重放，即解析成sql 语句逐一执行，使得其数据和Master节点的保持一致。最后I/O线程和SQL线程将进入睡眠状态，等待下一次被唤醒。</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/0d/81/30RxRKYF_o.png"></p> 
+<p><strong>记住两个日志和三个线程：</strong></p> 
+<p>两个日志：<strong>二进制日志（bin log）</strong> 、<strong>中继日志（Relay log）</strong></p> 
+<p>三个线程：<strong>I/O线程</strong>、<strong>dump线程</strong>、<strong>SQL线程</strong></p> 
+<p> <strong>注意：</strong></p> 
+<ul><li>中继日志通常会位于 OS 缓存中，所以中继日志的开销很小。</li><li>复制过程有一个很重要的限制，即复制在 Slave上是串行化的，也就是说 Master上的并行更新操作不能在 Slave上并行操作。</li><li>半同步复制，会多一个ack确认线程（ack collector thread），专门用于接收slave 的反馈信息（收集slave节点返回的ack信息）</li></ul> 
+<h4>1.7 数据库主从数据不一致解决方案</h4> 
+<p><strong>方法一：忽略错误后，继续同步</strong></p> 
+<p>该方法适用于主从库数据相差不大，或者要求数据可以不完全统一的情况，数据要求不严格的情况。</p> 
+<p><strong>方式二：重新做主从，完全同步</strong></p> 
+<p>该方法适用于主从库数据相差较大，或者要求数据完全统一的情况。</p> 
+<h4>1.8 mysql从服务器挂了 恢复后怎么保证数据同步？</h4> 
+<ul><li><strong>物理方法：</strong> rsync 磁盘文件同步。 使用文件恢复，主节点需要停服务。</li><li><strong>主从复制：</strong> 将从节点原有库删除，通过偏移量，重新做一次主从复制。</li></ul> 
+<h4>1.9 半同步复制什么情况下会降为异步复制？什么时候又会恢复同步复制？</h4> 
+<ul><li>当半同步复制发生超时（由rpl_semi_sync_master_timeout 参数控制，默认为10000ms， 即10s），会暂时关闭半同步复制，转而使用异步复制，也就是会自动降为异步工作。</li><li>当master dump 线程发送完一个事务的所有事件之后，如果在rpl_ semi_sync_master_ timeout 内，收到了从库的响应，则主从又重新恢复为半同步复制。</li></ul> 
+<p></p> 
+<h2>二、MySQL主从复制延迟原因和优化方法</h2> 
+<p><strong>主从复制延迟原因：</strong></p> 
+<ol><li>master服务器高并发，形成大量事务。</li></ol> 
+<ol><li>网络延迟。</li></ol> 
+<ol><li>主从硬件设备导致（cpu主频、内存IO、硬盘IO）。</li></ol> 
+<ol><li>是同步复制，而不是异步复制。</li></ol> 
+<p><strong>优化方法：</strong></p> 
+<ul><li>从库优化Mysql参数。比如增大innodb_buffer_pool_size，让更多操作在Mysql内存中完成，减少磁盘操作。</li><li>从库使用高性能主机。包括cpu强悍、内存加大。避免使用虚拟云主机，使用物理主机，这样提升了I/O方面性。</li><li>从库使用SSD磁盘。</li><li>网络优化，避免跨机房实现同步</li></ul> 
+<h2>三、MySQL主从复制的几个同步模式</h2> 
+<p><strong>1、异步复制（Asynchronous replication）</strong></p> 
+<p>MySQL默认的复制即是异步的，主库在执行完客户端提交的事务后会立即将结果返给客户端，并不关心从库是否已经接收并处理，这样就会有一个问题，主如果crash掉了，此时主上已经提交的事务可能并没有传到从上，如果此时，强行将从提升为主，可能导致新主上的数据不完整。</p> 
+<p><strong>2、全同步复制（Fully synchronous replication）</strong></p> 
+<p>指当主库执行完一个事务，所有的从库都执行了该事务才返回给客户端。因为需要等待所有从库执行完该事务才能返回，所以全同步复制的性能必然会收到严重的影响。</p> 
+<p><strong>3、半同步复制（Semisynchronous replication）</strong></p> 
+<p>介于异步复制和全同步复制之间，主库在执行完客户端提交的事务后不是立刻返回给客户端，而是等待至少一个从库接收到并写到relay log中才返回给客户端。相对于异步复制，半同步复制提高了数据的安全性，同时它也造成了一定程度的延迟，这个延迟最少是一个TCP/IP往返的时间。所以，半同步复制最好在低延时的网络中使用。</p> 
+<p><strong>注意：</strong></p> 
+<p>1）在一主多从的架构中，如果要开启半同步复制，并不要求所有的从都是半同步复制。</p> 
+<p>2）MySQL 5.7极大的提升了半同步复制的性能。</p> 
+<ul><li>5.6 版本的半同步复制，dump thread 承担了两份不同且又十分频繁的任务：传送binlog 给 slave ，还需要等待 slave 反馈信息，而且这两个任务是串行的，dump thread 必须等待 slave 返回之后才会传送下一个 events 事务。dump thread 已然成为整个半同步提高性能的瓶颈。在高并发业务场景下，这样的机制会影响数据库整体的系统吞吐量(TPS)。</li><li>5.7 版本的半同步复制中，独立出一个 ack collector thread ，专门用于接收 slave 的反馈信息。这样 master 上有两个线程独立工作，可以同时发送 binlog 到 slave ，和接收 slave 的反馈。</li></ul> 
+<p></p> 
+<h2>四、主从复制案例演示（异步复制）</h2> 
+<h4>实验环境：</h4> 
+<p>Master 服务器：192.168.126.22，mysql5.7</p> 
+<p>Slave1 服务器：192.168.126.23，mysql5.7</p> 
+<p>Slave2 服务器：192.168.126.24，mysql5.7</p> 
+<p><strong>实验思路：</strong></p> 
+<ol><li>主从服务器时间同步。</li><li>配置主服务器，修改其配置文件，在主数据库中创建一个同步账号授权给从数据库使用。</li><li>配置从数据库，修改其配置文件，在从数据库中配置同步。</li><li>验证能否同步成功。</li></ol> 
+<h4>实验步骤：</h4> 
+<p>每台服务器关闭防火墙和selinux 。</p> 
+<pre><code class="language-sql"> systemctl disable --now firewalld
+ setenforce 0</code></pre> 
+<h3>4.1 MYSQL主从服务器时间同步</h3> 
+<p><strong>时间同步：</strong></p> 
+<ul><li>每台mysql服务器需要设置时间同步，以免数据同步时产生错乱。</li><li>如果不通外网，则使用ntp服务。如果通外网，可以使用网络时钟源。</li></ul> 
+<h4>1）主服务器使用本地时钟源</h4> 
+<pre><code class="language-sql"> #安装时间同步工具（本地设置时钟源）
+ [root@zy2 ~]# yum install -y ntp
+ ​
+ #修改ntp配置文件，在末尾加入
+ [root@zy2 ~]# vim /etc/ntp.conf
+ server 127.127.72.0              #设置本地时钟源，注意修改网段（72是网段）
+ fudge 127.127.72.0 stratum 8     #设置时间层级为8（限制在15以内）
+ ​
+ #开启ntpd
+ [root@zy2 ~]# systemctl start ntpd
+</code></pre> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/ae/af/uwiGuhWi_o.png"></p> 
+<p><img alt="" src="https://images2.imgbox.com/03/8a/Y2BWR6zI_o.png"><img alt="" src="https://images2.imgbox.com/35/51/gEoaZOcg_o.png"> </p> 
+<h4>2）两台从服务器同步主服务器的时间 (zy3和zy4同样设置)</h4> 
+<pre><code class="language-sql">#安装时间同步工具
+ yum install -y ntp
+ #开启ntpd
+ systemctl start ntpd
+ ​
+ #和主服务器进行时间同步
+ /usr/sbin/ntpdate 192.168.72.192
+ ​
+ #设置定时任务，每30分钟同步一次
+ crontab -e  
+ */30 * * * * /usr/sbin/ntpdate 192.168.72.192
+</code></pre> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/54/00/t3GW061G_o.png"></p> 
+<h3>4.2 主服务器的mysql配置</h3> 
+<p>修改配置文件，创建一个同步账号授权给从数据库使用</p> 
+<pre><code class="language-sql">[root@zy2 ~]# vim /etc/my.cnf
+
+[mysqld]
+ ......
+ server-id = 1               #指定服务ID号，master和两台slave都要不同
+ log-bin=mysql-bin           #添加，主服务器开启二进制日志
+ binlog_format = MIXED       #指定二进制日志(binlog)的记录格式为MIXED
+ log-slave-updates=true      #添加，允许slave从master复制数据时可以写入到自己的二进制日志
+ expire_logs_days = 7        #设置二进制日志文件过期时间，默认值为0，表示logs不过期
+ max_binlog_size = 500M      #设置二进制日志限制大小，如果超出给定值，日志就会发生滚动，默认值是1GB
+ ​
+
+[root@zy2 ~]# systemctl restart mysqld
+
+[root@zy2 ~]# mysql -uroot -pabc123
+mysql&gt;  grant replication slave on *.* to 'myslave'@'192.168.126.%' identified by '123123';
+mysql&gt; flush privileges;            #刷新权限
+mysql&gt; show master status\G
+*************************** 1. row ***************************
+             File: mysql-bin.000004
+         Position: 1053
+     Binlog_Do_DB: 
+ Binlog_Ignore_DB: 
+Executed_Gtid_Set: 
+1 row in set (0.00 sec)</code></pre> 
+<h4> 4.3 从服务器的mysql配置（zy3和zy4配置一样，server-id不能相同，也不能和master的一样）</h4> 
+<pre><code class="language-sql">[root@zy3 ~]# vim /etc/my.cnf
+[mysqld]
+ ......
+ server-id = 2            #修改，注意id与Master的不同，两个Slave的id也要不同
+ relay-log=relay-log-bin  #添加，开启中继日志，从主服务器上同步日志文件记录到本地
+ relay-log-index=slave-relay-bin.index   #添加，定义中继日志索引文件的位置和名称，一般和relay-log在同一目录
+ relay_log_recovery = 1                  #选配项
+ #当 slave 从库宕机后，假如 relay-log 损坏了，导致一部分中继日志没有处理，则自动放弃所有未执行的 relay-log，并且重新从 master 上获取日志，这样就保证了 relay-log 的完整性。默认情况下该功能是关闭的，将 relay_log_recovery 的值设置为 1 时， 可在 slave 从库上开启该功能，建议开启。
+
+[root@zy3 ~]# systemctl restart mysqld
+[root@zy3 ~]#  mysql -u root -pabc123
+mysql&gt; change master to master_host='192.168.126.22',master_user='myslave',master_password='123123',master_log_file='mysql-bin.000004',master_log_pos=1053;
+mysql&gt;  show slave status\G     #查看主从复制是否正常
+##确保 IO 和 SQL 线程都是 Yes，代表同步正常。
+ Slave_IO_Running: Yes               #负责与主机的IO通信
+ Slave_SQL_Running: Yes              #负责自己的slave mysql进程
+
+##一般 "Slave_IO_Running: No" 的可能原因：
+ 1. 网络不通 
+ 2. my.cnf配置有问题（server-id重复）
+ 3. 密码、file文件名、pos偏移量不对 
+ 4. 防火墙没有关闭
+</code></pre> 
+<h3>4.4 验证主从复制效果</h3> 
+<p>主服务器上创建新的数据库，执行 <code>create database aaa666;</code></p> 
+<p style="text-align:center;"><code><img alt="" src="https://images2.imgbox.com/e1/e2/b1ET2Q7E_o.png"></code> </p> 
+<p>去从服务器上查看是否同步成功，执行 <code>show databases;</code></p> 
+<p style="text-align:center;"><code><img alt="" src="https://images2.imgbox.com/48/34/T9XaLl7Y_o.png"></code></p> 
+<p></p> 
+<h2>五、主从复制案例演示（半同步复制）</h2> 
+<h4><strong>实验环境：</strong></h4> 
+<p>Master 服务器：192.168.126.22，mysql5.7</p> 
+<p>Slave1 服务器：192.168.126.23，mysql5.7</p> 
+<p>Slave2 服务器：192.168.126.24，mysql5.7</p> 
+<h4></h4> 
+<h4>实验步骤</h4> 
+<pre><code class="language-sql"> -------1、所有服务器关闭防火墙------
+ systemctl disable --now firewalld
+ setenforce 0
+ ​
+ ​
+ -------2、主数据库配置---------
+ vim /etc/my.cnf             #在 [mysqld] 区域添加下面内容
+ ......
+ plugin-load=rpl_semi_sync_master=semisync_master.so     #加载mysql半同步复制的插件
+ rpl_semi_sync_master_enabled=ON         #或者设置为"1"，即开启半同步复制功能
+ rpl-semi-sync-master-timeout=1000       #超时时间为1000ms，即1s
+ ​
+ systemctl restart mysqld
+ ​
+ ​
+ -------3、从数据库配置-----------
+ vim /etc/my.cnf 
+ ......
+ plugin-load=rpl_semi_sync_slave=semisync_slave.so
+ rpl_semi_sync_slave_enabled=ON
+ ​
+ systemctl restart mysqld
+ ​
+ ​
+ -------4、查看半同步是否在运行---------------
+ #主数据库执行
+ show status like 'Rpl_semi_sync_master_status';
+ show variables like 'rpl_semi_sync_master_timeout';
+ ​
+ #从数据库执行（此时可能还是OFF状态，需要在下一步重启IO线程后，从库半同步状态才会为ON）
+ show status like 'Rpl_semi_sync_slave_status';
+ ​
+ #重启从数据库上的IO线程
+ STOP SLAVE IO_THREAD;
+ START SLAVE IO_THREAD;
+ ​
+ #在主库查询半同步状态
+ show status like '%Rpl_semi%'; 
+</code></pre> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/78/3b/RniQrXT9_o.png"></p> 
+<p><img alt="" src="https://images2.imgbox.com/58/56/xBQ9HwzZ_o.png"></p> 
+<p></p> 
+<h2>六、读写分离概念</h2> 
+<h3>6.1 MySQL读写分离原理</h3> 
+<ul><li>读写分离就是只在主服务器上写，只在从服务器上读。</li><li>基本的原理是让主数据库处理事务性操作，而从数据库处理select查询。</li><li>数据库复制被用来把主数据库上事务性操作导致的变更，同步到集群中的从数据库。</li></ul> 
+<h3>6.2 目前较为常见的MysQL读写分离分为以下两种</h3> 
+<h4>1）基于程序代码内部实现</h4> 
+<p>在代码中根据select、insert进行路由分类，这类方法也是目前生产环境应用最广泛的。</p> 
+<p>优点是性能较好，因为在程序代码中实现，不需要增加额外的设备为硬件开支；缺点是需要开发人员来实现，运维人员无从下手。</p> 
+<p>但是并不是所有的应用都适合在程序代码中实现读写分离，像一些大型复杂的Java应用，如果在程序代码中实现读写分离对代码改动就较大。</p> 
+<h4>2）基于中间代理层实现</h4> 
+<p>代理一般位于客户端和服务器之间，代理服务器接到客户端请求后通过判断后转发到后端数据库，有以下代表性程序。</p> 
+<p>（1）MySQL-Proxy。MySQL-Proxy为MysQL开源项目，通过其自带的1ua脚本进行sQL判断。</p> 
+<p>（2）Atlas。是由奇虎360的Web平台部基础架构团队开发维护的一个基于MysQL协议的数据中间层项目。它是在mysql-proxy 0.8.2版本的基础上，对其进行了优化，增加了一些新的功能特性。360内部使用atlas运行的mysql业务，每天承载的读写请求数达几干保条。支持事物以及存储过程。</p> 
+<p>（3）Amoeba。由陈思儒开发，作者曾就职于阿里巴巴。该程序由Java语言进行开发，阿里巴巴将其用于生产环境。但是它不支持事务和存储过程。</p> 
+<p>（4）Mycat。是一款流行的基于Java语言编写的数据库中间件，是一个实现了MySq1协议的服务器，其核心功能是分库分表。配合数据库的主从模式还可以实现读写分离。</p> 
+<p>由于使用MysQLProxy需要写大量的ua脚本，这些Lua并不是现成的，而是需要自己去写。这对于并不熟悉MysQLProxy 内置变量和MySQL Protocol的人来说是非常困难的。</p> 
+<p>Amoeba是一个非常容易使用、可移植性非常强的软件。因此它在生产环境中被广泛应用于数据库的代理层。</p> 
+<p></p> 
+<h2>七、读写分离案例（使用Amoeba）</h2> 
+<p><strong>实验环境：</strong></p> 
+<p>Master 服务器：192.168.126.21，mysql5.7，centos7-2</p> 
+<p>Slave1 服务器：192.168.126.22，mysql5.7，centos7-6</p> 
+<p>Slave2 服务器：192.168.126.23，mysql5.7，centos7-7</p> 
+<p>Amoeba 服务器：192.168.126.24，jdk1.6、Amoeba centos7-3</p> 
+<p>客户端：192.168.126.25， mysql5.7，centos7-4</p> 
+<p></p> 
+<h3>7.1 Amoeba服务器配置 192.168.126.24</h3> 
+<h4>1）安装 Java 环境</h4> 
+<pre><code class="language-sql">#因为 Amoeba 基于是 jdk1.5 开发的，所以官方推荐使用 jdk1.5 或 1.6 版本，高版本不建议使用。
+ ​
+ #先将jdk的二进制文件上传到/opt/目录下，之后复制到/usr/local/目录下
+ [root@Amo ~]# cd /opt/
+ [root@Amo opt]# cp jdk-6u14-linux-x64.bin /usr/local/
+ [root@Amo opt]# cd /usr/local/
+ [root@Amo local]# chmod +x jdk-6u14-linux-x64.bin     #为二进制文件增加执行权限
+ [root@Amo local]# ./jdk-6u14-linux-x64.bin
+ ##按yes，按enter
+ ​
+ [root@Amo local]# mv jdk1.6.0_14/ /usr/local/jdk1.6     #将jdk目录重命名
+ ​
+ #添加环境变量
+ [root@Amo local]# vim /etc/profile
+ export JAVA_HOME=/usr/local/jdk1.6
+ export CLASSPATH=.:$JAVA_HOME/lib:$JAVA_HOME/jre/lib
+ export PATH=$JAVA_HOME/bin:$JAVA_HOME/jre/bin:$PATH
+ export AMOEBA_HOME=/usr/local/amoeba
+ export PATH=$PATH:$AMOEBA_HOME/bin
+ ​
+ [root@Amo local]# source /etc/profile     #刷新文件，使立即生效
+ [root@Amo local]# java -version           #查看jdk版本
+</code></pre> 
+<h4>2）安装 Amoeba软件</h4> 
+<pre><code class="language-sql"> -------1、安装 Amoeba软件---------
+ #创建Amoeba的解压目录
+ [root@Amo ~]# mkdir /usr/local/amoeba/
+ #将Amoeba安装包上传到/opt/目录，解压安装包
+ [root@Amo opt]# cd /opt/
+ [root@Amo opt]# tar zxvf amoeba-mysql-binary-2.2.0.tar.gz -C /usr/local/amoeba/
+ #增加目录权限
+ [root@Amo opt]# chmod -R 755 /usr/local/amoeba/
+ #开启Amoeba
+ [root@Amo opt]# /usr/local/amoeba/bin/amoeba      #如显示amoeba start|stop说明安装成功
+ ​
+ ​
+ -------2、配置 Amoeba读写分离，两个 Slave 读负载均衡----------
+ ​
+ #先在Master、Slave1、Slave2 的mysql上开放权限给 Amoeba 访问。注意：这里授权的用户名和密码，会在下一步写入数据库配置文件。
+ grant all on *.* to 'myamoeba'@'192.168.126.%' identified by '123123';
+ ​
+ #再回到amoeba服务器配置amoeba服务：
+ [root@Amo opt]# cd /usr/local/amoeba/conf/
+ ​
+ #备份配置文件，修改amoeba配置文件
+ [root@Amo conf]# cp amoeba.xml amoeba.xml.bak
+ [root@Amo conf]# vim amoeba.xml
+ --30行--
+ &lt;property name="user"&gt;amoeba&lt;/property&gt;     #30行和32行，授权客户端用于登录amoeba的账号和密码
+ --32行-- 
+ &lt;property name="password"&gt;123456&lt;/property&gt;
+ ​
+ --115行--
+ &lt;property name="defaultPool"&gt;master&lt;/property&gt;  #设置默认服务器池
+ --117-去掉注释-
+ &lt;property name="writePool"&gt;master&lt;/property&gt;   #定义写的服务器池名称
+ &lt;property name="readPool"&gt;slaves&lt;/property&gt;    #定义读的服务器池名称
+ ​
+ ​
+ #备份数据库配置文件，之后修改数据库配置文件dbServers.xml
+ [root@Amo conf]# cp dbServers.xml dbServers.xml.bak
+ [root@Amo conf]# vim dbServers.xml  
+ --23行--注释掉  作用：默认进入test库，注释掉以防mysql中没有test库时，会报错
+ &lt;!-- &lt;property name="schema"&gt;test&lt;/property&gt; --&gt;
+ ​
+ ##26-30行，此用户就是之前在3台主从服务器上授权的用户，授权amoeba服务器用来登录mysql数据库的用户和密码。
+ --26行--修改
+ &lt;property name="user"&gt;myameoba&lt;/property&gt;  
+ --28-30行--去掉注释
+ &lt;property name="password"&gt;123123&lt;/property&gt;
+ ​
+ --45行--修改，设置主服务器的名称master和地址
+ &lt;dbServer name="master"  parent="abstractServer"&gt;
+ --48行--修改，设置主服务器的地址
+ &lt;property name="ipAddress"&gt;192.168.126.21&lt;/property&gt;
+ ​
+ --52行--修改，设置从服务器1的名称slave1
+ &lt;dbServer name="slave1"  parent="abstractServer"&gt;
+ --55行--修改，设置从服务器1的地址
+ &lt;property name="ipAddress"&gt;192.168.126.22&lt;/property&gt;
+ --58行--复制上面6行粘贴，设置从服务器2的名称slave2和地址
+ &lt;dbServer name="slave2"  parent="abstractServer"&gt;
+ &lt;property name="ipAddress"&gt;192.168.126.23&lt;/property&gt;
+ ​
+ --65行--修改
+ &lt;dbServer name="slaves" virtual="true"&gt;
+ --71行--修改
+ &lt;property name="poolNames"&gt;slave1,slave2&lt;/property&gt;
+ ​
+ ​
+ [root@Amo conf]# /usr/local/amoeba/bin/amoeba start &amp;  #后台启动Amoeba软件，按ctrl+c 返回
+ [root@Amo conf]# netstat -anpt | grep java            #查看8066端口是否开启，默认端口为TCP 8066
+</code></pre> 
+<p></p> 
+<h3>7.2 客户端安装mariadb数据库 客户端：192.168.126.25</h3> 
+<pre><code class="language-sql"> [root@zy5 ~]# yum install -y mariadb-server mariadb   #安装mariadb数据库
+ [root@zy5 ~]# systemctl start mariadb.service         #启动mariadb
+
+
+#客户端通过amoeba服务器登录数据库，之后向库中写入数据：
+ mysql -u amoeba -p123456 -h 192.168.126.24 -P8066        
+ use myamoeba666;
+ create table class(id int,name char(10));
+ 
+#通过amoeba服务器代理访问mysql ，再通过客户端连接mysql后写入的数据只有主服务会记录，然后同步给从--从服务器
+</code></pre> 
+<h3>7.3 测试读写分离</h3> 
+<pre><code class="language-sql">//在两台slave服务器上，关闭同步：
+ stop slave;                 #关闭同步
+ use myamoeba666;
+ ​
+ //在slave1上写入数据：
+ insert into class values('1','zhangsan');
+ ​
+ //在slave2上写入数据：
+ insert into class values('2','lisi');
+ ​
+ //在master服务器上写入数据：
+ insert into class values('3','wangwu');
+ ​
+ //在客户端上查看数据：
+ use myamoeba666;
+ select * from class;        
+ #客户端会分别向slave1和slave2读取数据（轮询），显示的只有在两个从服务器上添加的数据，没有在主服务器上添加的数据。说明读写是分离的，只从slave中读取数据。
+ ​
+ insert into class values('4','qianqi',);    //客户端插入数据，只有主服务器上有此数据
+ ​
+ //在两个从服务器上执行 start slave; 即可实现同步主服务器中添加的数据
+ start slave;             #开启同步
+ select * from class;    
+</code></pre> 
+<h2>总结：</h2> 
+<h4>1、主从复制的工作过程</h4> 
+<p>Master节点需要开启二进制日志，Slave节点需要开启中继日志。</p> 
+<p>（1）Master 节点将数据的改变记录成<strong>二进制日志（bin log）</strong> ，当Master上的数据发生改变时（增删改），则将其改变写入二进制日志中。</p> 
+<p>（2）Slave节点会在一定时间间隔内对Master的二进制日志进行探测其是否发生改变，如果发生改变，则开始一个<strong>I/O线程</strong>请求Master的二进制事件。（请求二进制数据）</p> 
+<p>（3）同时Master 节点为每个I/O线程启动一个<strong>dump线程</strong>，用于向其发送二进制事件，并保存至slave节点本地的<strong>中继日志（Relay log</strong>）中，，Slave节点将启动<strong>SQL线程</strong>从中继日志中读取二进制事件，在本地重放，即解析成sql 语句逐一执行，使得其数据和Master节点的保持一致。最后I/O线程和SQL线程将进入睡眠状态，等待下一次被唤醒。</p> 
+<p><strong>注意：</strong></p> 
+<ul><li>中继日志通常会位于 OS 缓存中，所以中继日志的开销很小。</li><li>复制过程有一个很重要的限制，即复制在 Slave上是串行化的，也就是说 Master上的并行更新操作不能在 Slave上并行操作。</li><li>半同步复制，会多一个ack确认线程（ack collector thread），专门用于接收slave 的反馈信息（收集slave节点返回的ack信息）。</li></ul> 
+<h4>2、数据库主从数据不一致解决方案</h4> 
+<p><strong>方法一：忽略错误后，继续同步</strong></p> 
+<ul><li>该方法适用于主从库数据相差不大，或者要求数据可以不完全统一的情况，数据要求不严格的情况。</li></ul> 
+<p><strong>方式二：重新做主从，完全同步</strong></p> 
+<ul><li>该方法适用于主从库数据相差较大，或者要求数据完全统一的情况。</li></ul> 
+<h4>3、mysql从服务器挂了 恢复后怎么保证数据同步？</h4> 
+<ul><li><strong>物理方法：</strong> rsync 磁盘文件同步。 使用文件恢复，主节点需要停服务。</li><li><strong>主从复制：</strong> 将从节点原有库删除，通过偏移量，重新做一次主从复制。</li></ul> 
+<h4>4、半同步复制什么情况下会降为异步复制？什么时候又会恢复同步复制？</h4> 
+<ul><li>当半同步复制发生超时（由rpl_semi_sync_master_timeout 参数控制，默认为10000ms， 即10s），会暂时关闭半同步复制，转而使用异步复制，也就是会自动降为异步工作。</li><li>当malster dump 线程发送完一个事务的所有事件之后，如果在rpl_ semi_sync_master_ timeout 内，收到了从库的响应，则主从又重新恢复为半同步复制。</li></ul> 
+<h4>5、MySQL主从复制延迟原因和优化方法</h4> 
+<p><strong>主从复制延迟原因：</strong></p> 
+<ol><li>master服务器高并发，形成大量事务。</li></ol> 
+<ol><li>网络延迟。</li></ol> 
+<ol><li>主从硬件设备导致（cpu主频、内存IO、硬盘IO）。</li></ol> 
+<ol><li>是同步复制，而不是异步复制。</li></ol> 
+<p><strong>优化方法：</strong></p> 
+<ul><li>从库优化Mysql参数。比如增大innodb_buffer_pool_size，让更多操作在Mysql内存中完成，减少磁盘操作。</li><li>从库使用高性能主机。包括cpu强悍、内存加大。避免使用虚拟云主机，使用物理主机，这样提升了I/O方面性。</li><li>从库使用SSD磁盘。</li><li>网络优化，避免跨机房实现同步。</li></ul> 
+<h4>6、注意事项</h4> 
+<ol><li>每个master可以有多个slave。</li></ol> 
+<ol><li>每个slave只能有一个master。</li></ol> 
+<ol><li> <p>每个slave只能有一个唯一的服务器ID（server-id）。</p> </li><li> <p>master一定要开启binlog二进制日志功能；通常为了数据安全，slave也开启binlog功能。</p> </li></ol> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/cb0792197ca96bd00231dab3f7a8eeee/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">着重讲解一下自动化测试框架的思想与构建策略，让你重新了解自动化测试框架</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/78d6a7083be68563084d910eafbddf97/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">golang代码优化</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

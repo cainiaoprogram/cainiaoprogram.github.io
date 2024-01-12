@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Redis的跳跃表底层原理 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Redis的跳跃表底层原理" />
+<meta property="og:description" content="一、前言 跳跃表（skiplist）是一种有序数据结构，它通过在每个节点中维持多个指向其他节点的指针，从而达到快速访问节点的目的。跳跃表支持平均O（logN）、最坏O（N）复杂度的节点查找，还可以通过顺序性操作来批量处理节点。
+在大部分情况下，跳跃表的效率可以和平衡树相媲美，并且因为跳跃表的实现比平衡树要来得更为简单，所以有不少程序都使用跳跃表来代替平衡树。
+Redis使用跳跃表作为有序集合键的底层实现之一，如果一个有序集合包含的元素数量比较多，又或者有序集合中元素的成员（member）是比较长的字符串时，Redis就会使用跳跃表来作为有序集合键的底层实现。
+二、跳跃表的实现 Redis的跳跃表由redis.h/zskiplistNode和redis.h/zskiplist两个结构定义，其中zskiplistNode结构用于表示跳跃表节点，而zskiplist结构则用于保存跳跃表节点的相关信息，比如节点的数量，以及指向表头节点和表尾节点的指针等等。
+如图展示了一个跳跃表示例，位于图片最左边的是zskiplist结构，该结构包含以下属性：
+header：指向跳跃表的表头节点。tail：指向跳跃表的表尾节点。level：记录目前跳跃表内，层数最大的那个节点的层数（表头节点的层数不计算在内）。length：记录跳跃表的长度，也即是，跳跃表目前包含节点的数量（表头节点不计算在内）。 位于zskiplist结构右方的是四个zskiplistNode结构，该结构包含以下属性：
+层（level）：节点中用L1、L2、L3等字样标记节点的各个层，L1代表第一层，L2代表第二层，以此类推。每个层都带有两个属性：前进指针和跨度。前进指针用于访问位于表尾方向的其他节点，而跨度则记录了前进指针所指向节点和当前节点的距离。在上面的图片中，连线上带有数字的箭头就代表前进指针，而那个数字就是跨度。当程序从表头向表尾进行遍历时，访问会沿着层的前进指针进行。后退（backward）指针：节点中用BW字样标记节点的后退指针，它指向位于当前节点的前一个节点。后退指针在程序从表尾向表头遍历时使用。分值（score）：各个节点中的1.0、2.0和3.0是节点所保存的分值。在跳跃表中，节点按各自所保存的分值从小到大排列。成员对象（obj）：各个节点中的o1、o2和o3是节点所保存的成员对象。 注意表头节点和其他节点的构造是一样的：表头节点也有后退指针、分值和成员对象，不过表头节点的这些属性都不会被用到，所以图中省略了这些部分，只显示了表头节点的各个层。
+三、跳跃表节点 跳跃表节点的实现由redis.h/zskiplistNode结构定义：
+typedef struct zskiplistNode { // 层 struct zskiplistLevel { // 前进指针 struct zskiplistNode *forward; // 跨度 unsigned int span; } level[]; // 后退指针 struct zskiplistNode *backward; // 分值 double score; // 成员对象 robj *obj; } zskiplistNode; 1.层 跳跃表节点的level数组可以包含多个元素，每个元素都包含一个指向其他节点的指针，程序可以通过这些层来加快访问其他节点的速度，一般来说，层的数量越多，访问其他节点的速度就越快。
+每次创建一个新跳跃表节点的时候，程序都根据幂次定律（power law，越大的数出现的概率越小）随机生成一个介于1和32之间的值作为level数组的大小，这个大小就是层的“高度”。
+下图分别展示了三个高度为1层、3层和5层的节点，因为C语言的数组索引总是从0开始的，所以节点的第一层是level[0]，而第二层是level[1]，以此类推。
+2.前进指针 每个层都有一个指向表尾方向的前进指针（level[i].forward属性），用于从表头向表尾方向访问节点。下图用虚线表示出了程序从表头向表尾方向，遍历跳跃表中所有节点的路径：
+迭代程序首先访问跳跃表的第一个节点（表头），然后从第四层的前进指针移动到表中的第二个节点。在第二个节点时，程序沿着第二层的前进指针移动到表中的第三个节点。在第三个节点时，程序同样沿着第二层的前进指针移动到表中的第四个节点。当程序再次沿着第四个节点的前进指针移动时，它碰到一个NULL，程序知道这时已经到达了跳跃表的表尾，于是结束这次遍历。 3.跨度 层的跨度（level[i].span属性）用于记录两个节点之间的距离：
+两个节点之间的跨度越大，它们相距得就越远。指向NULL的所有前进指针的跨度都为0，因为它们没有连向任何节点。 初看上去，很容易以为跨度和遍历操作有关，但实际上并不是这样，遍历操作只使用前进指针就可以完成了，跨度实际上是用来计算排位（rank）的：在查找某个节点的过程中，将沿途访问过的所有层的跨度累计起来，得到的结果就是目标节点在跳跃表中的排位。
+举个例子，如下图用虚线标记了在跳跃表中查找分值为2.0、成员对象为o2的节点时，沿途经历的层：在查找节点的过程中，程序经过了两个跨度为1的节点，因此可以计算出，目标节点在跳跃表中的排位为2。
+4.后退指针 节点的后退指针（backward属性）用于从表尾向表头方向访问节点：跟可以一次跳过多个节点的前进指针不同，因为每个节点只有一个后退指针，所以每次只能后退至前一个节
+点。
+如下图用虚线展示了如果从表尾向表头遍历跳跃表中的所有节点：程序首先通过跳跃表的tail指针访问表尾节点，然后通过后退指针访问倒数第二个节点，之后再沿着后退指针访问倒数第三个节点，再之后遇到指向NULL的后退指针，于是访问结束。
+5.分值和成员 节点的分值（score属性）是一个double类型的浮点数，跳跃表中的所有节点都按分值从小到大来排序。
+节点的成员对象（obj属性）是一个指针，它指向一个字符串对象，而字符串对象则保存着一个SDS值。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/9fc5cb1c1130ce77fbe622f14db716ae/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-05-08T10:46:08+08:00" />
+<meta property="article:modified_time" content="2020-05-08T10:46:08+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Redis的跳跃表底层原理</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="_0"></a>一、前言</h2> 
+<p>    跳跃表（skiplist）是一种有序数据结构，它通过在每个节点中维持多个指向其他节点的指针，从而达到快速访问节点的目的。跳跃表支持平均O（logN）、最坏O（N）复杂度的节点查找，还可以通过顺序性操作来批量处理节点。</p> 
+<p>    在大部分情况下，跳跃表的效率可以和平衡树相媲美，并且因为跳跃表的实现比平衡树要来得更为简单，所以有不少程序都使用跳跃表来代替平衡树。</p> 
+<p>    Redis使用跳跃表作为有序集合键的底层实现之一，<strong>如果一个有序集合包含的元素数量比较多，又或者有序集合中元素的成员（member）是比较长的字符串时，Redis就会使用跳跃表来作为有序集合键的底层实现</strong>。</p> 
+<h2><a id="_7"></a>二、跳跃表的实现</h2> 
+<p>    Redis的跳跃表由redis.h/zskiplistNode和redis.h/zskiplist两个结构定义，其中zskiplistNode结构用于表示跳跃表节点，而zskiplist结构则用于保存跳跃表节点的相关信息，比如节点的数量，以及指向表头节点和表尾节点的指针等等。<br> <img src="https://images2.imgbox.com/44/7b/NP23amY4_o.jpg" alt="在这里插入图片描述"><br> 如图展示了一个跳跃表示例，位于图片最左边的是zskiplist结构，该结构包含以下属性：</p> 
+<ul><li>header：指向跳跃表的表头节点。</li><li>tail：指向跳跃表的表尾节点。</li><li>level：记录目前跳跃表内，层数最大的那个节点的层数（表头节点的层数不计算在内）。</li><li>length：记录跳跃表的长度，也即是，跳跃表目前包含节点的数量（表头节点不计算在内）。</li></ul> 
+<p>位于zskiplist结构右方的是四个zskiplistNode结构，该结构包含以下属性：</p> 
+<ul><li>层（level）：节点中用L1、L2、L3等字样标记节点的各个层，L1代表第一层，L2代表第二层，以此类推。每个层都带有两个属性：前进指针和跨度。前进指针用于访问位于表尾方向的其他节点，而跨度则记录了前进指针所指向节点和当前节点的距离。在上面的图片中，连线上带有数字的箭头就代表前进指针，而那个数字就是跨度。当程序从表头向表尾进行遍历时，访问会沿着层的前进指针进行。</li><li>后退（backward）指针：节点中用BW字样标记节点的后退指针，它指向位于当前节点的前一个节点。后退指针在程序从表尾向表头遍历时使用。</li><li>分值（score）：各个节点中的1.0、2.0和3.0是节点所保存的分值。在跳跃表中，节点按各自所保存的分值从小到大排列。</li><li>成员对象（obj）：各个节点中的o1、o2和o3是节点所保存的成员对象。</li></ul> 
+<p>    注意表头节点和其他节点的构造是一样的：表头节点也有后退指针、分值和成员对象，不过表头节点的这些属性都不会被用到，所以图中省略了这些部分，只显示了表头节点的各个层。</p> 
+<h2><a id="_26"></a>三、跳跃表节点</h2> 
+<p>跳跃表节点的实现由redis.h/zskiplistNode结构定义：</p> 
+<pre><code class="prism language-bash">typedef struct zskiplistNode <span class="token punctuation">{<!-- --></span>
+    // 层
+    struct zskiplistLevel <span class="token punctuation">{<!-- --></span>
+         // 前进指针
+        struct zskiplistNode *forward<span class="token punctuation">;</span>
+        // 跨度
+        unsigned int span<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> level<span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+    // 后退指针
+    struct zskiplistNode *backward<span class="token punctuation">;</span>
+    // 分值
+    double score<span class="token punctuation">;</span>
+    // 成员对象
+    robj *obj<span class="token punctuation">;</span>
+<span class="token punctuation">}</span> zskiplistNode<span class="token punctuation">;</span>
+</code></pre> 
+<h3><a id="1_47"></a>1.层</h3> 
+<p>    跳跃表节点的level数组可以包含多个元素，每个元素都包含一个指向其他节点的指针，程序可以通过这些层来加快访问其他节点的速度，<strong>一般来说，层的数量越多，访问其他节点的速度就越快</strong>。</p> 
+<p>    每次创建一个新跳跃表节点的时候，程序都根据幂次定律（power law，越大的数出现的概率越小）随机生成一个介于1和32之间的值作为level数组的大小，这个大小就是层的“高度”。</p> 
+<p>    下图分别展示了三个高度为1层、3层和5层的节点，因为C语言的数组索引总是从0开始的，所以节点的第一层是level[0]，而第二层是level[1]，以此类推。<br> <img src="https://images2.imgbox.com/81/14/M9QpXquh_o.jpg" alt="在这里插入图片描述"></p> 
+<h3><a id="2_55"></a>2.前进指针</h3> 
+<p>    每个层都有一个指向表尾方向的前进指针（level[i].forward属性），用于从表头向表尾方向访问节点。下图用虚线表示出了程序从表头向表尾方向，遍历跳跃表中所有节点的路径：<br> <img src="https://images2.imgbox.com/b3/f7/htq4tjgW_o.jpg" alt="在这里插入图片描述"></p> 
+<ol><li>迭代程序首先访问跳跃表的第一个节点（表头），然后从第四层的前进指针移动到表中的第二个节点。</li><li>在第二个节点时，程序沿着第二层的前进指针移动到表中的第三个节点。</li><li>在第三个节点时，程序同样沿着第二层的前进指针移动到表中的第四个节点。</li><li>当程序再次沿着第四个节点的前进指针移动时，它碰到一个NULL，程序知道这时已经到达了跳跃表的表尾，于是结束这次遍历。</li></ol> 
+<h3><a id="3_64"></a>3.跨度</h3> 
+<p>层的跨度（level[i].span属性）用于记录两个节点之间的距离：</p> 
+<ul><li>两个节点之间的跨度越大，它们相距得就越远。</li><li>指向NULL的所有前进指针的跨度都为0，因为它们没有连向任何节点。</li></ul> 
+<p>    初看上去，很容易以为跨度和遍历操作有关，但实际上并不是这样，遍历操作只使用前进指针就可以完成了，跨度实际上是用来计算排位（rank）的：在查找某个节点的过程中，将沿途访问过的所有层的跨度累计起来，得到的结果就是目标节点在跳跃表中的排位。</p> 
+<p>举个例子，如下图用虚线标记了在跳跃表中查找分值为2.0、成员对象为o2的节点时，沿途经历的层：在查找节点的过程中，程序经过了两个跨度为1的节点，因此可以计算出，目标节点在跳跃表中的排位为2。<br> <img src="https://images2.imgbox.com/e8/b7/ZL2JCzIG_o.jpg" alt="在这里插入图片描述"></p> 
+<h3><a id="4_75"></a>4.后退指针</h3> 
+<p>    节点的后退指针（backward属性）用于从表尾向表头方向访问节点：跟可以一次跳过多个节点的前进指针不同，因为每个节点只有一个后退指针，所以每次只能后退至前一个节<br> 点。</p> 
+<p>    如下图用虚线展示了如果从表尾向表头遍历跳跃表中的所有节点：程序首先通过跳跃表的tail指针访问表尾节点，然后通过后退指针访问倒数第二个节点，之后再沿着后退指针访问倒数第三个节点，再之后遇到指向NULL的后退指针，于是访问结束。<br> <img src="https://images2.imgbox.com/81/71/CslY9a3L_o.jpg" alt="在这里插入图片描述"></p> 
+<h3><a id="5_82"></a>5.分值和成员</h3> 
+<p>    节点的分值（score属性）是一个double类型的浮点数，跳跃表中的所有节点都按分值从小到大来排序。</p> 
+<p>    节点的成员对象（obj属性）是一个指针，它指向一个字符串对象，而字符串对象则保存着一个SDS值。</p> 
+<p>    在同一个跳跃表中，各个节点保存的成员对象必须是唯一的，但是多个节点保存的分值却可以是相同的：分值相同的节点将按照成员对象在字典序中的大小来进行排序，成员对象较小的节点会排在前面（靠近表头的方向），而成员对象较大的节点则会排在后面（靠近表尾的方向）。</p> 
+<p>   举个例子，在下图所示的跳跃表中，三个跳跃表节点都保存了相同的分值10086.0，但保存成员对象o1的节点却排在保存成员对象o2和o3的节点之前，而保存成员对象o2的节点又排在保存成员对象o3的节点之前，由此可见，o1、o2、o3三个成员对象在字典中的排序为o1&lt;=o2&lt;=o3。<br> <img src="https://images2.imgbox.com/04/b7/8BfDxBZL_o.jpg" alt="在这里插入图片描述"></p> 
+<h2><a id="_92"></a>四、跳跃表</h2> 
+<p>仅靠多个跳跃表节点就可以组成一个跳跃表，如下图所示。<br> <img src="https://images2.imgbox.com/a5/1b/Dmhtc4b1_o.jpg" alt="在这里插入图片描述"><br>    但通过使用一个zskiplist结构来持有这些节点，程序可以更方便地对整个跳跃表进行处理，比如快速访问跳跃表的表头节点和表尾节点，或者快速地获取跳跃表节点的数量（也即是跳跃表的长度）等信息，如下图所示。<br> <img src="https://images2.imgbox.com/1b/39/ZBAhuHpV_o.jpg" alt="在这里插入图片描述"></p> 
+<p>zskiplist结构的定义如下：</p> 
+<pre><code class="prism language-bash">typedef struct zskiplist <span class="token punctuation">{<!-- --></span>
+    // 表头节点和表尾节点
+    structz skiplistNode *header, *tail<span class="token punctuation">;</span>
+    // 表中节点的数量
+    unsigned long length<span class="token punctuation">;</span>
+    // 表中层数最大的节点的层数
+    int level<span class="token punctuation">;</span>
+<span class="token punctuation">}</span> zskiplist<span class="token punctuation">;</span>
+</code></pre> 
+<ul><li>header和tail指针分别指向跳跃表的表头和表尾节点，通过这两个指针，程序定位表头节点和表尾节点的复杂度为O（1）。</li><li>通过使用length属性来记录节点的数量，程序可以在O（1）复杂度内返回跳跃表的长度。</li><li>level属性则用于在O（1）复杂度内获取跳跃表中层高最大的那个节点的层数量，注意表头节点的层高并不计算在内。</li></ul> 
+<h2><a id="_116"></a>五、总结</h2> 
+<ul><li>跳跃表是有序集合的底层实现之一。</li><li>Redis的跳跃表实现由zskiplist和zskiplistNode两个结构组成，其中zskiplist用于保存跳跃表信息（比如表头节点、表尾节点、长度），而zskiplistNode则用于表示跳跃表节点。</li><li>每个跳跃表节点的层高都是1至32之间的随机数。</li><li>在同一个跳跃表中，多个节点可以包含相同的分值，但每个节点的成员对象必须是唯一的。</li><li>跳跃表中的节点按照分值大小进行排序，当分值相同时，节点按照成员对象的大小进行排序。</li><li>和链表、字典等数据结构被广泛地应用在Redis内部不同，Redis只在两个地方用到了跳跃表，一个是实现有序集合键，另一个是在集群节点中用作内部数据结构，除此之外，跳跃表在Redis里面没有其他用途<br> ·</li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/f9979ea320ba4cad13f0d4f7d51f7c73/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">简单并全面地了解目标检测之fast RCNN(ROI Pooling、ROI Align和Precise ROI Pooling)</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/d1b3daba5e4f244bc91d774a61320d70/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Java IO教程 OutputStream InputStream 读写字节流</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

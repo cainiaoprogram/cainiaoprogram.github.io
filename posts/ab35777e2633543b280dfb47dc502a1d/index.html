@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>聊一聊 C# 线程切换后上下文都去了哪里 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="聊一聊 C# 线程切换后上下文都去了哪里" />
+<meta property="og:description" content="一：背景 1. 讲故事 总会有一些朋友问一个问题，在 Windows 中线程做了上下文切换，请问被切的线程他的寄存器上下文都去了哪里？能不能给我挖出来？这个问题其实比较底层，如果对操作系统没有个体系层面的理解以及做过源码分析，其实很难说明白，这篇我们就从.NET高级调试的角度试着分析一下吧。
+二：寄存器上下文去哪了 1. 用户线程的两态空间 用C#代码创建的线程在操作系统层面上来说属于 用户态线程，这种线程拥有两个线程栈，哈哈，是不是打破了一些朋友的三观。分别为 用户态栈 和 内核态栈。
+为了方便讲解，写一段简单的测试代码，不断的调用 Sleep(1) 让代码在用户态和内核态不断的切换，也就能观察得到这两套栈空间，参考代码如下：
+static void Main(string[] args) { for (int i = 0; i &lt; int.MaxValue; i&#43;&#43;) { Thread.Sleep(1); Console.WriteLine($&#34;i={i}&#34;); } } 将程序跑起来后我们用 windbg 附加，观察这个程序的上下文，参考如下：
+0: kd&gt; !process 0 2 ConsoleApp7.exe PROCESS ffffe00185e33440 SessionId: 2 Cid: 0f4c Peb: 7ff73b7a8000 ParentCid: 15f4 DirBase: 1573c1000 ObjectTable: ffffc00165357840 HandleCount: &lt;Data Not Accessible&gt; Image: ConsoleApp7.exe THREAD ffffe0018917a080 Cid 0f4c.0f50 Teb: 00007ff73b7ae000 Win32Thread: ffffe00185e3db20 WAIT: (DelayExecution) UserMode Alertable ffffffffffffffff NotificationEvent ." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/ab35777e2633543b280dfb47dc502a1d/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-05T12:51:11+08:00" />
+<meta property="article:modified_time" content="2024-01-05T12:51:11+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">聊一聊 C# 线程切换后上下文都去了哪里</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="_0"></a>一：背景</h3> 
+<h4><a id="1__2"></a>1. 讲故事</h4> 
+<p>总会有一些朋友问一个问题，在 Windows 中线程做了上下文切换，请问被切的线程他的寄存器上下文都去了哪里？能不能给我挖出来？这个问题其实比较底层，如果对操作系统没有个体系层面的理解以及做过源码分析，其实很难说明白，这篇我们就从<code>.NET高级调试</code>的角度试着分析一下吧。</p> 
+<h3><a id="_6"></a>二：寄存器上下文去哪了</h3> 
+<h4><a id="1__8"></a>1. 用户线程的两态空间</h4> 
+<p>用C#代码创建的线程在操作系统层面上来说属于 <code>用户态线程</code>，这种线程拥有两个线程栈，哈哈，是不是打破了一些朋友的三观。分别为 <code>用户态栈</code> 和 <code>内核态栈</code>。</p> 
+<p>为了方便讲解，写一段简单的测试代码，不断的调用 <code>Sleep(1)</code> 让代码在用户态和内核态不断的切换，也就能观察得到这两套栈空间，参考代码如下：</p> 
+<pre><code class="prism language-C#">
+        static void Main(string[] args)
+        {
+            for (int i = 0; i &lt; int.MaxValue; i++)
+            {
+                Thread.Sleep(1);
+                Console.WriteLine($"i={i}");
+            }
+        }
+
+</code></pre> 
+<p>将程序跑起来后我们用 windbg 附加，观察这个程序的上下文，参考如下：</p> 
+<pre><code class="prism language-C#">
+0: kd&gt; !process 0 2 ConsoleApp7.exe
+PROCESS ffffe00185e33440
+    SessionId: 2  Cid: 0f4c    Peb: 7ff73b7a8000  ParentCid: 15f4
+    DirBase: 1573c1000  ObjectTable: ffffc00165357840  HandleCount: &lt;Data Not Accessible&gt;
+    Image: ConsoleApp7.exe
+
+        THREAD ffffe0018917a080  Cid 0f4c.0f50  Teb: 00007ff73b7ae000 Win32Thread: ffffe00185e3db20 WAIT: (DelayExecution) UserMode Alertable
+            ffffffffffffffff  NotificationEvent
+...
+
+2: kd&gt; dt nt!_KTHREAD ffffe0018917a080
+   +0x028 InitialStack     : 0xffffd001`f8b64c90 Void
+   +0x030 StackLimit       : 0xffffd001`f8b5f000 Void
+   +0x038 StackBase        : 0xffffd001`f8b65000 Void
+   ...
+   +0x058 KernelStack      : 0xffffd001`f8b63c80 Void
+   ...
+   +0x0f0 Teb              : 0x00007ff7`3b7ae000 Void
+   ...
+
+2: kd&gt; dt ntdll!_NT_TIB 0x00007ff7`3b7ae000
+   +0x000 ExceptionList    : (null) 
+   +0x008 StackBase        : 0x00000035`35790000 Void
+   +0x010 StackLimit       : 0x00000035`3577e000 Void
+   +0x018 SubSystemTib     : (null) 
+   +0x020 FiberData        : 0x00000000`00001e00 Void
+   +0x020 Version          : 0x1e00
+   +0x028 ArbitraryUserPointer : (null) 
+   +0x030 Self             : 0x00007ff7`3b7ae000 _NT_TIB
+   ...
+
+</code></pre> 
+<p>上面的信息非常清晰，两套栈空间 <code>StackBase ~ StackLimit</code>，分别为 <code>0x0000003535790000 ~ 0x000000353577e000</code> 和 <code>0xffffd001f8b5f000~0xffffd001f8b65000</code>。</p> 
+<h4><a id="2__66"></a>2. 理解系统调用</h4> 
+<p>理解了线程的两套栈空间之后，接下来说的就是<code>系统调用</code>，简单来说就是C#线程从 <code>用户态</code> 进入到 <code>内核态</code> 时，他的用户态寄存器上下文会存放到 <code>_KTRAP_FRAME</code> 结构体中，而这个结构体会放在内核态的线程栈上，有些朋友可能有点懵，画个图如下：</p> 
+<p><img src="https://images2.imgbox.com/c0/5d/7ylBqS2D_o.png" alt=""></p> 
+<p>接下来的问题是如何验证呢？非常简单，第一种是通过 <code>!thread</code> 观察线程栈上的 TrapFrame 标记，第二种是提取内核线程的 <code>_KTHREAD.TrapFrame</code> 字段，为了方便测试，直接在 <code>Sleep</code> 的内核函数 <code>NtDelayExecution</code> 处下一个进程级别的断点，输出如下：</p> 
+<pre><code class="prism language-C#">
+1: kd&gt; bp /p ffffe00185e33440  nt!NtDelayExecution
+breakpoint 0 redefined
+1: kd&gt; g
+Breakpoint 0 hit
+nt!NtDelayExecution:
+fffff802`e4e8dfb0 4883ec28        sub     rsp,28h
+
+3: kd&gt; !thread ffffe0018917a080
+THREAD ffffe0018917a080  Cid 0f4c.0f50  Teb: 00007ff73b7ae000 Win32Thread: ffffe00185e3db20 RUNNING on processor 3
+IRP List:
+    ffffe00187633ca0: (0006,0358) Flags: 00060800  Mdl: 00000000
+Not impersonating
+DeviceMap                 ffffc0015d587160
+Owning Process            ffffe00185e33440       Image:         ConsoleApp7.exe
+Attached Process          N/A            Image:         N/A
+Wait Start TickCount      21032          Ticks: 1 (0:00:00:00.015)
+Context Switch Count      8187           IdealProcessor: 3             
+UserTime                  00:00:00.015
+KernelTime                00:00:00.125
+Win32 Start Address ConsoleApp7_exe!wmainCRTStartup (0x00007ff73beb3c60)
+Stack Init ffffd001f8b64c90 Current ffffd001f8b64550
+Base ffffd001f8b65000 Limit ffffd001f8b5f000 Call 0000000000000000
+Priority 10 BasePriority 8 PriorityDecrement 2 IoPriority 2 PagePriority 5
+Child-SP          RetAddr               : Args to Child                                                           : Call Site
+ffffd001`f8b64af8 fffff802`e4be9b63     : ffffe001`8917a080 00000000`00000014 ffffffff`ffffd8f0 ffffe001`886c3fe0 : nt!NtDelayExecution
+ffffd001`f8b64b00 00007ff8`cf383b6a     : 00007ff8`cc0d3777 00000035`3578e198 00000000`00000001 00000000`00000000 : nt!KiSystemServiceCopyEnd+0x13 (TrapFrame @ ffffd001`f8b64b00)
+00000035`3578e0d8 00007ff8`cc0d3777     : 00000035`3578e198 00000000`00000001 00000000`00000000 00000000`00000000 : ntdll!NtDelayExecution+0xa
+00000035`3578e0e0 00007ff8`aec355f2     : 00000035`35977a40 00000000`00000001 00000035`00000000 00000000`00000000 : KERNELBASE!SleepEx+0xa7
+(Inline Function) --------`--------     : --------`-------- --------`-------- --------`-------- --------`-------- : coreclr!ClrSleepEx+0xd (Inline Function @ 00007ff8`aec355f2) 
+00000035`3578e180 00007ff8`aec354eb     : 06000000`00000001 00007ff8`aec35450 04000000`00000001 00000000`00000000 : coreclr!Thread::UserSleep+0xb2
+00000035`3578e1d0 00007ff8`4f1ea095     : 00000035`3578e3c0 00000035`3578e4b8 00000000`00000001 00000000`00000001 : coreclr!ThreadNative::Sleep+0x9b 
+
+3: kd&gt; dt nt!_KTRAP_FRAME ffffd001`f8b64b00
+   ...
+   +0x030 Rax              : 0x00007ff7`3b770002
+   +0x038 Rcx              : 0x00000035`358d33a0
+   +0x040 Rdx              : 0x00000035`37b5c9b8
+   +0x048 R8               : 0x00000035`37b5c9c8
+   +0x050 R9               : 0x00000035`3578dd70
+   +0x058 R10              : 0x00007ff7`3b780022
+   +0x060 R11              : 0x00000035`3578e170
+   +0x068 GsBase           : 0x00007ff7`3b7ae000
+   +0x068 GsSwap           : 0x00007ff7`3b7ae000
+   ...
+   +0x0d0 FaultAddress     : 0x00000035`37b7b000
+   ...
+   +0x140 Rbx              : 1
+   +0x148 Rdi              : 0
+   +0x150 Rsi              : 1
+   +0x158 Rbp              : 0x503b1
+   +0x168 Rip              : 0x7ff8cf383b6a [Type: unsigned __int64]
+   +0x180 Rsp              : 0x353578e0d8 [Type: unsigned __int64]
+   ...
+
+</code></pre> 
+<p>仔细观察上面的 RIP 和 RSP 值，都能看到它是在 Ring3 上的现场，分别对应着用户态的 ret 和 ntdll!NtDelayExecution，输出如下：</p> 
+<pre><code class="prism language-C#">
+3: kd&gt; uf 0x7ff8cf383b6a
+ntdll!NtDelayExecution:
+00007ff8`cf383b60 4c8bd1          mov     r10,rcx
+00007ff8`cf383b63 b834000000      mov     eax,34h
+00007ff8`cf383b68 0f05            syscall
+00007ff8`cf383b6a c3              ret
+
+3: kd&gt; k
+ # Child-SP          RetAddr               Call Site
+00 ffffd001`f8b64af8 fffff802`e4be9b63     nt!NtDelayExecution
+01 ffffd001`f8b64b00 00007ff8`cf383b6a     nt!KiSystemServiceCopyEnd+0x13
+02 00000035`3578e0d8 00007ff8`cc0d3777     ntdll!NtDelayExecution+0xa
+03 00000035`3578e0e0 00007ff8`aec355f2     KERNELBASE!SleepEx+0xa7
+04 (Inline Function) --------`--------     coreclr!ClrSleepEx+0xd 
+05 00000035`3578e180 00007ff8`aec354eb     coreclr!Thread::UserSleep+0xb2 
+06 00000035`3578e1d0 00007ff8`4f1ea095     coreclr!ThreadNative::Sleep+0x9b
+07 00000035`3578e320 00000035`3578e3c0     0x00007ff8`4f1ea095
+
+</code></pre> 
+<h4><a id="3__156"></a>3. 内核态线程上下文切换</h4> 
+<p>上一节的<code>_KTRAP_FRAME</code>结构只是保存了 <code>Ring3 -&gt; Ring0</code> 的现场，其实还有一个现场，很显然是调用线程执行 <code>Sleep(1)</code> 后让自己暂停并出让cpu核，为了让自己下一次得到完美的调度，此次必须要保存现场，那这个保存现场的逻辑在哪里的？其实是通过内核的 <code>nt!KiSwapContext</code> 函数实现的。</p> 
+<p>本来想在 <code>nt!KiSwapContext</code> 处下个断点，发现命中不了我的 Sleep 函数的 SwapContext，怀疑有cli之类的屏蔽外部中断导致的，这里只能反汇编源码了，参考如下：</p> 
+<pre><code class="prism language-C#">
+3: kd&gt; uf nt!KiSwapContext
+nt!KiSwapContext:
+fffff802`e4be3f30 4881ec38010000  sub     rsp,138h
+fffff802`e4be3f37 488d842400010000 lea     rax,[rsp+100h]
+fffff802`e4be3f3f 0f29742430      movaps  xmmword ptr [rsp+30h],xmm6
+fffff802`e4be3f44 0f297c2440      movaps  xmmword ptr [rsp+40h],xmm7
+fffff802`e4be3f49 440f29442450    movaps  xmmword ptr [rsp+50h],xmm8
+fffff802`e4be3f4f 440f294c2460    movaps  xmmword ptr [rsp+60h],xmm9
+fffff802`e4be3f55 440f29542470    movaps  xmmword ptr [rsp+70h],xmm10
+fffff802`e4be3f5b 440f295880      movaps  xmmword ptr [rax-80h],xmm11
+fffff802`e4be3f60 440f296090      movaps  xmmword ptr [rax-70h],xmm12
+fffff802`e4be3f65 440f2968a0      movaps  xmmword ptr [rax-60h],xmm13
+fffff802`e4be3f6a 440f2970b0      movaps  xmmword ptr [rax-50h],xmm14
+fffff802`e4be3f6f 440f2978c0      movaps  xmmword ptr [rax-40h],xmm15
+fffff802`e4be3f74 488918          mov     qword ptr [rax],rbx
+fffff802`e4be3f77 48897808        mov     qword ptr [rax+8],rdi
+fffff802`e4be3f7b 48897010        mov     qword ptr [rax+10h],rsi
+fffff802`e4be3f7f 4c896018        mov     qword ptr [rax+18h],r12
+fffff802`e4be3f83 4c896820        mov     qword ptr [rax+20h],r13
+fffff802`e4be3f87 4c897028        mov     qword ptr [rax+28h],r14
+fffff802`e4be3f8b 4c897830        mov     qword ptr [rax+30h],r15
+fffff802`e4be3f8f 65488b1c2520000000 mov   rbx,qword ptr gs:[20h]
+fffff802`e4be3f98 488bf9          mov     rdi,rcx
+fffff802`e4be3f9b 488bf2          mov     rsi,rdx
+fffff802`e4be3f9e 418bc8          mov     ecx,r8d
+fffff802`e4be3fa1 e8ba020000      call    nt!SwapContext (fffff802`e4be4260)
+fffff802`e4be3fa6 488d8c2400010000 lea     rcx,[rsp+100h]
+fffff802`e4be3fae 0f28742430      movaps  xmm6,xmmword ptr [rsp+30h]
+fffff802`e4be3fb3 0f287c2440      movaps  xmm7,xmmword ptr [rsp+40h]
+fffff802`e4be3fb8 440f28442450    movaps  xmm8,xmmword ptr [rsp+50h]
+fffff802`e4be3fbe 440f284c2460    movaps  xmm9,xmmword ptr [rsp+60h]
+fffff802`e4be3fc4 440f28542470    movaps  xmm10,xmmword ptr [rsp+70h]
+fffff802`e4be3fca 440f285980      movaps  xmm11,xmmword ptr [rcx-80h]
+fffff802`e4be3fcf 440f286190      movaps  xmm12,xmmword ptr [rcx-70h]
+fffff802`e4be3fd4 440f2869a0      movaps  xmm13,xmmword ptr [rcx-60h]
+fffff802`e4be3fd9 440f2871b0      movaps  xmm14,xmmword ptr [rcx-50h]
+fffff802`e4be3fde 440f2879c0      movaps  xmm15,xmmword ptr [rcx-40h]
+fffff802`e4be3fe3 488b19          mov     rbx,qword ptr [rcx]
+fffff802`e4be3fe6 488b7908        mov     rdi,qword ptr [rcx+8]
+fffff802`e4be3fea 488b7110        mov     rsi,qword ptr [rcx+10h]
+fffff802`e4be3fee 4c8b6118        mov     r12,qword ptr [rcx+18h]
+fffff802`e4be3ff2 4c8b6920        mov     r13,qword ptr [rcx+20h]
+fffff802`e4be3ff6 4c8b7128        mov     r14,qword ptr [rcx+28h]
+fffff802`e4be3ffa 4c8b7930        mov     r15,qword ptr [rcx+30h]
+fffff802`e4be3ffe 4881c438010000  add     rsp,138h
+fffff802`e4be4005 c3              ret
+
+1: kd&gt; uf nt!SwapContext
+nt!SwapContext:
+...
+nt!SwapContext+0xc9:
+fffff802`1a9df329 0fae5918        stmxcsr dword ptr [rcx+18h]
+fffff802`1a9df32d 48896758        mov     qword ptr [rdi+58h],rsp
+fffff802`1a9df331 488b6658        mov     rsp,qword ptr [rsi+58h]
+fffff802`1a9df335 f6470380        test    byte ptr [rdi+3],80h
+fffff802`1a9df339 741c            je      nt!SwapContext+0xf7 (fffff802`1a9df357)  Branch
+...
+
+</code></pre> 
+<p>上面有一句非常重要的汇编代码 <code>rsp,qword ptr [rsi+58h]</code>，翻译过来就是 <code>esp=newThread.KernelStack</code>，其实就是切换到新线程的内核态栈，并且在执行 nt!SwapContext 之前会进行现场保存，比如上面的 xmm 之类的寄存器，在切换完之后在新线程的同等位置上pop出这些现场。</p> 
+<p>最后一个问题是这个上下文保存在哪里呢？通过观察是还是在 <code>InitialStack ~ KernelStack</code> 之间，并且比 <code>_KTRAP_FRAME</code> 的位置要低，画个模型图如下：</p> 
+<p><img src="https://images2.imgbox.com/d3/2d/gMGyo36U_o.png" alt=""></p> 
+<p>感兴趣的朋友可以在那些能被 <code>int 3</code> 的 KiSwapContext 处下断点，比较下大小即可，截图如下：</p> 
+<p><img src="https://images2.imgbox.com/24/2f/depBZgbR_o.png" alt=""></p> 
+<h3><a id="_234"></a>三：总结</h3> 
+<p>哈哈，是不是非常有意思，一个简单的 Sleep(1) 涉及到两块的寄存器上下文，并都保存在内核线程栈的 <code>InitialStack ~ KernelStack</code> 区间，这也算是加深了自己对操作系统的理解，也帮一些朋友解答了一些困惑！</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/c06c2b83d51eb6b0980e3cc2a5e95def/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">IOS：Safari无法播放MP4（H.264编码）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/bdd40b1f958aaeb151b3a44a4a534ca3/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Unity 0GC或者最大限度降低GC方案</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

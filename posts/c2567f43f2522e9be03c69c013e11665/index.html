@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Spring-Cloud-Gateway源码解析——过滤器 之 RequestRateLimiterGatewayFilterFactory 请求限流 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Spring-Cloud-Gateway源码解析——过滤器 之 RequestRateLimiterGatewayFilterFactory 请求限流" />
+<meta property="og:description" content="1. 概述 本文主要分享 RequestRateLimiterGatewayFilterFactory 的代码实现。
+Spring Cloud Gateway 提供了多种 GatewayFilterFactory 的实现，RequestRateLimiterGatewayFilterFactory 也是其中的一种。
+通过 RequestRateLimiterGatewayFilterFactory ，可以创建 RequestRateLimiterGatewayFilter ( 实际是内部匿名类，为了表述方便，下面继续这么称呼 ) 。
+RequestRateLimiterGatewayFilter 使用 Redis &#43; Lua 实现分布式限流。而限流的粒度，例如 URL / 用户 / IP 等，通过 org.springframework.cloud.gateway.filter.ratelimit.KeyResolver 实现类决定。
+2. 环境搭建 第一步，以 spring-cloud-gateway-sample 项目为基础，在 pom.xml 文件添加依赖库。
+&lt;dependency&gt; &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt; &lt;artifactId&gt;spring-boot-starter-data-redis-reactive&lt;/artifactId&gt; &lt;/dependency&gt; 第二步，在 application.yml 配置一个 RouteDefinition 。
+spring: cloud: gateway: routes: # ===================================== - id: default_path_to_httpbin uri: http://127.0.0.1:8081 order: 10000 predicates: - Path=/** filters: - RequestRateLimiter=10, 20, #{@principalNameKeyResolver} - RequestRateLimiter=10, 20, #{@principalNameKeyResolver} ，配置 RequestRateLimiterGatewayFilterFactory 。 默认情况下，基于令牌桶算法实现限流。第一个参数，burstCapacity ，令牌桶上限 。第二个参数，replenishRate ，令牌桶填充平均速率，单位：秒。第三个参数，keyResolver ，限流键解析器 Bean 对象名字，根据 #{@beanName} ，使用 SpEL 表达式，从 Spring 容器中获取 Bean 对象，详细参见 RouteDefinitionRouteLocator#getTuple(ArgumentHints, Map&lt;String, String&gt;, SpelExpressionParser, BeanFactory) 处的代码。另外，这里有一个 BUG ：在 YAML 里，# 代表注释，所以第三个参数无法正确被读取，需要等待官方修复。如果比较着急使用，可以考虑将此处的 # 修改成 \# ，并修改部分相关代码以解决该 BUG 。 第三步，配置完成，启动 spring-cloud-gateway-sample 项目。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/c2567f43f2522e9be03c69c013e11665/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-09-11T11:00:24+08:00" />
+<meta property="article:modified_time" content="2023-09-11T11:00:24+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Spring-Cloud-Gateway源码解析——过滤器 之 RequestRateLimiterGatewayFilterFactory 请求限流</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h2>1. 概述</h2> 
+<p>本文主要分享 <strong>RequestRateLimiterGatewayFilterFactory 的代码实现</strong>。</p> 
+<p>Spring Cloud Gateway 提供了多种 GatewayFilterFactory 的实现，RequestRateLimiterGatewayFilterFactory 也是其中的一种。</p> 
+<p>通过 RequestRateLimiterGatewayFilterFactory ，可以创建 RequestRateLimiterGatewayFilter ( 实际是内部匿名类，为了表述方便，下面继续这么称呼 ) 。</p> 
+<p>RequestRateLimiterGatewayFilter 使用 <strong>Redis + Lua</strong> 实现分布式限流。而限流的粒度，例如 URL / 用户 / IP 等，通过 <code>org.springframework.cloud.gateway.filter.ratelimit.KeyResolver</code> <strong>实现类</strong>决定。</p> 
+<hr> 
+<p></p> 
+<h2>2. 环境搭建</h2> 
+<p>第一步，以 <code>spring-cloud-gateway-sample</code> 项目为基础，在 <code>pom.xml</code> 文件添加依赖库。</p> 
+<pre><code class="language-java">&lt;dependency&gt;
+    &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+    &lt;artifactId&gt;spring-boot-starter-data-redis-reactive&lt;/artifactId&gt;
+&lt;/dependency&gt;</code></pre> 
+<p>第二步，在 <code>application.yml</code> 配置<strong>一个</strong> RouteDefinition 。</p> 
+<pre><code class="language-java">spring:
+  cloud:
+    gateway:
+      routes:
+      # =====================================
+      - id: default_path_to_httpbin
+        uri: http://127.0.0.1:8081
+        order: 10000
+        predicates:
+        - Path=/**
+        filters:
+        - RequestRateLimiter=10, 20, #{@principalNameKeyResolver}</code></pre> 
+<p>  </p> 
+<ul><li><code>- RequestRateLimiter=10, 20, #{@principalNameKeyResolver}</code> ，配置 RequestRateLimiterGatewayFilterFactory 。 
+  <ul><li>默认情况下，基于<strong>令牌桶算法</strong>实现限流。</li><li>第一个参数，<code>burstCapacity</code> ，令牌桶上限 。</li><li>第二个参数，<code>replenishRate</code> ，令牌桶填充平均速率，单位：秒。</li><li>第三个参数，<code>keyResolver</code> ，限流<strong>键</strong>解析器 Bean 对象名字，根据 <code>#{@beanName}</code> ，使用 SpEL 表达式，从 Spring 容器中获取 Bean 对象，详细参见 <a href="https://github.com/spring-cloud/spring-cloud-gateway/blob/83496b78944269050373bb92bb2181e1b7c070e8/spring-cloud-gateway-core/src/main/java/org/springframework/cloud/gateway/route/RouteDefinitionRouteLocator.java#L182" title="RouteDefinitionRouteLocator#getTuple(ArgumentHints, Map&lt;String, String&gt;, SpelExpressionParser, BeanFactory)">RouteDefinitionRouteLocator#getTuple(ArgumentHints, Map&lt;String, String&gt;, SpelExpressionParser, BeanFactory)</a> 处的代码。另外，这里有一个 BUG ：在 YAML 里，<code>#</code> 代表注释，所以第三个参数无法正确被读取，需要等待官方修复。如果比较着急使用，可以考虑将此处的 <code>#</code> 修改成 <code>\#</code> ，并修改部分相关代码以解决该 BUG 。</li></ul></li></ul> 
+<p>第三步，配置完成，启动 <code>spring-cloud-gateway-sample</code> 项目。</p> 
+<blockquote> 
+ <p><strong>友情提示</strong>，RequestRateLimiterGatewayFilter 使用了 RedisTemplate ，生产环境请配置。</p> 
+</blockquote> 
+<h2>3. RequestRateLimiterGatewayFilterFactory</h2> 
+<p><code>org.springframework.cloud.gateway.filter.factory.RequestRateLimiterGatewayFilterFactory</code> ，请求限流网关过滤器<strong>工厂</strong>类。代码如下 ：</p> 
+<pre><code class="language-java"> 1: public class RequestRateLimiterGatewayFilterFactory implements GatewayFilterFactory {
+ 2: 
+ 3: 	public static final String KEY_RESOLVER_KEY = "keyResolver";
+ 4: 
+ 5: 	private final RateLimiter rateLimiter;
+ 6: 	private final KeyResolver defaultKeyResolver;
+ 7: 
+ 8: 	public RequestRateLimiterGatewayFilterFactory(RateLimiter rateLimiter,
+ 9: 			KeyResolver defaultKeyResolver) {
+10: 		this.rateLimiter = rateLimiter;
+11: 		this.defaultKeyResolver = defaultKeyResolver;
+12: 	}
+13: 
+14: 	@Override
+15: 	public List&lt;String&gt; argNames() {
+16:         return Arrays.asList(
+17:                 RedisRateLimiter.REPLENISH_RATE_KEY,
+18:                 RedisRateLimiter.BURST_CAPACITY_KEY,
+19:                 KEY_RESOLVER_KEY
+20:         );
+21: 	}
+22: 
+23: 	@Override
+24: 	public boolean validateArgs() {
+25:  		return false;
+26: 	}
+27: 
+28: 	@SuppressWarnings("unchecked")
+29: 	@Override
+30: 	public GatewayFilter apply(Tuple args) {
+31:         validateMin(2, args);
+32: 
+33:         // 获得 KeyResolver
+34: 		KeyResolver keyResolver;
+35: 		if (args.hasFieldName(KEY_RESOLVER_KEY)) {
+36: 			keyResolver = args.getValue(KEY_RESOLVER_KEY, KeyResolver.class);
+37: 		} else {
+38: 			keyResolver = defaultKeyResolver;
+39: 		}
+40: 
+41: 		return (exchange, chain) -&gt; keyResolver.resolve(exchange).flatMap(key -&gt;
+42:             // TODO: if key is empty?
+43:             rateLimiter.isAllowed(key, args).flatMap(response -&gt; {
+44:                 // TODO: set some headers for rate, tokens left
+45: 
+46:                 // 允许访问
+47:                 if (response.isAllowed()) {
+48:                     return chain.filter(exchange);
+49:                 }
+50: 
+51:                 // 被限流，不允许访问
+52:                 exchange.getResponse().setStatusCode(HttpStatus.TOO_MANY_REQUESTS);
+53:                 return exchange.getResponse().setComplete();
+54:             }));
+55: 	}
+56: 
+57: }</code></pre> 
+<p>  </p> 
+<ul><li><code>rateLimiter</code> 属性，限流器。默认情况下，使用 RedisRateLimiter 。</li><li><code>defaultKeyResolver</code> 属性，默认限流<strong>键</strong>解析器。默认情况下，使用 PrincipalNameKeyResolver 。</li><li><code>#argNames()</code> 方法，定义了 Tuple 参数的 Key 为 <code>replenishRate</code> / <code>burstCapacity</code> / <code>keyResolver</code> 。</li><li><code>#validateArgs()</code> 方法，定义在 <a href="https://github.com/spring-cloud/spring-cloud-gateway/blob/83496b78944269050373bb92bb2181e1b7c070e8/spring-cloud-gateway-core/src/main/java/org/springframework/cloud/gateway/route/RouteDefinitionRouteLocator.java#L182" title="RouteDefinitionRouteLocator#getTuple(ArgumentHints, Map&lt;String, String&gt;, SpelExpressionParser, BeanFactory)">RouteDefinitionRouteLocator#getTuple(ArgumentHints, Map&lt;String, String&gt;, SpelExpressionParser, BeanFactory)</a> 无需校验 Tuple 结果。因为 <code>keyResolver</code> 非必填项，在 <code>#apply()</code> 方法，创建 RequestRateLimiterGatewayFilter 时<strong>校验</strong>。</li><li><code>#apply()</code> 方法，创建 RequestRateLimiterGatewayFilter 对象。</li><li>第 31 行 ：校验 Tuple 参数至少有两个元素，即 <code>replenishRate</code> 和 <code>burstCapacity</code> 。而 <code>keyResolver</code> 是<strong>选填</strong>，为空时，使用默认值 <code>defaultKeyResolver</code> 。</li><li>第 34 至 39 行 ：获得 <code>keyResolver</code> 。通过它，获得请求的限流<strong>键</strong>，例如URL / 用户 / IP 等。</li><li>--------- 第 41 至 54 行 ：<strong>创建 RequestRateLimiterGatewayFilter 对象并返回</strong>。</li><li>第 41 行 ：调用 <code>KeyResolver#resolve(ServerWebExchange)</code> 方法，获得请求的限流<strong>键</strong>。 
+  <ul><li><strong>注意下</strong>，这里未处理限流<strong>键</strong>为空的情况( <code>TODO: if key is empty?</code> )。所以，当限流<strong>键</strong>为空时，过滤器链不会继续向下执行，也就是说，不会请求后端 Http / Websocket 服务，并且最终返回客户端 <strong>200</strong> 状态码，内容为<strong>空</strong>。</li></ul></li><li>第 43 至 54 行 ：调用 <code>RateLimiter#isAllowed(ServerWebExchange, Tuple)</code> 方法，判断是否被限流。 
+  <ul><li>第 47 至 49 行 ：<strong>未</strong>被限流，允许访问，提交过滤器链继续过滤。</li><li>第 52 至 53 行 ：被限流， <strong>不</strong>允许访问，设置响应 429 状态码，并回写客户端<strong>响应</strong>( <code>exchange.getResponse().setComplete()</code> ) 。</li></ul></li></ul> 
+<h2>4. KeyResolver</h2> 
+<p><code>org.springframework.cloud.gateway.filter.ratelimit.KeyResolver</code> ，请求<strong>键</strong>解析器<strong>接口</strong>。代码如下 ：</p> 
+<pre><code class="language-java">public interface KeyResolver {
+	Mono&lt;String&gt; resolve(ServerWebExchange exchange);
+}</code></pre> 
+<p></p> 
+<ul><li><code>KeyResolver#resolve(ServerWebExchange)</code> 方法，获得请求的限流<strong>键</strong>。</li></ul> 
+<p>通过实现 KeyResolver 接口，实现获得不同的请求的限流<strong>键</strong>，例如URL / 用户 / IP 等。</p> 
+<p>目前版本，Spring Cloud Gateway 提供的 KeyResolver 实现类只有 PrincipalNameKeyResolver 。据官方说法，在未来的里程碑版本中，将会有一些 KeyResolver 具体实现类。</p> 
+<h3>4.1 PrincipalNameKeyResolver</h3> 
+<p><code>org.springframework.cloud.gateway.filter.ratelimit.PrincipalNameKeyResolver</code> ，使用请求认证的 <code>java.security.Principal</code> 作为限流<strong>键</strong>。代码如下 ：</p> 
+<pre><code class="language-java">public class PrincipalNameKeyResolver implements KeyResolver {
+
+	public static final String BEAN_NAME = "principalNameKeyResolver";
+
+	@Override
+	public Mono&lt;String&gt; resolve(ServerWebExchange exchange) {
+		return exchange.getPrincipal().map(Principal::getName).switchIfEmpty(Mono.empty());
+	}
+}</code></pre> 
+<p>  </p> 
+<p></p> 
+<h3>4.2 自定义 KeyResolver</h3> 
+<p>通过实现 KeyResolver 接口，实现自定义 KeyResolver 。下面我们实现一个使用请求 IP 作为限流<strong>键</strong>的 KeyResolver 。</p> 
+<p>第一步，创建 RemoteAddrKeyResolver 类，代码如下 ：</p> 
+<pre><code class="language-java">public class RemoteAddrKeyResolver implements KeyResolver {
+
+	public static final String BEAN_NAME = "remoteAddrKeyResolver";
+
+	@Override
+	public Mono&lt;String&gt; resolve(ServerWebExchange exchange) {
+        return Mono.just(exchange.getRequest().getRemoteAddress().getAddress().getHostAddress());
+	}
+	
+}</code></pre> 
+<p>  </p> 
+<p>第二步，配置 RemoteAddrKeyResolver Bean 对象，代码如下 ：</p> 
+<pre><code class="language-java">@Bean(name = RemoteAddrKeyResolver.BEAN_NAME)
+@ConditionalOnBean(RateLimiter.class)
+public RemoteAddrKeyResolver remoteAddrKeyResolver() {
+    return new RemoteAddrKeyResolver();
+}</code></pre> 
+<p>  </p> 
+<p>第三步，配置 RouteDefinition 路由配置，配置如下 ：</p> 
+<pre><code class="language-java">spring:
+  cloud:
+    gateway:
+      routes:
+      # =====================================
+      - id: default_path_to_httpbin
+        uri: http://127.0.0.1:8081
+        order: 10000
+        predicates:
+        - Path=/**
+        filters:
+        - RequestRateLimiter=10, 20, #{@remoteAddrKeyResolver}</code></pre> 
+<p>  </p> 
+<p>第四步，<strong>大功告成</strong>，启动 Spring Cloud Gateway 即可。</p> 
+<h2>5. RateLimiter</h2> 
+<p><code>org.springframework.cloud.gateway.filter.ratelimit.RateLimiter</code> ，限流器<strong>接口</strong>。代码如下 </p> 
+<pre><code class="language-java">public interface RateLimiter {
+
+	Mono&lt;Response&gt; isAllowed(String id, Tuple args);
+
+}</code></pre> 
+<ul><li> <p><code>#isAllowed(String id, Tuple args)</code> 方法，判断是否被限流。</p> </li><li> <p>Response 类，代码如下 ：</p> <pre><code class="language-java">class Response {
+    /**
+     * 是否允许访问( 未被限流 )
+     */
+	private final boolean allowed;
+    /**
+     * 令牌桶剩余数量
+     */
+	private final long tokensRemaining;
+
+	public Response(boolean allowed, long tokensRemaining) {
+		this.allowed = allowed;
+		this.tokensRemaining = tokensRemaining;
+	}
+}</code></pre> <p></p> </li></ul> 
+<h3>5.1 GatewayRedisAutoConfiguration</h3> 
+<p><code>org.springframework.cloud.gateway.config.GatewayRedisAutoConfiguration</code> ，Redis 相关配置类，代码如下 ：</p> 
+<pre><code class="language-java">1: @Configuration
+ 2: @AutoConfigureAfter(RedisReactiveAutoConfiguration.class)
+ 3: @AutoConfigureBefore(GatewayAutoConfiguration.class)
+ 4: @ConditionalOnBean(ReactiveRedisTemplate.class)
+ 5: @ConditionalOnClass({RedisTemplate.class, DispatcherHandler.class})
+ 6: class GatewayRedisAutoConfiguration {
+ 7: 
+ 8: 	@Bean
+ 9: 	@SuppressWarnings("unchecked")
+10: 	public RedisScript redisRequestRateLimiterScript() {
+11: 		DefaultRedisScript redisScript = new DefaultRedisScript&lt;&gt;();
+12: 		redisScript.setScriptSource(new ResourceScriptSource(new ClassPathResource("META-INF/scripts/request_rate_limiter.lua")));
+13: 		redisScript.setResultType(List.class);
+14: 		return redisScript;
+15: 	}
+16: 
+17: 	@Bean
+18: 	//TODO: replace with ReactiveStringRedisTemplate in future
+19: 	public ReactiveRedisTemplate&lt;String, String&gt; stringReactiveRedisTemplate(
+20: 			ReactiveRedisConnectionFactory reactiveRedisConnectionFactory,
+21: 			ResourceLoader resourceLoader) {
+22: 		RedisSerializer&lt;String&gt; serializer = new StringRedisSerializer();
+23: 		RedisSerializationContext&lt;String , String&gt; serializationContext = RedisSerializationContext
+24: 				.&lt;String, String&gt;newSerializationContext()
+25: 				.key(serializer)
+26: 				.value(serializer)
+27: 				.hashKey(serializer)
+28: 				.hashValue(serializer)
+29: 				.build();
+30: 		return new ReactiveRedisTemplate&lt;&gt;(reactiveRedisConnectionFactory,
+31: 				serializationContext);
+32: 	}
+33: 
+34: 	@Bean
+35: 	public RedisRateLimiter redisRateLimiter(ReactiveRedisTemplate&lt;String, String&gt; redisTemplate,
+36: 											 @Qualifier("redisRequestRateLimiterScript") RedisScript&lt;List&lt;Long&gt;&gt; redisScript) {
+37: 		return new RedisRateLimiter(redisTemplate, redisScript);
+38: 	}
+39: 
+40: }</code></pre> 
+<ul><li>第 8 至 15 行 ：创建 <code>org.springframework.data.redis.core.script.RedisScript</code> Bean 对象，加载 <code>META-INF/scripts/request_rate_limiter.lua</code> 路径下的 Redis Lua 脚本。该脚本使用 Redis 基于<strong>令牌桶算法</strong>实现限流。在本文 <a href="https://www.iocoder.cn/Spring-Cloud-Gateway/filter-request-rate-limiter/#" rel="nofollow" title="「Redis Lua 脚本」">「Redis Lua 脚本」</a> 详细解析。</li><li>第 17 至 32 行 ：创建 <code>org.springframework.data.redis.core.ReactiveRedisTemplate</code> Bean 对象。</li><li>第 34 至 38 行 ：使用 RedisScript 和 ReactiveRedisTemplate Bean 对象，创建 RedisRateLimiter Bean 对象。</li></ul> 
+<h3>5.2 RedisRateLimiter</h3> 
+<p><code>org.springframework.cloud.gateway.filter.ratelimit.RedisRateLimiter</code> ，基于 Redis 的分布式限流器<strong>实现类</strong>。</p> 
+<p><strong>构造方法</strong>，代码如下 ：</p> 
+<pre><code class="language-java">public class RedisRateLimiter implements RateLimiter {
+	public static final String REPLENISH_RATE_KEY = "replenishRate";
+	public static final String BURST_CAPACITY_KEY = "burstCapacity";
+
+	private final ReactiveRedisTemplate&lt;String, String&gt; redisTemplate;
+	private final RedisScript&lt;List&lt;Long&gt;&gt; script;
+
+	public RedisRateLimiter(ReactiveRedisTemplate&lt;String, String&gt; redisTemplate,
+			RedisScript&lt;List&lt;Long&gt;&gt; script) {
+		this.redisTemplate = redisTemplate;
+		this.script = script;
+	}
+}
+</code></pre> 
+<ul><li><code>redisTemplate</code> 属性，RedisTemplate 。</li><li><code>script</code> 属性，Lua 脚本。</li></ul> 
+<hr> 
+<p><code>#isAllowed(id, Tuple)</code> ，代码如下 ：</p> 
+<pre><code class="language-java">1: public Mono&lt;Response&gt; isAllowed(String id, Tuple args) {
+ 2: 	// How many requests per second do you want a user to be allowed to do?
+ 3: 	int replenishRate = args.getInt(REPLENISH_RATE_KEY);
+ 4: 
+ 5: 	// How much bursting do you want to allow?
+ 6: 	int burstCapacity;
+ 7: 	if (args.hasFieldName(BURST_CAPACITY_KEY)) {
+ 8: 		burstCapacity = args.getInt(BURST_CAPACITY_KEY);
+ 9: 	} else {
+10: 		burstCapacity = 0;
+11: 	}
+12: 
+13: 	try {
+14: 		// Make a unique key per user.
+15: 		String prefix = "request_rate_limiter." + id;
+16: 
+17: 		// You need two Redis keys for Token Bucket.
+18: 		List&lt;String&gt; keys = Arrays.asList(prefix + ".tokens", prefix + ".timestamp");
+19: 
+20: 		// The arguments to the LUA script. time() returns unixtime in seconds.
+21: 		List&lt;String&gt; scriptArgs = Arrays.asList(replenishRate + "", burstCapacity + "",
+22: 		 		Instant.now().getEpochSecond() + "", "1");
+23: 		// allowed, tokens_left = redis.eval(SCRIPT, keys, args)
+24: 		Flux&lt;List&lt;Long&gt;&gt; flux = this.redisTemplate.execute(this.script, keys, scriptArgs);
+25: 		// .log("redisratelimiter", Level.FINER);
+26: 		return flux
+27: 				// Throwable =&gt; Flux.just(Arrays.asList(1L, -1L)) 。
+28: 				.onErrorResume(throwable -&gt; Flux.just(Arrays.asList(1L, -1L)))
+29: 				// Flux&lt;List&lt;Long&gt;&gt; =&gt; Mono&lt;List&lt;Long&gt;&gt;
+30: 				.reduce(new ArrayList&lt;Long&gt;(), (longs, l) -&gt; {
+31: 					longs.addAll(l);
+32: 					return longs;
+33: 				})
+34: 				// Mono&lt;List&lt;Long&gt;&gt; =&gt; Mono&lt;Response&gt;
+35: 				.map(results -&gt; {
+36: 					boolean allowed = results.get(0) == 1L;
+37: 					Long tokensLeft = results.get(1);
+38: 
+39: 					Response response = new Response(allowed, tokensLeft);
+40: 
+41: 					if (log.isDebugEnabled()) {
+42: 						log.debug("response: " + response);
+43: 					}
+44: 					return response;
+45: 				});
+46: 	}
+47: 	catch (Exception e) {
+48: 		/*
+49: 		 * We don't want a hard dependency on Redis to allow traffic. Make sure to set
+50: 		 * an alert so you know if this is happening too much. Stripe's observed
+51: 		 * failure rate is 0.01%.
+52: 		 */
+53: 		log.error("Error determining if user allowed from redis", e);
+54: 	}
+55: 	return Mono.just(new Response(true, -1));
+56: }</code></pre> 
+<p>  </p> 
+<ul><li> <p><code>id</code> 方法参数，令牌桶编号。一个令牌桶编号对应令牌桶。</p> 
+  <ul><li>在本文场景中为请求限流<strong>键</strong>。</li></ul></li><li> <p>第 3 行 ：获得 <code>burstCapacity</code> 令牌桶上限。</p> </li><li> <p>第 5 至 11 行 ：获得 <code>replenishRate</code> ，令牌桶填充平均速率，单位：秒。</p> </li><li> <p>第 15 行 ：获得令牌桶前缀，<code>request_rate_limiter.${id}</code> 。</p> </li><li> <p>第 18 行 ：获得令牌桶键数组 ：</p> 
+  <ul><li><code>request_rate_limiter.${id}.tokens</code> ：令牌桶<strong>剩余</strong>令牌数。</li><li><code>request_rate_limiter.${id}.timestamp</code> ：令牌桶<strong>最后</strong>填充令牌时间，单位：秒。</li></ul></li><li> <p>第 21 至 22 行 ：获得 Lua 脚本参数 ：</p> 
+  <ul><li> <p>第一个参数 ：<code>replenishRate</code> 。</p> </li><li> <p>第二个参数 ：<code>burstCapacity</code> 。</p> </li><li> <p>第三个参数 ：得到从 <code>1970-01-01 00:00:00</code> 开始的秒数。<strong>为什么在 Java 代码里获取，而不使用 Lua 在 Reids 里获取</strong>？</p> 
+    <blockquote> 
+     <p>FROM <a href="https://union-click.jd.com/jdc?d=pT3LH8" rel="nofollow" title="《亿级流量网站架构核心技术》">《亿级流量网站架构核心技术》</a><br> 因为 Redis 的限制（ Lua中有写操作不能使用带随机性质的读操作，如TIME ）不能在 Redis Lua中 使用 TIME 获取时间戳，因此只好从应用获取然后传入，在某些极端情况下（机器时钟不准的情况下），限流会存在一些小问题。 * 涛哥这本书非常不错，推荐购买。</p> 
+    </blockquote> </li><li> <p>第四个参数 ：消耗令牌数量，默认 1 。</p> </li></ul></li><li> <p>第 24 行 ：调用 <code>ReactiveRedisTemplate#execute(RedisScript&lt;T&gt;, List&lt;K&gt;, List&lt;?&gt;)</code> 方法，执行 Redis Lua 脚本，获取令牌。返回结果为 <code>[是否获取令牌成功, 剩余令牌数]</code> ，其中，<code>1</code> 代表获取令牌<strong>成功</strong>，<code>0</code> 代表令牌获取<strong>失败</strong>。</p> </li><li> <p>第 25 行 ：当 Redis Lua 脚本过程中发生<strong>异常</strong>，忽略异常，返回 <code>Flux.just(Arrays.asList(1L, -1L))</code> ，即认为<strong>获取令牌成功</strong>。为什么？在 Redis 发生故障时，我们不希望限流器对 Reids 是<strong>强依赖</strong>，并且 Redis 发生故障的概率本身就很低。</p> 
+  <blockquote> 
+   <p>We don't want a hard dependency on Redis to allow traffic.<br> Make sure to set an alert so you know if this is happening too much. Stripe's observed failure rate is 0.01%.</p> 
+  </blockquote> </li><li> <p>第 30 至 33 行 ：调用 <code>Flux#reduce(A, BiFunction&lt;A, ? super T, A&gt;)</code> 方法，将 <code>Flux&lt;List&lt;Long&gt;&gt;</code> 转换成 <code>Mono&lt;List&lt;Long&gt;&gt;</code> 。因为 <code>ReactiveRedisTemplate#execute(RedisScript&lt;T&gt;, List&lt;K&gt;, List&lt;?&gt;)</code> 方法的执行结果为 Flux ( 多次 )，实际在当前场景里，自行 Redis Lua 脚本只会返回<strong>一次</strong>数组，所以转换成 Mono (一次)。</p> </li><li> <p>第 35 至 45 行 ：调用 <code>Mono#map(Function&lt;? super T, ? extends R&gt;)</code> 方法，将 <code>Mono&lt;List&lt;Long&gt;&gt;</code> =&gt; <code>Mono&lt;Response&gt;</code> 。</p> </li><li> <p>第 47 至 55 行 ：当【第 15 至 24 行】代码部分执行发生异常时，例如 Redis 挂了，返回 <code>Flux.just(Arrays.asList(1L, -1L))</code> ，即认为<strong>获取令牌成功</strong>。</p> </li></ul> 
+<h3>5.3 Redis Lua 脚本</h3> 
+<p><code>META-INF/scripts/request_rate_limiter.lua</code> ，Redis Lua 脚本，实现基于<strong>令牌桶算法</strong>实现限流。代码如下 ：</p> 
+<pre><code class="language-java"> 1: local tokens_key = KEYS[1]
+ 2: local timestamp_key = KEYS[2]
+ 3: 
+ 4: local rate = tonumber(ARGV[1])
+ 5: local capacity = tonumber(ARGV[2])
+ 6: local now = tonumber(ARGV[3])
+ 7: local requested = tonumber(ARGV[4])
+ 8: 
+ 9: local fill_time = capacity/rate
+10: local ttl = math.floor(fill_time*2)
+11: 
+12: local last_tokens = tonumber(redis.call("get", tokens_key))
+13: if last_tokens == nil then
+14:   last_tokens = capacity
+15: end
+16: 
+17: local last_refreshed = tonumber(redis.call("get", timestamp_key))
+18: if last_refreshed == nil then
+19:   last_refreshed = 0
+20: end
+21: 
+22: local delta = math.max(0, now-last_refreshed)
+23: local filled_tokens = math.min(capacity, last_tokens+(delta*rate))
+24: local allowed = filled_tokens &gt;= requested
+25: local new_tokens = filled_tokens
+26: local allowed_num = 0
+27: if allowed then
+28:   new_tokens = filled_tokens - requested
+29:   allowed_num = 1
+30: end
+31: 
+32: redis.call("setex", tokens_key, ttl, new_tokens)
+33: redis.call("setex", timestamp_key, ttl, now)
+34: 
+35: return { allowed_num, new_tokens }</code></pre> 
+<ul><li> <p>第 1 至 2 行 ：KEYS 方法参数 ：</p> 
+  <ul><li>第一个参数 ：<code>request_rate_limiter.${id}.tokens</code> ，令牌桶<strong>剩余</strong>令牌数。</li><li>第二个参数 ：<code>request_rate_limiter.${id}.timestamp</code> ，令牌桶<strong>最后</strong>填充令牌时间，单位：秒。</li></ul></li><li> <p>第 4 至 7 行 ：ARGV 方法参数 ：</p> 
+  <ul><li>第一个参数 ：<code>replenishRate</code> 。</li><li>第二个参数 ：<code>burstCapacity</code> 。</li><li>第三个参数 ：得到从 <code>1970-01-01 00:00:00</code> 开始的秒数。</li><li>第四个参数 ：消耗令牌数量，默认 1 。</li></ul></li><li> <p>第 9 行 ：计算令牌桶填充<strong>满</strong>令牌需要多久时间，单位：秒。</p> </li><li> <p>第 10 行 ：计算 <code>request_rate_limiter.${id}.tokens</code> / <code>request_rate_limiter.${id}.timestamp</code> 的 <strong>ttl</strong> 。<code>* 2</code> 保证时间充足。</p> </li><li> <p>第 12 至 20 行 ：调用 <code>get</code> 命令，获得令牌桶<strong>剩余</strong>令牌数( <code>last_tokens</code> ) ，令牌桶<strong>最后</strong>填充令牌时间(<code>last_refreshed</code>) 。</p> </li><li> <p>第 22 至 23 行 ：填充令牌，计算<strong>新</strong>的令牌桶<strong>剩余</strong>令牌数( <code>filled_tokens</code> )。填充不超过令牌桶令牌<strong>上限</strong>。</p> </li><li> <p>第 24 至 30 行 ：获取令牌是否成功。</p> 
+  <ul><li>若<strong>成功</strong>，令牌桶<strong>剩余</strong>令牌数(<code>new_tokens</code>) <strong>减</strong>消耗令牌数( <code>requested</code> )，并设置获取成功( <code>allowed_num = 1</code> ) 。</li><li>若<strong>失败</strong>，设置获取失败( <code>allowed_num = 0</code> ) 。</li></ul></li><li> <p>第 32 至 33 行 ：设置令牌桶<strong>剩余</strong>令牌数( <code>new_tokens</code> ) ，令牌桶<strong>最后</strong>填充令牌时间(<code>now</code>) 。</p> </li><li> <p>第 35 行 ：返回数组结果，<code>[是否获取令牌成功, 剩余令牌数]</code> 。</p> </li></ul> 
+<p><strong>Redis Lua 脚本不会有并发问题么</strong>？</p> 
+<blockquote> 
+ <p>FROM <a href="https://union-click.jd.com/jdc?d=pT3LH8" rel="nofollow" title="《亿级流量网站架构核心技术》">《亿级流量网站架构核心技术》</a><br> 因 Redis 是单线程模型，因此是线程安全的。</p> 
+</blockquote>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/5556ded4d0132500e5a09e9c52c8acb6/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Allegro 实用快捷键</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/4535165a68ca82b8116953d40194a19e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Qt调用onnxruntime推理maskrcnn模型</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

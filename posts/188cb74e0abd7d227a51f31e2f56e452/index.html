@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>初识RabbitMq - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="初识RabbitMq" />
+<meta property="og:description" content="目录 1.初识MQ1.1.同步调用1.2.异步调用1.3.技术选型 2.RabbitMQ2.1.安装2.2.收发消息2.2.1.交换机2.2.2.队列2.2.3.绑定关系2.2.4.发送消息 2.3.数据隔离2.3.1.用户管理2.3.2.virtual host 1.初识MQ 1.1.同步调用 之前说过，我们现在基于OpenFeign的调用都属于是同步调用，那么这种方式存在哪些问题呢？
+举个例子，我们以昨天留给大家作为作业的余额支付功能为例来分析，首先看下整个流程：
+目前我们采用的是基于OpenFeign的同步调用，也就是说业务执行流程是这样的：
+支付服务需要先调用用户服务完成余额扣减然后支付服务自己要更新支付流水单的状态然后支付服务调用交易服务，更新业务订单状态为已支付 三个步骤依次执行。
+这其中就存在3个问题：
+第一，拓展性差
+我们目前的业务相对简单，但是随着业务规模扩大，产品的功能也在不断完善。
+在大多数电商业务中，用户支付成功后都会以短信或者其它方式通知用户，告知支付成功。假如后期产品经理提出这样新的需求，你怎么办？是不是要在上述业务中再加入通知用户的业务？
+某些电商项目中，还会有积分或金币的概念。假如产品经理提出需求，用户支付成功后，给用户以积分奖励或者返还金币，你怎么办？是不是要在上述业务中再加入积分业务、返还金币业务？
+。。。
+最终你的支付业务会越来越臃肿：
+也就是说每次有新的需求，现有支付逻辑都要跟着变化，代码经常变动，不符合开闭原则，拓展性不好。
+第二，性能下降
+由于我们采用了同步调用，调用者需要等待服务提供者执行完返回结果后，才能继续向下执行，也就是说每次远程调用，调用者都是阻塞等待状态。最终整个业务的响应时长就是每次远程调用的执行时长之和：
+假如每个微服务的执行时长都是50ms，则最终整个业务的耗时可能高达300ms，性能太差了。
+第三，级联失败
+由于我们是基于OpenFeign调用交易服务、通知服务。当交易服务、通知服务出现故障时，整个事务都会回滚，交易失败。
+这其实就是同步调用的级联失败问题。
+但是大家思考一下，我们假设用户余额充足，扣款已经成功，此时我们应该确保支付流水单更新为已支付，确保交易成功。毕竟收到手里的钱没道理再退回去吧。
+因此，这里不能因为短信通知、更新订单状态失败而回滚整个事务。
+综上，同步调用的方式存在下列问题：
+拓展性差性能下降级联失败 而要解决这些问题，我们就必须用异步调用的方式来代替同步调用。
+1.2.异步调用 异步调用方式其实就是基于消息通知的方式，一般包含三个角色：
+消息发送者：投递消息的人，就是原来的调用方消息Broker：管理、暂存、转发消息，你可以把它理解成微信服务器消息接收者：接收和处理消息的人，就是原来的服务提供方 在异步调用中，发送者不再直接同步调用接收者的业务接口，而是发送一条消息投递给消息Broker。然后接收者根据自己的需求从消息Broker那里订阅消息。每当发送方发送消息后，接受者都能获取消息并处理。
+这样，发送消息的人和接收消息的人就完全解耦了。
+还是以余额支付业务为例：
+除了扣减余额、更新支付流水单状态以外，其它调用逻辑全部取消。而是改为发送一条消息到Broker。而相关的微服务都可以订阅消息通知，一旦消息到达Broker，则会分发给每一个订阅了的微服务，处理各自的业务。
+假如产品经理提出了新的需求，比如要在支付成功后更新用户积分。支付代码完全不用变更，而仅仅是让积分服务也订阅消息即可：
+不管后期增加了多少消息订阅者，作为支付服务来讲，执行问扣减余额、更新支付流水状态后，发送消息即可。业务耗时仅仅是这三部分业务耗时，仅仅100ms，大大提高了业务性能。
+另外，不管是交易服务、通知服务，还是积分服务，他们的业务与支付关联度低。现在采用了异步调用，解除了耦合，他们即便执行过程中出现了故障，也不会影响到支付服务。
+综上，异步调用的优势包括：
+耦合度更低性能更好业务拓展性强故障隔离，避免级联失败 当然，异步通信也并非完美无缺，它存在下列缺点：
+完全依赖于Broker的可靠性、安全性和性能架构复杂，后期维护和调试麻烦 1.3.技术选型 消息Broker，目前常见的实现方案就是消息队列（MessageQueue），简称为MQ.
+目比较常见的MQ实现：
+ActiveMQRabbitMQRocketMQKafka 几种常见MQ的对比：
+RabbitMQActiveMQRocketMQKafka公司/社区RabbitApache阿里Apache开发语言ErlangJavaJavaScala&amp;Java协议支持AMQP，XMPP，SMTP，STOMPOpenWire,STOMP，REST,XMPP,AMQP自定义协议自定义协议可用性高一般高高单机吞吐量一般差高非常高消息延迟微秒级毫秒级毫秒级毫秒以内消息可靠性高一般高一般 追求可用性：Kafka、 RocketMQ 、RabbitMQ
+追求可靠性：RabbitMQ、RocketMQ
+追求吞吐能力：RocketMQ、Kafka
+追求消息低延迟：RabbitMQ、Kafka
+据统计，目前国内消息队列使用最多的还是RabbitMQ，再加上其各方面都比较均衡，稳定性也好，因此我们课堂上选择RabbitMQ来学习。
+2.RabbitMQ RabbitMQ是基于Erlang语言开发的开源消息通信中间件，官网地址：
+Messaging that just works — RabbitMQ
+接下来，我们就学习它的基本概念和基础用法。
+2.1.安装 我们同样基于Docker来安装RabbitMQ，使用下面的命令即可：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/188cb74e0abd7d227a51f31e2f56e452/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-12-16T19:25:59+08:00" />
+<meta property="article:modified_time" content="2023-12-16T19:25:59+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">初识RabbitMq</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>目录</h4> 
+ <ul><li><a href="#1MQ_1" rel="nofollow">1.初识MQ</a></li><li><ul><li><a href="#11_2" rel="nofollow">1.1.同步调用</a></li><li><a href="#12_47" rel="nofollow">1.2.异步调用</a></li><li><a href="#13_82" rel="nofollow">1.3.技术选型</a></li></ul> 
+  </li><li><a href="#2RabbitMQ_112" rel="nofollow">2.RabbitMQ</a></li><li><ul><li><a href="#21_118" rel="nofollow">2.1.安装</a></li><li><a href="#22_184" rel="nofollow">2.2.收发消息</a></li><li><ul><li><a href="#221_186" rel="nofollow">2.2.1.交换机</a></li><li><a href="#222_196" rel="nofollow">2.2.2.队列</a></li><li><a href="#223_211" rel="nofollow">2.2.3.绑定关系</a></li><li><a href="#224_221" rel="nofollow">2.2.4.发送消息</a></li></ul> 
+   </li><li><a href="#23_236" rel="nofollow">2.3.数据隔离</a></li><li><ul><li><a href="#231_238" rel="nofollow">2.3.1.用户管理</a></li><li><a href="#232virtual_host_262" rel="nofollow">2.3.2.virtual host</a></li></ul> 
+  </li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h2><a id="1MQ_1"></a>1.初识MQ</h2> 
+<h3><a id="11_2"></a>1.1.同步调用</h3> 
+<p>之前说过，我们现在基于OpenFeign的调用都属于是同步调用，那么这种方式存在哪些问题呢？<br> 举个例子，我们以昨天留给大家作为作业的<strong>余额支付功能</strong>为例来分析，首先看下整个流程：<br> <img src="https://images2.imgbox.com/68/f6/b2rGscuP_o.jpg" alt=""><br> 目前我们采用的是基于OpenFeign的同步调用，也就是说业务执行流程是这样的：</p> 
+<ul><li>支付服务需要先调用用户服务完成余额扣减</li><li>然后支付服务自己要更新支付流水单的状态</li><li>然后支付服务调用交易服务，更新业务订单状态为已支付</li></ul> 
+<p>三个步骤依次执行。<br> 这其中就存在3个问题：<br> <strong>第一</strong>，<strong>拓展性差</strong><br> 我们目前的业务相对简单，但是随着业务规模扩大，产品的功能也在不断完善。<br> 在大多数电商业务中，用户支付成功后都会以短信或者其它方式通知用户，告知支付成功。假如后期产品经理提出这样新的需求，你怎么办？是不是要在上述业务中再加入通知用户的业务？<br> 某些电商项目中，还会有积分或金币的概念。假如产品经理提出需求，用户支付成功后，给用户以积分奖励或者返还金币，你怎么办？是不是要在上述业务中再加入积分业务、返还金币业务？<br> 。。。<br> 最终你的支付业务会越来越臃肿：<br> <img src="https://images2.imgbox.com/ff/31/KH8umjWB_o.jpg" alt=""><br> 也就是说每次有新的需求，现有支付逻辑都要跟着变化，代码经常变动，不符合开闭原则，拓展性不好。</p> 
+<p><strong>第二</strong>，<strong>性能下降</strong><br> 由于我们采用了同步调用，调用者需要等待服务提供者执行完返回结果后，才能继续向下执行，也就是说每次远程调用，调用者都是阻塞等待状态。最终整个业务的响应时长就是每次远程调用的执行时长之和：<br> <img src="https://images2.imgbox.com/80/40/OszxDEsr_o.jpg" alt=""><br> 假如每个微服务的执行时长都是50ms，则最终整个业务的耗时可能高达300ms，性能太差了。</p> 
+<p><strong>第三，级联失败</strong><br> 由于我们是基于OpenFeign调用交易服务、通知服务。当交易服务、通知服务出现故障时，整个事务都会回滚，交易失败。<br> 这其实就是同步调用的<strong>级联失败</strong>问题。</p> 
+<p>但是大家思考一下，我们假设用户余额充足，扣款已经成功，此时我们应该确保支付流水单更新为已支付，确保交易成功。毕竟收到手里的钱没道理再退回去吧。</p> 
+<p>因此，这里不能因为短信通知、更新订单状态失败而回滚整个事务。</p> 
+<p>综上，同步调用的方式存在下列问题：</p> 
+<ul><li>拓展性差</li><li>性能下降</li><li>级联失败</li></ul> 
+<p>而要解决这些问题，我们就必须用<strong>异步调用</strong>的方式来代替<strong>同步调用</strong>。</p> 
+<h3><a id="12_47"></a>1.2.异步调用</h3> 
+<p>异步调用方式其实就是基于消息通知的方式，一般包含三个角色：</p> 
+<ul><li>消息发送者：投递消息的人，就是原来的调用方</li><li>消息Broker：管理、暂存、转发消息，你可以把它理解成微信服务器</li><li>消息接收者：接收和处理消息的人，就是原来的服务提供方</li></ul> 
+<p><img src="https://images2.imgbox.com/8a/aa/WSWrxcDb_o.jpg" alt=""></p> 
+<p>在异步调用中，发送者不再直接同步调用接收者的业务接口，而是发送一条消息投递给消息Broker。然后接收者根据自己的需求从消息Broker那里订阅消息。每当发送方发送消息后，接受者都能获取消息并处理。<br> 这样，发送消息的人和接收消息的人就完全解耦了。</p> 
+<p>还是以余额支付业务为例：<br> <img src="https://images2.imgbox.com/92/5b/Rotv32OL_o.jpg" alt=""><br> 除了扣减余额、更新支付流水单状态以外，其它调用逻辑全部取消。而是改为发送一条消息到Broker。而相关的微服务都可以订阅消息通知，一旦消息到达Broker，则会分发给每一个订阅了的微服务，处理各自的业务。</p> 
+<p>假如产品经理提出了新的需求，比如要在支付成功后更新用户积分。支付代码完全不用变更，而仅仅是让积分服务也订阅消息即可：<br> <img src="https://images2.imgbox.com/f5/c0/GMizDnLf_o.jpg" alt=""><br> 不管后期增加了多少消息订阅者，作为支付服务来讲，执行问扣减余额、更新支付流水状态后，发送消息即可。业务耗时仅仅是这三部分业务耗时，仅仅100ms，大大提高了业务性能。</p> 
+<p>另外，不管是交易服务、通知服务，还是积分服务，他们的业务与支付关联度低。现在采用了异步调用，解除了耦合，他们即便执行过程中出现了故障，也不会影响到支付服务。</p> 
+<p>综上，异步调用的优势包括：</p> 
+<ul><li>耦合度更低</li><li>性能更好</li><li>业务拓展性强</li><li>故障隔离，避免级联失败</li></ul> 
+<p>当然，异步通信也并非完美无缺，它存在下列缺点：</p> 
+<ul><li>完全依赖于Broker的可靠性、安全性和性能</li><li>架构复杂，后期维护和调试麻烦</li></ul> 
+<h3><a id="13_82"></a>1.3.技术选型</h3> 
+<p>消息Broker，目前常见的实现方案就是消息队列（MessageQueue），简称为MQ.<br> 目比较常见的MQ实现：</p> 
+<ul><li>ActiveMQ</li><li>RabbitMQ</li><li>RocketMQ</li><li>Kafka</li></ul> 
+<p>几种常见MQ的对比：</p> 
+<table><thead><tr><th></th><th><strong>RabbitMQ</strong></th><th><strong>ActiveMQ</strong></th><th><strong>RocketMQ</strong></th><th><strong>Kafka</strong></th></tr></thead><tbody><tr><td>公司/社区</td><td>Rabbit</td><td>Apache</td><td>阿里</td><td>Apache</td></tr><tr><td>开发语言</td><td>Erlang</td><td>Java</td><td>Java</td><td>Scala&amp;Java</td></tr><tr><td>协议支持</td><td>AMQP，XMPP，SMTP，STOMP</td><td>OpenWire,STOMP，REST,XMPP,AMQP</td><td>自定义协议</td><td>自定义协议</td></tr><tr><td>可用性</td><td>高</td><td>一般</td><td>高</td><td>高</td></tr><tr><td>单机吞吐量</td><td>一般</td><td>差</td><td>高</td><td>非常高</td></tr><tr><td>消息延迟</td><td>微秒级</td><td>毫秒级</td><td>毫秒级</td><td>毫秒以内</td></tr><tr><td>消息可靠性</td><td>高</td><td>一般</td><td>高</td><td>一般</td></tr></tbody></table> 
+<p>追求可用性：Kafka、 RocketMQ 、RabbitMQ<br> 追求可靠性：RabbitMQ、RocketMQ<br> 追求吞吐能力：RocketMQ、Kafka<br> 追求消息低延迟：RabbitMQ、Kafka</p> 
+<p>据统计，目前国内消息队列使用最多的还是RabbitMQ，再加上其各方面都比较均衡，稳定性也好，因此我们课堂上选择RabbitMQ来学习。</p> 
+<h2><a id="2RabbitMQ_112"></a>2.RabbitMQ</h2> 
+<p>RabbitMQ是基于Erlang语言开发的开源消息通信中间件，官网地址：<br> <a href="https://www.rabbitmq.com/" rel="nofollow">Messaging that just works — RabbitMQ</a><br> 接下来，我们就学习它的基本概念和基础用法。</p> 
+<h3><a id="21_118"></a>2.1.安装</h3> 
+<p>我们同样基于Docker来安装RabbitMQ，使用下面的命令即可：</p> 
+<pre><code class="prism language-shell"><span class="token function">docker</span> run  <span class="token parameter variable">-e</span> <span class="token assign-left variable">RABBITMQ_DEFAULT_USER</span><span class="token operator">=</span>shenyang  <span class="token parameter variable">-e</span> <span class="token assign-left variable">RABBITMQ_DEFAULT_PASS</span><span class="token operator">=</span><span class="token number">1</span>
+<span class="token number">23456</span>  <span class="token parameter variable">-v</span> mq-plugins:/plugins  <span class="token parameter variable">--name</span> mq  <span class="token parameter variable">--hostname</span> mq  <span class="token parameter variable">-p</span> <span class="token number">15672</span>:15672  <span class="token parameter variable">-p</span> <span class="token number">5672</span>:5672  <span class="token parameter variable">--network</span> shen  <span class="token parameter variable">-d</span>  rabbitmq:3.8-management
+</code></pre> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@centos ~<span class="token punctuation">]</span><span class="token comment"># docker images</span>
+REPOSITORY           TAG              IMAGE ID       CREATED        SIZE
+mysql                <span class="token number">8.0</span>.32           412b8cc72e4a   <span class="token number">8</span> months ago   531MB
+redis                latest           31f08b90668e   <span class="token number">8</span> months ago   117MB
+rabbitmq             <span class="token number">3.8</span>-management   85e83aca5d60   <span class="token number">2</span> years ago    249MB
+canal/canal-server   v1.1.5           0c7f1d62a7d8   <span class="token number">2</span> years ago    874MB
+</code></pre> 
+<p>本地镜像命令：</p> 
+<p>要启动RabbitMQ镜像，并映射管理界面端口（默认是15672），同时设置用户和密码，你需要使用以下的 <code>docker run</code> 命令。这里我假设你的RabbitMQ镜像标签是 <code>3.8-management</code>。</p> 
+<p>首先，你需要为RabbitMQ设置环境变量来定义默认用户和密码。这可以通过在 <code>docker run</code> 命令中添加 <code>-e</code> 参数来实现：</p> 
+<pre><code class="prism language-bash"><span class="token function">docker</span> run <span class="token parameter variable">-d</span> <span class="token parameter variable">--name</span> myrabbitmq <span class="token punctuation">\</span>
+ <span class="token parameter variable">-e</span> <span class="token assign-left variable">RABBITMQ_DEFAULT_USER</span><span class="token operator">=</span>shenyang <span class="token punctuation">\</span>
+ <span class="token parameter variable">-e</span> <span class="token assign-left variable">RABBITMQ_DEFAULT_PASS</span><span class="token operator">=</span><span class="token number">123456</span> <span class="token punctuation">\</span>
+ <span class="token parameter variable">-p</span> <span class="token number">15672</span>:15672 <span class="token punctuation">\</span>
+ <span class="token parameter variable">-p</span> <span class="token number">5672</span>:5672
+ rabbitmq:3.8-management
+</code></pre> 
+<p>下面是每个选项的解释：</p> 
+<ul><li><code>-d</code>: 运行容器在后台（detached mode）。</li><li><code>--name myrabbitmq</code>: 给容器命名为 “myrabbitmq”。</li><li><code>-e RABBITMQ_DEFAULT_USER=shenyang</code>: 设置环境变量来创建用户 “shenyang”。</li><li><code>-e RABBITMQ_DEFAULT_PASS=123456</code>: 设置环境变量来为用户 “shenyang” 设置密码 “123456”。</li><li><code>-p 15672:15672</code>: 映射本地机器的15672端口到容器中的15672端口。该端口用于RabbitMQ管理界面。</li><li><code>rabbitmq:3.8-management</code>: 指定要运行的镜像名称和标签。</li></ul> 
+<p>运行这个命令后，将会创建一个后台运行的容器，在本地15672端口提供RabbitMQ服务。你可以通过 http://localhost:15672 访问管理界面，并使用用户名 “shenyang” 和密码 “123456” 登录。<br> 可以看到在安装命令中有两个映射的端口：</p> 
+<ul><li>15672：RabbitMQ提供的管理控制台的端口</li><li>5672：RabbitMQ的消息发送处理接口</li></ul> 
+<p>安装完成后，我们访问 http://192.168.193.141:15672即可看到管理控制台。首次访问需要登录，默认的用户名和密码在配置文件中已经指定了。<br> 登录后即可看到管理控制台总览页面：<br> 在这里插入图片描述<br> <img src="https://images2.imgbox.com/b3/4e/0kTZfle4_o.png" alt="在这里插入图片描述"></p> 
+<p>RabbitMQ对应的架构如图：<br> <img src="https://images2.imgbox.com/10/48/Sk1Gdsxj_o.png" alt="在这里插入图片描述"></p> 
+<p>其中包含几个概念：</p> 
+<ul><li><code>**publisher**</code>：生产者，也就是发送消息的一方</li><li><code>**consumer**</code>：消费者，也就是消费消息的一方</li><li><code>**queue**</code>：队列，存储消息。生产者投递的消息会暂存在消息队列中，等待消费者处理</li><li><code>**exchange**</code>：交换机，负责消息路由。生产者发送的消息由交换机决定投递到哪个队列。</li><li><code>**virtual host**</code>：虚拟主机，起到数据隔离的作用。每个虚拟主机相互独立，有各自的exchange、queue</li></ul> 
+<p>上述这些东西都可以在RabbitMQ的管理控制台来管理。</p> 
+<h3><a id="22_184"></a>2.2.收发消息</h3> 
+<h4><a id="221_186"></a>2.2.1.交换机</h4> 
+<p>我们打开Exchanges选项卡，可以看到已经存在很多交换机：<br> <img src="https://images2.imgbox.com/da/20/DD7KIzkj_o.png" alt="在这里插入图片描述"></p> 
+<p>我们点击任意交换机，即可进入交换机详情页面。仍然会利用控制台中的publish message 发送一条消息：<br> <img src="https://images2.imgbox.com/dd/55/fdyshT7A_o.png" alt="在这里插入图片描述"><img src="https://images2.imgbox.com/47/15/vp1rtOo7_o.png" alt="在这里插入图片描述"></p> 
+<p>这里是由控制台模拟了生产者发送的消息。由于没有消费者存在，最终消息丢失了，这样说明交换机没有存储消息的能力。</p> 
+<h4><a id="222_196"></a>2.2.2.队列</h4> 
+<p>我们打开<code>Queues</code>选项卡，新建一个队列：<br> <img src="https://images2.imgbox.com/8e/8d/J6c4vmJj_o.png" alt="在这里插入图片描述"></p> 
+<p>命名为<code>hello.queue1</code>：<br> <img src="https://images2.imgbox.com/2a/09/W7kwRvkW_o.png" alt="在这里插入图片描述"></p> 
+<p>再以相同的方式，创建一个队列，密码为<code>hello.queue2</code>，最终队列列表如下：<br> <img src="https://images2.imgbox.com/c3/82/usW90WNd_o.png" alt="在这里插入图片描述"></p> 
+<p>此时，我们再次向<code>amq.fanout</code>交换机发送一条消息。会发现消息依然没有到达队列！！<br> 怎么回事呢？<br> 发送到交换机的消息，只会路由到与其绑定的队列，因此仅仅创建队列是不够的，我们还需要将其与交换机绑定。</p> 
+<h4><a id="223_211"></a>2.2.3.绑定关系</h4> 
+<p>点击<code>Exchanges</code>选项卡，点击<code>amq.fanout</code>交换机，进入交换机详情页，然后点击<code>Bindings</code>菜单，在表单中填写要绑定的队列名称：<br> <img src="https://images2.imgbox.com/6d/aa/uxS8Tr2R_o.png" alt="在这里插入图片描述"></p> 
+<p>相同的方式，将hello.queue2也绑定到改交换机。<br> 最终，绑定结果如下：<br> <img src="https://images2.imgbox.com/b6/4a/ApDvJ3WD_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="224_221"></a>2.2.4.发送消息</h4> 
+<p>再次回到exchange页面，找到刚刚绑定的<code>amq.fanout</code>，点击进入详情页，再次发送一条消息：<br> <img src="https://images2.imgbox.com/cf/f6/WRxoBfcD_o.png" alt="在这里插入图片描述"></p> 
+<p>回到<code>Queues</code>页面，可以发现<code>hello.queue</code>中已经有一条消息了：<br> <img src="https://images2.imgbox.com/df/aa/7acKGXwS_o.png" alt="在这里插入图片描述"></p> 
+<p>点击队列名称，进入详情页，查看队列详情，这次我们点击get message：<br> <img src="https://images2.imgbox.com/8a/46/IC0h6rhD_o.png" alt="在这里插入图片描述"></p> 
+<p>可以看到消息到达队列了：<br> <img src="https://images2.imgbox.com/47/7d/0aFUlauu_o.png" alt="在这里插入图片描述"></p> 
+<p>这个时候如果有消费者监听了MQ的<code>hello.queue1</code>或<code>hello.queue2</code>队列，自然就能接收到消息了。</p> 
+<h3><a id="23_236"></a>2.3.数据隔离</h3> 
+<h4><a id="231_238"></a>2.3.1.用户管理</h4> 
+<p>点击<code>Admin</code>选项卡，首先会看到RabbitMQ控制台的用户管理界面：<br> <img src="https://images2.imgbox.com/d1/10/I68nMSSL_o.png" alt="在这里插入图片描述"><br> 这里的用户都是RabbitMQ的管理或运维人员。目前只有安装RabbitMQ时添加的<code>itheima</code>这个用户。仔细观察用户表格中的字段，如下：</p> 
+<ul><li><code>Name</code>：<code>shenyang</code>，也就是用户名</li><li><code>Tags</code>：<code>administrator</code>，说明<code>shenyang</code>用户是超级管理员，拥有所有权限</li><li><code>Can access virtual host</code>： <code>/</code>，可以访问的<code>virtual host</code>，这里的<code>/</code>是默认的<code>virtual host</code></li></ul> 
+<p>对于小型企业而言，出于成本考虑，我们通常只会搭建一套MQ集群，公司内的多个不同项目同时使用。这个时候为了避免互相干扰， 我们会利用<code>virtual host</code>的隔离特性，将不同项目隔离。一般会做两件事情：</p> 
+<ul><li>给每个项目创建独立的运维账号，将管理权限分离。</li><li>给每个项目创建不同的<code>virtual host</code>，将每个项目的数据隔离。</li></ul> 
+<p>比如，我们给测试用例创建一个新的用户，命名为<code>shenjie</code>：<br> 在这里插入图片描述</p> 
+<p>你会发现此时hmall用户没有任何<code>virtual host</code>的访问权限：<br> <img src="https://images2.imgbox.com/8d/0a/MVP0Cond_o.png" alt=")"></p> 
+<p>别急，接下来我们就来授权。</p> 
+<h4><a id="232virtual_host_262"></a>2.3.2.virtual host</h4> 
+<p>我们先退出登录：<br> 切换到刚刚创建的shenjie用户登录，然后点击<code>Virtual Hosts</code>菜单，进入<code>virtual host</code>管理页：<br> <img src="https://images2.imgbox.com/7b/63/rBPe85wF_o.png" alt="在这里插入图片描述"></p> 
+<p>可以看到目前只有一个默认的<code>virtual host</code>，名字为 <code>/</code>。<br> 我们可以创建一个单独的<code>virtual host</code>，而不是使用默认的<code>/</code>。<br> <img src="https://images2.imgbox.com/0b/76/oruvhEC1_o.png" alt="在这里插入图片描述"></p> 
+<p>创建完成后如图：<br> <img src="https://images2.imgbox.com/44/68/q7eZJrjG_o.png" alt="在这里插入图片描述"></p> 
+<p>由于我们是登录<code>shenjie</code>账户后创建的<code>virtual host</code>，因此回到<code>users</code>菜单，你会发现当前用户已经具备了对<code>/shen</code>这个<code>virtual host</code>的访问权限了：<br> <img src="https://images2.imgbox.com/1d/c6/6cv4BOc8_o.png" alt="在这里插入图片描述"></p> 
+<p>此时，点击页面右上角的<code>virtual host</code>下拉菜单，切换<code>virtual host</code>为 <code>/hmall</code>：<br> <img src="https://images2.imgbox.com/b6/88/P4fBDBfz_o.png" alt=""></p> 
+<p>然后再次查看queues选项卡，会发现之前的队列已经看不到了：<br> <img src="https://images2.imgbox.com/41/b8/qzdWPTU7_o.png" alt="在这里插入图片描述"></p> 
+<p>这就是基于<code>virtual host </code>的隔离效果。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/ed1d9b6bc76faa524fa476f650fc4f41/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【Android12】WindowManagerService架构分析</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/ad0be5e3ad1d13466328c9916d0ac86e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">shell重定向&amp;tee命令</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,1016 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Linux驱动_多点电容触摸 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Linux驱动_多点电容触摸" />
+<meta property="og:description" content="一丶Linux下多点电容触摸驱动框架 ① 电容触摸屏IC是FT5426,为IIC协议芯片,因此需要编写IIC驱动
+② 触摸IC会发出中断信号，并在中断服务函数中上报信息，因此需要编写中断框架
+③ 触摸屏向Linux内核上报的信息都属于Input子系统，因此需要编写Input子系统
+④ 上报的信息需要满足Input子系统的多点电容触摸协议
+二、多点电容触摸协议 在Documentation/input/multitouch-protocol.txt。
+MT协议主要是分为2种type A和type B。
+type B适用于有硬件追踪并能区分触摸点的触摸设备，此类型设备通过slot更新某一个触摸点的信息， FT5426就属于此类型。
+在中断函数中我们需要将触摸点的信息上报给Linux内核,在协议文档中介绍了，触摸点的信息通过ABS_MT事件上传给内核的。
+相关事件的宏定义如下：
+#define ABS_MT_SLOT 0x2f /* MT slot being modified */ #define ABS_MT_TOUCH_MAJOR 0x30 /* Major axis of touching ellipse */ #define ABS_MT_TOUCH_MINOR 0x31 /* Minor axis (omit if circular) */ #define ABS_MT_WIDTH_MAJOR 0x32 /* Major axis of approaching ellipse */ #define ABS_MT_WIDTH_MINOR 0x33 /* Minor axis (omit if circular) */ #define ABS_MT_ORIENTATION 0x34 /* Ellipse orientation */ #define ABS_MT_POSITION_X 0x35 /* Center X touch position */ #define ABS_MT_POSITION_Y 0x36 /* Center Y touch position */ #define ABS_MT_TOOL_TYPE 0x37 /* Type of touching device */ #define ABS_MT_BLOB_ID 0x38 /* Group a set of packets as a blob */ #define ABS_MT_TRACKING_ID 0x39 /* Unique ID of initiated contact */ #define ABS_MT_PRESSURE 0x3a /* Pressure on contact area */ #define ABS_MT_DISTANCE 0x3b /* Contact hover distance */ #define ABS_MT_TOOL_X 0x3c /* Center X tool position */ #define ABS_MT_TOOL_Y 0x3d /* Center Y tool position */ 从名称中我们不难看出， ABS_MT_POSITION_X 和ABS_MT_POSITION_Y 表示触摸点的X、Y坐标。ABS_MT_SLOT 用来上报触摸点的ID，除此之外，对于我们使用的满足type B类型的IC芯片，还需要使用ABS_MT_TRACKING_ID 关联每一个SLOT信息。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/8e22ad635d1dcbf37c86048b37488f69/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-04-21T18:06:02+08:00" />
+<meta property="article:modified_time" content="2022-04-21T18:06:02+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Linux驱动_多点电容触摸</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h2>一丶Linux下多点电容触摸驱动框架</h2> 
+<p>① 电容触摸屏IC是FT5426,为IIC协议芯片,因此需要编写<strong>IIC驱动</strong></p> 
+<p>② 触摸IC会发出中断信号，并在中断服务函数中上报信息，因此需要编写<strong>中断框架</strong></p> 
+<p>③ 触摸屏向Linux内核上报的信息都属于Input子系统，因此需要编写<strong>Input子系统</strong></p> 
+<p>④ 上报的信息需要满足<strong>Input子系统的多点电容触摸协议</strong></p> 
+<p></p> 
+<h2><strong>二、多点电容触摸协议</strong></h2> 
+<p>        <span style="color:#fe2c24;">在Documentation/input/multitouch-protocol.txt。</span></p> 
+<p><span style="color:#fe2c24;">       </span><span style="color:#0d0016;"> MT协议主要是分为2种<strong>type </strong>A和<strong>type </strong>B。</span></p> 
+<p><span style="color:#0d0016;"><strong>        type </strong>B</span>适用于有硬件追踪并能区分触摸点的触摸设备，此类型设备通过<strong>slot</strong>更新某一个触摸点的信息， <strong>FT5426</strong>就属于此类型。</p> 
+<p>        在中断函数中我们需要将触摸点的信息上报给Linux内核,在协议文档中介绍了，触摸点的信息通过<strong>ABS_MT</strong>事件上传给内核的。</p> 
+<p>        相关事件的宏定义如下：</p> 
+<pre><code class="language-cpp">#define ABS_MT_SLOT 0x2f /* MT slot being modified */
+#define ABS_MT_TOUCH_MAJOR 0x30 /* Major axis of touching ellipse */
+#define ABS_MT_TOUCH_MINOR 0x31 /* Minor axis (omit if circular) */
+#define ABS_MT_WIDTH_MAJOR 0x32 /* Major axis of approaching ellipse */
+#define ABS_MT_WIDTH_MINOR 0x33 /* Minor axis (omit if circular) */
+#define ABS_MT_ORIENTATION 0x34 /* Ellipse orientation */
+#define ABS_MT_POSITION_X 0x35 /* Center X touch position */
+#define ABS_MT_POSITION_Y 0x36 /* Center Y touch position */
+#define ABS_MT_TOOL_TYPE 0x37 /* Type of touching device */
+#define ABS_MT_BLOB_ID 0x38 /* Group a set of packets as a blob */
+#define ABS_MT_TRACKING_ID 0x39 /* Unique ID of initiated contact */
+#define ABS_MT_PRESSURE 0x3a /* Pressure on contact area */
+#define ABS_MT_DISTANCE 0x3b /* Contact hover distance */
+#define ABS_MT_TOOL_X 0x3c /* Center X tool position */
+#define ABS_MT_TOOL_Y 0x3d /* Center Y tool position */</code></pre> 
+<p>        从名称中我们不难看出， <strong>ABS_MT_POSITION_X </strong>和<strong>ABS_MT_POSITION_Y</strong> 表示触摸点的X、Y坐标。<strong>ABS_MT_SLOT </strong>用来上报触摸点的ID，除此之外，对于我们使用的满足<strong>type B</strong>类型的IC芯片，还需要使用<strong>ABS_MT_TRACKING_ID</strong> 关联每一个SLOT信息。</p> 
+<p>总结来说：对于FT5426芯片的电容屏，上传一个点的信息需要包括四个参数：</p> 
+<blockquote> 
+ <p><strong>ABS_MT_SLOT    //</strong>通过<strong>input_mt_report_slot_state </strong>函数</p> 
+ <p><strong>ABS_MT_POSITION_X </strong></p> 
+ <p><strong>ABS_MT_POSITION_Y        //</strong>通过<strong>input_report_abs </strong>函数</p> 
+ <p><strong>ABS_MT_TRACKING_ID</strong>       //通过<strong>input_mt_report_slot_state </strong>函数</p> 
+</blockquote> 
+<h2>三、 多点触摸使用的API函数</h2> 
+<p>    <strong>    1、 input_mt_init_slots 函数</strong></p> 
+<pre><code class="language-cpp">int input_mt_init_slots( struct input_dev *dev,
+                        unsigned int num_sl
+                        unsigned int flags)</code></pre> 
+<p>函数参数和返回值含义如下：</p> 
+<p>        <strong>dev</strong>： MT 设备对应的 input_dev。<br>         <strong>num_slots</strong>：设备要使用的 SLOT 数量，也就是触摸点的数量。<br>         <strong>flags</strong>： 其他一些 flags 信息，可设置的 flags 如下所示：<br><strong>       2、 input_mt_slot 函数</strong></p> 
+<pre><code class="language-cpp">void input_mt_slot(struct input_dev *dev,
+                    int slot)</code></pre> 
+<p>函数参数和返回值含义如下：<br>         <strong>dev</strong>： MT 设备对应的 input_dev。<br>         <strong>slot</strong>：当前发送的是哪个 slot 的坐标信息，也就是哪个触摸点。<br>         返回值：无。</p> 
+<p><strong>        3、 input_mt_report_slot_state 函数</strong></p> 
+<pre><code class="language-cpp">void input_mt_report_slot_state( struct input_dev *dev,
+                                unsigned int tool_type,
+                                bool active)</code></pre> 
+<p>       函数参数和返回值含义如下：<br>         <strong>dev</strong>： MT 设备对应的 input_dev。<br>         <strong>tool_type</strong>：触摸类型，可以选择 MT_TOOL_FINGER(手指)、 MT_TOOL_PEN(笔)或MT_TOOL_PALM(手掌)，对于多点电容触摸屏来说一般都是手指。<br>         <strong>active</strong>： <strong>true</strong>，连续触摸， input 子系统内核会自动分配一个 ABS_MT_TRACKING_ID 给 slot。<br>         <strong>false</strong>，触摸点抬起，表示某个触摸点无效了， input 子系统内核会分配一个-1 给 slot，表示触摸点溢出。<br>         返回值：无。</p> 
+<p><strong>        4、 input_report_abs 函数</strong></p> 
+<pre><code class="language-cpp">void input_report_abs( struct input_dev *dev,
+                        unsigned int code,
+                        int value)</code></pre> 
+<p>函数参数和返回值含义如下：<br>         <strong>dev</strong>： MT 设备对应的 input_dev。<br>         <strong>code</strong>：要上报的是什么数据，可以设置为 ABS_MT_POSITION_X 或 ABS_MT_POSITION_Y，也就是 X 轴或者 Y 轴坐标数据。<br>         <strong>value</strong>： 具体的 X 轴或 Y 轴坐标数据值。<br>         返回值：无。<br>  </p> 
+<h2>四、搭建驱动框架</h2> 
+<p>        前面介绍了本次驱动需要搭载IIC驱动和中断驱动框架，搭建完毕如下所示：</p> 
+<pre><code class="language-cpp">#include &lt;linux/module.h&gt;
+#include &lt;linux/ratelimit.h&gt;
+#include &lt;linux/interrupt.h&gt;
+#include &lt;linux/input.h&gt;
+#include &lt;linux/i2c.h&gt;
+#include &lt;linux/uaccess.h&gt;
+#include &lt;linux/delay.h&gt;
+#include &lt;linux/debugfs.h&gt;
+#include &lt;linux/slab.h&gt;
+#include &lt;linux/gpio.h&gt;
+#include &lt;linux/of_gpio.h&gt;
+#include &lt;linux/input/mt.h&gt;
+#include &lt;linux/input/touchscreen.h&gt;
+#include &lt;linux/input/edt-ft5x06.h&gt;
+#include &lt;linux/i2c.h&gt;
+
+
+struct ft5x06_dev {
+	struct device_node *nd;	//设备节点
+	int irq_pin,reset_pin;	//中断引脚,复位引脚
+	int irq_num;	//中断号
+	void *private_data;
+	struct i2c_client *client;	//i2c设备
+};
+
+static struct ft5x06_dev ft5x06;
+
+static int ft5x06_read_regs(struct ft5x06_dev *dev, u8 reg, void *val, int len)
+{
+	int ret;
+	struct i2c_msg msg[2];
+	struct i2c_client *client = (struct i2c_client *)dev-&gt;client;
+
+	/* msg[0]为发送要读取的首地址 */
+	msg[0].addr = client-&gt;addr;			/* ft5x06地址 */
+	msg[0].flags = 0;					/* 标记为发送数据 */
+	msg[0].buf = &amp;reg;					/* 读取的首地址 */
+	msg[0].len = 1;						/* reg长度*/
+
+	/* msg[1]读取数据 */
+	msg[1].addr = client-&gt;addr;			/* ft5x06地址 */
+	msg[1].flags = I2C_M_RD;			/* 标记为读取数据*/
+	msg[1].buf = val;					/* 读取数据缓冲区 */
+	msg[1].len = len;					/* 要读取的数据长度*/
+
+	ret = i2c_transfer(client-&gt;adapter, msg, 2);
+	if(ret == 2) {
+		ret = 0;
+	} else {
+		ret = -EREMOTEIO;
+	}
+	return ret;
+}
+
+
+static s32 ft5x06_write_regs(struct ft5x06_dev *dev, u8 reg, u8 *buf, u8 len)
+{
+	u8 b[256];
+	struct i2c_msg msg;
+	struct i2c_client *client = (struct i2c_client *)dev-&gt;client;
+	
+	b[0] = reg;					/* 寄存器首地址 */
+	memcpy(&amp;b[1],buf,len);		/* 将要写入的数据拷贝到数组b里面 */
+		
+	msg.addr = client-&gt;addr;	/* ft5x06地址 */
+	msg.flags = 0;				/* 标记为写数据 */
+
+	msg.buf = b;				/* 要写入的数据缓冲区 */
+	msg.len = len + 1;			/* 要写入的数据长度 */
+
+	return i2c_transfer(client-&gt;adapter, &amp;msg, 1);
+}
+
+
+static void ft5x06_write_reg(struct ft5x06_dev *dev, u8 reg, u8 data)
+{
+	u8 buf = 0;
+	buf = data;
+	ft5x06_write_regs(dev, reg, &amp;buf, 1);
+}
+
+
+/*复位FT5X06*/
+static int ft5x06_ts_reset(struct i2c_client *client, struct ft5x06_dev *dev)
+{
+	int ret = 0;
+
+	if (gpio_is_valid(dev-&gt;reset_pin)) {  		/* 检查IO是否有效 */
+		/* 申请复位IO，并且默认输出低电平 */
+		ret = devm_gpio_request_one(&amp;client-&gt;dev,	
+					dev-&gt;reset_pin, GPIOF_OUT_INIT_LOW,
+					"edt-ft5x06 reset");
+		if (ret) {
+			return ret;
+		}
+		msleep(5);
+		gpio_set_value(dev-&gt;reset_pin, 1);	/* 输出高电平，停止复位 */
+		msleep(300);
+	}
+	return 0;
+}
+
+/*中断处理函数*/
+static irqreturn_t ft5x06_handler(int irq, void *dev_id)
+{
+
+	printk("ft5x06_handler\r\n");
+	return IRQ_HANDLED;
+}
+
+static int ft5x06_ts_irq(struct i2c_client *client, struct ft5x06_dev *dev)
+{
+	int ret = 0;
+
+	/* 1,申请中断GPIO */
+	if (gpio_is_valid(dev-&gt;irq_pin)) {
+		ret = devm_gpio_request_one(&amp;client-&gt;dev, dev-&gt;irq_pin,
+					GPIOF_IN, "edt-ft5x06 irq");
+		if (ret) {
+			dev_err(&amp;client-&gt;dev,
+				"Failed to request GPIO %d, error %d\n",
+				dev-&gt;irq_pin, ret);
+			return ret;
+		}
+	}
+	/* 2，申请中断,client-&gt;irq就是IO中断， */
+	ret = devm_request_threaded_irq(&amp;client-&gt;dev, client-&gt;irq, NULL,
+					ft5x06_handler, IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
+					client-&gt;name, &amp;ft5x06);
+	if (ret) {
+		dev_err(&amp;client-&gt;dev, "Unable to request touchscreen IRQ.\n");
+		return ret;
+	}
+
+	return 0;
+}
+
+static int ft5x06_ts_probe(struct i2c_client *client, const struct i2c_device_id *id)
+{
+	int ret = 0;
+	printk("ft5426 init\n");
+
+	ft5x06.client = client;	//保存i2c分配的client信息
+
+	/*从设备树获取信息*/
+	ft5x06.irq_pin = of_get_named_gpio(client-&gt;dev.of_node, "interrupt-gpios", 0);
+	ft5x06.reset_pin = of_get_named_gpio(client-&gt;dev.of_node, "reset-gpios", 0);
+
+	ft5x06_ts_reset(ft5x06.client, &amp;ft5x06);
+	ft5x06_ts_irq(ft5x06.client, &amp;ft5x06);
+	return 0;
+
+}
+
+
+static int ft5x06_ts_remove(struct i2c_client *client)
+{	
+	printk("ft5426 exit\n");
+	return 0;
+}
+
+
+/*
+ *  传统驱动匹配表
+ */ 
+static const struct i2c_device_id ft5x06_ts_id[] = {
+	{ "edt-ft5426", 0, },
+	{ /* sentinel */ }
+};
+
+/*
+ * 设备树匹配表 
+ */
+static const struct of_device_id ft5x06_of_match[] = {
+	{ .compatible = "edt,edt-ft5426", },
+	{ /* sentinel */ }
+};
+
+/* i2c驱动结构体 */	
+static struct i2c_driver ft5x06_ts_driver = {
+	.driver = {
+		.owner = THIS_MODULE,
+		.name = "edt_ft5x06",
+		.of_match_table = of_match_ptr(ft5x06_of_match),
+	},
+	.id_table = ft5x06_ts_id,
+	.probe    = ft5x06_ts_probe,
+	.remove   = ft5x06_ts_remove,
+};
+
+
+static int __init ft5x06_init(void)
+{
+	int ret = 0;
+
+	ret = i2c_add_driver(&amp;ft5x06_ts_driver);
+
+	return ret;
+}
+
+
+static void __exit ft5x06_exit(void)
+{
+	i2c_del_driver(&amp;ft5x06_ts_driver);
+}
+
+module_init(ft5x06_init);
+module_exit(ft5x06_exit);
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("ZYC");
+
+</code></pre> 
+<p>        在驱动框架中利用设备树匹配的方式，完成了IIC设备的申请，触摸IC复位引脚和中断引脚的申请，并且申请方式为devm_gpio_request_one,通过此方式申请的IO不需要自己释放，由系统释放。</p> 
+<p>        现在加载驱动以后，触碰屏幕就会触发中断处理函数。验证如下：</p> 
+<p class="img-center"><img alt="" height="305" src="https://images2.imgbox.com/40/4a/JqmgB1ue_o.png" width="532"></p> 
+<h2>五、 完善多点电容触摸驱动 </h2> 
+<p>        </p> 
+<pre><code class="language-cpp">#include &lt;linux/module.h&gt;
+
+#include &lt;linux/ratelimit.h&gt;
+
+#include &lt;linux/interrupt.h&gt;
+
+#include &lt;linux/input.h&gt;
+
+#include &lt;linux/i2c.h&gt;
+
+#include &lt;linux/uaccess.h&gt;
+
+#include &lt;linux/delay.h&gt;
+
+#include &lt;linux/debugfs.h&gt;
+
+#include &lt;linux/slab.h&gt;
+
+#include &lt;linux/gpio.h&gt;
+
+#include &lt;linux/of_gpio.h&gt;
+
+#include &lt;linux/input/mt.h&gt;
+
+#include &lt;linux/input/touchscreen.h&gt;
+
+#include &lt;linux/input/edt-ft5x06.h&gt;
+
+#include &lt;linux/i2c.h&gt;
+
+
+
+
+
+#define MAX_SUPPORT_POINTS		5			/* 5点触摸 	*/
+
+#define TOUCH_EVENT_DOWN		0x00		/* 按下 	*/
+
+#define TOUCH_EVENT_UP			0x01		/* 抬起 	*/
+
+#define TOUCH_EVENT_ON			0x02		/* 接触 	*/
+
+#define TOUCH_EVENT_RESERVED	0x03		/* 保留 	*/
+
+
+
+/* FT5X06寄存器相关宏定义 */
+
+#define FT5X06_TD_STATUS_REG	0X02		/*	状态寄存器地址 		*/
+
+#define FT5x06_DEVICE_MODE_REG	0X00 		/* 模式寄存器 			*/
+
+#define FT5426_IDG_MODE_REG		0XA4		/* 中断模式				*/
+
+#define FT5X06_READLEN			29			/* 要读取的寄存器个数 	*/
+
+
+
+struct ft5x06_dev {
+
+	struct device_node *nd;	//设备节点
+
+	int irq_pin,reset_pin;	//中断引脚,复位引脚
+
+	int irq_num;	//中断号
+
+	void *private_data;
+
+	struct i2c_client *client;	//i2c设备
+
+	struct input_dev *input;	//input设备
+
+};
+
+
+
+static struct ft5x06_dev ft5x06;
+
+
+
+static int ft5x06_read_regs(struct ft5x06_dev *dev, u8 reg, void *val, int len)
+
+{
+
+	int ret;
+
+	struct i2c_msg msg[2];
+
+	struct i2c_client *client = (struct i2c_client *)dev-&gt;client;
+
+
+
+	/* msg[0]为发送要读取的首地址 */
+
+	msg[0].addr = client-&gt;addr;			/* ft5x06地址 */
+
+	msg[0].flags = 0;					/* 标记为发送数据 */
+
+	msg[0].buf = &amp;reg;					/* 读取的首地址 */
+
+	msg[0].len = 1;						/* reg长度*/
+
+
+
+	/* msg[1]读取数据 */
+
+	msg[1].addr = client-&gt;addr;			/* ft5x06地址 */
+
+	msg[1].flags = I2C_M_RD;			/* 标记为读取数据*/
+
+	msg[1].buf = val;					/* 读取数据缓冲区 */
+
+	msg[1].len = len;					/* 要读取的数据长度*/
+
+
+
+	ret = i2c_transfer(client-&gt;adapter, msg, 2);
+
+	if(ret == 2) {
+
+		ret = 0;
+
+	} else {
+
+		ret = -EREMOTEIO;
+
+	}
+
+	return ret;
+
+}
+
+
+
+
+
+static s32 ft5x06_write_regs(struct ft5x06_dev *dev, u8 reg, u8 *buf, u8 len)
+
+{
+
+	u8 b[256];
+
+	struct i2c_msg msg;
+
+	struct i2c_client *client = (struct i2c_client *)dev-&gt;client;
+
+	
+
+	b[0] = reg;					/* 寄存器首地址 */
+
+	memcpy(&amp;b[1],buf,len);		/* 将要写入的数据拷贝到数组b里面 */
+
+		
+
+	msg.addr = client-&gt;addr;	/* ft5x06地址 */
+
+	msg.flags = 0;				/* 标记为写数据 */
+
+
+
+	msg.buf = b;				/* 要写入的数据缓冲区 */
+
+	msg.len = len + 1;			/* 要写入的数据长度 */
+
+
+
+	return i2c_transfer(client-&gt;adapter, &amp;msg, 1);
+
+}
+
+
+
+
+
+static void ft5x06_write_reg(struct ft5x06_dev *dev, u8 reg, u8 data)
+
+{
+
+	u8 buf = 0;
+
+	buf = data;
+
+	ft5x06_write_regs(dev, reg, &amp;buf, 1);
+
+}
+
+
+
+
+
+/*复位FT5X06*/
+
+static int ft5x06_ts_reset(struct i2c_client *client, struct ft5x06_dev *dev)
+
+{
+
+	int ret = 0;
+
+
+
+	if (gpio_is_valid(dev-&gt;reset_pin)) {  		/* 检查IO是否有效 */
+
+		/* 申请复位IO，并且默认输出低电平 */
+
+		ret = devm_gpio_request_one(&amp;client-&gt;dev,	
+
+					dev-&gt;reset_pin, GPIOF_OUT_INIT_LOW,
+
+					"edt-ft5x06 reset");
+
+		if (ret) {
+
+			return ret;
+
+		}
+
+		msleep(5);
+
+		gpio_set_value(dev-&gt;reset_pin, 1);	/* 输出高电平，停止复位 */
+
+		msleep(300);
+
+	}
+
+	return 0;
+
+}
+
+
+
+static irqreturn_t ft5x06_handler(int irq, void *dev_id)
+
+{
+
+	struct ft5x06_dev *multidata = dev_id;
+
+
+
+	u8 rdbuf[29];
+
+	int i, type, x, y, id;
+
+	int offset, tplen;
+
+	int ret;
+
+	bool down;
+
+
+
+	offset = 1; 	/* 偏移1，也就是0X02+1=0x03,从0X03开始是触摸值 */
+
+	tplen = 6;		/* 一个触摸点有6个寄存器来保存触摸值 */
+
+
+
+	memset(rdbuf, 0, sizeof(rdbuf));		/* 清除 */
+
+
+
+	/* 读取FT5X06触摸点坐标从0X02寄存器开始，连续读取29个寄存器 */
+
+	ret = ft5x06_read_regs(multidata, FT5X06_TD_STATUS_REG, rdbuf, FT5X06_READLEN);
+
+	if (ret) {
+
+		goto fail;
+
+	}
+
+
+
+	/* 上报每一个触摸点坐标 */
+
+	for (i = 0; i &lt; MAX_SUPPORT_POINTS; i++) {
+
+		u8 *buf = &amp;rdbuf[i * tplen + offset];
+
+
+
+		/* 以第一个触摸点为例，寄存器TOUCH1_XH(地址0X03),各位描述如下：
+
+		 * bit7:6  Event flag  0:按下 1:释放 2：接触 3：没有事件
+
+		 * bit5:4  保留
+
+		 * bit3:0  X轴触摸点的11~8位。
+
+		 */
+
+		type = buf[0] &gt;&gt; 6;     /* 获取触摸类型 */
+
+		if (type == TOUCH_EVENT_RESERVED)
+
+			continue;
+
+ 
+
+		/* 我们所使用的触摸屏和FT5X06是反过来的 */
+
+		x = ((buf[2] &lt;&lt; 8) | buf[3]) &amp; 0x0fff;
+
+		y = ((buf[0] &lt;&lt; 8) | buf[1]) &amp; 0x0fff;
+
+		
+
+		/* 以第一个触摸点为例，寄存器TOUCH1_YH(地址0X05),各位描述如下：
+
+		 * bit7:4  Touch ID  触摸ID，表示是哪个触摸点
+
+		 * bit3:0  Y轴触摸点的11~8位。
+
+		 */
+
+		id = (buf[2] &gt;&gt; 4) &amp; 0x0f;
+
+		down = type != TOUCH_EVENT_UP;
+
+
+
+		input_mt_slot(multidata-&gt;input, id);
+
+		input_mt_report_slot_state(multidata-&gt;input, MT_TOOL_FINGER, down);
+
+
+
+		if (!down)
+
+			continue;
+
+
+
+		input_report_abs(multidata-&gt;input, ABS_MT_POSITION_X, x);
+
+		input_report_abs(multidata-&gt;input, ABS_MT_POSITION_Y, y);
+
+	}
+
+
+
+	input_mt_report_pointer_emulation(multidata-&gt;input, true);
+
+	input_sync(multidata-&gt;input);
+
+
+
+fail:
+
+	return IRQ_HANDLED;
+
+
+
+}
+
+
+
+static int ft5x06_ts_irq(struct i2c_client *client, struct ft5x06_dev *dev)
+
+{
+
+	int ret = 0;
+
+
+
+	/* 1,申请中断GPIO */
+
+	if (gpio_is_valid(dev-&gt;irq_pin)) {
+
+		ret = devm_gpio_request_one(&amp;client-&gt;dev, dev-&gt;irq_pin,
+
+					GPIOF_IN, "edt-ft5x06 irq");
+
+		if (ret) {
+
+			dev_err(&amp;client-&gt;dev,
+
+				"Failed to request GPIO %d, error %d\n",
+
+				dev-&gt;irq_pin, ret);
+
+			return ret;
+
+		}
+
+	}
+
+	/* 2，申请中断,client-&gt;irq就是IO中断， */
+
+	ret = devm_request_threaded_irq(&amp;client-&gt;dev, client-&gt;irq, NULL,
+
+					ft5x06_handler, IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
+
+					client-&gt;name, &amp;ft5x06);
+
+	if (ret) {
+
+		dev_err(&amp;client-&gt;dev, "Unable to request touchscreen IRQ.\n");
+
+		return ret;
+
+	}
+
+
+
+	return 0;
+
+}
+
+
+
+
+
+static int ft5x06_ts_probe(struct i2c_client *client, const struct i2c_device_id *id)
+
+{
+
+	int ret = 0;
+
+	printk("ft5426 init\n");
+
+
+
+	ft5x06.client = client;	//保存i2c分配的client信息
+
+
+
+	/*从设备树获取信息*/
+
+	ft5x06.irq_pin = of_get_named_gpio(client-&gt;dev.of_node, "interrupt-gpios", 0);
+
+	ft5x06.reset_pin = of_get_named_gpio(client-&gt;dev.of_node, "reset-gpios", 0);
+
+
+
+	ft5x06_ts_reset(ft5x06.client, &amp;ft5x06);
+
+	ft5x06_ts_irq(ft5x06.client, &amp;ft5x06);
+
+
+
+	/* 4，初始化FT5X06 */
+
+	ft5x06_write_reg(&amp;ft5x06, FT5x06_DEVICE_MODE_REG, 0); 	/* 进入正常模式 	*/
+
+	ft5x06_write_reg(&amp;ft5x06, FT5426_IDG_MODE_REG, 1); 		/* FT5426中断模式	*/
+
+
+
+
+
+/* 5，input设备注册 */
+
+	ft5x06.input = devm_input_allocate_device(&amp;client-&gt;dev);
+
+	if (!ft5x06.input) {
+
+		ret = -ENOMEM;
+
+		goto fail;
+
+	}
+
+	ft5x06.input-&gt;name = client-&gt;name;
+
+	ft5x06.input-&gt;id.bustype = BUS_I2C;
+
+	ft5x06.input-&gt;dev.parent = &amp;client-&gt;dev;
+
+
+
+	__set_bit(EV_KEY, ft5x06.input-&gt;evbit);
+
+	__set_bit(EV_ABS, ft5x06.input-&gt;evbit);
+
+	__set_bit(BTN_TOUCH, ft5x06.input-&gt;keybit);
+
+
+
+	input_set_abs_params(ft5x06.input, ABS_X, 0, 1024, 0, 0);
+
+	input_set_abs_params(ft5x06.input, ABS_Y, 0, 600, 0, 0);
+
+	input_set_abs_params(ft5x06.input, ABS_MT_POSITION_X,0, 1024, 0, 0);
+
+	input_set_abs_params(ft5x06.input, ABS_MT_POSITION_Y,0, 600, 0, 0);	     
+
+	ret = input_mt_init_slots( ft5x06.input, MAX_SUPPORT_POINTS, 0);	//初始化slot信息槽
+
+	if (ret) {
+
+		goto fail;
+
+	}
+
+
+
+	ret = input_register_device(ft5x06.input);
+
+	if (ret)
+
+		goto fail;
+
+
+
+	return 0;
+
+
+
+fail:
+
+	return ret;
+
+
+
+}
+
+
+
+
+
+static int ft5x06_ts_remove(struct i2c_client *client)
+
+{	
+
+	printk("ft5426 exit\n");
+
+	return 0;
+
+}
+
+
+
+
+
+/*
+
+ *  传统驱动匹配表
+
+ */ 
+
+static const struct i2c_device_id ft5x06_ts_id[] = {
+
+	{ "edt-ft5426", 0, },
+
+	{ /* sentinel */ }
+
+};
+
+
+
+/*
+
+ * 设备树匹配表 
+
+ */
+
+static const struct of_device_id ft5x06_of_match[] = {
+
+	{ .compatible = "edt,edt-ft5426", },
+
+	{ /* sentinel */ }
+
+};
+
+
+
+/* i2c驱动结构体 */	
+
+static struct i2c_driver ft5x06_ts_driver = {
+
+	.driver = {
+
+		.owner = THIS_MODULE,
+
+		.name = "edt_ft5x06",
+
+		.of_match_table = of_match_ptr(ft5x06_of_match),
+
+	},
+
+	.id_table = ft5x06_ts_id,
+
+	.probe    = ft5x06_ts_probe,
+
+	.remove   = ft5x06_ts_remove,
+
+};
+
+
+
+
+
+static int __init ft5x06_init(void)
+
+{
+
+	int ret = 0;
+
+
+
+	ret = i2c_add_driver(&amp;ft5x06_ts_driver);
+
+
+
+	return ret;
+
+}
+
+
+
+
+
+static void __exit ft5x06_exit(void)
+
+{
+
+	i2c_del_driver(&amp;ft5x06_ts_driver);
+
+}
+
+
+
+module_init(ft5x06_init);
+
+module_exit(ft5x06_exit);
+
+MODULE_LICENSE("GPL");
+
+MODULE_AUTHOR("ZYC");
+
+
+
+</code></pre> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e1bcf2c693f307d56fdd7319927981b1/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">c&#43;&#43; 中括号字符串转换成数组</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/bd11560b5dfd3339c66fe4f65566dfce/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">VisionTransformer（一）—— Embedding Patched与Word embedding及其实现</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

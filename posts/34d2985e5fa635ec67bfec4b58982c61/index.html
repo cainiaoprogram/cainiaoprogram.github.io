@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>3D目标检测（二）—— 直接处理点云的3D目标检测网络VoteNet、H3DNet - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="3D目标检测（二）—— 直接处理点云的3D目标检测网络VoteNet、H3DNet" />
+<meta property="og:description" content="前言 上次介绍了基于Point-Based方法处理点云的模块，3D目标检测（一）—— 基于Point-Based方法的PointNet点云处理系列,其中相关的模块则是构成本次要介绍的，直接在点云的基础上进行3D目标检测网络的基础。
+VoteNet 对于直接在点云上预测3D的目标框，有一个相对于2D而言难以解决的问题，即我们扫描得到的点云都是表示在物体表面的，而如果只利用物体表面的点云信息来预测其中心及大小信息，显然是有着一定差距的，而VoteNet这篇工作的主要思路就是想办法得到物体内部的点，然后利用这种内部的点来对物体的BB的中心，大小进行预测。（如下图中，原本黑色的点为物体表面的点，通过设计网络来预测得到物体内部中心的红色点以此来进行预测）
+而这种中心的获得，文章主要是通过Hough Voting的思想获得的，Hough Voting有可能大家都对此有诸多的解释，但其主要思路或者说方法就是去构造一个需要检测物体对应的参数空间，像在这里就是一个由边界点到其对应物体中心点的参数空间，那么根据这些物体表面的点在这个参数空间的映射投票，就可以确定其中的中心点。
+而其实VoteNet的网络结构主要可以分为两部分来解读，分别为对点云处理的Backbone部分，和目标框的生产Proposal部分。
+Backbone VoteNet是直接处理点云来进行目标检测的一个很好例子，其Backbone部分，采用了PointNet&#43;&#43;中的SA下采样模块来对点云下采样的同时，提升其特征维度，但考虑到需要进行目标检测，最后采样后剩下的点太少了，于是会在最后接上两个FP模块来在不改变特征维度的情况下，进行上采样，扩充特征空间中的点云数量。
+具体而言：
+SA：FPS最远点采样-&gt;Ball-query&#43;Group进行球查询后获得K个领域-&gt;MLP&#43;Maxpooling经过多层全连接提取特征后汇聚特征。
+FP：将输入第L个SA层的输入输出中的点云，计算距离矩阵来做为插值特征的权重，将得到的插值特征和输入特征拼接经过MLP后，升维得到上采样的点云特征。
+经过Backbone得到的点云，称为Seeds，可以认为Seeds就是2维图像经过特征提取后的对图像的抽象特征表示形式。其实不经过后续的Vote操作来获得物体的中心点，也可以进行目标检测，但如上述所言，经过Vote后的物体内部的点，更能生成精确的位置信息。
+Vote Vote操作即将经过Backbone生成的Seeds点，通过霍夫投票的思想来生成中心点，而为了在网络上方便的训练和融合，作者利用MLP来处理Seeds点，让网络自主的学习从Seeds点到内部中心点的变换，每个点，其中表示点在空间中的坐标，则表示点所带有的特征信息，将点经过MLP&#43;BN&#43;Relu后，网络学习点到其中心点的空间偏移量和特征偏移量以此通过每个投票获得中心点。
+当然，这种Vote的过程是需要监督来完成的，由于我们知道每个BB框的中心点坐标，所以可以通过损失函数的形式来对坐标进行监督，而有关特征偏移量的学习，则相对于一种补偿机制。其中，我们只对是在目标物体表面的Seeds点来进行预测监督。
+Proposal Generate 在得到Votes点后，我们对这些点进行一个SA操作，就相对于对这些点进行了聚合并且分成一簇簇的去提取了特征，即相对于在2D领域经过RPN后把生成的proposal一个个特征向量进一步提取特征。
+在将聚合了Votes点的特征经过预测头，在这里就是MLP&#43;BN&#43;Relu的操作，生成2&#43;3&#43;num_heading_bin*2&#43;num_size*4&#43;num_classes的向量做为proposal向量。其中2为是否是物体判断的objectness scores，3为基于上一步SA层进一步生成聚合点的xyz坐标里真实中心的偏移量，num_heading_bin为BB框的朝向角预测划分离散形式，在sun-rgbd数据集中，就划分为12个角度，细分为180/12=15°。而num_size和2D里常常直接预测BB的大小不同，其也是一种偏移概念，作者统计了每种物体的mean size，然后通过网络来预测其对应的偏移大小，num_classes则是代表预测物体的类别信息。
+像上面说的，不利用Votes点，而利用Seeds点也可以生成proposal点，其区别在于，我们可以通过FPS算法，来对Seeds进行采样获得伪的Votes点，也相对于是一种进一步聚合的方法。
+如果对VoteNet进行总结，可以发现其和2D图像里的二阶段目标检测方法其实是异曲同工的，先通过Backbone来提取特征，对提取出的特征用RPN/SA生成proposal，最后对proposal进一步操作，预测其BB属性。区别的是在直接处理点云的网络中，其把许多卷积的操作换成了SA操作，而且不仅需要处理特征信息，也要注意点云原始空间信息的运用，另外在二维图像中，想要获得更多的感受野，一般都需要卷积操作，而在点云中，则可用通过FPS操作后，ball-query&#43;SA来提升采样点的感受野信息。
+H3DNet H3DNet是VoteNet的续作，其主要对VoteNet中的一些结果进行分析，然后发现仅仅利用Votes点，也就是中心点，对于如画框这种薄的物体，中心信息有可能并不如其边的信息有效，而对于几何信息丰富的BB框的边界，通过其面的约束，可以使其预测的更加精确。于是作者提出不仅要对物体中心点进行votes，对物体每个面的中心votes和物体的边进行votes也是十分有效的。
+而如何Vote的细节，VoteNet中已经提及了，H3DNet需要解决的是，如何将多种Votes的结果利用起来，利用不同Votes的特征来约束生成更加精确的BB。
+其主要思路在于，通过构建一个距离函数来表示每个Votes点距离其真正中心点的距离，其生成的proposal应该有最小化这个距离函数的效果。（中心点&#43;6个面心&#43;12条边的中点=19）
+作者利用和VoteNet一样的方法，使用物体中心的Votes点来生成初始的proposal，然后利用face和edge信息来最小化这个距离函数，以达到refine初始proposal生成更精细结果的特点。
+而在特征融合方面，作者将center的feature当做是初始的特征，分别和来自face和edge的feature进行match，所谓的match就是SA模块：采样&#43;聚合，最后聚合后的face和edge特征concat起来对初始的proposal完成refine。
+总结 H3DNet个人我认为，也是一篇工程性或者带有刷点性质的工作，不过其提供了一种改进直接处理点云网络的思路，就是数据的表达，会对最后的效果产生很大的影响，不像2D的工作，在3D中，由于BB的属性相对于2D而言，多了很多特征，而怎么样的表达形式，可以去更好表征BB框中的特征。如最先VoteNet提出通过内部信息的点的表达会比用表面的点，对最后生成BB框有更好的效果，和H3DNet认为face和edge特征对于BB框的表达很重要等，这种对点云不同表达，是值得研究的课题。
+H3DNet虽然每种信息的表达不是完全孤立或者独立的，但如edge vote和line vote的产生是并行的，只是在特征层面稍微进行了融合，总归不是一种高效的表达形式。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/34d2985e5fa635ec67bfec4b58982c61/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-03-06T22:00:22+08:00" />
+<meta property="article:modified_time" content="2023-03-06T22:00:22+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">3D目标检测（二）—— 直接处理点云的3D目标检测网络VoteNet、H3DNet</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div class="kdocs-document"> 
+ <h2 style="">前言</h2> 
+ <p style="">上次介绍了基于Point-Based方法处理点云的模块，<a class="kdocs-link" style="color:#0A6CFF;" href="https://blog.csdn.net/lzzzzzzm/article/details/129107904?spm=1001.2014.3001.5501" target="_blank" rel="noopener noreferrer">3D目标检测（一）—— 基于Point-Based方法的PointNet点云处理系列</a>,其中相关的模块则是构成本次要介绍的，直接在点云的基础上进行3D目标检测网络的基础。</p> 
+ <ol start="1"><li style="margin-left:1.4em;list-style-type:decimal;text-indent:0;"><h2>VoteNet</h2></li></ol> 
+ <p style="">对于直接在点云上预测3D的目标框，有一个相对于2D而言难以解决的问题，即我们扫描得到的点云都是表示在物体表面的，而如果只利用物体表面的点云信息来预测其中心及大小信息，显然是有着一定差距的，而VoteNet这篇工作的主要思路就是想办法得到物体内部的点，然后利用这种内部的点来对物体的BB的中心，大小进行预测。（如下图中，原本黑色的点为物体表面的点，通过设计网络来预测得到物体内部中心的红色点以此来进行预测）</p> 
+ <div class="kdocs-line-container" style="display:flex;justify-content:center;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:543px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:77.71639%;height:0;"> 
+    <img src="https://images2.imgbox.com/71/2a/FNfjeRWI_o.png" style="margin-left:;display:block;width:543px;margin-top:-77.71639%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="">而这种中心的获得，文章主要是通过Hough Voting的思想获得的，Hough Voting有可能大家都对此有诸多的解释，但其主要思路或者说方法就是去构造一个需要检测物体对应的参数空间，像在这里就是一个由边界点到其对应物体中心点的参数空间，那么根据这些物体表面的点在这个参数空间的映射投票，就可以确定其中的中心点。</p> 
+ <div class="kdocs-line-container" style="display:flex;justify-content:center;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:1326px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:40.57315%;height:0;"> 
+    <img src="https://images2.imgbox.com/32/9c/BxXWkr05_o.png" style="margin-left:;border:solid 1px #E4E4E4;display:block;width:1326px;margin-top:-40.57315%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="">而其实VoteNet的网络结构主要可以分为两部分来解读，分别为对点云处理的Backbone部分，和目标框的生产Proposal部分。</p> 
+ <h3 style="">Backbone</h3> 
+ <p style="">VoteNet是直接处理点云来进行目标检测的一个很好例子，其Backbone部分，采用了PointNet++中的SA下采样模块来对点云下采样的同时，提升其特征维度，但考虑到需要进行目标检测，最后采样后剩下的点太少了，于是会在最后接上两个FP模块来在不改变特征维度的情况下，进行上采样，扩充特征空间中的点云数量。</p> 
+ <p style="">具体而言：</p> 
+ <p style=""><span class="kdocs-bold" style="font-weight:bold;">SA：FPS最远点采样-&gt;Ball-query+Group进行球查询后获得K个领域-&gt;MLP+Maxpooling经过多层全连接提取特征后汇聚特征。</span></p> 
+ <p style=""><span class="kdocs-bold" style="font-weight:bold;">FP：将输入第L个SA层的输入输出中的点云，计算距离矩阵来做为插值特征的权重，将得到的插值特征和输入特征拼接经过MLP后，升维得到上采样的点云特征。</span></p> 
+ <p style="">经过Backbone得到的点云，称为Seeds，可以认为Seeds就是2维图像经过特征提取后的对图像的抽象特征表示形式。其实不经过后续的Vote操作来获得物体的中心点，也可以进行目标检测，但如上述所言，经过Vote后的物体内部的点，更能生成精确的位置信息。</p> 
+ <h3 style="">Vote</h3> 
+ <p style="">Vote操作即将经过Backbone生成的Seeds点，通过霍夫投票的思想来生成中心点，而为了在网络上方便的训练和融合，作者利用MLP来处理Seeds点，让网络自主的学习从Seeds点到内部中心点的变换，每个点<img class="kdocs-latex-img" src="https://images2.imgbox.com/ad/0b/pDEsp2hx_o.png">，其中<img class="kdocs-latex-img" src="https://images2.imgbox.com/03/99/Rw0gRdRU_o.png">表示<img class="kdocs-latex-img" src="https://images2.imgbox.com/90/62/D8x9xq9M_o.png">点在空间中的坐标，<img class="kdocs-latex-img" src="https://images2.imgbox.com/2e/ff/NjQqZMoA_o.png">则表示<img class="kdocs-latex-img" src="https://images2.imgbox.com/48/d5/it55oLff_o.png">点所带有的特征信息，将点<img class="kdocs-latex-img" src="https://images2.imgbox.com/db/8f/SVi28OX0_o.png">经过MLP+BN+Relu后，网络学习<img class="kdocs-latex-img" src="https://images2.imgbox.com/ef/71/kE1FzvRC_o.png">点到其中心点的空间偏移量<img class="kdocs-latex-img" src="https://images2.imgbox.com/93/66/BAaMIMCl_o.png">和特征偏移量<img class="kdocs-latex-img" src="https://images2.imgbox.com/2b/f7/P8QpOrNU_o.png">以此通过每个<img class="kdocs-latex-img" src="https://images2.imgbox.com/53/68/zuL9qMl2_o.png">投票获得中心点。</p> 
+ <p style="text-align:center;"><img class="kdocs-latex-img" src="https://images2.imgbox.com/cc/57/3XLozqYF_o.png"></p> 
+ <p style="text-align:left;">当然，这种Vote的过程是需要监督来完成的，由于我们知道每个BB框的中心点坐标，所以可以通过损失函数的形式来对坐标进行监督，而有关特征偏移量的学习，则相对于一种补偿机制。其中，我们只对是在目标物体表面的Seeds点来进行预测监督。</p> 
+ <p style="text-align:center;"><img class="kdocs-latex-img" src="https://images2.imgbox.com/2a/53/13J4eGc7_o.png"></p> 
+ <h3 style="text-align:left;">Proposal Generate</h3> 
+ <p style="">在得到Votes点后，我们对这些点进行一个SA操作，就相对于对这些点进行了聚合并且分成一簇簇的去提取了特征，即相对于在2D领域经过RPN后把生成的proposal一个个特征向量进一步提取特征。</p> 
+ <div class="kdocs-line-container" style="display:flex;justify-content:center;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:508px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:18.700788%;height:0;"> 
+    <img src="https://images2.imgbox.com/03/b7/aqsggLec_o.png" style="margin-left:;display:block;width:508px;margin-top:-18.700788%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="">在将聚合了Votes点的特征经过预测头，在这里就是MLP+BN+Relu的操作，生成<span class="kdocs-bold" style="font-weight:bold;">2+3+num_heading_bin*2+num_size*4+num_classes的向量做为proposal向量。其中2为是否是物体判断的objectness scores，3为基于上一步SA层进一步生成聚合点的xyz坐标里真实中心的偏移量<img class="kdocs-latex-img" src="https://images2.imgbox.com/45/02/4OwpLRM6_o.png">，num_heading_bin为BB框的朝向角预测划分离散形式，在sun-rgbd数据集中，就划分为12个角度，细分为180/12=15°。而num_size和2D里常常直接预测BB的大小不同，其也是一种偏移概念，作者统计了每种物体的mean size，然后通过网络来预测其对应的偏移大小，num_classes则是代表预测物体的类别信息。</span></p> 
+ <p style="">像上面说的，不利用Votes点，而利用Seeds点也可以生成proposal点，其区别在于，我们可以通过FPS算法，来对Seeds进行采样获得伪的Votes点，也相对于是一种进一步聚合的方法。</p> 
+ <p style="">如果对VoteNet进行总结，可以发现其和2D图像里的二阶段目标检测方法其实是异曲同工的，先通过Backbone来提取特征，对提取出的特征用RPN/SA生成proposal，最后对proposal进一步操作，预测其BB属性。区别的是在直接处理点云的网络中，其把许多卷积的操作换成了SA操作，而且不仅需要处理特征信息，也要注意点云原始空间信息的运用，另外在二维图像中，想要获得更多的感受野，一般都需要卷积操作，而在点云中，则可用通过FPS操作后，ball-query+SA来提升采样点的感受野信息。</p> 
+ <ol start="2"><li style="margin-left:1.4em;list-style-type:decimal;text-indent:0;"><h2>H3DNet</h2></li></ol> 
+ <div class="kdocs-line-container" style="display:flex;justify-content:center;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:371px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:118.86792%;height:0;"> 
+    <img src="https://images2.imgbox.com/2b/bf/ilmOegQC_o.png" style="margin-left:;display:block;width:371px;margin-top:-118.86792%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="">H3DNet是VoteNet的续作，其主要对VoteNet中的一些结果进行分析，然后发现仅仅利用Votes点，也就是中心点，对于如画框这种薄的物体，中心信息有可能并不如其边的信息有效，而对于几何信息丰富的BB框的边界，通过其面的约束，可以使其预测的更加精确。于是作者提出不仅要对物体中心点进行votes，对物体每个面的中心votes和物体的边进行votes也是十分有效的。</p> 
+ <p style="">而如何Vote的细节，VoteNet中已经提及了，H3DNet需要解决的是，如何将多种Votes的结果利用起来，利用不同Votes的特征来约束生成更加精确的BB。</p> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:930px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:45.161293%;height:0;"> 
+    <img src="https://images2.imgbox.com/0d/e5/iQCTJcTR_o.png" style="margin-left:;display:block;width:930px;margin-top:-45.161293%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="">其主要思路在于，通过构建一个距离函数来表示每个Votes点距离其真正中心点的距离，其生成的proposal应该有最小化这个距离函数的效果。（中心点+6个面心+12条边的中点=19）</p> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:727px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:12.654745%;height:0;"> 
+    <img src="https://images2.imgbox.com/c1/3d/G41jhRf0_o.png" style="margin-left:;display:block;width:727px;margin-top:-12.654745%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="">作者利用和VoteNet一样的方法，使用物体中心的Votes点来生成初始的proposal，然后利用face和edge信息来最小化这个距离函数，以达到refine初始proposal生成更精细结果的特点。</p> 
+ <p style="">而在特征融合方面，作者将center的feature当做是初始的特征，分别和来自face和edge的feature进行match，所谓的match就是SA模块：采样+聚合，最后聚合后的face和edge特征concat起来对初始的proposal完成refine。</p> 
+ <h2 style="">总结</h2> 
+ <p style="">H3DNet个人我认为，也是一篇工程性或者带有刷点性质的工作，不过其提供了一种改进直接处理点云网络的思路，就是数据的表达，会对最后的效果产生很大的影响，不像2D的工作，在3D中，由于BB的属性相对于2D而言，多了很多特征，而怎么样的表达形式，可以去更好表征BB框中的特征。如最先VoteNet提出通过内部信息的点的表达会比用表面的点，对最后生成BB框有更好的效果，和H3DNet认为face和edge特征对于BB框的表达很重要等，这种对点云不同表达，是值得研究的课题。</p> 
+ <p style="">H3DNet虽然每种信息的表达不是完全孤立或者独立的，但如edge vote和line vote的产生是并行的，只是在特征层面稍微进行了融合，总归不是一种高效的表达形式。</p> 
+ <p style=""></p> 
+ <p style=""></p> 
+ <p style=""></p> 
+ <p style=""></p> 
+ <p style=""></p> 
+ <p style=""></p> 
+ <p style=""></p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/aa228de1e24f47512f45690b18bf8c8e/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">WGCNA分析 | 全流程代码分享 | 代码二</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/bbce3e30f37d6309c6a70cdace02caf1/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">（小甲鱼python）函数笔记合集七 函数(IX)总结 python实现汉诺塔详解</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>ImageReader丢帧卡顿的优化 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="ImageReader丢帧卡顿的优化" />
+<meta property="og:description" content="我们知道，在android camera里，可以给一个request添加多个target.比如以google的camera2Basic为例：
+private void createCameraPreviewSession() { try { SurfaceTexture texture = mTextureView.getSurfaceTexture(); assert texture != null; // We configure the size of default buffer to be the size of camera preview we want. texture.setDefaultBufferSize(mPreviewSize.getWidth(), mPreviewSize.getHeight()); // This is the output Surface we need to start preview. Surface surface = new Surface(texture); // We set up a CaptureRequest.Builder with the output Surface. mPreviewRequestBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW); mPreviewRequestBuilder.addTarget(surface); mPreviewRequestBuilder.addTarget(mImageReader.getSurface()); // Here, we create a CameraCaptureSession for camera preview." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/bcdd9820268e0a8823761f660ca85e9d/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-02-20T17:23:00+08:00" />
+<meta property="article:modified_time" content="2020-02-20T17:23:00+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">ImageReader丢帧卡顿的优化</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>        我们知道，在android camera里，可以给一个request添加多个target.比如以google的camera2Basic为例：</p> 
+<pre><code>private void createCameraPreviewSession() {
+        try {
+            SurfaceTexture texture = mTextureView.getSurfaceTexture();
+            assert texture != null;
+
+            // We configure the size of default buffer to be the size of camera preview we want.
+            texture.setDefaultBufferSize(mPreviewSize.getWidth(), mPreviewSize.getHeight());
+
+            // This is the output Surface we need to start preview.
+            Surface surface = new Surface(texture);
+
+            // We set up a CaptureRequest.Builder with the output Surface.
+            mPreviewRequestBuilder
+                    = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+            mPreviewRequestBuilder.addTarget(surface);
+            mPreviewRequestBuilder.addTarget(mImageReader.getSurface());
+
+            // Here, we create a CameraCaptureSession for camera preview.
+            mCameraDevice.createCaptureSession(Arrays.asList(surface, mImageReader.getSurface()),
+                    new CameraCaptureSession.StateCallback() {
+
+                        @Override
+                        public void onConfigured(@NonNull CameraCaptureSession cameraCaptureSession) {
+                            // The camera is already closed
+                            if (null == mCameraDevice) {
+                                return;
+                            }
+
+                            // When the session is ready, we start displaying the preview.
+                            mCaptureSession = cameraCaptureSession;
+                            try {
+                                // Auto focus should be continuous for camera preview.
+                             //   mPreviewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE,
+                            //            CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+                                // Flash is automatically enabled when necessary.
+                             //   setAutoFlash(mPreviewRequestBuilder);
+
+                                // Finally, we start displaying the camera preview.
+                                mPreviewRequest = mPreviewRequestBuilder.build();
+                                mCaptureSession.setRepeatingRequest(mPreviewRequest,
+                                        mCaptureCallback, mBackgroundHandler);
+                            } catch (CameraAccessException e) {
+                                e.printStackTrace();
+                            }
+                        }
+
+                        @Override
+                        public void onConfigureFailed(
+                                @NonNull CameraCaptureSession cameraCaptureSession) {
+                            showToast("Failed");
+                        }
+                    }, null
+            );
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+    }
+</code></pre> 
+<p>        在这个函数里，就addTarget了两个surface, 一个是用来预览用的SurfaceTexture，另一个是用来接收预览数据进行处理的imageReader。</p> 
+<p>         我们今天要说的就是这个ImageReader。这个ImageReader的创建方式如下：</p> 
+<pre><code>mImageReader = ImageReader.newInstance(1280, 960,
+               ImageFormat.YUV_420_888, /*maxImages*/2);
+mImageReader.setOnImageAvailableListener(
+               mOnImageAvailableListener, mBackgroundHandler);</code></pre> 
+<p>        这样创建好后，在下面的代码段里收到帧数据，可以用来做拍照或者图像编码处理等：</p> 
+<pre><code>    private final ImageReader.OnImageAvailableListener mOnImageAvailableListener
+            = new ImageReader.OnImageAvailableListener() {
+
+        @Override
+        public void onImageAvailable(ImageReader reader) {
+            Image img = reader.acquireLatestImage(); 
+//          mBackgroundHandler.post(new ImageSaver(reader.acquireNextImage(), mFile));
+            img.close();
+        }
+
+    };</code></pre> 
+<p>        好，现在问题来了。如果我们在newInstance的时候，创建imageReader时用的格式是jpeg或yuv的，那么在onImageAvailable里接收数据的频繁会非常的低。特别是jpeg，每秒大概只能接收到一两帧，yuv也会卡得很，每秒最多不超过15帧。并且同时add了imageReader后，会严重拖慢预览的性能，预览画面也会跟着卡顿起来。特别是在摄像头移动的时候，会有严重的残影。</p> 
+<p>        要解决这个问题，先要弄清楚这个卡顿，究竟是在哪个地方卡住的。是有耗时操作，还是系统内有啥限制导致丢帧？为了弄清这个问题，下面我从系统层入手，排查这个问题。</p> 
+<p>        1.）rameworks\base\core\java\android\hardware\camera2\legacy\RequestThreadManager.java</p> 
+<pre><code>    private final SurfaceTexture.OnFrameAvailableListener mPreviewCallback =
+            new SurfaceTexture.OnFrameAvailableListener() {
+                @Override
+                public void onFrameAvailable(SurfaceTexture surfaceTexture) {
+                    if (mGLThreadManager != null) {
+                        mGLThreadManager.queueNewFrame();
+                    }
+                }
+            };</code></pre> 
+<p>        2.）frameworks\base\core\java\android\hardware\camera2\legacy\GLThreadManager.java</p> 
+<pre><code>    public void queueNewFrame() {
+        Handler handler = mGLHandlerThread.getHandler();
+
+        /**
+         * Avoid queuing more than one new frame.  If we are not consuming faster than frames
+         * are produced, drop frames rather than allowing the queue to back up.
+         */
+        if (!handler.hasMessages(MSG_NEW_FRAME)) {
+            handler.sendMessage(handler.obtainMessage(MSG_NEW_FRAME));
+        } else {
+            Log.e(TAG, "GLThread dropping frame.  Not consuming frames quickly enough!");
+        }
+    }</code></pre> 
+<p>        注意这里的注释，大意是，如果消费帧的速度，比不上生产帧的速度，则会丢弃帧。从这里我们可以大概的猜测下，imageReader丢帧的原因。应该是我们在取帧数据的时候，消耗了太长的时间。也就是取帧的速度，比不上摄像头生产帧的速度。</p> 
+<p>        3.）frameworks\base\core\java\android\hardware\camera2\legacy\GLThreadManager.java</p> 
+<pre><code>    private final Handler.Callback mGLHandlerCb = new Handler.Callback() {
+        ......
+        public boolean handleMessage(Message msg) {
+            ......
+            try {
+                switch (msg.what) {
+                    ......
+                    case MSG_NEW_FRAME:
+						Log.i(TAG, "MSG_NEW_FRAME mDroppingFrames "+mDroppingFrames);
+                        if (mDroppingFrames) {
+                            Log.i(TAG, "Ignoring frame.");
+                            break;
+                        }
+
+                        if (!mConfigured) {
+                            Log.e(TAG, "Dropping frame, EGL context not configured!");
+                        }
+                        mTextureRenderer.drawIntoSurfaces(mCaptureCollector);
+                        break;
+                    ......
+                    default:
+                        Log.e(TAG, "Unhandled message " + msg.what + " on GLThread.");
+                        break;
+                }
+            } catch (Exception e) {
+                //!--
+            }
+            return true;
+        }
+    };</code></pre> 
+<p>        4.)frameworks\base\core\java\android\hardware\camera2\legacy\SurfaceTextureRenderer.java</p> 
+<pre><code>   public void drawIntoSurfaces(CaptureCollector targetCollector) {
+        ......
+        if ((mSurfaces == null || mSurfaces.size() == 0)
+                &amp;&amp; (mConversionSurfaces == null || mConversionSurfaces.size() == 0)) {
+            return;
+        }
+
+        ......
+        for (EGLSurfaceHolder holder : mSurfaces) {
+            if (LegacyCameraDevice.containsSurfaceId(holder.surface, targetSurfaceIds)) {
+                try{
+                    LegacyCameraDevice.setSurfaceDimens(holder.surface, holder.width,
+                            holder.height);
+                    makeCurrent(holder.eglSurface);
+
+                    LegacyCameraDevice.setNextTimestamp(holder.surface, captureHolder.second);
+                    drawFrame(mSurfaceTexture, holder.width, holder.height,
+                            (mFacing == CameraCharacteristics.LENS_FACING_FRONT) ?
+                                    FLIP_TYPE_HORIZONTAL : FLIP_TYPE_NONE);
+                    swapBuffers(holder.eglSurface);
+                } catch (LegacyExceptionUtils.BufferQueueAbandonedException e) {
+                    Log.w(TAG, "Surface abandoned, dropping frame. ", e);
+                    request.setOutputAbandoned();
+                }
+            }
+        }
+		
+        for (EGLSurfaceHolder holder : mConversionSurfaces) {
+            if (LegacyCameraDevice.containsSurfaceId(holder.surface, targetSurfaceIds)) {
+                // glReadPixels reads from the bottom of the buffer, so add an extra vertical flip
+                try {
+                    makeCurrent(holder.eglSurface);
+                    drawFrame(mSurfaceTexture, holder.width, holder.height,
+                            (mFacing == CameraCharacteristics.LENS_FACING_FRONT) ?
+                                    FLIP_TYPE_BOTH : FLIP_TYPE_VERTICAL);
+                } catch (LegacyExceptionUtils.BufferQueueAbandonedException e) {
+                    // Should never hit this.
+                    throw new IllegalStateException("Surface abandoned, skipping drawFrame...", e);
+                }
+                mPBufferPixels.clear();
+                GLES20.glReadPixels(/*x*/ 0, /*y*/ 0, holder.width, holder.height,
+                        GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, mPBufferPixels);
+                checkGlError("glReadPixels");
+                try {
+                    int format = LegacyCameraDevice.detectSurfaceType(holder.surface);
+                    LegacyCameraDevice.setSurfaceDimens(holder.surface, holder.width,
+                            holder.height);
+                    LegacyCameraDevice.setNextTimestamp(holder.surface, captureHolder.second);
+                    //!++ fix pixel data shift.
+                    byte[] pixelArray;
+					Log.i(TAG, "drawIntoSurfaces copyOfRange start, mPBufferPixels.arrayOffset()="+mPBufferPixels.arrayOffset());
+                    if (mPBufferPixels.arrayOffset() == 0) {
+                        pixelArray = mPBufferPixels.array();
+                    } else {
+                        pixelArray = Arrays.copyOfRange(
+                                mPBufferPixels.array(),
+                                mPBufferPixels.arrayOffset(),
+                                mPBufferPixels.capacity() + mPBufferPixels.arrayOffset());
+                    }
+					//这里跑到LegacyCameraDevice.produceFrame，然后在LegacyCameraDevice.produceFrame里的
+					// anw-&gt;queueBuffer里，跑到了android_media_ImageReader.cpp里的onFrameAvailable里。再
+				    //跑了app在的onFrameAvailable
+                    LegacyCameraDevice.produceFrame(holder.surface, pixelArray,
+                            holder.width, holder.height, format);
+                    //!++
+                    //!--
+                } catch (LegacyExceptionUtils.BufferQueueAbandonedException e) {
+                    Log.w(TAG, "Surface abandoned, dropping frame. ", e);
+                    request.setOutputAbandoned();
+                }
+            }
+        }
+        targetCollector.previewProduced();
+
+        if (doTiming) {
+            endGlTiming();
+        }
+    }</code></pre> 
+<p>        在这一步里，我们看到了有两个Surface，一个是mSurfaces队列，还有一个是mConversionSurfaces队列。从代码上看来，两种队列的处理方式不同。mConversionSurfaces的，需要先用GLES20.glReadPixels从gpu将数据拷贝到cpu里来，然后再交由LegacyCameraDevice.produceFrame去将ragb的帧数据，转成app上指定的数据。</p> 
+<p>        以我们这个例子为例，我们app上指定的是YUV_420_888，但是gpu里渲染给surface的数据是rgb的，所以还要转成yuv的才行。看起来，好像是这里拷贝然后再转码耗费的时间导致的卡顿。那我们继续跟进去，在通过glReadPixels取到数据后，将给了LegacyCameraDevice.produceFrame去处理。</p> 
+<p>        5.）frameworks\base\core\java\android\hardware\camera2\legacy\LegacyCameraDevice.java</p> 
+<pre><code>    static void produceFrame(Surface surface, byte[] pixelBuffer, int width,
+                             int height, int pixelFormat)
+            throws BufferQueueAbandonedException {
+        checkNotNull(surface);
+        checkNotNull(pixelBuffer);
+        checkArgumentPositive(width, "width must be positive.");
+        checkArgumentPositive(height, "height must be positive.");
+
+        LegacyExceptionUtils.throwOnError(nativeProduceFrame(surface, pixelBuffer, width, height,
+                pixelFormat));
+    }</code></pre> 
+<p>        6.)frameworks\base\core\jni\android_hardware_camera2_legacy_LegacyCameraDevice.cpp</p> 
+<pre><code>static jint LegacyCameraDevice_nativeProduceFrame(JNIEnv* env, jobject thiz, jobject surface,
+        jbyteArray pixelBuffer, jint width, jint height, jint pixelFormat) {
+    ........
+
+    status_t err = produceFrame(anw, reinterpret_cast&lt;uint8_t*&gt;(pixels), width, height,
+            pixelFormat, bufSize);
+    ........
+    return NO_ERROR;
+}
+</code></pre> 
+<p>        7.)frameworks\base\core\jni\android_hardware_camera2_legacy_LegacyCameraDevice.cpp</p> 
+<pre><code>static status_t produceFrame(const sp&lt;ANativeWindow&gt;&amp; anw,
+                             uint8_t* pixelBuffer,
+                             int32_t bufWidth, // Width of the pixelBuffer
+                             int32_t bufHeight, // Height of the pixelBuffer
+                             int32_t pixelFmt, // Format of the pixelBuffer
+                             int32_t bufSize) {
+    ........
+    switch(pixelFmt) {
+        case HAL_PIXEL_FORMAT_YCrCb_420_SP: {
+            if (bufferLength &lt; totalSizeBytes) {
+                ALOGE("%s: PixelBuffer size %zu too small for given dimensions",
+                        __FUNCTION__, bufferLength);
+                return BAD_VALUE;
+            }
+            uint8_t* img = NULL;
+            ALOGV("%s: Lock buffer from %p for write", __FUNCTION__, anw.get());
+            err = buf-&gt;lock(GRALLOC_USAGE_SW_WRITE_OFTEN, (void**)(&amp;img));
+            if (err != NO_ERROR) return err;
+
+            uint8_t* yPlane = img;
+            uint8_t* uPlane = img + height * width;
+            uint8_t* vPlane = uPlane + 1;
+            size_t chromaStep = 2;
+            size_t yStride = width;
+            size_t chromaStride = width;
+
+            rgbToYuv420(pixelBuffer, width, height, yPlane,
+                    uPlane, vPlane, chromaStep, yStride, chromaStride);
+            break;
+        }
+        case HAL_PIXEL_FORMAT_YV12: {
+            if (bufferLength &lt; totalSizeBytes) {
+                ALOGE("%s: PixelBuffer size %zu too small for given dimensions",
+                        __FUNCTION__, bufferLength);
+                return BAD_VALUE;
+            }
+
+            if ((width &amp; 1) || (height &amp; 1)) {
+                ALOGE("%s: Dimens %zu x %zu are not divisible by 2.", __FUNCTION__, width, height);
+                return BAD_VALUE;
+            }
+
+            uint8_t* img = NULL;
+            //!++
+            ALOGI("%s: Lock buffer from %p for write", __FUNCTION__, anw.get());
+            //!--
+            err = buf-&gt;lock(GRALLOC_USAGE_SW_WRITE_OFTEN, (void**)(&amp;img));
+            if (err != NO_ERROR) {
+                ALOGE("%s: Error %s (%d) while locking gralloc buffer for write.", __FUNCTION__,
+                        strerror(-err), err);
+                return err;
+            }
+
+            uint32_t stride = buf-&gt;getStride();
+            ALOGV("%s: stride is: %" PRIu32, __FUNCTION__, stride);
+            LOG_ALWAYS_FATAL_IF(stride % 16, "Stride is not 16 pixel aligned %d", stride);
+
+            uint32_t cStride = ALIGN(stride / 2, 16);
+            size_t chromaStep = 1;
+
+            uint8_t* yPlane = img;
+            uint8_t* crPlane = img + static_cast&lt;uint32_t&gt;(height) * stride;
+            uint8_t* cbPlane = crPlane + cStride * static_cast&lt;uint32_t&gt;(height) / 2;
+
+            rgbToYuv420(pixelBuffer, width, height, yPlane,
+                    crPlane, cbPlane, chromaStep, stride, cStride);
+            break;
+        }
+        case HAL_PIXEL_FORMAT_YCbCr_420_888: {
+            // Software writes with YCbCr_420_888 format are unsupported
+            // by the gralloc module for now
+            if (bufferLength &lt; totalSizeBytes) {
+                ALOGE("%s: PixelBuffer size %zu too small for given dimensions",
+                        __FUNCTION__, bufferLength);
+                return BAD_VALUE;
+            }
+            android_ycbcr ycbcr = android_ycbcr();
+            ALOGV("%s: Lock buffer from %p for write", __FUNCTION__, anw.get());
+
+            err = buf-&gt;lockYCbCr(GRALLOC_USAGE_SW_WRITE_OFTEN, &amp;ycbcr);
+            if (err != NO_ERROR) {
+                ALOGE("%s: Failed to lock ycbcr buffer, error %s (%d).", __FUNCTION__,
+                        strerror(-err), err);
+                return err;
+            }
+            rgbToYuv420(pixelBuffer, width, height, &amp;ycbcr);
+            break;
+        }
+        case HAL_PIXEL_FORMAT_BLOB: {
+            int8_t* img = NULL;
+            struct camera3_jpeg_blob footer = {
+                .jpeg_blob_id = CAMERA3_JPEG_BLOB_ID,
+                .jpeg_size = (uint32_t)bufferLength
+            };
+
+            size_t totalJpegSize = bufferLength + sizeof(footer);
+            totalJpegSize = (totalJpegSize + 3) &amp; ~0x3; // round up to nearest octonibble
+
+            if (totalJpegSize &gt; totalSizeBytes) {
+                ALOGE("%s: Pixel buffer needs size %zu, cannot fit in gralloc buffer of size %zu",
+                        __FUNCTION__, totalJpegSize, totalSizeBytes);
+                return BAD_VALUE;
+            }
+
+            err = buf-&gt;lock(GRALLOC_USAGE_SW_WRITE_OFTEN, (void**)(&amp;img));
+            if (err != NO_ERROR) {
+                ALOGE("%s: Failed to lock buffer, error %s (%d).", __FUNCTION__, strerror(-err),
+                        err);
+                return err;
+            }
+
+            memcpy(img, pixelBuffer, bufferLength);
+            memcpy(img + totalSizeBytes - sizeof(footer), &amp;footer, sizeof(footer));
+            break;
+        }
+        default: {
+            ALOGE("%s: Invalid pixel format in produceFrame: %x", __FUNCTION__, pixelFmt);
+            return BAD_VALUE;
+        }
+    }
+
+    ALOGV("%s: Unlock buffer from %p", __FUNCTION__, anw.get());
+    err = buf-&gt;unlock();
+    if (err != NO_ERROR) {
+        ALOGE("%s: Failed to unlock buffer, error %s (%d).", __FUNCTION__, strerror(-err), err);
+        return err;
+    }
+    //!++
+    ALOGI("%s: Queue buffer to %p", __FUNCTION__, anw.get());
+    //!--
+    err = anw-&gt;queueBuffer(anw.get(), buf-&gt;getNativeBuffer(), /*fenceFd*/-1);
+    if (err != NO_ERROR) {
+        ALOGE("%s: Failed to queue buffer, error %s (%d).", __FUNCTION__, strerror(-err), err);
+        return err;
+    }
+    return NO_ERROR;
+}</code></pre> 
+<p>        我们可以从这个函数里看到，传进来的数据，都在这里转码。开始我怀疑是这里转码引起的卡顿，后来在这个函数的前后加上打印发现，每次转码都只耗费了1到5毫秒左右的时间。显然，这肯定不会引起卡顿。</p> 
+<p>        如果不是这里，那又会是哪里呢？我们往回找，的第4步的SurfaceTextureRenderer.java文件里的drawIntoSurfaces函数中，传给produceFrame的数据，是先用GLES20.glReadPixels从gpu将数据拷贝到cpu里来，然后再交由LegacyCameraDevice.produceFrame去将ragb的帧数据，转成app上指定的数据的。现在我们再在GLES20.glReadPixels这条语句的前后加上打印log，查看这里耗时多少。</p> 
+<p>        从打印的log看出，当app指定imageReader的格式为 YUV_420_888 的时候，这条语句执行一次，大概耗时120毫秒左右。当然，在不同的机器，不同的版本上，这速度略有不同，总之，这是一个相当耗时的操作。</p> 
+<p>        现在可以定位，问题基本上就是这里引起的。我们app如果指定预览的fps为25的话，理论上imageReader每秒也要收到这么多帧数据才对。但是这里读取一帧的数据，就花费了120毫秒，可想而知，一秒下来，最多能读个七八帧数据。</p> 
+<p>        为什么会这么耗时呢？因为android的默认GraphicBuffer的格式是rgb的，非yv12的。如果指定imageReader的格式为yuv的话，那么这里就要先从gpu里将这个rgb数据拷出来，然后再转成yuv格式的。因为涉及到了从gpu到cpu的数据拷贝，所以会非常的耗时。</p> 
+<p>        问题找到了，该怎么去解决呢？我在网上找到了一个大神的解决方案，用的是双缓冲队列。不过人家用的gles接口是3.0的PBO，我这边是2.0的，接口有些不同，不能直接拿过来用。如果哪位刚好用的也是3.0的opengl，那么刚好可以参考下，下面附上这位大神的链接：</p> 
+<p><a href="https://blog.csdn.net/c553110519/article/details/73294172">https://blog.csdn.net/c553110519/article/details/73294172</a></p> 
+<p>        上面说到了PBO，我这里顺便就说一下这个PBO是个什么东西。 PBO是Pixel Buffer Object的缩写，在做camera模块的同学，大多都有从FBO读取像素数据的需求，熟悉<code>OpenGL ES</code>的应该首先想到了<code>glReadPixels</code>，而了解更为深入的相信都会使用更为高效的<code>PBO，就像上面那篇文章的大神。 </code></p> 
+<p><code>  glReadPixels</code>是<code>OpenGL ES 2.0</code>和<code>OpenGL ES 3.0</code>都支持的api，使用最为简单广泛，只需要绑定一个<code>FBO</code>，然后就可以通过<code>glReadPixels</code>来读取像素数据到一个指定的缓冲区就可以了。这是本文所有方式中最为低效的，但因为其简单通用，所以使用广泛。</p> 
+<p><code>PBO</code>是<code>OpenGL ES 3.0</code>开始提供的一种方式，主要应用于从内存快速复制纹理到显存，或从显存复制像素数据到内存。由于现在Android的生态还有大部分只支持到<code>OpenGL ES 2.0</code>的硬件存在，所以通常需要跟<code>glReadPixels</code>配合使用。判断硬件api版本，如果是<code>3.0</code>就使用<code>PBO</code>，否则使用<code>glReadPixels</code>。虽然使用起来比第一中方法要复杂很多，但是却能大幅提高性能，所以还是值得的。<br>   <code>PBO</code>的主要优点是可以通过<code>DMA (Direct Memory Access)</code>快速地在显卡上传递像素数据，而不影响CPU的时钟周期（中断）。另一个优势是它还具备<code>异步DMA</code>传输。也正因为这个特性，使得在使用单个<code>PBO</code>的情况下，性能提升并不明显，所以通常需要两个<code>PBO</code>配合使用。<br>   在使用的时候，先绑定第一个PBO，然后调用另一个特殊的<code>glReadPixels</code>异步读取像素数据，这时候会立即返回，而不是像第一种方法那样需要等待。于此同时，去取出第二个PBO的数据（如果已经准备好），PBO数据的读取主要通过<code>glMapBufferRange</code>（内存映射）的方式。</p> 
+<pre><code>private fun initPBOs() {
+    val size = width * height * 4
+    pbos = IntArray(2)
+    GLES30.glGenBuffers(2, pbos, 0)
+    GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbos!![0])
+    GLES30.glBufferData(GLES30.GL_PIXEL_PACK_BUFFER, size, null, GLES30.GL_STATIC_READ)
+    GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbos!![1])
+    GLES30.glBufferData(GLES30.GL_PIXEL_PACK_BUFFER, size, null, GLES30.GL_STATIC_READ)
+    GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
+}
+private fun readPixelsFromPBO(frameBuffer: Int) {
+    GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, frameBuffer)
+    //绑定到第一个PBO
+    GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbos!![index])
+    GLHelper.glReadPixels(0, 0, width, height, Egl.GL_CLOLR_DEFAULT, GLES30.GL_UNSIGNED_BYTE)
+    //绑定到第二个PBO
+    GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbos!![nextIndex])
+    //glMapBufferRange会等待DMA传输完成，所以需要交替使用pbo
+    //映射内存
+    pixelsBuffer = PixelsBuffer.wrap(GLES30.glMapBufferRange(GLES30.GL_PIXEL_PACK_BUFFER,
+            0, width * height * Egl.COLOR_CHANNELS, GLES30.GL_MAP_READ_BIT) as ByteBuffer)
+    //            PushLog.e("glMapBufferRange: " + GLES30.glGetError());
+    //解除映射
+    GLES30.glUnmapBuffer(GLES30.GL_PIXEL_PACK_BUFFER)
+    //解除绑定PBO
+    GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, GLES20.GL_NONE)
+    GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, GLES20.GL_NONE)
+    //交换索引
+    index = (index + 1) % 2
+    nextIndex = (nextIndex + 1) % 2
+}
+/**
+ * 最后记得要释放
+ */
+private fun releasePBO() {
+    if (null != pbos) {
+        GLES20.glDeleteBuffers(pbos!!.size, pbos, 0)
+    }
+}</code></pre> 
+<p>        上面这段关于PBO的描述，是参考的下面这篇博客，有兴趣的可以去看看：<a href="https://www.jianshu.com/p/3be97e897531" rel="nofollow">https://www.jianshu.com/p/3be97e897531</a></p> 
+<p>        对于对opengl接口不熟，app上用imageReader的目的只是用来拍照的，可以先换另一种思路。我们还是从第4步看起，在第4步的SurfaceTextureRenderer.java文件里的drawIntoSurfaces函数中，有两个for循环，用来处理两路surface.上面讲的是第二路的mConversionSurfaces，还有一咱是mSurfaces。 这两路有什么区别呢？我们可以在这个文件里查找一下，会发现如下代码：</p> 
+<pre><code>   public void configureSurfaces(Collection&lt;Pair&lt;Surface, Size&gt;&gt; surfaces) {
+        ......
+
+        for (Pair&lt;Surface, Size&gt; p : surfaces) {
+            Surface s = p.first;
+            Size surfaceSize = p.second;
+            // If pixel conversions aren't handled by egl, use a pbuffer
+            try {
+                EGLSurfaceHolder holder = new EGLSurfaceHolder();
+                holder.surface = s;
+                holder.width = surfaceSize.getWidth();
+                holder.height = surfaceSize.getHeight();
+                if (LegacyCameraDevice.needsConversion(s)) {
+                    mConversionSurfaces.add(holder);
+                    // LegacyCameraDevice is the producer of surfaces if it's not handled by EGL,
+                    // so LegacyCameraDevice needs to connect to the surfaces.
+                    LegacyCameraDevice.connectSurface(s);
+                } else {
+                    mSurfaces.add(holder);
+                }
+            } catch (LegacyExceptionUtils.BufferQueueAbandonedException e) {
+                Log.w(TAG, "Surface abandoned, skipping configuration... ", e);
+            }
+        }
+}</code></pre> 
+<pre><code>    static boolean needsConversion(Surface s) throws BufferQueueAbandonedException {
+        int nativeType = detectSurfaceType(s);
+        return nativeType == ImageFormat.YUV_420_888 || nativeType == ImageFormat.YV12 ||
+                nativeType == ImageFormat.NV21;
+    }</code></pre> 
+<p>        从这里可以看出，当我们app上设置的是yuv格式时，就会添加到mConversionSurfaces这个队列里，再对它进行转码。如果不是yuv格式的，则添加到另一个队列mSurfaces.</p> 
+<p>        8.）frameworks\base\core\java\android\hardware\camera2\legacy\SurfaceTextureRenderer.java</p> 
+<pre><code> public void drawIntoSurfaces(CaptureCollector targetCollector) {
+        ........
+        for (EGLSurfaceHolder holder : mSurfaces) {
+			Log.i(TAG, "drawIntoSurfaces a6, j="+j);
+			j++;
+            if (LegacyCameraDevice.containsSurfaceId(holder.surface, targetSurfaceIds)) {
+                try{
+					Log.i(TAG, "drawIntoSurfaces a7");
+                    LegacyCameraDevice.setSurfaceDimens(holder.surface, holder.width,
+                            holder.height);
+                    makeCurrent(holder.eglSurface);
+
+                    LegacyCameraDevice.setNextTimestamp(holder.surface, captureHolder.second);
+                    drawFrame(mSurfaceTexture, holder.width, holder.height,
+                            (mFacing == CameraCharacteristics.LENS_FACING_FRONT) ?
+                                    FLIP_TYPE_HORIZONTAL : FLIP_TYPE_NONE);
+                    swapBuffers(holder.eglSurface);
+                } catch (LegacyExceptionUtils.BufferQueueAbandonedException e) {
+                    Log.w(TAG, "Surface abandoned, dropping frame. ", e);
+                    request.setOutputAbandoned();
+                }
+            }
+        }
+        ........
+}</code></pre> 
+<p>        9.）frameworks\base\core\java\android\hardware\camera2\legacy\SurfaceTextureRenderer.java</p> 
+<pre><code>    private boolean swapBuffers(EGLSurface surface)
+            throws LegacyExceptionUtils.BufferQueueAbandonedException {
+        boolean result = EGL14.eglSwapBuffers(mEGLDisplay, surface);
+        int error = EGL14.eglGetError();
+        if (error == EGL14.EGL_BAD_SURFACE) {
+            throw new LegacyExceptionUtils.BufferQueueAbandonedException();
+        } else if (error != EGL14.EGL_SUCCESS) {
+            throw new IllegalStateException("swapBuffers: EGL error: 0x" +
+                    Integer.toHexString(error));
+        }
+        return result;
+    }</code></pre> 
+<p>     </p> 
+<p>        这里没有去从gpu里取数据，而是使用的swapBuffers来将EGLDisplay, surface两个缓冲的地址对队一下，这里实际上使用的，也就是opengl的双缓冲机制，速度相当之快，大约在2毫秒左右不到就完成了数据交换。如图所示：</p> 
+<p><img alt="" height="353" src="https://images2.imgbox.com/a8/0b/RTobq4Mg_o.png" width="600"></p> 
+<p>        利用双缓冲进行Swap的时候，Display和Surface进行实际意义上的地址交换，来实现eglSwapBuffers的标准， 如上图的右侧所示。上图的左侧表示，单缓冲Framebuffer的形式，Surface永远都在后端， 显示的永远是Display，在GPU出现后已不使用。       </p> 
+<p>        既然采用这种方式速度最快，那么我们就可使用这种方式了。怎么才能使用这种方式呢？正如我们上面第7步所描述的，只要使用的不是yuv的数据，都会走这一步。那我们看看除了yuv数据，我们app都可以设置哪些格式。</p> 
+<p>        10.）frameworks\base\media\jni\android_media_ImageReader.cpp</p> 
+<pre><code>static jint ImageReader_imageSetup(JNIEnv* env, jobject thiz, jobject image) {
+        if (imgReaderFmt != bufferFormat) {
+            if (imgReaderFmt == HAL_PIXEL_FORMAT_YCbCr_420_888 &amp;&amp;
+                    isPossiblyYUV(bufferFormat)) {
+                // Treat formats that are compatible with flexible YUV
+                // (HAL_PIXEL_FORMAT_YCbCr_420_888) as HAL_PIXEL_FORMAT_YCbCr_420_888.
+                ALOGV("%s: Treat buffer format to 0x%x as HAL_PIXEL_FORMAT_YCbCr_420_888",
+                        __FUNCTION__, bufferFormat);
+            } else if (imgReaderFmt == HAL_PIXEL_FORMAT_BLOB &amp;&amp;
+                    bufferFormat == HAL_PIXEL_FORMAT_RGBA_8888) {
+                // Using HAL_PIXEL_FORMAT_RGBA_8888 Gralloc buffers containing JPEGs to get around
+                // SW write limitations for (b/17379185).
+                ALOGV("%s: Receiving JPEG in HAL_PIXEL_FORMAT_RGBA_8888 buffer.", __FUNCTION__);
+            } else {
+                // Return the buffer to the queue. No need to provide fence, as this buffer wasn't
+                // used anywhere yet.
+                bufferConsumer-&gt;releaseBuffer(*buffer);
+                ctx-&gt;returnBufferItem(buffer);
+
+                // Throw exception
+                ALOGE("Producer output buffer format: 0x%x, ImageReader configured format: 0x%x",
+                        bufferFormat, ctx-&gt;getBufferFormat());
+                String8 msg;
+                msg.appendFormat("The producer output buffer format 0x%x doesn't "
+                        "match the ImageReader's configured buffer format 0x%x.",
+                        bufferFormat, ctx-&gt;getBufferFormat());
+                jniThrowException(env, "java/lang/UnsupportedOperationException",
+                        msg.string());
+                return -1;
+            }
+        }
+}</code></pre> 
+<p>        从上面代码可以看出，如果是yuv格式的，是直接支持的（注意，是部份yuv格式，即只有yv12,、ycbcr_420_888、ycbcr_422_sp、ycrcb_420_sp、ycbcr_422_I这5种yuv格式的才支持），详情可以看\frameworks\native\libs\gui\CpuConsumer.cpp</p> 
+<pre><code>
+static bool isPossiblyYUV(PixelFormat format) {
+    switch (static_cast&lt;int&gt;(format)) {
+        case HAL_PIXEL_FORMAT_RGBA_8888:
+        case HAL_PIXEL_FORMAT_RGBX_8888:
+        case HAL_PIXEL_FORMAT_RGBA_FP16:
+        case HAL_PIXEL_FORMAT_RGBA_1010102:
+        case HAL_PIXEL_FORMAT_RGB_888:
+        case HAL_PIXEL_FORMAT_RGB_565:
+        case HAL_PIXEL_FORMAT_BGRA_8888:
+        case HAL_PIXEL_FORMAT_Y8:
+        case HAL_PIXEL_FORMAT_Y16:
+        case HAL_PIXEL_FORMAT_RAW16:
+        case HAL_PIXEL_FORMAT_RAW10:
+        case HAL_PIXEL_FORMAT_RAW_OPAQUE:
+        case HAL_PIXEL_FORMAT_BLOB:
+        case HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED:
+            return false;
+
+        case HAL_PIXEL_FORMAT_YV12:
+        case HAL_PIXEL_FORMAT_YCbCr_420_888:
+        case HAL_PIXEL_FORMAT_YCbCr_422_SP:
+        case HAL_PIXEL_FORMAT_YCrCb_420_SP:
+        case HAL_PIXEL_FORMAT_YCbCr_422_I:
+        default:
+            return true;
+    }
+}</code></pre> 
+<p>        如果app设置的格式不是yuv的，那么如果设置的是HAL_PIXEL_FORMAT_BLOB(即jpeg，对应关系看下面的函数)格式的，且当前设备输出的mGraphicBuffer的格式是HAL_PIXEL_FORMAT_RGBA_8888的，那么也是支持的。</p> 
+<pre><code>int android_view_Surface_mapPublicFormatToHalFormat(PublicFormat f) {
+
+    switch(f) {
+        case PublicFormat::JPEG:
+        case PublicFormat::DEPTH_POINT_CLOUD:
+            return HAL_PIXEL_FORMAT_BLOB;
+        case PublicFormat::DEPTH16:
+            return HAL_PIXEL_FORMAT_Y16;
+        case PublicFormat::RAW_SENSOR:
+        case PublicFormat::RAW_DEPTH:
+            return HAL_PIXEL_FORMAT_RAW16;
+        default:
+            // Most formats map 1:1
+            return static_cast&lt;int&gt;(f);
+    }
+}</code></pre> 
+<p>        如果即不是yuv的，又不是blob的，那么只要app上设置的imageReader的格式，和当前设备输出的mGraphicBuffer的格式是一致的，也是可以的。</p> 
+<p>        比如，app上设置的是HAL_PIXEL_FORMAT_RGBA_8888，且当前设备的mGraphicBuffer的格式也是HAL_PIXEL_FORMAT_RGBA_8888，那么也是支持的，是可以直接用双缓冲来处理渲染的。但是如果app设置的格式和设备的mGraphicBuffer的格式不一致，那就不支持 了。</p> 
+<p>       比如，app上设置的是HAL_PIXEL_FORMAT_RGBA_8888，且当前设备的mGraphicBuffer的格式是HAL_PIXEL_FORMAT_RGBX_8888，那么就会报错。</p> 
+<p>        这个当前设备的mGraphicBuffer的格式默认值，是由gpu驱动来决定的。具体的可以参考hardware\libhardware\modules\gralloc\framebuffer.cpp里的fb_device_open函数。</p> 
+<pre><code>int fb_device_open(hw_module_t const* module, const char* name,
+        hw_device_t** device)
+{
+    int status = -EINVAL;
+    if (!strcmp(name, GRALLOC_HARDWARE_FB0)) {
+        /* initialize our state here */
+        fb_context_t *dev = (fb_context_t*)malloc(sizeof(*dev));
+        memset(dev, 0, sizeof(*dev));
+
+        /* initialize the procs */
+        dev-&gt;device.common.tag = HARDWARE_DEVICE_TAG;
+        dev-&gt;device.common.version = 0;
+        dev-&gt;device.common.module = const_cast&lt;hw_module_t*&gt;(module);
+        dev-&gt;device.common.close = fb_close;
+        dev-&gt;device.setSwapInterval = fb_setSwapInterval;
+        dev-&gt;device.post            = fb_post;
+        dev-&gt;device.setUpdateRect = 0;
+
+        private_module_t* m = (private_module_t*)module;
+        status = mapFrameBuffer(m);
+        if (status &gt;= 0) {
+            int stride = m-&gt;finfo.line_length / (m-&gt;info.bits_per_pixel &gt;&gt; 3);
+            int format = (m-&gt;info.bits_per_pixel == 32)
+                         ? (m-&gt;info.red.offset ? HAL_PIXEL_FORMAT_BGRA_8888 : HAL_PIXEL_FORMAT_RGBX_8888)
+                         : HAL_PIXEL_FORMAT_RGB_565;
+            const_cast&lt;uint32_t&amp;&gt;(dev-&gt;device.flags) = 0;
+            const_cast&lt;uint32_t&amp;&gt;(dev-&gt;device.width) = m-&gt;info.xres;
+            const_cast&lt;uint32_t&amp;&gt;(dev-&gt;device.height) = m-&gt;info.yres;
+            const_cast&lt;int&amp;&gt;(dev-&gt;device.stride) = stride;
+            const_cast&lt;int&amp;&gt;(dev-&gt;device.format) = format;
+            const_cast&lt;float&amp;&gt;(dev-&gt;device.xdpi) = m-&gt;xdpi;
+            const_cast&lt;float&amp;&gt;(dev-&gt;device.ydpi) = m-&gt;ydpi;
+            const_cast&lt;float&amp;&gt;(dev-&gt;device.fps) = m-&gt;fps;
+            const_cast&lt;int&amp;&gt;(dev-&gt;device.minSwapInterval) = 1;
+            const_cast&lt;int&amp;&gt;(dev-&gt;device.maxSwapInterval) = 1;
+            *device = &amp;dev-&gt;device.common;
+        }
+    }
+    return status;
+}
+</code></pre> 
+<p>      当然，mGraphicBuffer的format，也可以通过frameworks\native\libs\nativewindow\include\system\windows.h里的<em>native_window_set_buffers_format </em>这个函数来手动设置。</p> 
+<pre><code>
+/*
+ * native_window_set_buffers_format(..., int format)
+ * All buffers dequeued after this call will have the format specified.
+ *
+ * If the specified format is 0, the default buffer format will be used.
+ */
+static inline int native_window_set_buffers_format(
+        struct ANativeWindow* window,
+        int format)
+{
+    return window-&gt;perform(window, NATIVE_WINDOW_SET_BUFFERS_FORMAT, format);
+}
+
+</code></pre> 
+<p> </p> 
+<p>      最后总结一下，如果你不懂opengl的双缓冲技术，但是又想用imageReader高速的取到每一帧数据，那么就不要去用yuv的 格式，只用和你当前设备匹配的格式。比如我这边用的是：</p> 
+<pre><code>               mImageReader = ImageReader.newInstance(1280, 960,
+                        PixelFormat.RGBA_8888, /*maxImages*/2); </code></pre> 
+<p>        这样，onImageAvailable就可以非常快的取到每一帧的数据了。</p> 
+<p>         本人建了个android camera系统 微信群，不过现在群成员超200了，不能通过二维码扫码加入，有兴趣的，可以加我微信号：xuhui_7810，到时拉你们入群。</p> 
+<p> </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/505099029da9adb8ff7ee8eb1b45d394/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">大龄程序员的前途在哪里？</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/b0ff696d339146ac29a9bf1638e52e5d/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">目标检测学习之路——YOLOv3</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

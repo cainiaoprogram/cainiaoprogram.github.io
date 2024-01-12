@@ -1,0 +1,1040 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Iceberg: COW模式下的MERGE INTO的执行流程 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Iceberg: COW模式下的MERGE INTO的执行流程" />
+<meta property="og:description" content="MergeInto命令 MERGE INTO target_table t USING source_table s ON s.id = t.id //这里是JOIN的关联条件 WHEN MATCHED AND s.opType = &#39;delete&#39; THEN DELETE // WHEN条件是对当前行进行打标的匹配条件 WHEN MATCHED AND s.opType = &#39;update&#39; THEN UPDATE SET id = s.id, name = s.name WHEN NOT MATCHED AND s.opType = &#39;insert&#39; THEN INSERT (key, value) VALUES (key, value) 如上是一条MERGE INTO语句，经过Spark Analyzer解析时，会发现它是MERGE INTO命令，因此将解析target_table对应生成的SparkTable实例封装成RowLevelOperationTable的实例，它会绑定一个SparkCopyOnWriteOperation的实例，并且实现了创建ScanBuilder和WriteBuilder的方法。
+ScanBuilder和WriteBuilder是Spark中定义的接口，分别用于构建读数据器（Scan）和写数据器（BatchWrite）。
+Iceberg基于Spark 3.x提供的外部Catalog及相关的读写接口，实现了对于Iceberg表（存储格式）的数据读写。
+下面以SparkCopyOnWriteOperation跟踪分析如何利用Spark写出数据为Iceberg表格式。
+Iceberg行级更新的操作，目前支持UPDATE / DELETE / MERGE INTO三个语法。
+预备知识 SparkTable定义 public class SparkTable implements org." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/5e7b9f12ddffbac27a701d4d7cc75d7d/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-05T20:06:01+08:00" />
+<meta property="article:modified_time" content="2024-01-05T20:06:01+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Iceberg: COW模式下的MERGE INTO的执行流程</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="MergeInto_1"></a>MergeInto命令</h2> 
+<pre><code class="prism language-sql"><span class="token keyword">MERGE</span> <span class="token keyword">INTO</span> target_table t
+<span class="token keyword">USING</span> source_table s
+<span class="token keyword">ON</span> s<span class="token punctuation">.</span>id <span class="token operator">=</span> t<span class="token punctuation">.</span>id                <span class="token comment">//这里是JOIN的关联条件</span>
+<span class="token keyword">WHEN</span> <span class="token keyword">MATCHED</span> <span class="token operator">AND</span> s<span class="token punctuation">.</span>opType <span class="token operator">=</span> <span class="token string">'delete'</span> <span class="token keyword">THEN</span> <span class="token keyword">DELETE</span> <span class="token comment">// WHEN条件是对当前行进行打标的匹配条件</span>
+<span class="token keyword">WHEN</span> <span class="token keyword">MATCHED</span> <span class="token operator">AND</span> s<span class="token punctuation">.</span>opType <span class="token operator">=</span> <span class="token string">'update'</span> <span class="token keyword">THEN</span> <span class="token keyword">UPDATE</span> <span class="token keyword">SET</span> id <span class="token operator">=</span> s<span class="token punctuation">.</span>id<span class="token punctuation">,</span> name <span class="token operator">=</span> s<span class="token punctuation">.</span>name
+<span class="token keyword">WHEN</span> <span class="token operator">NOT</span> <span class="token keyword">MATCHED</span> <span class="token operator">AND</span> s<span class="token punctuation">.</span>opType <span class="token operator">=</span> <span class="token string">'insert'</span> <span class="token keyword">THEN</span> <span class="token keyword">INSERT</span> <span class="token punctuation">(</span><span class="token keyword">key</span><span class="token punctuation">,</span> <span class="token keyword">value</span><span class="token punctuation">)</span> <span class="token keyword">VALUES</span> <span class="token punctuation">(</span><span class="token keyword">key</span><span class="token punctuation">,</span> <span class="token keyword">value</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>如上是一条MERGE INTO语句，经过Spark Analyzer解析时，会发现它是<code>MERGE INTO</code>命令，因此将解析<code>target_table</code>对应生成的<code>SparkTable实例</code>封装成<code>RowLevelOperationTable</code>的实例，它会绑定一个<code>SparkCopyOnWriteOperation</code>的实例，并且实现了创建<code>ScanBuilder</code>和<code>WriteBuilder</code>的方法。</p> 
+<blockquote> 
+ <p>ScanBuilder和WriteBuilder是Spark中定义的接口，分别用于构建读数据器（Scan）和写数据器（BatchWrite）。</p> 
+</blockquote> 
+<p>Iceberg基于Spark 3.x提供的外部Catalog及相关的读写接口，实现了对于Iceberg表（存储格式）的数据读写。</p> 
+<p>下面以<code>SparkCopyOnWriteOperation</code>跟踪分析如何利用Spark写出数据为Iceberg表格式。</p> 
+<blockquote> 
+ <p>Iceberg行级更新的操作，目前支持UPDATE / DELETE / MERGE INTO三个语法。</p> 
+</blockquote> 
+<h3><a id="_20"></a>预备知识</h3> 
+<h4><a id="SparkTable_21"></a>SparkTable定义</h4> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">SparkTable</span>
+    <span class="token keyword">implements</span> <span class="token class-name"><span class="token namespace">org<span class="token punctuation">.</span>apache<span class="token punctuation">.</span>spark<span class="token punctuation">.</span>sql<span class="token punctuation">.</span>connector<span class="token punctuation">.</span>catalog<span class="token punctuation">.</span></span>Table</span><span class="token punctuation">,</span> <span class="token comment">// 继承自Spark的接口</span>
+        <span class="token class-name">SupportsRead</span><span class="token punctuation">,</span>
+        <span class="token class-name">SupportsWrite</span><span class="token punctuation">,</span>
+        <span class="token class-name">SupportsDelete</span><span class="token punctuation">,</span> <span class="token comment">// 支持删除</span>
+        <span class="token class-name">SupportsRowLevelOperations</span><span class="token punctuation">,</span> <span class="token comment">// 支持行级的数据更新</span>
+        <span class="token class-name">SupportsMetadataColumns</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">Table</span> icebergTable<span class="token punctuation">;</span>
+  <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">Long</span> snapshotId<span class="token punctuation">;</span>
+  <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token keyword">boolean</span> refreshEagerly<span class="token punctuation">;</span>
+  <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">Set</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">TableCapability</span><span class="token punctuation">&gt;</span></span> capabilities<span class="token punctuation">;</span>
+  <span class="token keyword">private</span> <span class="token class-name">String</span> branch<span class="token punctuation">;</span>
+  <span class="token keyword">private</span> <span class="token class-name">StructType</span> lazyTableSchema <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+  <span class="token keyword">private</span> <span class="token class-name">SparkSession</span> lazySpark <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+
+  <span class="token keyword">public</span> <span class="token class-name">SparkTable</span><span class="token punctuation">(</span><span class="token class-name">Table</span> icebergTable<span class="token punctuation">,</span> <span class="token class-name">Long</span> snapshotId<span class="token punctuation">,</span> <span class="token keyword">boolean</span> refreshEagerly<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>icebergTable <span class="token operator">=</span> icebergTable<span class="token punctuation">;</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>snapshotId <span class="token operator">=</span> snapshotId<span class="token punctuation">;</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>refreshEagerly <span class="token operator">=</span> refreshEagerly<span class="token punctuation">;</span>
+
+    <span class="token keyword">boolean</span> acceptAnySchema <span class="token operator">=</span>
+        <span class="token class-name">PropertyUtil</span><span class="token punctuation">.</span><span class="token function">propertyAsBoolean</span><span class="token punctuation">(</span>
+            icebergTable<span class="token punctuation">.</span><span class="token function">properties</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token class-name">TableProperties</span><span class="token punctuation">.</span><span class="token constant">SPARK_WRITE_ACCEPT_ANY_SCHEMA</span><span class="token punctuation">,</span>
+            <span class="token class-name">TableProperties</span><span class="token punctuation">.</span><span class="token constant">SPARK_WRITE_ACCEPT_ANY_SCHEMA_DEFAULT</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>capabilities <span class="token operator">=</span> acceptAnySchema <span class="token operator">?</span> <span class="token constant">CAPABILITIES_WITH_ACCEPT_ANY_SCHEMA</span> <span class="token operator">:</span> <span class="token constant">CAPABILITIES</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+  
+  <span class="token comment">/**
+   * 该表支持读取，因此实现了此方法返回一个ScanBuilder实例
+   */</span>
+  <span class="token annotation punctuation">@Override</span>
+  <span class="token keyword">public</span> <span class="token class-name">ScanBuilder</span> <span class="token function">newScanBuilder</span><span class="token punctuation">(</span><span class="token class-name">CaseInsensitiveStringMap</span> options<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>options<span class="token punctuation">.</span><span class="token function">containsKey</span><span class="token punctuation">(</span><span class="token class-name">SparkReadOptions</span><span class="token punctuation">.</span><span class="token constant">FILE_SCAN_TASK_SET_ID</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">// skip planning the job and fetch already staged file scan tasks</span>
+      <span class="token comment">// 如果设置了此参数，则会在读取数据后，将此次生成的Iceberg ScanTasks缓存在本地进程中的ScanTaskSetManager实例里，</span>
+      <span class="token comment">// 后面再对同相同的FileSet集合（或scan file的任务集合）构建时，可以避免重复构建任务集，</span>
+      <span class="token comment">// 起到缓存的作用</span>
+      <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">SparkFilesScanBuilder</span><span class="token punctuation">(</span><span class="token function">sparkSession</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> icebergTable<span class="token punctuation">,</span> options<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>options<span class="token punctuation">.</span><span class="token function">containsKey</span><span class="token punctuation">(</span><span class="token class-name">SparkReadOptions</span><span class="token punctuation">.</span><span class="token constant">SCAN_TASK_SET_ID</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">// 作用同上</span>
+      <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">SparkStagedScanBuilder</span><span class="token punctuation">(</span><span class="token function">sparkSession</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> icebergTable<span class="token punctuation">,</span> options<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>refreshEagerly<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      icebergTable<span class="token punctuation">.</span><span class="token function">refresh</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">// 可以支持基于branch或是基于SnapshotId创建SparkTable</span>
+    <span class="token comment">// 如果基于SnapshotID，则需要显示地解析SnapshotId归属的branch</span>
+    <span class="token class-name">CaseInsensitiveStringMap</span> scanOptions <span class="token operator">=</span>
+        branch <span class="token operator">!=</span> <span class="token keyword">null</span> <span class="token operator">?</span> options <span class="token operator">:</span> <span class="token function">addSnapshotId</span><span class="token punctuation">(</span>options<span class="token punctuation">,</span> snapshotId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">SparkScanBuilder</span><span class="token punctuation">(</span>
+        <span class="token function">sparkSession</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> icebergTable<span class="token punctuation">,</span> branch<span class="token punctuation">,</span> <span class="token function">snapshotSchema</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> scanOptions<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+  
+  <span class="token comment">/**
+   * 该表支持写，因此实现了此方法返回一个WriteBuilder实例
+   */</span>
+  <span class="token annotation punctuation">@Override</span>
+  <span class="token keyword">public</span> <span class="token class-name">WriteBuilder</span> <span class="token function">newWriteBuilder</span><span class="token punctuation">(</span><span class="token class-name">LogicalWriteInfo</span> info<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token class-name">Preconditions</span><span class="token punctuation">.</span><span class="token function">checkArgument</span><span class="token punctuation">(</span>
+        snapshotId <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">,</span> <span class="token string">"Cannot write to table at a specific snapshot: %s"</span><span class="token punctuation">,</span> snapshotId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">SparkWriteBuilder</span><span class="token punctuation">(</span><span class="token function">sparkSession</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> icebergTable<span class="token punctuation">,</span> branch<span class="token punctuation">,</span> info<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="Spark_Analyzer_Resolving_Table_91"></a>Spark Analyzer Resolving Table</h4> 
+<p>假设我们有如下配置，定义了一个新的用户自定义的catalog，其name为<code>iceberg</code>。并通过<code>spark.sql.catalog.iceberg</code>指定了这个catalog的实现类<code>org.apache.iceberg.spark.SparkCatalog</code>，其类型为<code>hive</code>（意味着会在Iceberg的侧使用<code>HiveCatalog</code>解析库、表），meta存储地址为<code>thrift://metastore-host:port</code>。</p> 
+<blockquote> 
+ <p>spark.sql.catalog.iceberg = org.apache.iceberg.spark.SparkCatalog<br> spark.sql.catalog.iceberg.type = hive<br> spark.sql.catalog.iceberg.uri = thrift://metastore-host:port</p> 
+</blockquote> 
+<p>当我们执行<code>SELECT * FROM iceberg.test_tbl</code>时，在SQL解析过程中，会通过如下的过程来解析CatalogName和TableName，并创建对应的<code>Catalog</code>和<code>Table</code>实例，即对应Iceberg中的实现类<code>SparkCatalog</code>和<code>SparkTable</code>。</p> 
+<pre><code class="prism language-scala">  <span class="token comment">/**
+   * 如果当前Plan是还未解析的表视图或是表，或是INSERT INTO语句，则应用此Rule，
+   * 查看绑定的目标表名是否是SQL层级的临时视图或是Session级别的全局视图表名，最终返回一个新的SubqueryAlias的实例
+   */</span>
+  <span class="token keyword">object</span> ResolveTempViews <span class="token keyword">extends</span> Rule<span class="token punctuation">[</span>LogicalPlan<span class="token punctuation">]</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">def</span> apply<span class="token punctuation">(</span>plan<span class="token operator">:</span> LogicalPlan<span class="token punctuation">)</span><span class="token operator">:</span> LogicalPlan <span class="token operator">=</span> plan<span class="token punctuation">.</span>resolveOperatorsUp <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">case</span> u @ UnresolvedRelation<span class="token punctuation">(</span>ident<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+        lookupTempView<span class="token punctuation">(</span>ident<span class="token punctuation">)</span><span class="token punctuation">.</span>getOrElse<span class="token punctuation">(</span>u<span class="token punctuation">)</span>
+      <span class="token keyword">case</span> i @ InsertIntoStatement<span class="token punctuation">(</span>UnresolvedRelation<span class="token punctuation">(</span>ident<span class="token punctuation">)</span><span class="token punctuation">,</span> _<span class="token punctuation">,</span> _<span class="token punctuation">,</span> _<span class="token punctuation">,</span> _<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+        lookupTempView<span class="token punctuation">(</span>ident<span class="token punctuation">)</span>
+          <span class="token punctuation">.</span>map<span class="token punctuation">(</span>view <span class="token keyword">=&gt;</span> i<span class="token punctuation">.</span>copy<span class="token punctuation">(</span>table <span class="token operator">=</span> view<span class="token punctuation">)</span><span class="token punctuation">)</span>
+          <span class="token punctuation">.</span>getOrElse<span class="token punctuation">(</span>i<span class="token punctuation">)</span>
+      <span class="token keyword">case</span> u @ UnresolvedTable<span class="token punctuation">(</span>ident<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+        lookupTempView<span class="token punctuation">(</span>ident<span class="token punctuation">)</span><span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> _ <span class="token keyword">=&gt;</span>
+          u<span class="token punctuation">.</span>failAnalysis<span class="token punctuation">(</span><span class="token string-interpolation"><span class="token id function">s</span><span class="token string">"</span><span class="token interpolation"><span class="token punctuation">${<!-- --></span><span class="token expression">ident<span class="token punctuation">.</span>quoted</span><span class="token punctuation">}</span></span><span class="token string"> is a temp view not table."</span></span><span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+        u
+      <span class="token keyword">case</span> u @ UnresolvedTableOrView<span class="token punctuation">(</span>ident<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+        lookupTempView<span class="token punctuation">(</span>ident<span class="token punctuation">)</span><span class="token punctuation">.</span>map<span class="token punctuation">(</span>_ <span class="token keyword">=&gt;</span> ResolvedView<span class="token punctuation">(</span>ident<span class="token punctuation">.</span>asIdentifier<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span>getOrElse<span class="token punctuation">(</span>u<span class="token punctuation">)</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">def</span> lookupTempView<span class="token punctuation">(</span>identifier<span class="token operator">:</span> Seq<span class="token punctuation">[</span><span class="token builtin">String</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token operator">:</span> Option<span class="token punctuation">[</span>LogicalPlan<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">// Permanent View can't refer to temp views, no need to lookup at all.</span>
+      <span class="token keyword">if</span> <span class="token punctuation">(</span>isResolvingView<span class="token punctuation">)</span> <span class="token keyword">return</span> None
+
+      identifier <span class="token keyword">match</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">case</span> Seq<span class="token punctuation">(</span>part1<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span> v1SessionCatalog<span class="token punctuation">.</span>lookupTempView<span class="token punctuation">(</span>part1<span class="token punctuation">)</span>
+        <span class="token keyword">case</span> Seq<span class="token punctuation">(</span>part1<span class="token punctuation">,</span> part2<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span> v1SessionCatalog<span class="token punctuation">.</span>lookupGlobalTempView<span class="token punctuation">(</span>part1<span class="token punctuation">,</span> part2<span class="token punctuation">)</span>
+        <span class="token keyword">case</span> _ <span class="token keyword">=&gt;</span> None
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+
+  <span class="token comment">/**
+   * Resolve table relations with concrete relations from v2 catalog.
+   *
+   * [[ResolveRelations]] still resolves v1 tables.
+   */</span>
+  <span class="token keyword">object</span> ResolveTables <span class="token keyword">extends</span> Rule<span class="token punctuation">[</span>LogicalPlan<span class="token punctuation">]</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">def</span> apply<span class="token punctuation">(</span>plan<span class="token operator">:</span> LogicalPlan<span class="token punctuation">)</span><span class="token operator">:</span> LogicalPlan <span class="token operator">=</span> ResolveTempViews<span class="token punctuation">(</span>plan<span class="token punctuation">)</span><span class="token punctuation">.</span>resolveOperatorsUp <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">case</span> u<span class="token operator">:</span> UnresolvedRelation <span class="token keyword">=&gt;</span>
+        lookupV2Relation<span class="token punctuation">(</span>u<span class="token punctuation">.</span>multipartIdentifier<span class="token punctuation">)</span>
+          <span class="token punctuation">.</span>map <span class="token punctuation">{<!-- --></span> rel <span class="token keyword">=&gt;</span>
+            <span class="token keyword">val</span> ident <span class="token operator">=</span> rel<span class="token punctuation">.</span>identifier<span class="token punctuation">.</span>get
+            SubqueryAlias<span class="token punctuation">(</span>rel<span class="token punctuation">.</span>catalog<span class="token punctuation">.</span>get<span class="token punctuation">.</span>name <span class="token operator">+</span><span class="token operator">:</span> ident<span class="token punctuation">.</span>namespace <span class="token operator">:</span><span class="token operator">+</span> ident<span class="token punctuation">.</span>name<span class="token punctuation">,</span> rel<span class="token punctuation">)</span>
+          <span class="token punctuation">}</span><span class="token punctuation">.</span>getOrElse<span class="token punctuation">(</span>u<span class="token punctuation">)</span>
+
+      <span class="token keyword">case</span> u @ UnresolvedTable<span class="token punctuation">(</span>NonSessionCatalogAndIdentifier<span class="token punctuation">(</span>catalog<span class="token punctuation">,</span> ident<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+        <span class="token comment">// NonSessionCatalogAndIdentifier的unapply方法，会尝试解析catalog，并通过Spark.CatalogManager::catalog(name)解析并构建Catalog实例</span>
+        <span class="token comment">// 这里就是一个Iceberg中定义的SparkCatalog实现类，然后通过工具类的方法加载表，并创建SparkTable实例。</span>
+        CatalogV2Util<span class="token punctuation">.</span>loadTable<span class="token punctuation">(</span>catalog<span class="token punctuation">,</span> ident<span class="token punctuation">)</span>
+          <span class="token punctuation">.</span>map<span class="token punctuation">(</span>ResolvedTable<span class="token punctuation">(</span>catalog<span class="token punctuation">.</span>asTableCatalog<span class="token punctuation">,</span> ident<span class="token punctuation">,</span> _<span class="token punctuation">)</span><span class="token punctuation">)</span>
+          <span class="token punctuation">.</span>getOrElse<span class="token punctuation">(</span>u<span class="token punctuation">)</span>
+
+      <span class="token keyword">case</span> u @ UnresolvedTableOrView<span class="token punctuation">(</span>NonSessionCatalogAndIdentifier<span class="token punctuation">(</span>catalog<span class="token punctuation">,</span> ident<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+        CatalogV2Util<span class="token punctuation">.</span>loadTable<span class="token punctuation">(</span>catalog<span class="token punctuation">,</span> ident<span class="token punctuation">)</span>
+          <span class="token punctuation">.</span>map<span class="token punctuation">(</span>ResolvedTable<span class="token punctuation">(</span>catalog<span class="token punctuation">.</span>asTableCatalog<span class="token punctuation">,</span> ident<span class="token punctuation">,</span> _<span class="token punctuation">)</span><span class="token punctuation">)</span>
+          <span class="token punctuation">.</span>getOrElse<span class="token punctuation">(</span>u<span class="token punctuation">)</span>
+
+      <span class="token keyword">case</span> i @ InsertIntoStatement<span class="token punctuation">(</span>u<span class="token operator">:</span> UnresolvedRelation<span class="token punctuation">,</span> _<span class="token punctuation">,</span> _<span class="token punctuation">,</span> _<span class="token punctuation">,</span> _<span class="token punctuation">)</span> <span class="token keyword">if</span> i<span class="token punctuation">.</span>query<span class="token punctuation">.</span>resolved <span class="token keyword">=&gt;</span>
+        lookupV2Relation<span class="token punctuation">(</span>u<span class="token punctuation">.</span>multipartIdentifier<span class="token punctuation">)</span>
+          <span class="token punctuation">.</span>map<span class="token punctuation">(</span>v2Relation <span class="token keyword">=&gt;</span> i<span class="token punctuation">.</span>copy<span class="token punctuation">(</span>table <span class="token operator">=</span> v2Relation<span class="token punctuation">)</span><span class="token punctuation">)</span>
+          <span class="token punctuation">.</span>getOrElse<span class="token punctuation">(</span>i<span class="token punctuation">)</span>
+
+      <span class="token keyword">case</span> alter @ AlterTable<span class="token punctuation">(</span>_<span class="token punctuation">,</span> _<span class="token punctuation">,</span> u<span class="token operator">:</span> UnresolvedV2Relation<span class="token punctuation">,</span> _<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+        CatalogV2Util<span class="token punctuation">.</span>loadRelation<span class="token punctuation">(</span>u<span class="token punctuation">.</span>catalog<span class="token punctuation">,</span> u<span class="token punctuation">.</span>tableName<span class="token punctuation">)</span>
+          <span class="token punctuation">.</span>map<span class="token punctuation">(</span>rel <span class="token keyword">=&gt;</span> alter<span class="token punctuation">.</span>copy<span class="token punctuation">(</span>table <span class="token operator">=</span> rel<span class="token punctuation">)</span><span class="token punctuation">)</span>
+          <span class="token punctuation">.</span>getOrElse<span class="token punctuation">(</span>alter<span class="token punctuation">)</span>
+
+      <span class="token keyword">case</span> u<span class="token operator">:</span> UnresolvedV2Relation <span class="token keyword">=&gt;</span>
+        CatalogV2Util<span class="token punctuation">.</span>loadRelation<span class="token punctuation">(</span>u<span class="token punctuation">.</span>catalog<span class="token punctuation">,</span> u<span class="token punctuation">.</span>tableName<span class="token punctuation">)</span><span class="token punctuation">.</span>getOrElse<span class="token punctuation">(</span>u<span class="token punctuation">)</span>
+    <span class="token punctuation">}</span>
+    
+    <span class="token comment">/**
+     * Performs the lookup of DataSourceV2 Tables from v2 catalog.
+     */</span>
+    <span class="token keyword">private</span> <span class="token keyword">def</span> lookupV2Relation<span class="token punctuation">(</span>identifier<span class="token operator">:</span> Seq<span class="token punctuation">[</span><span class="token builtin">String</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token operator">:</span> Option<span class="token punctuation">[</span>DataSourceV2Relation<span class="token punctuation">]</span> <span class="token operator">=</span>
+      expandRelationName<span class="token punctuation">(</span>identifier<span class="token punctuation">)</span> <span class="token keyword">match</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">case</span> NonSessionCatalogAndIdentifier<span class="token punctuation">(</span>catalog<span class="token punctuation">,</span> ident<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+          CatalogV2Util<span class="token punctuation">.</span>loadTable<span class="token punctuation">(</span>catalog<span class="token punctuation">,</span> ident<span class="token punctuation">)</span> <span class="token keyword">match</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">case</span> Some<span class="token punctuation">(</span>table<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+              Some<span class="token punctuation">(</span>DataSourceV2Relation<span class="token punctuation">.</span>create<span class="token punctuation">(</span>table<span class="token punctuation">,</span> Some<span class="token punctuation">(</span>catalog<span class="token punctuation">)</span><span class="token punctuation">,</span> Some<span class="token punctuation">(</span>ident<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+            <span class="token keyword">case</span> None <span class="token keyword">=&gt;</span> None
+          <span class="token punctuation">}</span>
+        <span class="token keyword">case</span> _ <span class="token keyword">=&gt;</span> None
+      <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="SparkCatalogHiveCatalog_187"></a>SparkCatalog路由加载表的过程到HiveCatalog</h4> 
+<p><code>SparkCatalog</code>由于继承自<code>TableCatalog</code>，因此拥有<code> Table loadTable(Identifier ident) throws NoSuchTableException</code>方法，在Spark内部进行SQL解析时，可以调用此方法，生成用户自定义的Table实例。</p> 
+<p>SparkCatalog定位于Spark与Iceberg之前的桥梁，最终的实现效果是将某个Catalog的解析并创建表的任务，路由给Iceberg中的Catalog实现，例如<code>HiveCatalog</code>。</p> 
+<pre><code class="prism language-java"><span class="token comment">/**
+ * 实现了Spark中的如下接口：
+ * public interface TableCatalog extends CatalogPlugin
+ * 可以在SQL解析过程时，应用`ResolveTables`规则时，通过Catalog + Identifier创建
+ */</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">SparkCatalog</span> <span class="token keyword">extends</span> <span class="token class-name">BaseCatalog</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">/**
+   * 由于继承自CatalogPlugin接口类，因此需要重写initialize(...)方法，以初始化SparkCatalog实例
+   */</span>
+  <span class="token annotation punctuation">@Override</span>
+  <span class="token keyword">public</span> <span class="token keyword">final</span> <span class="token keyword">void</span> <span class="token function">initialize</span><span class="token punctuation">(</span><span class="token class-name">String</span> name<span class="token punctuation">,</span> <span class="token class-name">CaseInsensitiveStringMap</span> options<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>cacheEnabled <span class="token operator">=</span>
+        <span class="token class-name">PropertyUtil</span><span class="token punctuation">.</span><span class="token function">propertyAsBoolean</span><span class="token punctuation">(</span>
+            options<span class="token punctuation">,</span> <span class="token class-name">CatalogProperties</span><span class="token punctuation">.</span><span class="token constant">CACHE_ENABLED</span><span class="token punctuation">,</span> <span class="token class-name">CatalogProperties</span><span class="token punctuation">.</span><span class="token constant">CACHE_ENABLED_DEFAULT</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">long</span> cacheExpirationIntervalMs <span class="token operator">=</span>
+        <span class="token class-name">PropertyUtil</span><span class="token punctuation">.</span><span class="token function">propertyAsLong</span><span class="token punctuation">(</span>
+            options<span class="token punctuation">,</span>
+            <span class="token class-name">CatalogProperties</span><span class="token punctuation">.</span><span class="token constant">CACHE_EXPIRATION_INTERVAL_MS</span><span class="token punctuation">,</span>
+            <span class="token class-name">CatalogProperties</span><span class="token punctuation">.</span><span class="token constant">CACHE_EXPIRATION_INTERVAL_MS_DEFAULT</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// An expiration interval of 0ms effectively disables caching.</span>
+    <span class="token comment">// Do not wrap with CachingCatalog.</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>cacheExpirationIntervalMs <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">this</span><span class="token punctuation">.</span>cacheEnabled <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">// 创建Iceberg支持的catalog实例，一共支持如下几个</span>
+    <span class="token comment">//   public static final String ICEBERG_CATALOG_TYPE_HADOOP = "hadoop";</span>
+    <span class="token comment">// public static final String ICEBERG_CATALOG_TYPE_HIVE = "hive";</span>
+    <span class="token comment">// public static final String ICEBERG_CATALOG_TYPE_REST = "rest";</span>
+
+    <span class="token comment">// public static final String ICEBERG_CATALOG_HADOOP = "org.apache.iceberg.hadoop.HadoopCatalog";</span>
+    <span class="token comment">// public static final String ICEBERG_CATALOG_HIVE = "org.apache.iceberg.hive.HiveCatalog";</span>
+    <span class="token comment">// public static final String ICEBERG_CATALOG_REST = "org.apache.iceberg.rest.RESTCatalog";</span>
+    <span class="token comment">// 默认情况下，我们创建的是HiveCatalog，后续调用loadTable(...)方法创建SparkTable时，则通过HiveCatalog::loadTable(name)方法生成</span>
+    <span class="token class-name">Catalog</span> catalog <span class="token operator">=</span> <span class="token function">buildIcebergCatalog</span><span class="token punctuation">(</span>name<span class="token punctuation">,</span> options<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">this</span><span class="token punctuation">.</span>catalogName <span class="token operator">=</span> name<span class="token punctuation">;</span>
+    <span class="token class-name">SparkSession</span> sparkSession <span class="token operator">=</span> <span class="token class-name">SparkSession</span><span class="token punctuation">.</span><span class="token function">active</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>useTimestampsWithoutZone <span class="token operator">=</span>
+        <span class="token class-name">SparkUtil</span><span class="token punctuation">.</span><span class="token function">useTimestampWithoutZoneInNewTables</span><span class="token punctuation">(</span>sparkSession<span class="token punctuation">.</span><span class="token function">conf</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>tables <span class="token operator">=</span>
+        <span class="token keyword">new</span> <span class="token class-name">HadoopTables</span><span class="token punctuation">(</span><span class="token class-name">SparkUtil</span><span class="token punctuation">.</span><span class="token function">hadoopConfCatalogOverrides</span><span class="token punctuation">(</span><span class="token class-name">SparkSession</span><span class="token punctuation">.</span><span class="token function">active</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> name<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>icebergCatalog <span class="token operator">=</span>
+        cacheEnabled <span class="token operator">?</span> <span class="token class-name">CachingCatalog</span><span class="token punctuation">.</span><span class="token function">wrap</span><span class="token punctuation">(</span>catalog<span class="token punctuation">,</span> cacheExpirationIntervalMs<span class="token punctuation">)</span> <span class="token operator">:</span> catalog<span class="token punctuation">;</span>
+    <span class="token comment">// 支持通过参数的方式，指定默认的namespace，默认值为default</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>catalog <span class="token keyword">instanceof</span> <span class="token class-name">SupportsNamespaces</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">this</span><span class="token punctuation">.</span>asNamespaceCatalog <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token class-name">SupportsNamespaces</span><span class="token punctuation">)</span> catalog<span class="token punctuation">;</span>
+      <span class="token keyword">if</span> <span class="token punctuation">(</span>options<span class="token punctuation">.</span><span class="token function">containsKey</span><span class="token punctuation">(</span><span class="token string">"default-namespace"</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>defaultNamespace <span class="token operator">=</span>
+            <span class="token class-name">Splitter</span><span class="token punctuation">.</span><span class="token function">on</span><span class="token punctuation">(</span><span class="token char">'.'</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">splitToList</span><span class="token punctuation">(</span>options<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token string">"default-namespace"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">toArray</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">String</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token class-name">EnvironmentContext</span><span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span><span class="token class-name">EnvironmentContext</span><span class="token punctuation">.</span><span class="token constant">ENGINE_NAME</span><span class="token punctuation">,</span> <span class="token string">"spark"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token class-name">EnvironmentContext</span><span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>
+        <span class="token class-name">EnvironmentContext</span><span class="token punctuation">.</span><span class="token constant">ENGINE_VERSION</span><span class="token punctuation">,</span> sparkSession<span class="token punctuation">.</span><span class="token function">sparkContext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">version</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token class-name">EnvironmentContext</span><span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span><span class="token class-name">CatalogProperties</span><span class="token punctuation">.</span><span class="token constant">APP_ID</span><span class="token punctuation">,</span> sparkSession<span class="token punctuation">.</span><span class="token function">sparkContext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">applicationId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+
+  <span class="token annotation punctuation">@Override</span>
+  <span class="token keyword">public</span> <span class="token class-name">Table</span> <span class="token function">loadTable</span><span class="token punctuation">(</span><span class="token class-name">Identifier</span> ident<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">NoSuchTableException</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 基于标识符创建SparkTable实例</span>
+    <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">return</span> <span class="token function">load</span><span class="token punctuation">(</span>ident<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name"><span class="token namespace">org<span class="token punctuation">.</span>apache<span class="token punctuation">.</span>iceberg<span class="token punctuation">.</span>exceptions<span class="token punctuation">.</span></span>NoSuchTableException</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">NoSuchTableException</span><span class="token punctuation">(</span>ident<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+
+  <span class="token annotation punctuation">@Override</span>
+  <span class="token keyword">public</span> <span class="token class-name">Table</span> <span class="token function">loadTable</span><span class="token punctuation">(</span><span class="token class-name">Identifier</span> ident<span class="token punctuation">,</span> <span class="token class-name">String</span> version<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">NoSuchTableException</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token class-name">Table</span> table <span class="token operator">=</span> <span class="token function">loadTable</span><span class="token punctuation">(</span>ident<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// ...</span>
+  <span class="token punctuation">}</span>
+
+  <span class="token annotation punctuation">@Override</span>
+  <span class="token keyword">public</span> <span class="token class-name">Table</span> <span class="token function">loadTable</span><span class="token punctuation">(</span><span class="token class-name">Identifier</span> ident<span class="token punctuation">,</span> <span class="token keyword">long</span> timestamp<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">NoSuchTableException</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token class-name">Table</span> table <span class="token operator">=</span> <span class="token function">loadTable</span><span class="token punctuation">(</span>ident<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// ...</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h5><a id="SparkCatalogbuildIcebergCatalogHiveCatalog_276"></a>SparkCatalog::buildIcebergCatalog返回HiveCatalog实例</h5> 
+<pre><code class="prism language-java">  <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token class-name">Catalog</span> <span class="token function">buildIcebergCatalog</span><span class="token punctuation">(</span><span class="token class-name">String</span> name<span class="token punctuation">,</span> <span class="token class-name">Map</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> options<span class="token punctuation">,</span> <span class="token class-name">Object</span> conf<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token class-name">String</span> catalogImpl <span class="token operator">=</span> options<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token class-name">CatalogProperties</span><span class="token punctuation">.</span><span class="token constant">CATALOG_IMPL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>catalogImpl <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">// 如果用户没有指定Catalog的实现，则使用Iceberg内置的实现</span>
+      <span class="token class-name">String</span> catalogType <span class="token operator">=</span>
+          <span class="token class-name">PropertyUtil</span><span class="token punctuation">.</span><span class="token function">propertyAsString</span><span class="token punctuation">(</span>options<span class="token punctuation">,</span> <span class="token constant">ICEBERG_CATALOG_TYPE</span><span class="token punctuation">,</span> <span class="token constant">ICEBERG_CATALOG_TYPE_HIVE</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token keyword">switch</span> <span class="token punctuation">(</span>catalogType<span class="token punctuation">.</span><span class="token function">toLowerCase</span><span class="token punctuation">(</span><span class="token class-name">Locale</span><span class="token punctuation">.</span><span class="token constant">ENGLISH</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">case</span> <span class="token constant">ICEBERG_CATALOG_TYPE_HIVE</span><span class="token operator">:</span>
+          <span class="token comment">// 当我们通过Hive表读取数据时，默认使用的是这个Catalog的实现</span>
+          catalogImpl <span class="token operator">=</span> <span class="token constant">ICEBERG_CATALOG_HIVE</span><span class="token punctuation">;</span>
+          <span class="token keyword">break</span><span class="token punctuation">;</span>
+        <span class="token keyword">case</span> <span class="token constant">ICEBERG_CATALOG_TYPE_HADOOP</span><span class="token operator">:</span>
+          <span class="token comment">// 当我们通过Hadoop文件获取数据时，默认使用的是这个Catalog的实现</span>
+          catalogImpl <span class="token operator">=</span> <span class="token constant">ICEBERG_CATALOG_HADOOP</span><span class="token punctuation">;</span>
+          <span class="token keyword">break</span><span class="token punctuation">;</span>
+        <span class="token keyword">case</span> <span class="token constant">ICEBERG_CATALOG_TYPE_REST</span><span class="token operator">:</span>
+          <span class="token comment">// 如果使用REST API获取数据时，默认使用的这个Catalog的实现</span>
+          catalogImpl <span class="token operator">=</span> <span class="token constant">ICEBERG_CATALOG_REST</span><span class="token punctuation">;</span>
+          <span class="token keyword">break</span><span class="token punctuation">;</span>
+        <span class="token keyword">default</span><span class="token operator">:</span>
+          <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">UnsupportedOperationException</span><span class="token punctuation">(</span><span class="token string">"Unknown catalog type: "</span> <span class="token operator">+</span> catalogType<span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">// 如果用户指定了自己的实现类，则使用指定的Catalog的类名</span>
+      <span class="token class-name">String</span> catalogType <span class="token operator">=</span> options<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token constant">ICEBERG_CATALOG_TYPE</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token class-name">Preconditions</span><span class="token punctuation">.</span><span class="token function">checkArgument</span><span class="token punctuation">(</span>
+          catalogType <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">,</span>
+          <span class="token string">"Cannot create catalog %s, both type and catalog-impl are set: type=%s, catalog-impl=%s"</span><span class="token punctuation">,</span>
+          name<span class="token punctuation">,</span>
+          catalogType<span class="token punctuation">,</span>
+          catalogImpl<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">// 通过Java Reflection库，实例化Catalog的实现类</span>
+    <span class="token keyword">return</span> <span class="token class-name">CatalogUtil</span><span class="token punctuation">.</span><span class="token function">loadCatalog</span><span class="token punctuation">(</span>catalogImpl<span class="token punctuation">,</span> name<span class="token punctuation">,</span> options<span class="token punctuation">,</span> conf<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<h5><a id="CatalogUtilloadCatalogHiveCatalog_314"></a>CatalogUtil::loadCatalog返回HiveCatalog实例</h5> 
+<blockquote> 
+ <p>这里以Hive为例，解析如何加载Custom Catalog</p> 
+</blockquote> 
+<pre><code class="prism language-java">  <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token class-name">Catalog</span> <span class="token function">loadCatalog</span><span class="token punctuation">(</span>
+      <span class="token class-name">String</span> impl<span class="token punctuation">,</span> <span class="token class-name">String</span> catalogName<span class="token punctuation">,</span> <span class="token class-name">Map</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> properties<span class="token punctuation">,</span> <span class="token class-name">Object</span> hadoopConf<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// impl = ICEBERG_CATALOG_HIVE</span>
+    <span class="token comment">// catalogName = hive</span>
+    <span class="token comment">// properties = spark.sql.catalog.[catalogName].x</span>
+    <span class="token comment">// 其中properties指的是catalogName对应的配置选项，是从Spark.SQLConf解析得到的</span>
+    <span class="token class-name">Preconditions</span><span class="token punctuation">.</span><span class="token function">checkNotNull</span><span class="token punctuation">(</span>impl<span class="token punctuation">,</span> <span class="token string">"Cannot initialize custom Catalog, impl class name is null"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token class-name">DynConstructors<span class="token punctuation">.</span>Ctor</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Catalog</span><span class="token punctuation">&gt;</span></span> ctor<span class="token punctuation">;</span>
+    <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">// 通过默认的impl名字，通过Refect机制，调用无参的构造函数，生成对应的类的实例</span>
+      ctor <span class="token operator">=</span> <span class="token class-name">DynConstructors</span><span class="token punctuation">.</span><span class="token function">builder</span><span class="token punctuation">(</span><span class="token class-name">Catalog</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">impl</span><span class="token punctuation">(</span>impl<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">buildChecked</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">NoSuchMethodException</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">IllegalArgumentException</span><span class="token punctuation">(</span>
+          <span class="token class-name">String</span><span class="token punctuation">.</span><span class="token function">format</span><span class="token punctuation">(</span><span class="token string">"Cannot initialize Catalog implementation %s: %s"</span><span class="token punctuation">,</span> impl<span class="token punctuation">,</span> e<span class="token punctuation">.</span><span class="token function">getMessage</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+          e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token class-name">Catalog</span> catalog<span class="token punctuation">;</span>
+    <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">// 使用默认构造函数，实例化对象</span>
+      catalog <span class="token operator">=</span> ctor<span class="token punctuation">.</span><span class="token function">newInstance</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">ClassCastException</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">IllegalArgumentException</span><span class="token punctuation">(</span>
+          <span class="token class-name">String</span><span class="token punctuation">.</span><span class="token function">format</span><span class="token punctuation">(</span><span class="token string">"Cannot initialize Catalog, %s does not implement Catalog."</span><span class="token punctuation">,</span> impl<span class="token punctuation">)</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">// 为Catalog添加Hadoop相关的运行时参数</span>
+    <span class="token function">configureHadoopConf</span><span class="token punctuation">(</span>catalog<span class="token punctuation">,</span> hadoopConf<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 通过properties，来助力catalog对象的初始化过程</span>
+    catalog<span class="token punctuation">.</span><span class="token function">initialize</span><span class="token punctuation">(</span>catalogName<span class="token punctuation">,</span> properties<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> catalog<span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<h5><a id="HiveCataloginitialize_352"></a>HiveCatalog::initialize</h5> 
+<pre><code class="prism language-java">  <span class="token annotation punctuation">@Override</span>
+  <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">initialize</span><span class="token punctuation">(</span><span class="token class-name">String</span> inputName<span class="token punctuation">,</span> <span class="token class-name">Map</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> properties<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>catalogProperties <span class="token operator">=</span> <span class="token class-name">ImmutableMap</span><span class="token punctuation">.</span><span class="token function">copyOf</span><span class="token punctuation">(</span>properties<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>name <span class="token operator">=</span> inputName<span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>conf <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token constant">LOG</span><span class="token punctuation">.</span><span class="token function">warn</span><span class="token punctuation">(</span><span class="token string">"No Hadoop Configuration was set, using the default environment Configuration"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token keyword">this</span><span class="token punctuation">.</span>conf <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Configuration</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">// 解析指定的Hive metastore地址</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>properties<span class="token punctuation">.</span><span class="token function">containsKey</span><span class="token punctuation">(</span><span class="token class-name">CatalogProperties</span><span class="token punctuation">.</span><span class="token constant">URI</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">this</span><span class="token punctuation">.</span>conf<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span><span class="token class-name">HiveConf<span class="token punctuation">.</span>ConfVars</span><span class="token punctuation">.</span><span class="token constant">METASTOREURIS</span><span class="token punctuation">.</span>varname<span class="token punctuation">,</span> properties<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token class-name">CatalogProperties</span><span class="token punctuation">.</span><span class="token constant">URI</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">// 解析指定的metastore的工作目录</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>properties<span class="token punctuation">.</span><span class="token function">containsKey</span><span class="token punctuation">(</span><span class="token class-name">CatalogProperties</span><span class="token punctuation">.</span><span class="token constant">WAREHOUSE_LOCATION</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">this</span><span class="token punctuation">.</span>conf<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>
+          <span class="token class-name">HiveConf<span class="token punctuation">.</span>ConfVars</span><span class="token punctuation">.</span><span class="token constant">METASTOREWAREHOUSE</span><span class="token punctuation">.</span>varname<span class="token punctuation">,</span>
+          <span class="token class-name">LocationUtil</span><span class="token punctuation">.</span><span class="token function">stripTrailingSlash</span><span class="token punctuation">(</span>properties<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token class-name">CatalogProperties</span><span class="token punctuation">.</span><span class="token constant">WAREHOUSE_LOCATION</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">this</span><span class="token punctuation">.</span>listAllTables <span class="token operator">=</span>
+        <span class="token class-name">Boolean</span><span class="token punctuation">.</span><span class="token function">parseBoolean</span><span class="token punctuation">(</span>properties<span class="token punctuation">.</span><span class="token function">getOrDefault</span><span class="token punctuation">(</span><span class="token constant">LIST_ALL_TABLES</span><span class="token punctuation">,</span> <span class="token constant">LIST_ALL_TABLES_DEFAULT</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 解析指定的读写文件的 接口实现类，如果不指定则默认为HadoopFileIO</span>
+    <span class="token comment">// 否则加载用户自定义的实现类</span>
+    <span class="token class-name">String</span> fileIOImpl <span class="token operator">=</span> properties<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token class-name">CatalogProperties</span><span class="token punctuation">.</span><span class="token constant">FILE_IO_IMPL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>fileIO <span class="token operator">=</span>
+        fileIOImpl <span class="token operator">==</span> <span class="token keyword">null</span>
+            <span class="token operator">?</span> <span class="token keyword">new</span> <span class="token class-name">HadoopFileIO</span><span class="token punctuation">(</span>conf<span class="token punctuation">)</span>
+            <span class="token operator">:</span> <span class="token class-name">CatalogUtil</span><span class="token punctuation">.</span><span class="token function">loadFileIO</span><span class="token punctuation">(</span>fileIOImpl<span class="token punctuation">,</span> properties<span class="token punctuation">,</span> conf<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 初始化元数据交互的客户端，使用默认使用HiveClientPool</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>clients <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">CachedClientPool</span><span class="token punctuation">(</span>conf<span class="token punctuation">,</span> properties<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="HiveCatalogSparkTable_386"></a>HiveCatalog加载SparkTable</h4> 
+<p>在生成<code>SparkCatalog</code>时，会根据<code>spark.sql.catalog.iceberg.type</code>这个配置，知道我们要创建的表在Iceberg中的类型是<code>hive</code>，因此需要通过<code>HiveCatalog</code>加载表。</p> 
+<h4><a id="HiveCatalogloadTableSparkTabble_388"></a>HiveCatalog::loadTable返回SparkTabble</h4> 
+<pre><code class="prism language-java">  <span class="token annotation punctuation">@Override</span>
+  <span class="token keyword">public</span> <span class="token class-name">Table</span> <span class="token function">loadTable</span><span class="token punctuation">(</span><span class="token class-name">TableIdentifier</span> identifier<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token class-name">Table</span> result<span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">isValidIdentifier</span><span class="token punctuation">(</span>identifier<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">// 对于HiveCatalog来说，所有的identifier都是合法的，因此会通过下面的方法得到对应类型的TableOperations实例</span>
+      <span class="token comment">// </span>
+      <span class="token comment">// 在Iceberg世界中，实际上是不存在表的，只是利用表的概念，将TableMetadata进行了抽象，</span>
+      <span class="token comment">// 因此Iceberg中的Table都必须绑定一个TableOperations实例，来读取TableMetadata数据</span>
+      <span class="token comment">// 例如在这里会对应生成HiveTableOperations，因此必然有 ops.current() != null</span>
+      <span class="token class-name">TableOperations</span> ops <span class="token operator">=</span> <span class="token function">newTableOps</span><span class="token punctuation">(</span>identifier<span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token keyword">if</span> <span class="token punctuation">(</span>ops<span class="token punctuation">.</span><span class="token function">current</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// the identifier may be valid for both tables and metadata tables</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">isValidMetadataIdentifier</span><span class="token punctuation">(</span>identifier<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+          result <span class="token operator">=</span> <span class="token function">loadMetadataTable</span><span class="token punctuation">(</span>identifier<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">NoSuchTableException</span><span class="token punctuation">(</span><span class="token string">"Table does not exist: %s"</span><span class="token punctuation">,</span> identifier<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+      <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// 走这里，返回BaseTable的实例，BaseTable提供了获取Scan的方法，描述了如何读取此表的数据、读取哪些数据等。</span>
+        <span class="token comment">// 这里Scan的概念与Spark中的Scan相同。</span>
+        result <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">BaseTable</span><span class="token punctuation">(</span>ops<span class="token punctuation">,</span> <span class="token function">fullTableName</span><span class="token punctuation">(</span><span class="token function">name</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> identifier<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">metricsReporter</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token punctuation">}</span>
+
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">isValidMetadataIdentifier</span><span class="token punctuation">(</span>identifier<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      result <span class="token operator">=</span> <span class="token function">loadMetadataTable</span><span class="token punctuation">(</span>identifier<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">NoSuchTableException</span><span class="token punctuation">(</span><span class="token string">"Invalid table identifier: %s"</span><span class="token punctuation">,</span> identifier<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token constant">LOG</span><span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"Table loaded by catalog: {}"</span><span class="token punctuation">,</span> result<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> result<span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="Iceberg_Scan_424"></a>Iceberg Scan的定义、构建及执行流程</h3> 
+<blockquote> 
+ <p>MERGE INTO重写时，会为目标表生成一个DataSourceV2Relation的逻辑计划实例，以读取目标表中的相关数据，因此在过滤表达式下推优化时，会同时构建<code>COW</code>模式下的<code>Scan</code>实例。<br> Scan是Spark中定义的读取数据的接口。</p> 
+</blockquote> 
+<pre><code class="prism language-scala"><span class="token comment">/**
+ * 在Spark的逻辑计划优化的过程中（如这里的表达式下推优化过程），会尝试通过Table，即Iceberg中的BaseTable，获取一个scanBuilder实例，
+ * 并调用scanBuilder.build()方法，返回一个org.apache.spark.sql.connector.read.Scan的实例。
+ */</span>
+<span class="token keyword">object</span> V2ScanRelationPushDown <span class="token keyword">extends</span> Rule<span class="token punctuation">[</span>LogicalPlan<span class="token punctuation">]</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">import</span> DataSourceV2Implicits<span class="token punctuation">.</span>_
+
+  <span class="token keyword">override</span> <span class="token keyword">def</span> apply<span class="token punctuation">(</span>plan<span class="token operator">:</span> LogicalPlan<span class="token punctuation">)</span><span class="token operator">:</span> LogicalPlan <span class="token operator">=</span> plan transformDown <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">case</span> ScanOperation<span class="token punctuation">(</span>project<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> relation<span class="token operator">:</span> DataSourceV2Relation<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+      <span class="token comment">// 调用这里的Table是一个RowLevelOperationTable的实例，同时它绑定了一个SparkCopyOnWriteOperation实例</span>
+      <span class="token comment">// 因此底层实际上调用的是SparkCopyOnWriteOperation::newScanBuilder方法</span>
+      <span class="token keyword">val</span> scanBuilder <span class="token operator">=</span> relation<span class="token punctuation">.</span>table<span class="token punctuation">.</span>asReadable<span class="token punctuation">.</span>newScanBuilder<span class="token punctuation">(</span>relation<span class="token punctuation">.</span>options<span class="token punctuation">)</span>
+
+      <span class="token keyword">val</span> normalizedFilters <span class="token operator">=</span> DataSourceStrategy<span class="token punctuation">.</span>normalizeExprs<span class="token punctuation">(</span>filters<span class="token punctuation">,</span> relation<span class="token punctuation">.</span>output<span class="token punctuation">)</span>
+      <span class="token keyword">val</span> <span class="token punctuation">(</span>normalizedFiltersWithSubquery<span class="token punctuation">,</span> normalizedFiltersWithoutSubquery<span class="token punctuation">)</span> <span class="token operator">=</span>
+        normalizedFilters<span class="token punctuation">.</span>partition<span class="token punctuation">(</span>SubqueryExpression<span class="token punctuation">.</span>hasSubquery<span class="token punctuation">)</span>
+
+      <span class="token comment">// `pushedFilters` will be pushed down and evaluated in the underlying data sources.</span>
+      <span class="token comment">// `postScanFilters` need to be evaluated after the scan.</span>
+      <span class="token comment">// `postScanFilters` and `pushedFilters` can overlap, e.g. the parquet row group filter.</span>
+      <span class="token keyword">val</span> <span class="token punctuation">(</span>pushedFilters<span class="token punctuation">,</span> postScanFiltersWithoutSubquery<span class="token punctuation">)</span> <span class="token operator">=</span> PushDownUtils<span class="token punctuation">.</span>pushFilters<span class="token punctuation">(</span>
+        scanBuilder<span class="token punctuation">,</span> normalizedFiltersWithoutSubquery<span class="token punctuation">)</span>
+      <span class="token keyword">val</span> postScanFilters <span class="token operator">=</span> postScanFiltersWithoutSubquery <span class="token operator">++</span> normalizedFiltersWithSubquery
+
+      <span class="token keyword">val</span> normalizedProjects <span class="token operator">=</span> DataSourceStrategy
+        <span class="token punctuation">.</span>normalizeExprs<span class="token punctuation">(</span>project<span class="token punctuation">,</span> relation<span class="token punctuation">.</span>output<span class="token punctuation">)</span>
+        <span class="token punctuation">.</span>asInstanceOf<span class="token punctuation">[</span>Seq<span class="token punctuation">[</span>NamedExpression<span class="token punctuation">]</span><span class="token punctuation">]</span>
+      <span class="token comment">// 列裁剪，同时调用scanBuilder.build()方法，生成一个读取具体数据源的Scan实例</span>
+      <span class="token keyword">val</span> <span class="token punctuation">(</span>scan<span class="token punctuation">,</span> output<span class="token punctuation">)</span> <span class="token operator">=</span> PushDownUtils<span class="token punctuation">.</span>pruneColumns<span class="token punctuation">(</span>
+        scanBuilder<span class="token punctuation">,</span> relation<span class="token punctuation">,</span> normalizedProjects<span class="token punctuation">,</span> postScanFilters<span class="token punctuation">)</span>
+      logInfo<span class="token punctuation">(</span>
+        <span class="token string-interpolation"><span class="token id function">s</span><span class="token string">"""
+           |Pushing operators to </span><span class="token interpolation"><span class="token punctuation">${<!-- --></span><span class="token expression">relation<span class="token punctuation">.</span>name</span><span class="token punctuation">}</span></span><span class="token string">
+           |Pushed Filters: </span><span class="token interpolation"><span class="token punctuation">${<!-- --></span><span class="token expression">pushedFilters<span class="token punctuation">.</span>mkString<span class="token punctuation">(</span><span class="token string">", "</span><span class="token punctuation">)</span></span><span class="token punctuation">}</span></span><span class="token string">
+           |Post-Scan Filters: </span><span class="token interpolation"><span class="token punctuation">${<!-- --></span><span class="token expression">postScanFilters<span class="token punctuation">.</span>mkString<span class="token punctuation">(</span><span class="token string">","</span><span class="token punctuation">)</span></span><span class="token punctuation">}</span></span><span class="token string">
+           |Output: </span><span class="token interpolation"><span class="token punctuation">${<!-- --></span><span class="token expression">output<span class="token punctuation">.</span>mkString<span class="token punctuation">(</span><span class="token string">", "</span><span class="token punctuation">)</span></span><span class="token punctuation">}</span></span><span class="token string">
+         """</span></span><span class="token punctuation">.</span>stripMargin<span class="token punctuation">)</span>
+
+      <span class="token keyword">val</span> wrappedScan <span class="token operator">=</span> scan <span class="token keyword">match</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">case</span> v1<span class="token operator">:</span> V1Scan <span class="token keyword">=&gt;</span>
+          <span class="token keyword">val</span> translated <span class="token operator">=</span> filters<span class="token punctuation">.</span>flatMap<span class="token punctuation">(</span>DataSourceStrategy<span class="token punctuation">.</span>translateFilter<span class="token punctuation">(</span>_<span class="token punctuation">,</span> <span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+          V1ScanWrapper<span class="token punctuation">(</span>v1<span class="token punctuation">,</span> translated<span class="token punctuation">,</span> pushedFilters<span class="token punctuation">)</span>
+        <span class="token keyword">case</span> _ <span class="token keyword">=&gt;</span> scan
+      <span class="token punctuation">}</span>
+      <span class="token comment">// 这里生成一个读取数据的逻辑计划</span>
+      <span class="token keyword">val</span> scanRelation <span class="token operator">=</span> DataSourceV2ScanRelation<span class="token punctuation">(</span>relation<span class="token punctuation">.</span>table<span class="token punctuation">,</span> wrappedScan<span class="token punctuation">,</span> output<span class="token punctuation">)</span>
+
+      <span class="token keyword">val</span> projectionOverSchema <span class="token operator">=</span> ProjectionOverSchema<span class="token punctuation">(</span>output<span class="token punctuation">.</span>toStructType<span class="token punctuation">)</span>
+      <span class="token keyword">val</span> projectionFunc <span class="token operator">=</span> <span class="token punctuation">(</span>expr<span class="token operator">:</span> Expression<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span> expr transformDown <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">case</span> projectionOverSchema<span class="token punctuation">(</span>newExpr<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span> newExpr
+      <span class="token punctuation">}</span>
+
+      <span class="token keyword">val</span> filterCondition <span class="token operator">=</span> postScanFilters<span class="token punctuation">.</span>reduceLeftOption<span class="token punctuation">(</span>And<span class="token punctuation">)</span>
+      <span class="token keyword">val</span> newFilterCondition <span class="token operator">=</span> filterCondition<span class="token punctuation">.</span>map<span class="token punctuation">(</span>projectionFunc<span class="token punctuation">)</span>
+      <span class="token keyword">val</span> withFilter <span class="token operator">=</span> newFilterCondition<span class="token punctuation">.</span>map<span class="token punctuation">(</span>Filter<span class="token punctuation">(</span>_<span class="token punctuation">,</span> scanRelation<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span>getOrElse<span class="token punctuation">(</span>scanRelation<span class="token punctuation">)</span>
+
+      <span class="token keyword">val</span> withProjection <span class="token operator">=</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>withFilter<span class="token punctuation">.</span>output <span class="token operator">!=</span> project<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">val</span> newProjects <span class="token operator">=</span> normalizedProjects
+          <span class="token punctuation">.</span>map<span class="token punctuation">(</span>projectionFunc<span class="token punctuation">)</span>
+          <span class="token punctuation">.</span>asInstanceOf<span class="token punctuation">[</span>Seq<span class="token punctuation">[</span>NamedExpression<span class="token punctuation">]</span><span class="token punctuation">]</span>
+        Project<span class="token punctuation">(</span>newProjects<span class="token punctuation">,</span> withFilter<span class="token punctuation">)</span>
+      <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        withFilter
+      <span class="token punctuation">}</span>
+      <span class="token comment">// 返回最终的逻辑计划</span>
+      withProjection
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="IcebergScan_498"></a>Iceberg中实现的Scan</h4> 
+<p>从前面我们知道，在Spark进行Filter Pushdown优化时，会调用<code>Table::newScanBuilder</code>方法构建一个具体的数据描述器（Scan），实际上是会最终调用Iceberg中如下的方法：</p> 
+<pre><code class="prism language-java"><span class="token keyword">class</span> <span class="token class-name">SparkCopyOnWriteOperation</span> <span class="token keyword">implements</span> <span class="token class-name">RowLevelOperation</span> <span class="token punctuation">{<!-- --></span>
+
+  <span class="token annotation punctuation">@Override</span>
+  <span class="token keyword">public</span> <span class="token class-name">ScanBuilder</span> <span class="token function">newScanBuilder</span><span class="token punctuation">(</span><span class="token class-name">CaseInsensitiveStringMap</span> options<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>lazyScanBuilder <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      lazyScanBuilder <span class="token operator">=</span>
+          <span class="token keyword">new</span> <span class="token class-name">SparkScanBuilder</span><span class="token punctuation">(</span>spark<span class="token punctuation">,</span> table<span class="token punctuation">,</span> branch<span class="token punctuation">,</span> options<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token annotation punctuation">@Override</span>
+            <span class="token keyword">public</span> <span class="token class-name">Scan</span> <span class="token function">build</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+              <span class="token comment">// 构建COW模式的Scan实例</span>
+              <span class="token class-name">Scan</span> scan <span class="token operator">=</span> <span class="token keyword">super</span><span class="token punctuation">.</span><span class="token function">buildCopyOnWriteScan</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+              <span class="token class-name">SparkCopyOnWriteOperation</span><span class="token punctuation">.</span><span class="token keyword">this</span><span class="token punctuation">.</span>configuredScan <span class="token operator">=</span> scan<span class="token punctuation">;</span>
+              <span class="token keyword">return</span> scan<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+          <span class="token punctuation">}</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">return</span> lazyScanBuilder<span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>如下是对<code>SparkCopyOnWriteOperation::buildCopyOnWriteScan</code>方法的完整定义：</p> 
+<pre><code class="prism language-java">  <span class="token keyword">public</span> <span class="token class-name">Scan</span> <span class="token function">buildCopyOnWriteScan</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// table变量，是一个BaseTable实例，因为从Spark的代码流转到Iceberg侧时，使用的都是Iceberg中定义的类</span>
+    <span class="token comment">// 这里是从当前表找到最新的Snapshot</span>
+    <span class="token class-name">Snapshot</span> snapshot <span class="token operator">=</span> <span class="token class-name">SnapshotUtil</span><span class="token punctuation">.</span><span class="token function">latestSnapshot</span><span class="token punctuation">(</span>table<span class="token punctuation">,</span> readConf<span class="token punctuation">.</span><span class="token function">branch</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>snapshot <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">SparkCopyOnWriteScan</span><span class="token punctuation">(</span>
+          spark<span class="token punctuation">,</span> table<span class="token punctuation">,</span> readConf<span class="token punctuation">,</span> <span class="token function">schemaWithMetadataColumns</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> filterExpressions<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token class-name">Schema</span> expectedSchema <span class="token operator">=</span> <span class="token function">schemaWithMetadataColumns</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// Snapshot存在，说明有数据，因此需要生成Scan实例</span>
+    <span class="token comment">//   default BatchScan newBatchScan() {<!-- --></span>
+    <span class="token comment">//     return new BatchScanAdapter(newScan());</span>
+    <span class="token comment">//   }</span>
+    <span class="token comment">// 由于这里的table类型为BaseTable，因此会调用newScan()方法生成DataTableScan的实例，而BatchScan则是一个代理类</span>
+    <span class="token class-name">BatchScan</span> scan <span class="token operator">=</span>
+        table
+            <span class="token punctuation">.</span><span class="token function">newBatchScan</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+            <span class="token punctuation">.</span><span class="token function">useSnapshot</span><span class="token punctuation">(</span>snapshot<span class="token punctuation">.</span><span class="token function">snapshotId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+            <span class="token punctuation">.</span><span class="token function">ignoreResiduals</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+            <span class="token punctuation">.</span><span class="token function">caseSensitive</span><span class="token punctuation">(</span>caseSensitive<span class="token punctuation">)</span>
+            <span class="token punctuation">.</span><span class="token function">filter</span><span class="token punctuation">(</span><span class="token function">filterExpression</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+            <span class="token punctuation">.</span><span class="token function">project</span><span class="token punctuation">(</span>expectedSchema<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    scan <span class="token operator">=</span> <span class="token function">configureSplitPlanning</span><span class="token punctuation">(</span>scan<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 返回一个实现了Spark中的Scan接口的实例</span>
+    <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">SparkCopyOnWriteScan</span><span class="token punctuation">(</span>
+        spark<span class="token punctuation">,</span> table<span class="token punctuation">,</span> scan<span class="token punctuation">,</span> snapshot<span class="token punctuation">,</span> readConf<span class="token punctuation">,</span> expectedSchema<span class="token punctuation">,</span> filterExpressions<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="SparkCopyOnWriteScanSparkBatch_556"></a>SparkCopyOnWriteScan负责生成Spark.Batch</h4> 
+<blockquote> 
+ <p>我们知道SparkCopyOnWriteScan实现了Spark中的Scan接口，而Scan是一个逻辑上的数据读取器，就像逻辑计划那样，因此还需要通过它的Scan::toBatch方法，创建一个可执行的<code>SparkBatch</code>实体类对象</p> 
+</blockquote> 
+<pre><code class="prism language-java"><span class="token keyword">class</span> <span class="token class-name">SparkCopyOnWriteScan</span> <span class="token keyword">extends</span> <span class="token class-name">SparkPartitioningAwareScan</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">FileScanTask</span><span class="token punctuation">&gt;</span></span>
+
+  <span class="token annotation punctuation">@Override</span>
+  <span class="token keyword">public</span> <span class="token class-name">Batch</span> <span class="token function">toBatch</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 返回一个Spark可操作的Batch实例，负责对待读取的数据划分Batches</span>
+    <span class="token comment">// 注意这里在创建SparkBatch实例时，taskGroups()的调用，这个方法实际上是调用Iceberg的接口，搜索此次Scan任务需要读取的所有数据。</span>
+    <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">SparkBatch</span><span class="token punctuation">(</span>
+        sparkContext<span class="token punctuation">,</span> table<span class="token punctuation">,</span> readConf<span class="token punctuation">,</span> <span class="token function">groupingKeyType</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">taskGroups</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> expectedSchema<span class="token punctuation">,</span> <span class="token function">hashCode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h5><a id="SparkCopyOnWriteScantaskGroupsSnapshotScanplanFiles_572"></a>SparkCopyOnWriteScan::taskGroups基于SnapshotScan::planFiles方法实现</h5> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">abstract</span> <span class="token keyword">class</span> <span class="token class-name">SnapshotScan</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ThisT</span><span class="token punctuation">,</span> <span class="token class-name">T</span> <span class="token keyword">extends</span> <span class="token class-name">ScanTask</span><span class="token punctuation">,</span> <span class="token class-name">G</span> <span class="token keyword">extends</span> <span class="token class-name">ScanTaskGroup</span><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span>
+
+  <span class="token annotation punctuation">@Override</span>
+  <span class="token keyword">public</span> <span class="token class-name">CloseableIterable</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token function">planFiles</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 获取要读取的Snapshot</span>
+    <span class="token class-name">Snapshot</span> snapshot <span class="token operator">=</span> <span class="token function">snapshot</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>snapshot <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token constant">LOG</span><span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"Scanning empty table {}"</span><span class="token punctuation">,</span> <span class="token function">table</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token keyword">return</span> <span class="token class-name">CloseableIterable</span><span class="token punctuation">.</span><span class="token function">empty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token constant">LOG</span><span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span>
+        <span class="token string">"Scanning table {} snapshot {} created at {} with filter {}"</span><span class="token punctuation">,</span>
+        <span class="token function">table</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        snapshot<span class="token punctuation">.</span><span class="token function">snapshotId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token class-name">DateTimeUtil</span><span class="token punctuation">.</span><span class="token function">formatTimestampMillis</span><span class="token punctuation">(</span>snapshot<span class="token punctuation">.</span><span class="token function">timestampMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token class-name">ExpressionUtil</span><span class="token punctuation">.</span><span class="token function">toSanitizedString</span><span class="token punctuation">(</span><span class="token function">filter</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token class-name">Listeners</span><span class="token punctuation">.</span><span class="token function">notifyAll</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">ScanEvent</span><span class="token punctuation">(</span><span class="token function">table</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">name</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> snapshot<span class="token punctuation">.</span><span class="token function">snapshotId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">filter</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">schema</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Integer</span><span class="token punctuation">&gt;</span></span> projectedFieldIds <span class="token operator">=</span> <span class="token class-name">Lists</span><span class="token punctuation">.</span><span class="token function">newArrayList</span><span class="token punctuation">(</span><span class="token class-name">TypeUtil</span><span class="token punctuation">.</span><span class="token function">getProjectedIds</span><span class="token punctuation">(</span><span class="token function">schema</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> projectedFieldNames <span class="token operator">=</span>
+        projectedFieldIds<span class="token punctuation">.</span><span class="token function">stream</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">map</span><span class="token punctuation">(</span><span class="token function">schema</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">::</span><span class="token function">findColumnName</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">collect</span><span class="token punctuation">(</span><span class="token class-name">Collectors</span><span class="token punctuation">.</span><span class="token function">toList</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token class-name">Timer<span class="token punctuation">.</span>Timed</span> planningDuration <span class="token operator">=</span> <span class="token function">scanMetrics</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">totalPlanningDuration</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">start</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token class-name">CloseableIterable</span><span class="token punctuation">.</span><span class="token function">whenComplete</span><span class="token punctuation">(</span>
+        <span class="token function">doPlanFiles</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token comment">// doPlanFiles()方法会通过Iceberg的接口，搜索所有要读取的data文件和delete文件</span>
+        <span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-&gt;</span> <span class="token punctuation">{<!-- --></span>
+          planningDuration<span class="token punctuation">.</span><span class="token function">stop</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+          <span class="token class-name">Map</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> metadata <span class="token operator">=</span> <span class="token class-name">Maps</span><span class="token punctuation">.</span><span class="token function">newHashMap</span><span class="token punctuation">(</span><span class="token function">context</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">options</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+          metadata<span class="token punctuation">.</span><span class="token function">putAll</span><span class="token punctuation">(</span><span class="token class-name">EnvironmentContext</span><span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+          <span class="token class-name">ScanReport</span> scanReport <span class="token operator">=</span>
+              <span class="token class-name">ImmutableScanReport</span><span class="token punctuation">.</span><span class="token function">builder</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+                  <span class="token punctuation">.</span><span class="token function">schemaId</span><span class="token punctuation">(</span><span class="token function">schema</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">schemaId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                  <span class="token punctuation">.</span><span class="token function">projectedFieldIds</span><span class="token punctuation">(</span>projectedFieldIds<span class="token punctuation">)</span>
+                  <span class="token punctuation">.</span><span class="token function">projectedFieldNames</span><span class="token punctuation">(</span>projectedFieldNames<span class="token punctuation">)</span>
+                  <span class="token punctuation">.</span><span class="token function">tableName</span><span class="token punctuation">(</span><span class="token function">table</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">name</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                  <span class="token punctuation">.</span><span class="token function">snapshotId</span><span class="token punctuation">(</span>snapshot<span class="token punctuation">.</span><span class="token function">snapshotId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                  <span class="token punctuation">.</span><span class="token function">filter</span><span class="token punctuation">(</span><span class="token class-name">ExpressionUtil</span><span class="token punctuation">.</span><span class="token function">sanitize</span><span class="token punctuation">(</span><span class="token function">filter</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                  <span class="token punctuation">.</span><span class="token function">scanMetrics</span><span class="token punctuation">(</span><span class="token class-name">ScanMetricsResult</span><span class="token punctuation">.</span><span class="token function">fromScanMetrics</span><span class="token punctuation">(</span><span class="token function">scanMetrics</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                  <span class="token punctuation">.</span><span class="token function">metadata</span><span class="token punctuation">(</span>metadata<span class="token punctuation">)</span>
+                  <span class="token punctuation">.</span><span class="token function">build</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+          <span class="token function">context</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">metricsReporter</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">report</span><span class="token punctuation">(</span>scanReport<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="SparkBatchPartitionsPartition_Reader_623"></a>SparkBatch负责生成Partitions及Partition Reader</h4> 
+<blockquote> 
+ <p>SparkBatch继承自Spark中的Batch接口</p> 
+</blockquote> 
+<pre><code class="prism language-java"><span class="token keyword">class</span> <span class="token class-name">SparkBatch</span> <span class="token keyword">implements</span> <span class="token class-name">Batch</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">JavaSparkContext</span> sparkContext<span class="token punctuation">;</span>
+  <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">Table</span> table<span class="token punctuation">;</span>
+  <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">String</span> branch<span class="token punctuation">;</span>
+  <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">SparkReadConf</span> readConf<span class="token punctuation">;</span>
+  <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">Types<span class="token punctuation">.</span>StructType</span> groupingKeyType<span class="token punctuation">;</span>
+  <span class="token comment">// 保存了由SparkCopyOnWriteScan::taskGroups()方法生成的所有要读取的Iceberg管理的data文件和delete文件，</span>
+  <span class="token comment">// 这些文件按对应的分区数据进行分组，并且一个分区的数据文件可能被划分到多个groups</span>
+  <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token operator">?</span> <span class="token keyword">extends</span> <span class="token class-name">ScanTaskGroup</span><span class="token punctuation">&lt;</span><span class="token operator">?</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> taskGroups<span class="token punctuation">;</span>
+  <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">Schema</span> expectedSchema<span class="token punctuation">;</span>
+  <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token keyword">boolean</span> caseSensitive<span class="token punctuation">;</span>
+  <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token keyword">boolean</span> localityEnabled<span class="token punctuation">;</span>
+  <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token keyword">int</span> scanHashCode<span class="token punctuation">;</span>
+
+  <span class="token annotation punctuation">@Override</span>
+  <span class="token keyword">public</span> <span class="token class-name">InputPartition</span><span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token function">planInputPartitions</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 负责对要读取的数据进行分区</span>
+    <span class="token comment">// broadcast the table metadata as input partitions will be sent to executors</span>
+    <span class="token class-name">Broadcast</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Table</span><span class="token punctuation">&gt;</span></span> tableBroadcast <span class="token operator">=</span>
+        sparkContext<span class="token punctuation">.</span><span class="token function">broadcast</span><span class="token punctuation">(</span><span class="token class-name">SerializableTableWithSize</span><span class="token punctuation">.</span><span class="token function">copyOf</span><span class="token punctuation">(</span>table<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token class-name">String</span> expectedSchemaString <span class="token operator">=</span> <span class="token class-name">SchemaParser</span><span class="token punctuation">.</span><span class="token function">toJson</span><span class="token punctuation">(</span>expectedSchema<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 一个Group就对应Spark中的一个Partition</span>
+    <span class="token class-name">InputPartition</span><span class="token punctuation">[</span><span class="token punctuation">]</span> partitions <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">InputPartition</span><span class="token punctuation">[</span>taskGroups<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+
+    <span class="token class-name">Tasks</span><span class="token punctuation">.</span><span class="token function">range</span><span class="token punctuation">(</span>partitions<span class="token punctuation">.</span>length<span class="token punctuation">)</span>
+        <span class="token punctuation">.</span><span class="token function">stopOnFailure</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token punctuation">.</span><span class="token function">executeWith</span><span class="token punctuation">(</span>localityEnabled <span class="token operator">?</span> <span class="token class-name">ThreadPools</span><span class="token punctuation">.</span><span class="token function">getWorkerPool</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">:</span> <span class="token keyword">null</span><span class="token punctuation">)</span>
+        <span class="token punctuation">.</span><span class="token function">run</span><span class="token punctuation">(</span>
+            index <span class="token operator">-&gt;</span>
+                partitions<span class="token punctuation">[</span>index<span class="token punctuation">]</span> <span class="token operator">=</span>
+                    <span class="token keyword">new</span> <span class="token class-name">SparkInputPartition</span><span class="token punctuation">(</span>
+                        groupingKeyType<span class="token punctuation">,</span> <span class="token comment">// 一个taskGroup包含的文件拥有相同的Grouping key</span>
+                        taskGroups<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>index<span class="token punctuation">)</span><span class="token punctuation">,</span>
+                        tableBroadcast<span class="token punctuation">,</span>
+                        branch<span class="token punctuation">,</span>
+                        expectedSchemaString<span class="token punctuation">,</span>
+                        caseSensitive<span class="token punctuation">,</span>
+                        localityEnabled<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> partitions<span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+
+  <span class="token annotation punctuation">@Override</span>
+  <span class="token keyword">public</span> <span class="token class-name">PartitionReaderFactory</span> <span class="token function">createReaderFactory</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 负责创建读取数据的Reader，支持列式读取和行式读取</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">useParquetBatchReads</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">int</span> batchSize <span class="token operator">=</span> readConf<span class="token punctuation">.</span><span class="token function">parquetBatchSize</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">SparkColumnarReaderFactory</span><span class="token punctuation">(</span>batchSize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">useOrcBatchReads</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">int</span> batchSize <span class="token operator">=</span> readConf<span class="token punctuation">.</span><span class="token function">orcBatchSize</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">SparkColumnarReaderFactory</span><span class="token punctuation">(</span>batchSize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">SparkRowReaderFactory</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="SparkBatch_686"></a>从SparkBatch构建数据读取的物理执行计划</h4> 
+<blockquote> 
+ <p>前文提到的Spark中有关数据的读写接口，都是由DataSourceV2中定义的，因此对于数据读取的逻辑计划（DataSourceV2ScanRelation），会先转换成物理执行计划BatchScanExec。</p> 
+</blockquote> 
+<pre><code class="prism language-java"><span class="token keyword">case</span> <span class="token keyword">class</span> <span class="token class-name">BatchScanExec</span><span class="token punctuation">(</span>
+    output<span class="token operator">:</span> <span class="token class-name">Seq</span><span class="token punctuation">[</span><span class="token class-name">AttributeReference</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+    <span class="token annotation punctuation">@transient</span> scan<span class="token operator">:</span> <span class="token class-name">Scan</span><span class="token punctuation">)</span> <span class="token keyword">extends</span> <span class="token class-name">DataSourceV2ScanExecBase</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// scan，对应于Iceberg中的SparkCopyOnWriteScan</span>
+  <span class="token comment">// 因此batch变量是一个SparkBatch实例</span>
+  <span class="token annotation punctuation">@transient</span> lazy val batch <span class="token operator">=</span> scan<span class="token punctuation">.</span>toBatch
+
+  <span class="token comment">// TODO: unify the equal/hashCode implementation for all data source v2 query plans.</span>
+  override def <span class="token function">equals</span><span class="token punctuation">(</span>other<span class="token operator">:</span> <span class="token class-name">Any</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token class-name">Boolean</span> <span class="token operator">=</span> other match <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">case</span> other<span class="token operator">:</span> <span class="token class-name">BatchScanExec</span> <span class="token operator">=</span><span class="token operator">&gt;</span> <span class="token keyword">this</span><span class="token punctuation">.</span>batch <span class="token operator">==</span> other<span class="token punctuation">.</span>batch
+    <span class="token keyword">case</span> _ <span class="token operator">=</span><span class="token operator">&gt;</span> <span class="token boolean">false</span>
+  <span class="token punctuation">}</span>
+
+  override def <span class="token function">hashCode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token class-name">Int</span> <span class="token operator">=</span> batch<span class="token punctuation">.</span><span class="token function">hashCode</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+  <span class="token comment">// 调用SparkBatch::planInputPartitions生成partitions信息</span>
+  <span class="token annotation punctuation">@transient</span> override lazy val partitions<span class="token operator">:</span> <span class="token class-name">Seq</span><span class="token punctuation">[</span><span class="token class-name">InputPartition</span><span class="token punctuation">]</span> <span class="token operator">=</span> batch<span class="token punctuation">.</span><span class="token function">planInputPartitions</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+  <span class="token comment">// 调用SparkBatch::createReaderFactory生成Reader工厂对象</span>
+  override lazy val readerFactory<span class="token operator">:</span> <span class="token class-name">PartitionReaderFactory</span> <span class="token operator">=</span> batch<span class="token punctuation">.</span><span class="token function">createReaderFactory</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+  override lazy val inputRDD<span class="token operator">:</span> <span class="token constant">RDD</span><span class="token punctuation">[</span><span class="token class-name">InternalRow</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 执行时，净当前的物理执行计划，转换为一个RDD，并传递给所有的RDD以及Reader工厂</span>
+    <span class="token keyword">new</span> <span class="token class-name">DataSourceRDD</span><span class="token punctuation">(</span>sparkContext<span class="token punctuation">,</span> partitions<span class="token punctuation">,</span> readerFactory<span class="token punctuation">,</span> supportsColumnar<span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+
+  override def <span class="token function">doCanonicalize</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token class-name">BatchScanExec</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">copy</span><span class="token punctuation">(</span>output <span class="token operator">=</span> output<span class="token punctuation">.</span><span class="token function">map</span><span class="token punctuation">(</span><span class="token class-name">QueryPlan</span><span class="token punctuation">.</span><span class="token function">normalizeExpressions</span><span class="token punctuation">(</span>_<span class="token punctuation">,</span> output<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="DataSourceRDDReader_719"></a>DataSourceRDD计算时实例化Reader并完成读数据</h4> 
+<p>这里需要重点关注的是<code>compute</code>方法，在Spark中，每一个Partition都对应一个Task，这个Task负责最终调用<code>compute</code>方法，触发当前分区上的计算逻辑。</p> 
+<pre><code class="prism language-java"><span class="token comment">// columnar scan.</span>
+<span class="token keyword">class</span> <span class="token class-name">DataSourceRDD</span><span class="token punctuation">(</span>
+    sc<span class="token operator">:</span> <span class="token class-name">SparkContext</span><span class="token punctuation">,</span>
+    <span class="token annotation punctuation">@transient</span> <span class="token keyword">private</span> val inputPartitions<span class="token operator">:</span> <span class="token class-name">Seq</span><span class="token punctuation">[</span><span class="token class-name">InputPartition</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+    partitionReaderFactory<span class="token operator">:</span> <span class="token class-name">PartitionReaderFactory</span><span class="token punctuation">,</span>
+    columnarReads<span class="token operator">:</span> <span class="token class-name">Boolean</span><span class="token punctuation">)</span>
+  <span class="token keyword">extends</span> <span class="token class-name">RDD</span><span class="token punctuation">[</span><span class="token class-name">InternalRow</span><span class="token punctuation">]</span><span class="token punctuation">(</span>sc<span class="token punctuation">,</span> <span class="token class-name">Nil</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+  override <span class="token keyword">protected</span> def getPartitions<span class="token operator">:</span> <span class="token class-name">Array</span><span class="token punctuation">[</span><span class="token class-name">Partition</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    inputPartitions<span class="token punctuation">.</span>zipWithIndex<span class="token punctuation">.</span>map <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">case</span> <span class="token punctuation">(</span>inputPartition<span class="token punctuation">,</span> index<span class="token punctuation">)</span> <span class="token operator">=</span><span class="token operator">&gt;</span> <span class="token keyword">new</span> <span class="token class-name">DataSourceRDDPartition</span><span class="token punctuation">(</span>index<span class="token punctuation">,</span> inputPartition<span class="token punctuation">)</span>
+    <span class="token punctuation">}</span><span class="token punctuation">.</span>toArray
+  <span class="token punctuation">}</span>
+
+  <span class="token keyword">private</span> def <span class="token function">castPartition</span><span class="token punctuation">(</span>split<span class="token operator">:</span> <span class="token class-name">Partition</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token class-name">DataSourceRDDPartition</span> <span class="token operator">=</span> split match <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">case</span> p<span class="token operator">:</span> <span class="token class-name">DataSourceRDDPartition</span> <span class="token operator">=</span><span class="token operator">&gt;</span> p
+    <span class="token keyword">case</span> _ <span class="token operator">=</span><span class="token operator">&gt;</span> <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">SparkException</span><span class="token punctuation">(</span>s<span class="token string">"[BUG] Not a DataSourceRDDPartition: $split"</span><span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+
+  override def <span class="token function">compute</span><span class="token punctuation">(</span>split<span class="token operator">:</span> <span class="token class-name">Partition</span><span class="token punctuation">,</span> context<span class="token operator">:</span> <span class="token class-name">TaskContext</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token class-name">Iterator</span><span class="token punctuation">[</span><span class="token class-name">InternalRow</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// partition对应于Iceberg中的一个TaskGroup，而一个TaskGroup的数据文件拥有相同的Partition data</span>
+    val inputPartition <span class="token operator">=</span> <span class="token function">castPartition</span><span class="token punctuation">(</span>split<span class="token punctuation">)</span><span class="token punctuation">.</span>inputPartition
+    val <span class="token punctuation">(</span>iter<span class="token punctuation">,</span> reader<span class="token punctuation">)</span> <span class="token operator">=</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>columnarReads<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">// 列读</span>
+      <span class="token comment">// batchReader实际上是一个BatchDataReader的实例</span>
+      val batchReader <span class="token operator">=</span> partitionReaderFactory<span class="token punctuation">.</span><span class="token function">createColumnarReader</span><span class="token punctuation">(</span>inputPartition<span class="token punctuation">)</span>
+      val iter <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">MetricsBatchIterator</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">PartitionIterator</span><span class="token punctuation">[</span><span class="token class-name">ColumnarBatch</span><span class="token punctuation">]</span><span class="token punctuation">(</span>batchReader<span class="token punctuation">)</span><span class="token punctuation">)</span>
+      <span class="token punctuation">(</span>iter<span class="token punctuation">,</span> batchReader<span class="token punctuation">)</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">// 行读</span>
+      val rowReader <span class="token operator">=</span> partitionReaderFactory<span class="token punctuation">.</span><span class="token function">createReader</span><span class="token punctuation">(</span>inputPartition<span class="token punctuation">)</span>
+      val iter <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">MetricsRowIterator</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">PartitionIterator</span><span class="token punctuation">[</span><span class="token class-name">InternalRow</span><span class="token punctuation">]</span><span class="token punctuation">(</span>rowReader<span class="token punctuation">)</span><span class="token punctuation">)</span>
+      <span class="token punctuation">(</span>iter<span class="token punctuation">,</span> rowReader<span class="token punctuation">)</span>
+    <span class="token punctuation">}</span>
+    context<span class="token punctuation">.</span>addTaskCompletionListener<span class="token punctuation">[</span><span class="token class-name">Unit</span><span class="token punctuation">]</span><span class="token punctuation">(</span>_ <span class="token operator">=</span><span class="token operator">&gt;</span> reader<span class="token punctuation">.</span><span class="token function">close</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token comment">// TODO: SPARK-25083 remove the type erasure hack in data source scan</span>
+    <span class="token keyword">new</span> <span class="token class-name">InterruptibleIterator</span><span class="token punctuation">(</span>context<span class="token punctuation">,</span> iter<span class="token punctuation">.</span>asInstanceOf<span class="token punctuation">[</span><span class="token class-name">Iterator</span><span class="token punctuation">[</span><span class="token class-name">InternalRow</span><span class="token punctuation">]</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+
+  override def <span class="token function">getPreferredLocations</span><span class="token punctuation">(</span>split<span class="token operator">:</span> <span class="token class-name">Partition</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token class-name">Seq</span><span class="token punctuation">[</span><span class="token class-name">String</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token function">castPartition</span><span class="token punctuation">(</span>split<span class="token punctuation">)</span><span class="token punctuation">.</span>inputPartition<span class="token punctuation">.</span><span class="token function">preferredLocations</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="BatchDataReader_767"></a>BatchDataReader读取数据</h4> 
+<blockquote> 
+ <p>BatchDataReader继承自Spark中的<code>PartitionReader&lt;ColumnarBatch&gt;</code>接口</p> 
+</blockquote> 
+<pre><code class="prism language-java"><span class="token keyword">class</span> <span class="token class-name">BatchDataReader</span> <span class="token keyword">extends</span> <span class="token class-name">BaseBatchReader</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">FileScanTask</span><span class="token punctuation">&gt;</span></span>
+    <span class="token keyword">implements</span> <span class="token class-name">PartitionReader</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ColumnarBatch</span><span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+  
+  <span class="token comment">// 返回一个迭代器，可以在FileScanTask包含的所有data文件和delete文件，</span>
+  <span class="token annotation punctuation">@Override</span>
+  <span class="token keyword">protected</span> <span class="token class-name">CloseableIterator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ColumnarBatch</span><span class="token punctuation">&gt;</span></span> <span class="token keyword">open</span><span class="token punctuation">(</span><span class="token class-name">FileScanTask</span> task<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token class-name">String</span> filePath <span class="token operator">=</span> task<span class="token punctuation">.</span><span class="token function">file</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">path</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token constant">LOG</span><span class="token punctuation">.</span><span class="token function">debug</span><span class="token punctuation">(</span><span class="token string">"Opening data file {}"</span><span class="token punctuation">,</span> filePath<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// update the current file for Spark's filename() function</span>
+    <span class="token class-name">InputFileBlockHolder</span><span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>filePath<span class="token punctuation">,</span> task<span class="token punctuation">.</span><span class="token function">start</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> task<span class="token punctuation">.</span><span class="token function">length</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token class-name">Map</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Integer</span><span class="token punctuation">,</span> <span class="token operator">?</span><span class="token punctuation">&gt;</span></span> idToConstant <span class="token operator">=</span> <span class="token function">constantsMap</span><span class="token punctuation">(</span>task<span class="token punctuation">,</span> <span class="token function">expectedSchema</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token class-name">InputFile</span> inputFile <span class="token operator">=</span> <span class="token function">getInputFile</span><span class="token punctuation">(</span>filePath<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token class-name">Preconditions</span><span class="token punctuation">.</span><span class="token function">checkNotNull</span><span class="token punctuation">(</span>inputFile<span class="token punctuation">,</span> <span class="token string">"Could not find InputFile associated with FileScanTask"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 创建一个SparkDeleteFilter实例，它负责收集等值删除文件 和 位置删除文件，并建立删除数据记录的索引，</span>
+    <span class="token comment">// 如此在每遍历一个data file时，就可以根据索引信息，确定当前的record是不是存活的。</span>
+    <span class="token class-name">SparkDeleteFilter</span> deleteFilter <span class="token operator">=</span>
+        task<span class="token punctuation">.</span><span class="token function">deletes</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+            <span class="token operator">?</span> <span class="token keyword">null</span>
+            <span class="token operator">:</span> <span class="token keyword">new</span> <span class="token class-name">SparkDeleteFilter</span><span class="token punctuation">(</span>filePath<span class="token punctuation">,</span> task<span class="token punctuation">.</span><span class="token function">deletes</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">counter</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// newBatchIterable()方法会根据inputFile的类型，创建相应的文件读取器，例如为Parquet创建VectorizedParquetReader</span>
+    <span class="token keyword">return</span> <span class="token function">newBatchIterable</span><span class="token punctuation">(</span>
+            inputFile<span class="token punctuation">,</span>
+            task<span class="token punctuation">.</span><span class="token function">file</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">format</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            task<span class="token punctuation">.</span><span class="token function">start</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            task<span class="token punctuation">.</span><span class="token function">length</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            task<span class="token punctuation">.</span><span class="token function">residual</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            idToConstant<span class="token punctuation">,</span>
+            deleteFilter<span class="token punctuation">)</span>
+        <span class="token punctuation">.</span><span class="token function">iterator</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="SparkColumnarBatch_807"></a>读取数据转换成Spark中的ColumnarBatch</h4> 
+<blockquote> 
+ <p>不论是Parquet/Orc文件，最底层都是通过ColumnarBatchReader负责真正的数据读取与过滤</p> 
+</blockquote> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">ColumnarBatchReader</span> <span class="token keyword">extends</span> <span class="token class-name">BaseBatchReader</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ColumnarBatch</span><span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token keyword">boolean</span> hasIsDeletedColumn<span class="token punctuation">;</span>
+  <span class="token keyword">private</span> <span class="token class-name">DeleteFilter</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">InternalRow</span><span class="token punctuation">&gt;</span></span> deletes <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+  <span class="token keyword">private</span> <span class="token keyword">long</span> rowStartPosInBatch <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+
+  <span class="token keyword">public</span> <span class="token class-name">ColumnarBatchReader</span><span class="token punctuation">(</span><span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">VectorizedReader</span><span class="token punctuation">&lt;</span><span class="token operator">?</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> readers<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">super</span><span class="token punctuation">(</span>readers<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>hasIsDeletedColumn <span class="token operator">=</span>
+        readers<span class="token punctuation">.</span><span class="token function">stream</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">anyMatch</span><span class="token punctuation">(</span>reader <span class="token operator">-&gt;</span> reader <span class="token keyword">instanceof</span> <span class="token class-name">DeletedVectorReader</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+  
+  <span class="token comment">/**
+   * 设置RowGroup的信息，方便在数据读取时，能够根据RowGroup的统计信息调整要读取的位置。
+   */</span>
+  <span class="token annotation punctuation">@Override</span>
+  <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">setRowGroupInfo</span><span class="token punctuation">(</span>
+      <span class="token class-name">PageReadStore</span> pageStore<span class="token punctuation">,</span> <span class="token class-name">Map</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ColumnPath</span><span class="token punctuation">,</span> <span class="token class-name">ColumnChunkMetaData</span><span class="token punctuation">&gt;</span></span> metaData<span class="token punctuation">,</span> <span class="token keyword">long</span> rowPosition<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">super</span><span class="token punctuation">.</span><span class="token function">setRowGroupInfo</span><span class="token punctuation">(</span>pageStore<span class="token punctuation">,</span> metaData<span class="token punctuation">,</span> rowPosition<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>rowStartPosInBatch <span class="token operator">=</span> rowPosition<span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+  
+  <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">setDeleteFilter</span><span class="token punctuation">(</span><span class="token class-name">DeleteFilter</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">InternalRow</span><span class="token punctuation">&gt;</span></span> deleteFilter<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>deletes <span class="token operator">=</span> deleteFilter<span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+
+  <span class="token annotation punctuation">@Override</span>
+  <span class="token keyword">public</span> <span class="token keyword">final</span> <span class="token class-name">ColumnarBatch</span> <span class="token function">read</span><span class="token punctuation">(</span><span class="token class-name">ColumnarBatch</span> reuse<span class="token punctuation">,</span> <span class="token keyword">int</span> numRowsToRead<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>reuse <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token function">closeVectors</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">// 通过内部类ColumnBatchLoader代理完成数据的读取与结果转换</span>
+    <span class="token class-name">ColumnarBatch</span> columnarBatch <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ColumnBatchLoader</span><span class="token punctuation">(</span>numRowsToRead<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">loadDataToColumnBatch</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    rowStartPosInBatch <span class="token operator">+=</span> numRowsToRead<span class="token punctuation">;</span>
+    <span class="token keyword">return</span> columnarBatch<span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+  <span class="token comment">/**
+   * 内部，封装了数据读取的细节。
+   */</span>
+  <span class="token keyword">private</span> <span class="token keyword">class</span> <span class="token class-name">ColumnBatchLoader</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token keyword">int</span> numRowsToRead<span class="token punctuation">;</span>
+    <span class="token comment">// the rowId mapping to skip deleted rows for all column vectors inside a batch, it is null when</span>
+    <span class="token comment">// there is no deletes</span>
+    <span class="token keyword">private</span> <span class="token keyword">int</span><span class="token punctuation">[</span><span class="token punctuation">]</span> rowIdMapping<span class="token punctuation">;</span>
+    <span class="token comment">// the array to indicate if a row is deleted or not, it is null when there is no "_deleted"</span>
+    <span class="token comment">// metadata column</span>
+    <span class="token keyword">private</span> <span class="token keyword">boolean</span><span class="token punctuation">[</span><span class="token punctuation">]</span> isDeleted<span class="token punctuation">;</span>
+
+    <span class="token comment">/**
+     * Build a row id mapping inside a batch, which skips deleted rows. Here is an example of how we
+     * delete 2 rows in a batch with 8 rows in total. [0,1,2,3,4,5,6,7] -- Original status of the
+     * row id mapping array [F,F,F,F,F,F,F,F] -- Original status of the isDeleted array Position
+     * delete 2, 6 [0,1,3,4,5,7,-,-] -- After applying position deletes [Set Num records to 6]
+     * [F,F,T,F,F,F,T,F] -- After applying position deletes
+     * 构建Delete Position到
+     *
+     * @param deletedRowPositions a set of deleted row positions
+     * @return the mapping array and the new num of rows in a batch, null if no row is deleted
+     */</span>
+    <span class="token class-name">Pair</span><span class="token operator">&lt;</span><span class="token keyword">int</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token class-name">Integer</span><span class="token operator">&gt;</span> <span class="token function">buildPosDelRowIdMapping</span><span class="token punctuation">(</span><span class="token class-name">PositionDeleteIndex</span> deletedRowPositions<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">if</span> <span class="token punctuation">(</span>deletedRowPositions <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+      <span class="token punctuation">}</span>
+
+      <span class="token keyword">int</span><span class="token punctuation">[</span><span class="token punctuation">]</span> posDelRowIdMapping <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token keyword">int</span><span class="token punctuation">[</span>numRowsToRead<span class="token punctuation">]</span><span class="token punctuation">;</span>
+      <span class="token comment">// 使用双指针法，查找存活的数据行，并按顺序放置到区间[0, currentRowId]</span>
+      <span class="token comment">// posDelRowIdMapping数组的下标定义为存活的数据记录的新行号，其值表示读取时的行号。</span>
+      <span class="token keyword">int</span> originalRowId <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+      <span class="token keyword">int</span> currentRowId <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+      <span class="token keyword">while</span> <span class="token punctuation">(</span>originalRowId <span class="token operator">&lt;</span> numRowsToRead<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>deletedRowPositions<span class="token punctuation">.</span><span class="token function">isDeleted</span><span class="token punctuation">(</span>originalRowId <span class="token operator">+</span> rowStartPosInBatch<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+          posDelRowIdMapping<span class="token punctuation">[</span>currentRowId<span class="token punctuation">]</span> <span class="token operator">=</span> originalRowId<span class="token punctuation">;</span>
+          currentRowId<span class="token operator">++</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token keyword">if</span> <span class="token punctuation">(</span>hasIsDeletedColumn<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            isDeleted<span class="token punctuation">[</span>originalRowId<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+          <span class="token punctuation">}</span>
+
+          deletes<span class="token punctuation">.</span><span class="token function">incrementDeleteCount</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        originalRowId<span class="token operator">++</span><span class="token punctuation">;</span>
+      <span class="token punctuation">}</span>
+
+      <span class="token keyword">if</span> <span class="token punctuation">(</span>currentRowId <span class="token operator">==</span> numRowsToRead<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// there is no delete in this batch</span>
+        <span class="token keyword">return</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+      <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> <span class="token class-name">Pair</span><span class="token punctuation">.</span><span class="token function">of</span><span class="token punctuation">(</span>posDelRowIdMapping<span class="token punctuation">,</span> currentRowId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">int</span><span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token function">initEqDeleteRowIdMapping</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">int</span><span class="token punctuation">[</span><span class="token punctuation">]</span> eqDeleteRowIdMapping <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+      <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">hasEqDeletes</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        eqDeleteRowIdMapping <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token keyword">int</span><span class="token punctuation">[</span>numRowsToRead<span class="token punctuation">]</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> numRowsToRead<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+          eqDeleteRowIdMapping<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> i<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+      <span class="token punctuation">}</span>
+
+      <span class="token keyword">return</span> eqDeleteRowIdMapping<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">/**
+     * Filter out the equality deleted rows. Here is an example, [0,1,2,3,4,5,6,7] -- Original
+     * status of the row id mapping array [F,F,F,F,F,F,F,F] -- Original status of the isDeleted
+     * array Position delete 2, 6 [0,1,3,4,5,7,-,-] -- After applying position deletes [Set Num
+     * records to 6] [F,F,T,F,F,F,T,F] -- After applying position deletes Equality delete 1 &lt;= x &lt;=
+     * 3 [0,4,5,7,-,-,-,-] -- After applying equality deletes [Set Num records to 4]
+     * [F,T,T,T,F,F,T,F] -- After applying equality deletes
+     * 对读取的数据，进行等值删除过滤，保留存活的数据行。
+     *
+     * @param columnarBatch the {@link ColumnarBatch} to apply the equality delete
+     */</span>
+    <span class="token keyword">void</span> <span class="token function">applyEqDelete</span><span class="token punctuation">(</span><span class="token class-name">ColumnarBatch</span> columnarBatch<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token class-name">Iterator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">InternalRow</span><span class="token punctuation">&gt;</span></span> it <span class="token operator">=</span> columnarBatch<span class="token punctuation">.</span><span class="token function">rowIterator</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token comment">// 与buildPosDelRowIdMapping方法的实现类似，也是利用双指针法，为每一个存活的数据行计算新的行号。</span>
+      <span class="token keyword">int</span> rowId <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+      <span class="token keyword">int</span> currentRowId <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+      <span class="token keyword">while</span> <span class="token punctuation">(</span>it<span class="token punctuation">.</span><span class="token function">hasNext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">InternalRow</span> row <span class="token operator">=</span> it<span class="token punctuation">.</span><span class="token function">next</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>deletes<span class="token punctuation">.</span><span class="token function">eqDeletedRowFilter</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">test</span><span class="token punctuation">(</span>row<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token comment">// the row is NOT deleted</span>
+          <span class="token comment">// skip deleted rows by pointing to the next undeleted row Id</span>
+          rowIdMapping<span class="token punctuation">[</span>currentRowId<span class="token punctuation">]</span> <span class="token operator">=</span> rowIdMapping<span class="token punctuation">[</span>rowId<span class="token punctuation">]</span><span class="token punctuation">;</span>
+          currentRowId<span class="token operator">++</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token keyword">if</span> <span class="token punctuation">(</span>hasIsDeletedColumn<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            isDeleted<span class="token punctuation">[</span>rowIdMapping<span class="token punctuation">[</span>rowId<span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+          <span class="token punctuation">}</span>
+
+          deletes<span class="token punctuation">.</span><span class="token function">incrementDeleteCount</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        rowId<span class="token operator">++</span><span class="token punctuation">;</span>
+      <span class="token punctuation">}</span>
+
+      columnarBatch<span class="token punctuation">.</span><span class="token function">setNumRows</span><span class="token punctuation">(</span>currentRowId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="Write_953"></a>Write的执行过程</h3> 
+<p>从前面的章节可以看到，在构建Scan的过程中，会同时搜集data files和delete files，因此在调用Reader实例读取每一个<code>TaskGroup</code>中的数据文件时，同时会应用<code>DeleteFilter</code>，来过滤掉那些被删除的记录。</p> 
+<p><code>这个过程实际上就是一个\Merge On Read的过程。</code></p> 
+<p>而MERGE INTO的Write过程，在我<a href="https://blog.csdn.net/u014445499/article/details/129099821?csdn_share_tail=%7B%22type%22%3A%22blog%22%2C%22rType%22%3A%22article%22%2C%22rId%22%3A%22129099821%22%2C%22source%22%3A%22u014445499%22%7D">之前的文章</a>有解析，大体的思路就是将从<code>target_table</code> Scan得到的、经过删除过滤后的数据集，与<code>source_table</code>中的数据JOIN；从而产生带有<code>变更标记的结果数据集（每个被标记为INSERT/UPDATE/DELETE）</code>；在写出数据到文件时，就可以根据每一行的标记确定写出行为，最终只会产生<code>Data Files</code>，数据文件更加干净。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/f64ae52cf73e4ac0b277c43a93233dba/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Iceberg: 列式读取Parquet数据</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/fd125bab78eeb66ab4540fde74a8797e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">在Fiber中处理请求和响应</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

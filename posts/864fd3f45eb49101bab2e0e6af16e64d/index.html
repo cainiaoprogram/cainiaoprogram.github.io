@@ -1,0 +1,2532 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>深度学习被你忽略的细节系列篇——Softmax、LogSumExp和Sigmoid - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="深度学习被你忽略的细节系列篇——Softmax、LogSumExp和Sigmoid" />
+<meta property="og:description" content="平时我们用pytorch或者tensorflow框架时，基本对特别底层的函数实现关注不多，仅限于知道公式的原理。但是很多大佬往往自己会实现一些源码(比如ListNet复现)，在看这些源码时，经常出现各种有点难以理解的代码，本来很简单的东西，莫名其妙的各种转换，化简完之后可能感觉是一样的，这么费劲周折的折腾啥？殊不知还是对底层的实现原理了解少了，虽然有些源码不需要我们从底层造轮子(完全从底层造轮子也影响效率)，但是能理解其原理在我们debug以及看一些源码时不至于太多疑惑(毕竟国外很多大佬都喜欢实现一些底层utils)。
+今天我们来重新认识一下我们经常用的Softmax、LogSumExp和Sigmoid
+1. 背景概要 我们知道编程语言中的数值都有一个表示范围的，如果数值过大，超过最大的范围，就是上溢；如果过小，超过最小的范围，就是下溢。
+今天要讨论的Softmax、LogSumExp和Sigmoid，就面临着上述溢出的问题，下面的一些梳理也主要用来解决计算Softmax或CrossEntropy时出现的上溢(overflow)或下溢(underflow)问题。
+2. Softmax 在机器学习中，计算概率输出基本都需要经过Softmax函数，它的公式应该很熟悉了吧
+Softmax ( x i ) = exp ⁡ ( x i ) ∑ j = 1 n exp ⁡ ( x j ) (1) \text{Softmax}(x_i) = \frac{\exp(x_i)}{\sum_{j=1}^n \exp(x_j)} \tag{1} Softmax(xi​)=∑j=1n​exp(xj​)exp(xi​)​(1)
+但是Softmax存在上溢和下溢大问题。如果 x i x_i xi​太大，对应的指数函数也非常大，此时很容易就溢出，得到nan结果；如果 x i x_i xi​太小，或者说负的太多，就会导致出现下溢而变成0，如果分母变成0，就会出现除0的结果。
+此时我们经常看到一个常见的做法是(其实用到的是指数归一化技巧, exp-normalize)，先计算x中的最大值 b = max ⁡ i = 1 n x i b = \max_{i=1}^n x_i b=maxi=1n​xi​，然后根据
+Softmax ( x i ) = exp ⁡ ( x i ) ∑ j = 1 n exp ⁡ ( x j ) = exp ⁡ ( x i − b ) ⋅ exp ⁡ ( b ) ∑ j = 1 n ( exp ⁡ ( x j − b ) ⋅ exp ⁡ ( b ) ) = exp ⁡ ( x i − b ) ⋅ exp ⁡ ( b ) exp ⁡ ( b ) ⋅ ∑ j = 1 n exp ⁡ ( x j − b ) = exp ⁡ ( x i − b ) ∑ j = 1 n exp ⁡ ( x j − b ) = Softmax ( x i − b ) \begin{aligned} \text{Softmax}(x_i) &amp;= \frac{\exp(x_i)}{\sum_{j=1}^n \exp(x_j)} \\ &amp;= \frac{\exp(x_i - b) \cdot \exp(b)}{\sum_{j=1}^n \left (\exp(x_j - b) \cdot \exp(b) \right)} \\ &amp;= \frac{\exp(x_i - b) \cdot \exp(b)}{ \exp(b) \cdot \sum_{j=1}^n \exp(x_j - b) } \\ &amp;= \frac{\exp(x_i - b)}{\sum_{j=1}^n \exp(x_j - b)} \\ &amp;= \text{Softmax}(x_i - b) \end{aligned} Softmax(xi​)​=∑j=1n​exp(xj​)exp(xi​)​=∑j=1n​(exp(xj​−b)⋅exp(b))exp(xi​−b)⋅exp(b)​=exp(b)⋅∑j=1n​exp(xj​−b)exp(xi​−b)⋅exp(b)​=∑j=1n​exp(xj​−b)exp(xi​−b)​=Softmax(xi​−b)​" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/864fd3f45eb49101bab2e0e6af16e64d/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-03-06T18:15:43+08:00" />
+<meta property="article:modified_time" content="2023-03-06T18:15:43+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">深度学习被你忽略的细节系列篇——Softmax、LogSumExp和Sigmoid</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>平时我们用pytorch或者tensorflow框架时，基本对特别底层的函数实现关注不多，仅限于知道公式的原理。但是很多大佬往往自己会实现一些源码(比如<a href="https://github.com/koreyou/listnet_chainer">ListNet复现</a>)，在看这些源码时，经常出现各种有点难以理解的代码，本来很简单的东西，莫名其妙的各种转换，化简完之后可能感觉是一样的，这么费劲周折的折腾啥？殊不知还是对底层的实现原理了解少了，虽然有些源码不需要我们从底层造轮子(完全从底层造轮子也影响效率)，但是能理解其原理在我们debug以及看一些源码时不至于太多疑惑(毕竟国外很多大佬都喜欢实现一些底层utils)。</p> 
+<p>今天我们来重新认识一下我们经常用的Softmax、LogSumExp和Sigmoid</p> 
+<h2><a id="1__3"></a>1. 背景概要</h2> 
+<p>我们知道编程语言中的数值都有一个表示范围的，如果数值过大，超过最大的范围，就是上溢；如果过小，超过最小的范围，就是下溢。<br> 今天要讨论的Softmax、LogSumExp和Sigmoid，就面临着上述溢出的问题，下面的一些梳理也主要用来解决计算Softmax或CrossEntropy时出现的上溢(overflow)或下溢(underflow)问题。<br> <img src="https://images2.imgbox.com/22/17/wF5CAFEa_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="2_Softmax_8"></a>2. Softmax</h2> 
+<p>在机器学习中，计算概率输出基本都需要经过Softmax函数，它的公式应该很熟悉了吧<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+          
+          
+           
+           
+             Softmax 
+            
+           
+             ( 
+            
+            
+            
+              x 
+             
+            
+              i 
+             
+            
+           
+             ) 
+            
+           
+             = 
+            
+            
+             
+             
+               exp 
+              
+             
+               ⁡ 
+              
+             
+               ( 
+              
+              
+              
+                x 
+               
+              
+                i 
+               
+              
+             
+               ) 
+              
+             
+             
+              
+              
+                ∑ 
+               
+               
+               
+                 j 
+                
+               
+                 = 
+                
+               
+                 1 
+                
+               
+              
+                n 
+               
+              
+             
+               exp 
+              
+             
+               ⁡ 
+              
+             
+               ( 
+              
+              
+              
+                x 
+               
+              
+                j 
+               
+              
+             
+               ) 
+              
+             
+            
+           
+          
+          
+          
+          
+            (1) 
+           
+          
+         
+        
+       
+         \text{Softmax}(x_i) = \frac{\exp(x_i)}{\sum_{j=1}^n \exp(x_j)} \tag{1} 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord text"><span class="mord">Softmax</span></span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 2.5571em; vertical-align: -1.1301em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.427em;"><span class="" style="top: -2.3057em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mop"><span class="mop op-symbol small-op" style="position: relative; top: 0em;">∑</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8043em;"><span class="" style="top: -2.4003em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span><span class="mrel mtight">=</span><span class="mord mtight">1</span></span></span></span><span class="" style="top: -3.2029em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.4358em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span></span></span><span class="" style="top: -3.23em;"><span class="pstrut" style="height: 3em;"></span><span class="frac-line" style="border-bottom-width: 0.04em;"></span></span><span class="" style="top: -3.677em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 1.1301em;"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span></span><span class="tag"><span class="strut" style="height: 2.5571em; vertical-align: -1.1301em;"></span><span class="mord text"><span class="mord">(</span><span class="mord"><span class="mord">1</span></span><span class="mord">)</span></span></span></span></span></span></span><br> 但是Softmax存在上溢和下溢大问题。如果<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          x 
+         
+        
+          i 
+         
+        
+       
+      
+        x_i 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.5806em; vertical-align: -0.15em;"></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span></span></span></span></span>太大，对应的指数函数也非常大，此时很容易就溢出，得到nan结果；如果<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          x 
+         
+        
+          i 
+         
+        
+       
+      
+        x_i 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.5806em; vertical-align: -0.15em;"></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span></span></span></span></span>太小，或者说负的太多，就会导致出现下溢而变成0，如果分母变成0，就会出现除0的结果。<br> 此时我们经常看到一个常见的做法是(其实用到的是指数归一化技巧, exp-normalize)，先计算x中的最大值<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         b 
+        
+       
+         = 
+        
+        
+         
+         
+           max 
+          
+         
+           ⁡ 
+          
+         
+         
+         
+           i 
+          
+         
+           = 
+          
+         
+           1 
+          
+         
+        
+          n 
+         
+        
+        
+        
+          x 
+         
+        
+          i 
+         
+        
+       
+      
+        b = \max_{i=1}^n x_i 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal">b</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.9231em; vertical-align: -0.2587em;"></span><span class="mop"><span class="mop">max</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.6644em;"><span class="" style="top: -2.4413em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight">i</span><span class="mrel mtight">=</span><span class="mord mtight">1</span></span></span></span><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2587em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span></span></span></span></span>，然后根据<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+          
+           
+            
+            
+              Softmax 
+             
+            
+              ( 
+             
+             
+             
+               x 
+              
+             
+               i 
+              
+             
+            
+              ) 
+             
+            
+           
+          
+          
+           
+            
+             
+            
+              = 
+             
+             
+              
+              
+                exp 
+               
+              
+                ⁡ 
+               
+              
+                ( 
+               
+               
+               
+                 x 
+                
+               
+                 i 
+                
+               
+              
+                ) 
+               
+              
+              
+               
+               
+                 ∑ 
+                
+                
+                
+                  j 
+                 
+                
+                  = 
+                 
+                
+                  1 
+                 
+                
+               
+                 n 
+                
+               
+              
+                exp 
+               
+              
+                ⁡ 
+               
+              
+                ( 
+               
+               
+               
+                 x 
+                
+               
+                 j 
+                
+               
+              
+                ) 
+               
+              
+             
+            
+           
+          
+         
+         
+          
+           
+            
+           
+          
+          
+           
+            
+             
+            
+              = 
+             
+             
+              
+              
+                exp 
+               
+              
+                ⁡ 
+               
+              
+                ( 
+               
+               
+               
+                 x 
+                
+               
+                 i 
+                
+               
+              
+                − 
+               
+              
+                b 
+               
+              
+                ) 
+               
+              
+                ⋅ 
+               
+              
+                exp 
+               
+              
+                ⁡ 
+               
+              
+                ( 
+               
+              
+                b 
+               
+              
+                ) 
+               
+              
+              
+               
+               
+                 ∑ 
+                
+                
+                
+                  j 
+                 
+                
+                  = 
+                 
+                
+                  1 
+                 
+                
+               
+                 n 
+                
+               
+               
+               
+                 ( 
+                
+               
+                 exp 
+                
+               
+                 ⁡ 
+                
+               
+                 ( 
+                
+                
+                
+                  x 
+                 
+                
+                  j 
+                 
+                
+               
+                 − 
+                
+               
+                 b 
+                
+               
+                 ) 
+                
+               
+                 ⋅ 
+                
+               
+                 exp 
+                
+               
+                 ⁡ 
+                
+               
+                 ( 
+                
+               
+                 b 
+                
+               
+                 ) 
+                
+               
+                 ) 
+                
+               
+              
+             
+            
+           
+          
+         
+         
+          
+           
+            
+           
+          
+          
+           
+            
+             
+            
+              = 
+             
+             
+              
+              
+                exp 
+               
+              
+                ⁡ 
+               
+              
+                ( 
+               
+               
+               
+                 x 
+                
+               
+                 i 
+                
+               
+              
+                − 
+               
+              
+                b 
+               
+              
+                ) 
+               
+              
+                ⋅ 
+               
+              
+                exp 
+               
+              
+                ⁡ 
+               
+              
+                ( 
+               
+              
+                b 
+               
+              
+                ) 
+               
+              
+              
+              
+                exp 
+               
+              
+                ⁡ 
+               
+              
+                ( 
+               
+              
+                b 
+               
+              
+                ) 
+               
+              
+                ⋅ 
+               
+               
+               
+                 ∑ 
+                
+                
+                
+                  j 
+                 
+                
+                  = 
+                 
+                
+                  1 
+                 
+                
+               
+                 n 
+                
+               
+              
+                exp 
+               
+              
+                ⁡ 
+               
+              
+                ( 
+               
+               
+               
+                 x 
+                
+               
+                 j 
+                
+               
+              
+                − 
+               
+              
+                b 
+               
+              
+                ) 
+               
+              
+             
+            
+           
+          
+         
+         
+          
+           
+            
+           
+          
+          
+           
+            
+             
+            
+              = 
+             
+             
+              
+              
+                exp 
+               
+              
+                ⁡ 
+               
+              
+                ( 
+               
+               
+               
+                 x 
+                
+               
+                 i 
+                
+               
+              
+                − 
+               
+              
+                b 
+               
+              
+                ) 
+               
+              
+              
+               
+               
+                 ∑ 
+                
+                
+                
+                  j 
+                 
+                
+                  = 
+                 
+                
+                  1 
+                 
+                
+               
+                 n 
+                
+               
+              
+                exp 
+               
+              
+                ⁡ 
+               
+              
+                ( 
+               
+               
+               
+                 x 
+                
+               
+                 j 
+                
+               
+              
+                − 
+               
+              
+                b 
+               
+              
+                ) 
+               
+              
+             
+            
+           
+          
+         
+         
+          
+           
+            
+           
+          
+          
+           
+            
+             
+            
+              = 
+             
+            
+              Softmax 
+             
+            
+              ( 
+             
+             
+             
+               x 
+              
+             
+               i 
+              
+             
+            
+              − 
+             
+            
+              b 
+             
+            
+              ) 
+             
+            
+           
+          
+         
+        
+       
+         \begin{aligned} \text{Softmax}(x_i) &amp;= \frac{\exp(x_i)}{\sum_{j=1}^n \exp(x_j)} \\ &amp;= \frac{\exp(x_i - b) \cdot \exp(b)}{\sum_{j=1}^n \left (\exp(x_j - b) \cdot \exp(b) \right)} \\ &amp;= \frac{\exp(x_i - b) \cdot \exp(b)}{ \exp(b) \cdot \sum_{j=1}^n \exp(x_j - b) } \\ &amp;= \frac{\exp(x_i - b)}{\sum_{j=1}^n \exp(x_j - b)} \\ &amp;= \text{Softmax}(x_i - b) \end{aligned} 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 12.9284em; vertical-align: -6.2142em;"></span><span class="mord"><span class="mtable"><span class="col-align-r"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 6.7142em;"><span class="" style="top: -8.7142em;"><span class="pstrut" style="height: 3.427em;"></span><span class="mord"><span class="mord text"><span class="mord">Softmax</span></span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span></span></span><span class="" style="top: -5.8571em;"><span class="pstrut" style="height: 3.427em;"></span><span class="mord"></span></span><span class="" style="top: -3em;"><span class="pstrut" style="height: 3.427em;"></span><span class="mord"></span></span><span class="" style="top: -0.1429em;"><span class="pstrut" style="height: 3.427em;"></span><span class="mord"></span></span><span class="" style="top: 2.1272em;"><span class="pstrut" style="height: 3.427em;"></span><span class="mord"></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 6.2142em;"><span class=""></span></span></span></span></span><span class="col-align-l"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 6.7142em;"><span class="" style="top: -8.7142em;"><span class="pstrut" style="height: 3.427em;"></span><span class="mord"><span class="mord"></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.427em;"><span class="" style="top: -2.3057em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mop"><span class="mop op-symbol small-op" style="position: relative; top: 0em;">∑</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8043em;"><span class="" style="top: -2.4003em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span><span class="mrel mtight">=</span><span class="mord mtight">1</span></span></span></span><span class="" style="top: -3.2029em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.4358em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span></span></span><span class="" style="top: -3.23em;"><span class="pstrut" style="height: 3em;"></span><span class="frac-line" style="border-bottom-width: 0.04em;"></span></span><span class="" style="top: -3.677em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 1.1301em;"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span></span></span><span class="" style="top: -5.8571em;"><span class="pstrut" style="height: 3.427em;"></span><span class="mord"><span class="mord"></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.427em;"><span class="" style="top: -2.3057em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mop"><span class="mop op-symbol small-op" style="position: relative; top: 0em;">∑</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8043em;"><span class="" style="top: -2.4003em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span><span class="mrel mtight">=</span><span class="mord mtight">1</span></span></span></span><span class="" style="top: -3.2029em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.4358em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="minner"><span class="mopen delimcenter" style="top: 0em;">(</span><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mord mathnormal">b</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">⋅</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord mathnormal">b</span><span class="mclose">)</span><span class="mclose delimcenter" style="top: 0em;">)</span></span></span></span><span class="" style="top: -3.23em;"><span class="pstrut" style="height: 3em;"></span><span class="frac-line" style="border-bottom-width: 0.04em;"></span></span><span class="" style="top: -3.677em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mord mathnormal">b</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">⋅</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord mathnormal">b</span><span class="mclose">)</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 1.1301em;"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span></span></span><span class="" style="top: -3em;"><span class="pstrut" style="height: 3.427em;"></span><span class="mord"><span class="mord"></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.427em;"><span class="" style="top: -2.3057em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mop">exp</span><span class="mopen">(</span><span class="mord mathnormal">b</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">⋅</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mop"><span class="mop op-symbol small-op" style="position: relative; top: 0em;">∑</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8043em;"><span class="" style="top: -2.4003em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span><span class="mrel mtight">=</span><span class="mord mtight">1</span></span></span></span><span class="" style="top: -3.2029em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.4358em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mord mathnormal">b</span><span class="mclose">)</span></span></span><span class="" style="top: -3.23em;"><span class="pstrut" style="height: 3em;"></span><span class="frac-line" style="border-bottom-width: 0.04em;"></span></span><span class="" style="top: -3.677em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mord mathnormal">b</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">⋅</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord mathnormal">b</span><span class="mclose">)</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 1.1301em;"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span></span></span><span class="" style="top: -0.1429em;"><span class="pstrut" style="height: 3.427em;"></span><span class="mord"><span class="mord"></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.427em;"><span class="" style="top: -2.3057em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mop"><span class="mop op-symbol small-op" style="position: relative; top: 0em;">∑</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8043em;"><span class="" style="top: -2.4003em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span><span class="mrel mtight">=</span><span class="mord mtight">1</span></span></span></span><span class="" style="top: -3.2029em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.4358em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mord mathnormal">b</span><span class="mclose">)</span></span></span><span class="" style="top: -3.23em;"><span class="pstrut" style="height: 3em;"></span><span class="frac-line" style="border-bottom-width: 0.04em;"></span></span><span class="" style="top: -3.677em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mord mathnormal">b</span><span class="mclose">)</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 1.1301em;"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span></span></span><span class="" style="top: 2.1272em;"><span class="pstrut" style="height: 3.427em;"></span><span class="mord"><span class="mord"></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mord text"><span class="mord">Softmax</span></span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mord mathnormal">b</span><span class="mclose">)</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 6.2142em;"><span class=""></span></span></span></span></span></span></span></span></span></span></span></span><br> 这种转换是等价的，经过这一变换，就避免了上溢，最大值变成了<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         exp 
+        
+       
+         ⁡ 
+        
+       
+         ( 
+        
+       
+         0 
+        
+       
+         ) 
+        
+       
+         = 
+        
+       
+         1 
+        
+       
+      
+        \exp(0)=1 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord">0</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">1</span></span></span></span></span>；同时分母中也会有一个1，就避免了下溢。<br> 我们通过实例来理解一下。</p> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">bad_softmax</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">:</span>
+  y <span class="token operator">=</span> np<span class="token punctuation">.</span>exp<span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+  <span class="token keyword">return</span> y <span class="token operator">/</span> y<span class="token punctuation">.</span><span class="token builtin">sum</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+ 
+x <span class="token operator">=</span> np<span class="token punctuation">.</span>array<span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">10</span><span class="token punctuation">,</span> <span class="token number">1000</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>bad_softmax<span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">)</span> 
+
+<span class="token comment">#运行结果</span>
+<span class="token comment">#... RuntimeWarning: overflow encountered in exp</span>
+<span class="token comment">#... RuntimeWarning: invalid value encountered in true_divide</span>
+<span class="token comment">#array([ 0.,  0., nan])</span>
+</code></pre> 
+<p>接下来进行上面的优化，并进行测试：</p> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">softmax</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">:</span>
+  b <span class="token operator">=</span> x<span class="token punctuation">.</span><span class="token builtin">max</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+  y <span class="token operator">=</span> np<span class="token punctuation">.</span>exp<span class="token punctuation">(</span>x <span class="token operator">-</span> b<span class="token punctuation">)</span>
+  <span class="token keyword">return</span> y <span class="token operator">/</span> y<span class="token punctuation">.</span><span class="token builtin">sum</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+ 
+<span class="token keyword">print</span><span class="token punctuation">(</span>softmax<span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token comment"># array([0., 0., 1.])</span>
+x <span class="token operator">=</span> np<span class="token punctuation">.</span>array<span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token operator">-</span><span class="token number">800</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1000</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1000</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>bad_softmax<span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token comment"># array([nan, nan, nan])</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>softmax<span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token comment"># array([1.00000000e+00, 3.72007598e-44, 3.72007598e-44])</span>
+</code></pre> 
+<p>关于softmax的另外实现，参加下文。</p> 
+<h2><a id="3_LogSumExp_47"></a>3. LogSumExp</h2> 
+<p>什么是LSE?<br> LSE被定义为参数指数之和的对数：<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+        
+          LSE 
+         
+        
+          ( 
+         
+         
+         
+           x 
+          
+         
+           1 
+          
+         
+        
+          , 
+         
+        
+          ⋯ 
+          
+        
+          , 
+         
+         
+         
+           x 
+          
+         
+           n 
+          
+         
+        
+          ) 
+         
+        
+          = 
+         
+        
+          log 
+         
+        
+          ⁡ 
+         
+         
+         
+           ∑ 
+          
+          
+          
+            i 
+           
+          
+            = 
+           
+          
+            1 
+           
+          
+         
+           n 
+          
+         
+        
+          exp 
+         
+        
+          ⁡ 
+         
+        
+          ( 
+         
+         
+         
+           x 
+          
+         
+           i 
+          
+         
+        
+          ) 
+         
+        
+          = 
+         
+        
+          log 
+         
+        
+          ⁡ 
+         
+         
+         
+           ( 
+          
+         
+           exp 
+          
+         
+           ⁡ 
+          
+         
+           ( 
+          
+          
+          
+            x 
+           
+          
+            1 
+           
+          
+         
+           ) 
+          
+         
+           + 
+          
+         
+           ⋯ 
+          
+         
+           + 
+          
+         
+           exp 
+          
+         
+           ⁡ 
+          
+         
+           ( 
+          
+          
+          
+            x 
+           
+          
+            n 
+           
+          
+         
+           ) 
+          
+         
+           ) 
+          
+         
+        
+       
+         \text{LSE}(x_1,\cdots,x_n) = \log \sum_{i=1}^n \exp(x_i) =\log \left(\exp(x_1) + \cdots + \exp(x_n) \right) 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord text"><span class="mord">LSE</span></span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3011em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">1</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="minner">⋯</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.1514em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 2.9291em; vertical-align: -1.2777em;"></span><span class="mop">lo<span style="margin-right: 0.0139em;">g</span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.6514em;"><span class="" style="top: -1.8723em; margin-left: 0em;"><span class="pstrut" style="height: 3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight">i</span><span class="mrel mtight">=</span><span class="mord mtight">1</span></span></span></span><span class="" style="top: -3.05em;"><span class="pstrut" style="height: 3.05em;"></span><span class=""><span class="mop op-symbol large-op">∑</span></span></span><span class="" style="top: -4.3em; margin-left: 0em;"><span class="pstrut" style="height: 3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 1.2777em;"><span class=""></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mop">lo<span style="margin-right: 0.0139em;">g</span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="minner"><span class="mopen delimcenter" style="top: 0em;">(</span><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3011em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">1</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="minner">⋯</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.1514em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span><span class="mclose delimcenter" style="top: 0em;">)</span></span></span></span></span></span></span><br> 输入可以看成是一个n维的向量，输出是一个标量。</p> 
+<p>什么场景下要到LogSumExp呢？<br> 交叉熵loss大家肯定不陌生，其中就有一项是log<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         p 
+        
+       
+      
+        p 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em; vertical-align: -0.1944em;"></span><span class="mord mathnormal">p</span></span></span></span></span>，比如多分类场景里面就需要在对softmax的结果做对数处理：<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+          
+           
+            
+            
+              log 
+             
+            
+              ⁡ 
+             
+             
+             
+               ( 
+              
+             
+               Softmax 
+              
+             
+               ( 
+              
+              
+              
+                x 
+               
+              
+                i 
+               
+              
+             
+               ) 
+              
+             
+               ) 
+              
+             
+            
+           
+          
+          
+           
+            
+             
+            
+              = 
+             
+            
+              log 
+             
+            
+              ⁡ 
+             
+             
+              
+              
+                exp 
+               
+              
+                ⁡ 
+               
+              
+                ( 
+               
+               
+               
+                 x 
+                
+               
+                 i 
+                
+               
+              
+                ) 
+               
+              
+              
+               
+               
+                 ∑ 
+                
+                
+                
+                  j 
+                 
+                
+                  = 
+                 
+                
+                  1 
+                 
+                
+               
+                 n 
+                
+               
+              
+                exp 
+               
+              
+                ⁡ 
+               
+              
+                ( 
+               
+               
+               
+                 x 
+                
+               
+                 j 
+                
+               
+              
+                ) 
+               
+              
+             
+            
+           
+          
+         
+         
+          
+           
+            
+           
+          
+          
+           
+            
+             
+            
+              = 
+             
+             
+             
+               x 
+              
+             
+               i 
+              
+             
+            
+              − 
+             
+            
+              log 
+             
+            
+              ⁡ 
+             
+             
+             
+               ∑ 
+              
+              
+              
+                j 
+               
+              
+                = 
+               
+              
+                1 
+               
+              
+             
+               n 
+              
+             
+            
+              exp 
+             
+            
+              ⁡ 
+             
+            
+              ( 
+             
+             
+             
+               x 
+              
+             
+               j 
+              
+             
+            
+              ) 
+             
+            
+           
+          
+         
+        
+       
+         \begin{aligned} \log \left( \text{Softmax}(x_i) \right) &amp;= \log \frac{\exp(x_i)}{\sum_{j=1}^n \exp(x_j)} \\ &amp;= x_i - \log \sum_{j=1}^n \exp(x_j) \\ \end{aligned} 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 6.2223em; vertical-align: -2.8611em;"></span><span class="mord"><span class="mtable"><span class="col-align-r"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 3.3611em;"><span class="" style="top: -5.5855em;"><span class="pstrut" style="height: 3.6514em;"></span><span class="mord"><span class="mop">lo<span style="margin-right: 0.0139em;">g</span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="minner"><span class="mopen delimcenter" style="top: 0em;">(</span><span class="mord text"><span class="mord">Softmax</span></span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span><span class="mclose delimcenter" style="top: 0em;">)</span></span></span></span><span class="" style="top: -2.504em;"><span class="pstrut" style="height: 3.6514em;"></span><span class="mord"></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 2.8611em;"><span class=""></span></span></span></span></span><span class="col-align-l"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 3.3611em;"><span class="" style="top: -5.5855em;"><span class="pstrut" style="height: 3.6514em;"></span><span class="mord"><span class="mord"></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mop">lo<span style="margin-right: 0.0139em;">g</span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.427em;"><span class="" style="top: -2.3057em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mop"><span class="mop op-symbol small-op" style="position: relative; top: 0em;">∑</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8043em;"><span class="" style="top: -2.4003em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span><span class="mrel mtight">=</span><span class="mord mtight">1</span></span></span></span><span class="" style="top: -3.2029em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.4358em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span></span></span><span class="" style="top: -3.23em;"><span class="pstrut" style="height: 3em;"></span><span class="frac-line" style="border-bottom-width: 0.04em;"></span></span><span class="" style="top: -3.677em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 1.1301em;"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span></span></span><span class="" style="top: -2.504em;"><span class="pstrut" style="height: 3.6514em;"></span><span class="mord"><span class="mord"></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mop">lo<span style="margin-right: 0.0139em;">g</span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.6514em;"><span class="" style="top: -1.8723em; margin-left: 0em;"><span class="pstrut" style="height: 3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span><span class="mrel mtight">=</span><span class="mord mtight">1</span></span></span></span><span class="" style="top: -3.05em;"><span class="pstrut" style="height: 3.05em;"></span><span class=""><span class="mop op-symbol large-op">∑</span></span></span><span class="" style="top: -4.3em; margin-left: 0em;"><span class="pstrut" style="height: 3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 1.4138em;"><span class=""></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 2.8611em;"><span class=""></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+<p>能看出来不，后面这一项就是我们上面说的LSE。</p> 
+<p>理清前因后果之后，我们就来看LSE的实现问题。</p> 
+<p>因为上面最后一项也有上溢的问题，所以应用跟softmax同样的技巧，得<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+          
+          
+           
+           
+             log 
+            
+           
+             ⁡ 
+            
+            
+            
+              ∑ 
+             
+             
+             
+               j 
+              
+             
+               = 
+              
+             
+               1 
+              
+             
+            
+              n 
+             
+            
+           
+             exp 
+            
+           
+             ⁡ 
+            
+           
+             ( 
+            
+            
+            
+              x 
+             
+            
+              j 
+             
+            
+           
+             ) 
+            
+           
+             = 
+            
+           
+             log 
+            
+           
+             ⁡ 
+            
+            
+            
+              ∑ 
+             
+             
+             
+               j 
+              
+             
+               = 
+              
+             
+               1 
+              
+             
+            
+              n 
+             
+            
+           
+             exp 
+            
+           
+             ⁡ 
+            
+           
+             ( 
+            
+            
+            
+              x 
+             
+            
+              j 
+             
+            
+           
+             − 
+            
+           
+             b 
+            
+           
+             ) 
+            
+           
+             exp 
+            
+           
+             ⁡ 
+            
+           
+             ( 
+            
+           
+             b 
+            
+           
+             ) 
+            
+           
+             = 
+            
+           
+             b 
+            
+           
+             + 
+            
+           
+             log 
+            
+           
+             ⁡ 
+            
+            
+            
+              ∑ 
+             
+             
+             
+               j 
+              
+             
+               = 
+              
+             
+               1 
+              
+             
+            
+              n 
+             
+            
+           
+             exp 
+            
+           
+             ⁡ 
+            
+           
+             ( 
+            
+            
+            
+              x 
+             
+            
+              j 
+             
+            
+           
+             − 
+            
+           
+             b 
+            
+           
+             ) 
+            
+           
+          
+          
+          
+          
+            (4) 
+           
+          
+         
+        
+       
+         \log \sum_{j=1}^n \exp(x_j) = \log \sum_{j=1}^n \exp(x_j - b) \exp(b) = b + \log \sum_{j=1}^n \exp(x_j - b) \tag{4} 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 3.0652em; vertical-align: -1.4138em;"></span><span class="mop">lo<span style="margin-right: 0.0139em;">g</span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.6514em;"><span class="" style="top: -1.8723em; margin-left: 0em;"><span class="pstrut" style="height: 3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span><span class="mrel mtight">=</span><span class="mord mtight">1</span></span></span></span><span class="" style="top: -3.05em;"><span class="pstrut" style="height: 3.05em;"></span><span class=""><span class="mop op-symbol large-op">∑</span></span></span><span class="" style="top: -4.3em; margin-left: 0em;"><span class="pstrut" style="height: 3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 1.4138em;"><span class=""></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 3.0652em; vertical-align: -1.4138em;"></span><span class="mop">lo<span style="margin-right: 0.0139em;">g</span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.6514em;"><span class="" style="top: -1.8723em; margin-left: 0em;"><span class="pstrut" style="height: 3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span><span class="mrel mtight">=</span><span class="mord mtight">1</span></span></span></span><span class="" style="top: -3.05em;"><span class="pstrut" style="height: 3.05em;"></span><span class=""><span class="mop op-symbol large-op">∑</span></span></span><span class="" style="top: -4.3em; margin-left: 0em;"><span class="pstrut" style="height: 3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 1.4138em;"><span class=""></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord mathnormal">b</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord mathnormal">b</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.7778em; vertical-align: -0.0833em;"></span><span class="mord mathnormal">b</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 3.0652em; vertical-align: -1.4138em;"></span><span class="mop">lo<span style="margin-right: 0.0139em;">g</span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.6514em;"><span class="" style="top: -1.8723em; margin-left: 0em;"><span class="pstrut" style="height: 3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span><span class="mrel mtight">=</span><span class="mord mtight">1</span></span></span></span><span class="" style="top: -3.05em;"><span class="pstrut" style="height: 3.05em;"></span><span class=""><span class="mop op-symbol large-op">∑</span></span></span><span class="" style="top: -4.3em; margin-left: 0em;"><span class="pstrut" style="height: 3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 1.4138em;"><span class=""></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord mathnormal">b</span><span class="mclose">)</span></span><span class="tag"><span class="strut" style="height: 3.0652em; vertical-align: -1.4138em;"></span><span class="mord text"><span class="mord">(</span><span class="mord"><span class="mord">4</span></span><span class="mord">)</span></span></span></span></span></span></span></p> 
+<p><span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         b 
+        
+       
+      
+        b 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal">b</span></span></span></span></span>同样是取<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         x 
+        
+       
+      
+        x 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.4306em;"></span><span class="mord mathnormal">x</span></span></span></span></span>中的最大值。</p> 
+<p>这样，我们就得到了LSE的最终表示：<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+          
+          
+           
+           
+             LSE 
+            
+           
+             ( 
+            
+           
+             x 
+            
+           
+             ) 
+            
+           
+             = 
+            
+           
+             b 
+            
+           
+             + 
+            
+           
+             log 
+            
+           
+             ⁡ 
+            
+            
+            
+              ∑ 
+             
+             
+             
+               j 
+              
+             
+               = 
+              
+             
+               1 
+              
+             
+            
+              n 
+             
+            
+           
+             exp 
+            
+           
+             ⁡ 
+            
+           
+             ( 
+            
+            
+            
+              x 
+             
+            
+              j 
+             
+            
+           
+             − 
+            
+           
+             b 
+            
+           
+             ) 
+            
+           
+          
+          
+          
+          
+            (5) 
+           
+          
+         
+        
+       
+         \text{LSE}(x) = b + \log \sum_{j=1}^n \exp(x_j - b) \tag{5} 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord text"><span class="mord">LSE</span></span><span class="mopen">(</span><span class="mord mathnormal">x</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.7778em; vertical-align: -0.0833em;"></span><span class="mord mathnormal">b</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 3.0652em; vertical-align: -1.4138em;"></span><span class="mop">lo<span style="margin-right: 0.0139em;">g</span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.6514em;"><span class="" style="top: -1.8723em; margin-left: 0em;"><span class="pstrut" style="height: 3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span><span class="mrel mtight">=</span><span class="mord mtight">1</span></span></span></span><span class="" style="top: -3.05em;"><span class="pstrut" style="height: 3.05em;"></span><span class=""><span class="mop op-symbol large-op">∑</span></span></span><span class="" style="top: -4.3em; margin-left: 0em;"><span class="pstrut" style="height: 3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 1.4138em;"><span class=""></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord mathnormal">b</span><span class="mclose">)</span></span><span class="tag"><span class="strut" style="height: 3.0652em; vertical-align: -1.4138em;"></span><span class="mord text"><span class="mord">(</span><span class="mord"><span class="mord">5</span></span><span class="mord">)</span></span></span></span></span></span></span><br> 对LogSumExp求导就得到了exp-normalize(Softmax)的形式，<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+          
+          
+           
+            
+             
+             
+               ∂ 
+              
+              
+              
+                ( 
+               
+              
+                b 
+               
+              
+                + 
+               
+              
+                log 
+               
+              
+                ⁡ 
+               
+               
+               
+                 ∑ 
+                
+                
+                
+                  j 
+                 
+                
+                  = 
+                 
+                
+                  1 
+                 
+                
+               
+                 n 
+                
+               
+              
+                exp 
+               
+              
+                ⁡ 
+               
+              
+                ( 
+               
+               
+               
+                 x 
+                
+               
+                 j 
+                
+               
+              
+                − 
+               
+              
+                b 
+               
+              
+                ) 
+               
+              
+                ) 
+               
+              
+             
+             
+             
+               ∂ 
+              
+              
+              
+                x 
+               
+              
+                j 
+               
+              
+             
+            
+           
+             = 
+            
+            
+             
+             
+               exp 
+              
+             
+               ⁡ 
+              
+             
+               ( 
+              
+              
+              
+                x 
+               
+              
+                i 
+               
+              
+             
+               − 
+              
+             
+               b 
+              
+             
+               ) 
+              
+             
+             
+              
+              
+                ∑ 
+               
+               
+               
+                 j 
+                
+               
+                 = 
+                
+               
+                 1 
+                
+               
+              
+                n 
+               
+              
+             
+               exp 
+              
+             
+               ⁡ 
+              
+             
+               ( 
+              
+              
+              
+                x 
+               
+              
+                j 
+               
+              
+             
+               − 
+              
+             
+               b 
+              
+             
+               ) 
+              
+             
+            
+           
+          
+          
+          
+          
+            (6) 
+           
+          
+         
+        
+       
+         \frac{\partial \left (b + \log \sum_{j=1}^n \exp(x_j - b) \right )}{\partial x_j} = \frac{\exp(x_i - b)}{\sum_{j=1}^n \exp(x_j - b)} \tag{6} 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 3.1621em; vertical-align: -0.9721em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 2.19em;"><span class="" style="top: -2.464em;"><span class="pstrut" style="height: 3.15em;"></span><span class="mord"><span class="mord" style="margin-right: 0.0556em;">∂</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span></span></span><span class="" style="top: -3.38em;"><span class="pstrut" style="height: 3.15em;"></span><span class="frac-line" style="border-bottom-width: 0.04em;"></span></span><span class="" style="top: -4.19em;"><span class="pstrut" style="height: 3.15em;"></span><span class="mord"><span class="mord" style="margin-right: 0.0556em;">∂</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="minner"><span class="mopen delimcenter" style="top: 0em;"><span class="delimsizing size2">(</span></span><span class="mord mathnormal">b</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mop">lo<span style="margin-right: 0.0139em;">g</span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop"><span class="mop op-symbol small-op" style="position: relative; top: 0em;">∑</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8043em;"><span class="" style="top: -2.4003em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span><span class="mrel mtight">=</span><span class="mord mtight">1</span></span></span></span><span class="" style="top: -3.2029em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.4358em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mord mathnormal">b</span><span class="mclose">)</span><span class="mclose delimcenter" style="top: 0em;"><span class="delimsizing size2">)</span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.9721em;"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 2.5571em; vertical-align: -1.1301em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.427em;"><span class="" style="top: -2.3057em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mop"><span class="mop op-symbol small-op" style="position: relative; top: 0em;">∑</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8043em;"><span class="" style="top: -2.4003em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span><span class="mrel mtight">=</span><span class="mord mtight">1</span></span></span></span><span class="" style="top: -3.2029em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.4358em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mord mathnormal">b</span><span class="mclose">)</span></span></span><span class="" style="top: -3.23em;"><span class="pstrut" style="height: 3em;"></span><span class="frac-line" style="border-bottom-width: 0.04em;"></span></span><span class="" style="top: -3.677em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mord mathnormal">b</span><span class="mclose">)</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 1.1301em;"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span></span><span class="tag"><span class="strut" style="height: 3.3201em; vertical-align: -1.1301em;"></span><span class="mord text"><span class="mord">(</span><span class="mord"><span class="mord">6</span></span><span class="mord">)</span></span></span></span></span></span></span></p> 
+<p>怎么实现LSE</p> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">logsumexp</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">:</span>
+  b <span class="token operator">=</span> x<span class="token punctuation">.</span><span class="token builtin">max</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+  <span class="token keyword">return</span> b <span class="token operator">+</span> np<span class="token punctuation">.</span>log<span class="token punctuation">(</span>np<span class="token punctuation">.</span><span class="token builtin">sum</span><span class="token punctuation">(</span>np<span class="token punctuation">.</span>exp<span class="token punctuation">(</span>x <span class="token operator">-</span> b<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+ 
+<span class="token keyword">def</span> <span class="token function">softmax_lse</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">:</span>
+  <span class="token keyword">return</span> np<span class="token punctuation">.</span>exp<span class="token punctuation">(</span>x <span class="token operator">-</span> logsumexp<span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+
+x1 <span class="token operator">=</span> np<span class="token punctuation">.</span>array<span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">10</span><span class="token punctuation">,</span> <span class="token number">1000</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+x2 <span class="token operator">=</span> np<span class="token punctuation">.</span>array<span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token operator">-</span><span class="token number">900</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1000</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1000</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>softmax_lse<span class="token punctuation">(</span>x1<span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token comment"># array([0., 0., 1.])</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>softmax<span class="token punctuation">(</span>x1<span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token comment"># array([0., 0., 1.])</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>softmax_lse<span class="token punctuation">(</span>x2<span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token comment"># array([1.00000000e+00, 3.72007598e-44, 3.72007598e-44])</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>softmax<span class="token punctuation">(</span>x2<span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token comment"># array([1.00000000e+00, 3.72007598e-44, 3.72007598e-44])</span>
+
+
+</code></pre> 
+<hr> 
+<p>到此LSE的实现就清晰了，不过返回来再看Softmax，Softmax也可以这样表示:<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+          
+          
+           
+            
+             
+              
+               
+               
+                 Softmax 
+                
+               
+                 ( 
+                
+                
+                
+                  x 
+                 
+                
+                  i 
+                 
+                
+               
+                 ) 
+                
+               
+              
+             
+             
+              
+               
+                
+               
+                 = 
+                
+               
+                 exp 
+                
+               
+                 ( 
+                
+               
+                 log 
+                
+               
+                 ( 
+                
+               
+                 Softmax 
+                
+               
+                 ( 
+                
+                
+                
+                  x 
+                 
+                
+                  i 
+                 
+                
+               
+                 ) 
+                
+               
+                 ) 
+                
+               
+                 ) 
+                
+               
+              
+             
+            
+            
+             
+              
+               
+              
+             
+             
+              
+               
+                
+               
+                 = 
+                
+               
+                 exp 
+                
+               
+                 ( 
+                
+                
+                
+                  x 
+                 
+                
+                  i 
+                 
+                
+               
+                 − 
+                
+               
+                 log 
+                
+               
+                 ⁡ 
+                
+                
+                
+                  ∑ 
+                 
+                 
+                 
+                   j 
+                  
+                 
+                   = 
+                  
+                 
+                   1 
+                  
+                 
+                
+                  n 
+                 
+                
+               
+                 exp 
+                
+               
+                 ⁡ 
+                
+               
+                 ( 
+                
+                
+                
+                  x 
+                 
+                
+                  j 
+                 
+                
+               
+                 ) 
+                
+               
+                 ) 
+                
+               
+              
+             
+            
+            
+             
+              
+               
+              
+             
+             
+              
+               
+                
+               
+                 = 
+                
+               
+                 exp 
+                
+               
+                 ⁡ 
+                
+                
+                
+                  ( 
+                 
+                 
+                 
+                   x 
+                  
+                 
+                   i 
+                  
+                 
+                
+                  − 
+                 
+                
+                  b 
+                 
+                
+                  − 
+                 
+                
+                  log 
+                 
+                
+                  ⁡ 
+                 
+                 
+                 
+                   ∑ 
+                  
+                  
+                  
+                    j 
+                   
+                  
+                    = 
+                   
+                  
+                    1 
+                   
+                  
+                 
+                   n 
+                  
+                 
+                
+                  exp 
+                 
+                
+                  ⁡ 
+                 
+                
+                  ( 
+                 
+                 
+                 
+                   x 
+                  
+                 
+                   j 
+                  
+                 
+                
+                  − 
+                 
+                
+                  b 
+                 
+                
+                  ) 
+                 
+                
+                  ) 
+                 
+                
+               
+              
+             
+            
+           
+          
+          
+          
+          
+            (7) 
+           
+          
+         
+        
+       
+         \begin{aligned}\text{Softmax}(x_i) &amp;= \text{exp}(\text{log}(\text{Softmax}(x_i)))\\ &amp;=\text{exp}(x_i-\log \sum_{j=1}^n \exp(x_j)) \\ &amp;= \exp \left( x_i - b - \log \sum_{j=1}^n \exp(x_j - b) \right) \tag{7} \\ \end{aligned} 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 8.329em; vertical-align: -3.9145em;"></span><span class="mord"><span class="mtable"><span class="col-align-r"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 4.4145em;"><span class="" style="top: -7.3245em;"><span class="pstrut" style="height: 3.75em;"></span><span class="mord"><span class="mord text"><span class="mord">Softmax</span></span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span></span></span><span class="" style="top: -5.0131em;"><span class="pstrut" style="height: 3.75em;"></span><span class="mord"></span></span><span class="" style="top: -1.5493em;"><span class="pstrut" style="height: 3.75em;"></span><span class="mord"></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 3.9145em;"><span class=""></span></span></span></span></span><span class="col-align-l"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 4.4145em;"><span class="" style="top: -7.3245em;"><span class="pstrut" style="height: 3.75em;"></span><span class="mord"><span class="mord"></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mord text"><span class="mord">exp</span></span><span class="mopen">(</span><span class="mord text"><span class="mord">log</span></span><span class="mopen">(</span><span class="mord text"><span class="mord">Softmax</span></span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mclose">)))</span></span></span><span class="" style="top: -5.0131em;"><span class="pstrut" style="height: 3.75em;"></span><span class="mord"><span class="mord"></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mord text"><span class="mord">exp</span></span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mop">lo<span style="margin-right: 0.0139em;">g</span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.6514em;"><span class="" style="top: -1.8723em; margin-left: 0em;"><span class="pstrut" style="height: 3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span><span class="mrel mtight">=</span><span class="mord mtight">1</span></span></span></span><span class="" style="top: -3.05em;"><span class="pstrut" style="height: 3.05em;"></span><span class=""><span class="mop op-symbol large-op">∑</span></span></span><span class="" style="top: -4.3em; margin-left: 0em;"><span class="pstrut" style="height: 3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 1.4138em;"><span class=""></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span><span class="mclose">))</span></span></span><span class="" style="top: -1.5493em;"><span class="pstrut" style="height: 3.75em;"></span><span class="mord"><span class="mord"></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mop">exp</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="minner"><span class="mopen delimcenter" style="top: 0em;"><span class="delimsizing size4">(</span></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mord mathnormal">b</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mop">lo<span style="margin-right: 0.0139em;">g</span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.6514em;"><span class="" style="top: -1.8723em; margin-left: 0em;"><span class="pstrut" style="height: 3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span><span class="mrel mtight">=</span><span class="mord mtight">1</span></span></span></span><span class="" style="top: -3.05em;"><span class="pstrut" style="height: 3.05em;"></span><span class=""><span class="mop op-symbol large-op">∑</span></span></span><span class="" style="top: -4.3em; margin-left: 0em;"><span class="pstrut" style="height: 3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 1.4138em;"><span class=""></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0572em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mord mathnormal">b</span><span class="mclose">)</span><span class="mclose delimcenter" style="top: 0em;"><span class="delimsizing size4">)</span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 3.9145em;"><span class=""></span></span></span></span></span></span></span></span><span class="tag"><span class="strut" style="height: 8.329em; vertical-align: -3.9145em;"></span><span class="mord text"><span class="mord">(</span><span class="mord"><span class="mord">7</span></span><span class="mord">)</span></span></span></span></span></span></span></p> 
+<p>那我们是使用exp-normalize还是使用LogSumExp呢？</p> 
+<p>如果你需要保留Log空间，那么就计算<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         log 
+        
+       
+         ⁡ 
+        
+       
+         ( 
+        
+       
+         Softmax 
+        
+       
+         ) 
+        
+       
+      
+        \log(\text{Softmax}) 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mop">lo<span style="margin-right: 0.0139em;">g</span></span><span class="mopen">(</span><span class="mord text"><span class="mord">Softmax</span></span><span class="mclose">)</span></span></span></span></span>，此时使用LogSumExp技巧；如果你只需要计算Softmax，那么就使用exp-normalize技巧。</p> 
+<h2><a id="4_Sigmoid_103"></a>4. Sigmoid</h2> 
+<p>我们知道Sigmoid函数是交叉熵之前常用的激活函数，公式为：<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+          
+          
+           
+           
+             σ 
+            
+           
+             ( 
+            
+           
+             x 
+            
+           
+             ) 
+            
+           
+             = 
+            
+            
+            
+              1 
+             
+             
+             
+               1 
+              
+             
+               + 
+              
+             
+               exp 
+              
+             
+               ⁡ 
+              
+             
+               ( 
+              
+             
+               − 
+              
+             
+               x 
+              
+             
+               ) 
+              
+             
+            
+           
+          
+          
+          
+          
+            (8) 
+           
+          
+         
+        
+       
+         \sigma(x) = \frac{1}{1 + \exp(-x)} \tag{8} 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord mathnormal" style="margin-right: 0.0359em;">σ</span><span class="mopen">(</span><span class="mord mathnormal">x</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 2.2574em; vertical-align: -0.936em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.3214em;"><span class="" style="top: -2.314em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mord">1</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord">−</span><span class="mord mathnormal">x</span><span class="mclose">)</span></span></span><span class="" style="top: -3.23em;"><span class="pstrut" style="height: 3em;"></span><span class="frac-line" style="border-bottom-width: 0.04em;"></span></span><span class="" style="top: -3.677em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mord">1</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.936em;"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span></span><span class="tag"><span class="strut" style="height: 2.2574em; vertical-align: -0.936em;"></span><span class="mord text"><span class="mord">(</span><span class="mord"><span class="mord">8</span></span><span class="mord">)</span></span></span></span></span></span></span></p> 
+<p>对应的图像如下：<br> <img src="https://images2.imgbox.com/c5/8f/rIYaPxtw_o.png" alt="在这里插入图片描述"><br> 其中包含一个<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         exp 
+        
+       
+         ⁡ 
+        
+       
+         ( 
+        
+       
+         − 
+        
+       
+         x 
+        
+       
+         ) 
+        
+       
+      
+        \exp(-x) 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord">−</span><span class="mord mathnormal">x</span><span class="mclose">)</span></span></span></span></span>，我们看一下<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          e 
+         
+        
+          x 
+         
+        
+       
+      
+        e^x 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6644em;"></span><span class="mord"><span class="mord mathnormal">e</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.6644em;"><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">x</span></span></span></span></span></span></span></span></span></span></span></span>的图像：<br> <img src="https://images2.imgbox.com/70/cb/gPPcFuxS_o.png" alt="在这里插入图片描述" width="400"><br> 从上图可以看出，如果x很大，<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          e 
+         
+        
+          x 
+         
+        
+       
+      
+        e^x 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6644em;"></span><span class="mord"><span class="mord mathnormal">e</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.6644em;"><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">x</span></span></span></span></span></span></span></span></span></span></span></span>会非常大，而很小就没事，变成无限接近0。</p> 
+<p>当Sigmoid函数中的x负的特别多，那么<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         exp 
+        
+       
+         ⁡ 
+        
+       
+         ( 
+        
+       
+         − 
+        
+       
+         x 
+        
+       
+         ) 
+        
+       
+      
+        \exp(-x) 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord">−</span><span class="mord mathnormal">x</span><span class="mclose">)</span></span></span></span></span>就会变成<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         ∞ 
+        
+       
+      
+        \infty 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.4306em;"></span><span class="mord">∞</span></span></span></span></span>​，就出现了上溢；</p> 
+<p>那么如何解决这个问题呢？<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         σ 
+        
+       
+         ( 
+        
+       
+         x 
+        
+       
+         ) 
+        
+       
+      
+        \sigma(x) 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord mathnormal" style="margin-right: 0.0359em;">σ</span><span class="mopen">(</span><span class="mord mathnormal">x</span><span class="mclose">)</span></span></span></span></span>可以表示成两种形式：<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+          
+          
+           
+           
+             σ 
+            
+           
+             ( 
+            
+           
+             x 
+            
+           
+             ) 
+            
+           
+             = 
+            
+            
+            
+              1 
+             
+             
+             
+               1 
+              
+             
+               + 
+              
+             
+               exp 
+              
+             
+               ⁡ 
+              
+             
+               ( 
+              
+             
+               − 
+              
+             
+               x 
+              
+             
+               ) 
+              
+             
+            
+           
+             = 
+            
+            
+             
+             
+               exp 
+              
+             
+               ⁡ 
+              
+             
+               ( 
+              
+             
+               x 
+              
+             
+               ) 
+              
+             
+             
+             
+               1 
+              
+             
+               + 
+              
+             
+               exp 
+              
+             
+               ⁡ 
+              
+             
+               ( 
+              
+             
+               x 
+              
+             
+               ) 
+              
+             
+            
+           
+          
+          
+          
+          
+            (9) 
+           
+          
+         
+        
+       
+         \sigma(x) = \frac{1}{1 + \exp(-x)} = \frac{\exp(x)}{1 + \exp(x)} \tag{9} 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord mathnormal" style="margin-right: 0.0359em;">σ</span><span class="mopen">(</span><span class="mord mathnormal">x</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 2.2574em; vertical-align: -0.936em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.3214em;"><span class="" style="top: -2.314em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mord">1</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord">−</span><span class="mord mathnormal">x</span><span class="mclose">)</span></span></span><span class="" style="top: -3.23em;"><span class="pstrut" style="height: 3em;"></span><span class="frac-line" style="border-bottom-width: 0.04em;"></span></span><span class="" style="top: -3.677em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mord">1</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.936em;"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 2.363em; vertical-align: -0.936em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.427em;"><span class="" style="top: -2.314em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mord">1</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mop">exp</span><span class="mopen">(</span><span class="mord mathnormal">x</span><span class="mclose">)</span></span></span><span class="" style="top: -3.23em;"><span class="pstrut" style="height: 3em;"></span><span class="frac-line" style="border-bottom-width: 0.04em;"></span></span><span class="" style="top: -3.677em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mop">exp</span><span class="mopen">(</span><span class="mord mathnormal">x</span><span class="mclose">)</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.936em;"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span></span><span class="tag"><span class="strut" style="height: 2.363em; vertical-align: -0.936em;"></span><span class="mord text"><span class="mord">(</span><span class="mord"><span class="mord">9</span></span><span class="mord">)</span></span></span></span></span></span></span></p> 
+<p>当<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         x 
+        
+       
+         ≥ 
+        
+       
+         0 
+        
+       
+      
+        x \geq 0 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7719em; vertical-align: -0.136em;"></span><span class="mord mathnormal">x</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">≥</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">0</span></span></span></span></span>时，我们根据<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          e 
+         
+        
+          x 
+         
+        
+       
+      
+        e^{x} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6644em;"></span><span class="mord"><span class="mord mathnormal">e</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.6644em;"><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight">x</span></span></span></span></span></span></span></span></span></span></span></span></span>的图像，我们取<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          1 
+         
+         
+         
+           1 
+          
+         
+           + 
+          
+         
+           exp 
+          
+         
+           ⁡ 
+          
+         
+           ( 
+          
+         
+           − 
+          
+         
+           x 
+          
+         
+           ) 
+          
+         
+        
+       
+      
+        \frac{1}{1 + \exp(-x)} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.3651em; vertical-align: -0.52em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8451em;"><span class="" style="top: -2.655em;"><span class="pstrut" style="height: 3em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">1</span><span class="mbin mtight">+</span><span class="mop mtight"><span class="mtight">e</span><span class="mtight">x</span><span class="mtight">p</span></span><span class="mopen mtight">(</span><span class="mord mtight">−</span><span class="mord mathnormal mtight">x</span><span class="mclose mtight">)</span></span></span></span><span class="" style="top: -3.23em;"><span class="pstrut" style="height: 3em;"></span><span class="frac-line" style="border-bottom-width: 0.04em;"></span></span><span class="" style="top: -3.394em;"><span class="pstrut" style="height: 3em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">1</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.52em;"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span></span></span></span></span>的形式；</p> 
+<p>当 x &lt; 0 时，我们取<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+         
+         
+           exp 
+          
+         
+           ⁡ 
+          
+         
+           ( 
+          
+         
+           x 
+          
+         
+           ) 
+          
+         
+         
+         
+           1 
+          
+         
+           + 
+          
+         
+           exp 
+          
+         
+           ⁡ 
+          
+         
+           ( 
+          
+         
+           x 
+          
+         
+           ) 
+          
+         
+        
+       
+      
+        \frac{\exp(x)}{1 + \exp(x)} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.53em; vertical-align: -0.52em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.01em;"><span class="" style="top: -2.655em;"><span class="pstrut" style="height: 3em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">1</span><span class="mbin mtight">+</span><span class="mop mtight"><span class="mtight">e</span><span class="mtight">x</span><span class="mtight">p</span></span><span class="mopen mtight">(</span><span class="mord mathnormal mtight">x</span><span class="mclose mtight">)</span></span></span></span><span class="" style="top: -3.23em;"><span class="pstrut" style="height: 3em;"></span><span class="frac-line" style="border-bottom-width: 0.04em;"></span></span><span class="" style="top: -3.485em;"><span class="pstrut" style="height: 3em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mop mtight"><span class="mtight">e</span><span class="mtight">x</span><span class="mtight">p</span></span><span class="mopen mtight">(</span><span class="mord mathnormal mtight">x</span><span class="mclose mtight">)</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.52em;"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span></span></span></span></span></p> 
+<pre><code class="prism language-python"><span class="token comment"># 原来的做法</span>
+<span class="token keyword">def</span> <span class="token function">sigmoid_naive</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">:</span>
+  <span class="token keyword">return</span> <span class="token number">1</span> <span class="token operator">/</span> <span class="token punctuation">(</span><span class="token number">1</span> <span class="token operator">+</span> math<span class="token punctuation">.</span>exp<span class="token punctuation">(</span><span class="token operator">-</span>x<span class="token punctuation">)</span><span class="token punctuation">)</span>
+  
+<span class="token comment"># 优化后的做法</span>
+<span class="token keyword">def</span> <span class="token function">sigmoid</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">:</span>
+  <span class="token keyword">if</span> x <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">:</span>
+    <span class="token keyword">return</span> math<span class="token punctuation">.</span>exp<span class="token punctuation">(</span>x<span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token punctuation">(</span><span class="token number">1</span> <span class="token operator">+</span> math<span class="token punctuation">.</span>exp<span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">)</span>
+  <span class="token keyword">else</span><span class="token punctuation">:</span>
+    <span class="token keyword">return</span> <span class="token number">1</span> <span class="token operator">/</span> <span class="token punctuation">(</span><span class="token number">1</span> <span class="token operator">+</span> math<span class="token punctuation">.</span>exp<span class="token punctuation">(</span><span class="token operator">-</span>x<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+<span class="token keyword">print</span><span class="token punctuation">(</span>sigmoid_naive<span class="token punctuation">(</span><span class="token number">2000</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token comment"># 1.0</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>sigmoid<span class="token punctuation">(</span><span class="token number">2000</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token comment"># 1.0</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>sigmoid_naive<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">2000</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token comment"># OverflowError: math range error</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>sigmoid<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">2000</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token comment"># 0.0</span>
+</code></pre> 
+<p>参考链接：</p> 
+<ul><li><a href="https://gregorygundersen.com/blog/2020/02/09/log-sum-exp/" rel="nofollow">The Log-Sum-Exp Trick </a></li><li><a href="https://helloai.blog.csdn.net/article/details/121734499" rel="nofollow">一文弄懂交叉熵损失 </a></li><li><a href="https://timvieira.github.io/blog/post/2014/02/11/exp-normalize-trick/" rel="nofollow">Exp-normalize trick</a></li><li><a href="https://blog.csdn.net/yjw123456/article/details/121869249">一文弄懂LogSumExp技巧</a></li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/09897d536b5bde271f0ab65bbd75a345/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">av_interleaved_write_frame -32 broken pipe</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/0163705a41d3e7510bbf32397f0407d8/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">springboot启动报错 Field userMapper in XXXX required a bean of type ‘XXXX‘ that could not be found.</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Prometheus TSDB (Part 3): Memory Mapping of Head Chunks from Disk - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Prometheus TSDB (Part 3): Memory Mapping of Head Chunks from Disk" />
+<meta property="og:description" content="数据采集 最前面 ​ 数据采集(scrape)是prometheus的核心服务。它有两种采集方式:pull和push，这里着重分析pull模式，push模式请看文档。
+​ 简易流程
+代码目录 - scrape - testdata	// 测试数据 - manager.go	// scrape管理器，负责主要业务逻辑 - scrape.go	// 数据采集，实现具体的采集方法 - target.go	// 采集目标 关键概念 scrapePool
+​ scrapePool是target集合的采集管理器,每一个scrapePool都负责管理一组targetsGroup。每一个scrapePool都会运行单独的数据采集服务sp.Sync(groups)。当Discovery模块有更新数据时，通过discoveryManagerScrape.SyncCh()将数据传入scrapeManager，执行reload（）方法更新scrapePool。
+type scrapePool struct { appendable Appendable // 数据存储的上层抽象 logger log.Logger mtx sync.RWMutex config *config.ScrapeConfig client *http.Client	// http客户端 activeTargets map[uint64]*Target // 活动中的target droppedTargets []*Target // 已废弃的target loops map[uint64]loop // 启动器，实现loop接口，负责启动当前pool进行数据采集 cancel context.CancelFunc // 上下文取消事件 // loops构造器 newLoop func(scrapeLoopOptions) loop } scrapeLoop" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/f17abc4703a3df2cdfa1d9aff2c4ce6b/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-09-09T21:44:55+08:00" />
+<meta property="article:modified_time" content="2022-09-09T21:44:55+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Prometheus TSDB (Part 3): Memory Mapping of Head Chunks from Disk</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h4><a id="_0"></a>数据采集</h4> 
+<h5><a id="_2"></a>最前面</h5> 
+<p>​ 数据采集(scrape)是prometheus的核心服务。它有两种采集方式:pull和push，这里着重分析pull模式，push模式请看<a href="https://github.com/prometheus/pushgateway">文档</a>。</p> 
+<p>​ <a href="https://www.processon.com/view/link/5d8330a1e4b0ca6e051e9bb5" rel="nofollow">简易流程</a></p> 
+<h5><a id="_10"></a>代码目录</h5> 
+<pre><code>- scrape
+	- testdata	// 测试数据
+	- manager.go	// scrape管理器，负责主要业务逻辑
+	- scrape.go	// 数据采集，实现具体的采集方法
+	- target.go	// 采集目标
+</code></pre> 
+<h5><a id="_22"></a>关键概念</h5> 
+<ol><li> <p>scrapePool</p> <p>​ scrapePool是target集合的采集管理器,每一个scrapePool都负责管理一组targetsGroup。每一个scrapePool都会运行单独的数据采集服务<code>sp.Sync(groups)</code>。当Discovery模块有更新数据时，通过<code>discoveryManagerScrape.SyncCh()</code>将数据传入scrapeManager，执行<code>reload（）</code>方法更新scrapePool。</p> <pre><code class="prism language-go"><span class="token keyword">type</span> scrapePool <span class="token keyword">struct</span> <span class="token punctuation">{<!-- --></span>
+	appendable Appendable <span class="token comment">// 数据存储的上层抽象</span>
+	logger     log<span class="token punctuation">.</span>Logger
+	mtx    sync<span class="token punctuation">.</span>RWMutex
+	config <span class="token operator">*</span>config<span class="token punctuation">.</span>ScrapeConfig
+	client <span class="token operator">*</span>http<span class="token punctuation">.</span>Client	<span class="token comment">// http客户端</span>
+	activeTargets  <span class="token keyword">map</span><span class="token punctuation">[</span><span class="token builtin">uint64</span><span class="token punctuation">]</span><span class="token operator">*</span>Target <span class="token comment">// 活动中的target</span>
+	droppedTargets <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token operator">*</span>Target <span class="token comment">// 已废弃的target</span>
+	loops          <span class="token keyword">map</span><span class="token punctuation">[</span><span class="token builtin">uint64</span><span class="token punctuation">]</span>loop <span class="token comment">// 启动器，实现loop接口，负责启动当前pool进行数据采集</span>
+	cancel         context<span class="token punctuation">.</span>CancelFunc <span class="token comment">// 上下文取消事件</span>
+	<span class="token comment">// loops构造器</span>
+	newLoop <span class="token keyword">func</span><span class="token punctuation">(</span>scrapeLoopOptions<span class="token punctuation">)</span> loop
+<span class="token punctuation">}</span>
+</code></pre> </li><li> <p>scrapeLoop</p> <p>​ scrapeLoop是建立在单个target基础上,为target提供具体的采集服务。每一个scrapeLoop都有独立的生命周期。scrapeLoop实现了loop接口。</p> <pre><code class="prism language-go">s <span class="token operator">:=</span> <span class="token operator">&amp;</span>targetScraper<span class="token punctuation">{<!-- --></span>Target<span class="token punctuation">:</span> t<span class="token punctuation">,</span> client<span class="token punctuation">:</span> sp<span class="token punctuation">.</span>client<span class="token punctuation">,</span> timeout<span class="token punctuation">:</span> timeout<span class="token punctuation">}</span>
+l <span class="token operator">:=</span> sp<span class="token punctuation">.</span><span class="token function">newLoop</span><span class="token punctuation">(</span>scrapeLoopOptions<span class="token punctuation">{<!-- --></span>
+    target<span class="token punctuation">:</span>          t<span class="token punctuation">,</span>	<span class="token comment">// target</span>
+    scraper<span class="token punctuation">:</span>         s<span class="token punctuation">,</span>
+    limit<span class="token punctuation">:</span>           limit<span class="token punctuation">,</span>	<span class="token comment">// sample limit</span>
+    honorLabels<span class="token punctuation">:</span>     honorLabels<span class="token punctuation">,</span>
+    honorTimestamps<span class="token punctuation">:</span> honorTimestamps<span class="token punctuation">,</span>
+    mrc<span class="token punctuation">:</span>              mrc<span class="token punctuation">,</span>	<span class="token comment">// relabel config</span>
+<span class="token punctuation">}</span><span class="token punctuation">)</span>
+sp<span class="token punctuation">.</span>activeTargets<span class="token punctuation">[</span>hash<span class="token punctuation">]</span> <span class="token operator">=</span> t
+sp<span class="token punctuation">.</span>loops<span class="token punctuation">[</span>hash<span class="token punctuation">]</span> <span class="token operator">=</span> l
+<span class="token comment">// loops启动运行</span>
+<span class="token keyword">go</span> l<span class="token punctuation">.</span><span class="token function">run</span><span class="token punctuation">(</span>interval<span class="token punctuation">,</span> timeout<span class="token punctuation">,</span> <span class="token boolean">nil</span><span class="token punctuation">)</span>
+</code></pre> </li><li> <p>reloader()</p> </li></ol> 
+<p>​ 核心方法，在<code>Run()</code>方法中启动，用于监听外部的更新数据，执行<code>reload()</code>方法。文章最后会重点分析这个方法。</p> 
+<pre><code class="prism language-go">	<span class="token keyword">for</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">select</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token comment">// 监听到关闭信号就结束循环</span>
+		<span class="token keyword">case</span> <span class="token operator">&lt;-</span>m<span class="token punctuation">.</span>graceShut<span class="token punctuation">:</span>
+			<span class="token keyword">return</span>
+		<span class="token comment">// 每5秒开始监听重载事件，限制更新次数</span>
+		<span class="token keyword">case</span> <span class="token operator">&lt;-</span>ticker<span class="token punctuation">.</span>C<span class="token punctuation">:</span>
+			<span class="token keyword">select</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">case</span> <span class="token operator">&lt;-</span>m<span class="token punctuation">.</span>triggerReload<span class="token punctuation">:</span>
+				<span class="token comment">// 由m.triggerReload触发事件</span>
+				m<span class="token punctuation">.</span><span class="token function">reload</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+			<span class="token keyword">case</span> <span class="token operator">&lt;-</span>m<span class="token punctuation">.</span>graceShut<span class="token punctuation">:</span>
+				<span class="token keyword">return</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+</code></pre> 
+<ol start="4"><li> <p>fanoutStorage</p> <p>​ 在创建scrapeManager时使用，fanoutStorage是对存储的抽象。在scrape数据之后，通过fanoutStorage写入存储中。具体实现逻辑在storage模块中。</p> </li><li> <p>loop</p> <p>​ loop是一个单向的控制器，它负责启动和关闭一个服务。这个过程是单向的，已关闭的服务不能重新启动。它定义了一组接口方法。</p> <pre><code class="prism language-go"><span class="token comment">// loop的接口定义</span>
+<span class="token keyword">type</span> loop <span class="token keyword">interface</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token function">run</span><span class="token punctuation">(</span>interval<span class="token punctuation">,</span> timeout time<span class="token punctuation">.</span>Duration<span class="token punctuation">,</span> errc <span class="token keyword">chan</span><span class="token operator">&lt;-</span> <span class="token builtin">error</span><span class="token punctuation">)</span>
+	<span class="token function">stop</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> </li><li> <p>timeLimitAppender</p> <p>​ timeLimitAppender用于限制数据的时效性。在数据提交storage进行存储时，这条数据的生成时间已超过10分钟，那么prometheus就会抛错。目前默认值10分钟，无法通过配置文件修改。</p> <pre><code class="prism language-go"><span class="token keyword">const</span> maxAheadTime <span class="token operator">=</span> <span class="token number">10</span> <span class="token operator">*</span> time<span class="token punctuation">.</span>Minute
+</code></pre> </li></ol> 
+<h5><a id="_123"></a>工作流程</h5> 
+<ol><li> <p>创建管理器</p> <pre><code class="prism language-go"><span class="token comment">// fanoutStorage：存储抽象，数据采集完成之后通过它写入到存储中。</span>
+scrape<span class="token punctuation">.</span><span class="token function">NewManager</span><span class="token punctuation">(</span>log<span class="token punctuation">.</span><span class="token function">With</span><span class="token punctuation">(</span>logger<span class="token punctuation">,</span> <span class="token string">"component"</span><span class="token punctuation">,</span> <span class="token string">"scrape manager"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> fanoutStorage<span class="token punctuation">)</span>
+</code></pre> </li><li> <p>应用配置</p> <p>​ scrapeManager创建之后，通过调用<code>ApplyConfig(cfg *config.Config)</code>方法进行配置加载。</p> <p>若当前scrapeManager中有启动的scrapePool且不在当前配置中，执行<code>sp.stop()</code>方法，关闭scrapePool下所有的loop，同时删除这个scrapePool。若scrapePool的配置信息和传入的配置数据不相同，执行<code>sp.reload(cfg)</code>方法重载配置(删除老的loop,启动新的loop)。</p> </li><li> <p>启动管理器</p> <p>​ 核心函数，用于启动scrapeManager。<code>Run()</code>方法主要运行了两个服务：</p> <pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token punctuation">(</span>m <span class="token operator">*</span>Manager<span class="token punctuation">)</span> <span class="token function">Run</span><span class="token punctuation">(</span>tsets <span class="token operator">&lt;-</span><span class="token keyword">chan</span> <span class="token keyword">map</span><span class="token punctuation">[</span><span class="token builtin">string</span><span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token operator">*</span>targetgroup<span class="token punctuation">.</span>Group<span class="token punctuation">)</span> <span class="token builtin">error</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">// 服务1:配置重载服务，监听m.triggerReload</span>
+	<span class="token keyword">go</span> m<span class="token punctuation">.</span><span class="token function">reloader</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+	<span class="token comment">// 服务2:监听外部传入的tsets，当发生变化时，通过m.triggerReload通知reloader</span>
+	<span class="token keyword">for</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">select</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token comment">// 监听channel，发生变化就执行reload函数</span>
+		<span class="token keyword">case</span> ts <span class="token operator">:=</span> <span class="token operator">&lt;-</span>tsets<span class="token punctuation">:</span>
+			<span class="token comment">// 更新manager中的目标组</span>
+			m<span class="token punctuation">.</span><span class="token function">updateTsets</span><span class="token punctuation">(</span>ts<span class="token punctuation">)</span>
+			<span class="token keyword">select</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token comment">// 触发reload事件</span>
+			<span class="token keyword">case</span> m<span class="token punctuation">.</span>triggerReload <span class="token operator">&lt;-</span> <span class="token keyword">struct</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">:</span>
+			<span class="token keyword">default</span><span class="token punctuation">:</span>
+			<span class="token punctuation">}</span>
+    <span class="token comment">// 触发关闭事件</span>
+		<span class="token keyword">case</span> <span class="token operator">&lt;-</span>m<span class="token punctuation">.</span>graceShut<span class="token punctuation">:</span>
+			<span class="token keyword">return</span> <span class="token boolean">nil</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> </li></ol> 
+<h5><a id="_172"></a>核心方法</h5> 
+<p>​ <code>m.reloader()</code>是scrapeManager启动的核心方法。在这里做详细的说明，一层层的分析它的执行过程。</p> 
+<ol><li> <p>reload()</p> <p>​ <code>m.reload()</code>是<code>reloader()</code>里调用的具体执行方法，由<code>ticker</code>限制执行频率，默认5s。</p> <p>​ <code>m.reload()</code>为scrapeManager的每一个未创建scrapePool的targetGroup创建scrapePool，并启动协程运行同步服务<code>sp.Sync(groups)</code>。</p> <pre><code class="prism language-go"><span class="token comment">// 创建新的ScrapePool</span>
+<span class="token function">newScrapePool</span><span class="token punctuation">(</span>scrapeConfig<span class="token punctuation">,</span> m<span class="token punctuation">.</span><span class="token builtin">append</span><span class="token punctuation">,</span> m<span class="token punctuation">.</span>jitterSeed<span class="token punctuation">,</span> log<span class="token punctuation">.</span><span class="token function">With</span><span class="token punctuation">(</span>m<span class="token punctuation">.</span>logger<span class="token punctuation">,</span> <span class="token string">"scrape_pool"</span><span class="token punctuation">,</span> setName<span class="token punctuation">)</span><span class="token punctuation">)</span>
+</code></pre> <pre><code class="prism language-go"><span class="token comment">// 启动服务</span>
+<span class="token keyword">go</span> <span class="token keyword">func</span><span class="token punctuation">(</span>sp <span class="token operator">*</span>scrapePool<span class="token punctuation">,</span> groups <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token operator">*</span>targetgroup<span class="token punctuation">.</span>Group<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+   <span class="token comment">// 更新sp中的targets</span>
+   sp<span class="token punctuation">.</span><span class="token function">Sync</span><span class="token punctuation">(</span>groups<span class="token punctuation">)</span>
+   wg<span class="token punctuation">.</span><span class="token function">Done</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">}</span><span class="token punctuation">(</span>m<span class="token punctuation">.</span>scrapePools<span class="token punctuation">[</span>setName<span class="token punctuation">]</span><span class="token punctuation">,</span> groups<span class="token punctuation">)</span>
+</code></pre> </li><li> <p>sp.Sync(groups)</p> </li></ol> 
+<p>​ <code>func (sp *scrapePool) Sync(tgs []*targetgroup.Group)</code>方法首先筛选<code>tgs</code>中的target，判断是否它是否是有效的taregt(<code>t.Labels().Len() &gt;</code>),将无效的target存入scrapeManager的droppedTargets中。筛选完成之后，执行下一个逻辑方法<code>sp.sync(all)</code>。</p> 
+<pre><code class="prism language-go"><span class="token comment">// target筛选，将有效的target存储all中</span>
+<span class="token keyword">for</span> <span class="token boolean">_</span><span class="token punctuation">,</span> t <span class="token operator">:=</span> <span class="token keyword">range</span> targets <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">if</span> t<span class="token punctuation">.</span><span class="token function">Labels</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Len</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+				all <span class="token operator">=</span> <span class="token function">append</span><span class="token punctuation">(</span>all<span class="token punctuation">,</span> t<span class="token punctuation">)</span>
+			<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> t<span class="token punctuation">.</span><span class="token function">DiscoveredLabels</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Len</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+				sp<span class="token punctuation">.</span>droppedTargets <span class="token operator">=</span> <span class="token function">append</span><span class="token punctuation">(</span>sp<span class="token punctuation">.</span>droppedTargets<span class="token punctuation">,</span> t<span class="token punctuation">)</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-go"><span class="token comment">// 对比现在和传入的targets，启动采集任务</span>
+sp<span class="token punctuation">.</span><span class="token function">sync</span><span class="token punctuation">(</span>all<span class="token punctuation">)</span>
+</code></pre> 
+<ol start="3"><li>sp.sync(all)</li></ol> 
+<p>​ <code>func (sp *scrapePool) sync(targets []*Target)</code>，根据target的hash值对传入参数targets和sp.activeTargets进行对比。</p> 
+<p>​ 若targets中的元素若不存在于activeTargets中，则新建scrapeLoop，运行后台采集服务，若存在，则更新数据内容。</p> 
+<pre><code class="prism language-go"><span class="token comment">// target不在sp.activeTargets中，新建scrapeLoop</span>
+s <span class="token operator">:=</span> <span class="token operator">&amp;</span>targetScraper<span class="token punctuation">{<!-- --></span>Target<span class="token punctuation">:</span> t<span class="token punctuation">,</span> client<span class="token punctuation">:</span> sp<span class="token punctuation">.</span>client<span class="token punctuation">,</span> timeout<span class="token punctuation">:</span> timeout<span class="token punctuation">}</span>
+l <span class="token operator">:=</span> sp<span class="token punctuation">.</span><span class="token function">newLoop</span><span class="token punctuation">(</span>scrapeLoopOptions<span class="token punctuation">{<!-- --></span>
+  target<span class="token punctuation">:</span>          t<span class="token punctuation">,</span>
+  scraper<span class="token punctuation">:</span>         s<span class="token punctuation">,</span>
+  limit<span class="token punctuation">:</span>           limit<span class="token punctuation">,</span>
+  honorLabels<span class="token punctuation">:</span>     honorLabels<span class="token punctuation">,</span>
+  honorTimestamps<span class="token punctuation">:</span> honorTimestamps<span class="token punctuation">,</span>
+  mrc<span class="token punctuation">:</span>              mrc<span class="token punctuation">,</span>
+<span class="token punctuation">}</span><span class="token punctuation">)</span>
+</code></pre> 
+<pre><code class="prism language-go"><span class="token comment">// 更新</span>
+sp<span class="token punctuation">.</span>activeTargets<span class="token punctuation">[</span>hash<span class="token punctuation">]</span><span class="token punctuation">.</span><span class="token function">SetDiscoveredLabels</span><span class="token punctuation">(</span>t<span class="token punctuation">.</span><span class="token function">DiscoveredLabels</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>​ 若activeTargets中有targets不存在的元素，则停止对应的loop，删除scrapePool和target。</p> 
+<ol start="4"><li>sl.run()</li></ol> 
+<p>​ 每一个scrapeLoop都会启动一个后台服务，对应代码<code>go l.run(interval, timeout, nil)</code>。</p> 
+<p><code>run()</code>负责采集target的数据并且写入存储中。以下是关键步骤。</p> 
+<pre><code class="prism language-go"><span class="token comment">// 使用GET请求拿到exporter数据,将数据copy到缓存buf</span>
+contentType<span class="token punctuation">,</span> scrapeErr <span class="token operator">:=</span> sl<span class="token punctuation">.</span>scraper<span class="token punctuation">.</span><span class="token function">scrape</span><span class="token punctuation">(</span>scrapeCtx<span class="token punctuation">,</span> buf<span class="token punctuation">)</span>
+</code></pre> 
+<pre><code class="prism language-go"><span class="token comment">// 将数据写入到存储中</span>
+<span class="token comment">// 存储时使用了scrapeCache，提高存储效率，具体逻辑在storage模块中实现！！！</span>
+total<span class="token punctuation">,</span> added<span class="token punctuation">,</span> seriesAdded<span class="token punctuation">,</span> appErr <span class="token operator">:=</span> sl<span class="token punctuation">.</span><span class="token function">append</span><span class="token punctuation">(</span>b<span class="token punctuation">,</span> contentType<span class="token punctuation">,</span> start<span class="token punctuation">)</span>
+</code></pre> 
+<pre><code class="prism language-go"><span class="token comment">// 记录这次采集过程的元数据</span>
+sl<span class="token punctuation">.</span><span class="token function">report</span><span class="token punctuation">(</span>start<span class="token punctuation">,</span> time<span class="token punctuation">.</span><span class="token function">Since</span><span class="token punctuation">(</span>start<span class="token punctuation">)</span><span class="token punctuation">,</span> total<span class="token punctuation">,</span> added<span class="token punctuation">,</span> seriesAdded<span class="token punctuation">,</span> scrapeErr<span class="token punctuation">)</span>
+</code></pre> 
+<pre><code class="prism language-go"><span class="token comment">// run()的结束方法。循环结束之后执行。</span>
+sl<span class="token punctuation">.</span><span class="token function">endOfRunStaleness</span><span class="token punctuation">(</span>last<span class="token punctuation">,</span> ticker<span class="token punctuation">,</span> interval<span class="token punctuation">)</span>
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/d9339437b70885d4229f1a6d0419a470/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">爬虫技术-滑块验证码</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/ce6e88102a189077298e536fb1e29a1e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">阿里面试，让我十五分钟内手写 LRU。。。</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>深入理解WKWebView白屏 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="深入理解WKWebView白屏" />
+<meta property="og:description" content="白屏是webview进程终止之后的表现，在webview因异常使用内存、CPU等资源时，webkit会终止当前m页展示的进程，在用户端表现为白页。
+第一、webview的进程被终止的原因有哪些？ ProcessTerminationReason { ExceededMemoryLimit,//超出内存限制 ExceededCPULimit,//超出CPU限制 RequestedByClient,//主动触发的terminate Crash,//web进程自己发生了crash NavigationSwap,//m页的加载环境出现了变化 }; 第二、内存限制是如何计算的？ 1、苹果是如何计算当前内存的使用量的？ 主要是通过计算当前进程的phys_footprint来度量内存的使用量
+namespace WTF { size_t memoryFootprint() { task_vm_info_data_t vmInfo; mach_msg_type_number_t count = TASK_VM_INFO_COUNT; kern_return_t result = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t) &amp;vmInfo, &amp;count); if (result != KERN_SUCCESS) return 0; return static_cast&lt;size_t&gt;(vmInfo.phys_footprint); } } 2、内存使用过量的阈值是如何计算的？ 内存超出的计算依赖了两个值：基于CPU框架的基本阈值baseThreshold和手机内存大小ramSize来计算阈值
+static size_t thresholdForMemoryKillWithProcessState(WebsamProcessState processState, unsigned tabCount) { size_t baseThreshold = 2 * GB; #if CPU(X86_64) || CPU(ARM64) if (processState == WebsamProcessState::Active) baseThreshold = 4 * GB; if (tabCount &gt; 1) baseThreshold &#43;= std::min(tabCount - 1, 4u) * 1 * GB; #else if ((tabCount &gt; 1) || (processState == WebsamProcessState::Active)) baseThreshold = 3 * GB; #endif return std::min(baseThreshold, static_cast&lt;size_t&gt;(ramSize() * 0." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/6d46861a8ef3a1ac72fe4287d15d0f96/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-05-29T15:33:21+08:00" />
+<meta property="article:modified_time" content="2022-05-29T15:33:21+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">深入理解WKWebView白屏</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p></p> 
+<p>白屏是webview进程终止之后的表现，在webview因异常使用内存、CPU等资源时，webkit会终止当前m页展示的进程，在用户端表现为白页。</p> 
+<h2>第一、webview的进程被终止的原因有哪些？</h2> 
+<pre class="has"><code class="language-cpp">ProcessTerminationReason {
+    ExceededMemoryLimit,//超出内存限制
+    ExceededCPULimit,//超出CPU限制
+    RequestedByClient,//主动触发的terminate
+    Crash,//web进程自己发生了crash
+    NavigationSwap,//m页的加载环境出现了变化
+};
+</code></pre> 
+<h2>第二、内存限制是如何计算的？</h2> 
+<h3>1、苹果是如何计算当前内存的使用量的？</h3> 
+<p>主要是通过计算当前进程的phys_footprint来度量内存的使用量</p> 
+<pre class="has"><code class="language-cpp">namespace WTF {
+
+size_t memoryFootprint()
+{
+    task_vm_info_data_t vmInfo;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    kern_return_t result = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t) &amp;vmInfo, &amp;count);
+    if (result != KERN_SUCCESS)
+        return 0;
+    return static_cast&lt;size_t&gt;(vmInfo.phys_footprint);
+}
+
+}</code></pre> 
+<h3>2、内存使用过量的阈值是如何计算的？</h3> 
+<p>内存超出的计算依赖了两个值：基于CPU框架的基本阈值baseThreshold和手机内存大小ramSize来计算阈值</p> 
+<pre class="has"><code class="language-cpp">static size_t thresholdForMemoryKillWithProcessState(WebsamProcessState processState, unsigned tabCount)
+{
+    size_t baseThreshold = 2 * GB;
+#if CPU(X86_64) || CPU(ARM64)
+    if (processState == WebsamProcessState::Active)
+        baseThreshold = 4 * GB;
+    if (tabCount &gt; 1)
+        baseThreshold += std::min(tabCount - 1, 4u) * 1 * GB;
+#else
+    if ((tabCount &gt; 1) || (processState == WebsamProcessState::Active))
+        baseThreshold = 3 * GB;
+#endif
+    return std::min(baseThreshold, static_cast&lt;size_t&gt;(ramSize() * 0.9));
+}</code></pre> 
+<p>这里可以看出，baseThreshold初始化为2GB，64位CPU初始化位4GB，多tab时每个tab可以多加1GB（总计不超过4GB）。非64位CPU在多tab的情况下最多为3GB。</p> 
+<p>再来看ramSize大小的计算方法，因为webkit是一个多平台使用的框架，这里计算ramsize，我们只分析iOS系统的计算方法：</p> 
+<pre class="has"><code class="language-cpp">size_t ramSize()
+{
+    static size_t ramSize;
+    static std::once_flag onceFlag;
+    std::call_once(onceFlag, [] {
+        ramSize = computeRAMSize();
+    });
+    return ramSize;
+}</code></pre> 
+<p>这是个单例，只运算一次。而computeRAMSize()的实现如下：</p> 
+<pre class="has"><code class="language-cpp">static size_t computeRAMSize()
+{
+#if OS(WINDOWS)
+    MEMORYSTATUSEX status;
+    status.dwLength = sizeof(status);
+    bool result = GlobalMemoryStatusEx(&amp;status);
+    if (!result)
+        return ramSizeGuess;
+    return status.ullTotalPhys;
+#elif defined(USE_SYSTEM_MALLOC) &amp;&amp; USE_SYSTEM_MALLOC
+#if OS(UNIX)
+    struct sysinfo si;
+    sysinfo(&amp;si);
+    return si.totalram * si.mem_unit;
+#else
+#error "Missing a platform specific way of determining the available RAM"
+#endif // OS(UNIX)
+#else
+    return bmalloc::api::availableMemory();
+#endif
+}</code></pre> 
+<p>这里有windows系统和Unix系统以及其他三种分类，但是这里的Unix系统不包括iOS系统（虽然iOS是基于Unix的），我们的iOS系统在最后一个分支bmalloc::api::availableMemory()中。来看看该方法的实现：</p> 
+<pre class="has"><code class="language-cpp">//调用第一步
+inline size_t availableMemory()
+{
+    return bmalloc::availableMemory();
+}
+
+//调用第二步
+size_t availableMemory()
+{
+    static size_t availableMemory;
+    static std::once_flag onceFlag;
+    std::call_once(onceFlag, [] {
+        availableMemory = computeAvailableMemory();
+    });
+    return availableMemory;
+}
+
+//调用第三步
+static size_t computeAvailableMemory()
+{
+#if BOS(DARWIN)
+    size_t sizeAccordingToKernel = memorySizeAccordingToKernel();
+#if BPLATFORM(IOS_FAMILY)
+    sizeAccordingToKernel = std::min(sizeAccordingToKernel, jetsamLimit());
+#endif
+    size_t multiple = 128 * bmalloc::MB;
+
+    // Round up the memory size to a multiple of 128MB because max_mem may not be exactly 512MB
+    // (for example) and we have code that depends on those boundaries.
+    return ((sizeAccordingToKernel + multiple - 1) / multiple) * multiple;
+#elif BOS(UNIX)
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long pageSize = sysconf(_SC_PAGE_SIZE);
+    if (pages == -1 || pageSize == -1)
+        return availableMemoryGuess;
+    return pages * pageSize;
+#else
+    return availableMemoryGuess;
+#endif
+}</code></pre> 
+<p>第三步是计算设备ramsize的核心代码，这里sizeAccordingToKernel的计算与两个很重要的方法memorySizeAccordingToKernel()、jetsamLimit()相关联，前者是与当前设备内核相关的内存size，后者jetsamLimit是苹果对各个进程使用内存的限制，我们来分析一下。</p> 
+<pre class="has"><code class="language-cpp">static const size_t availableMemoryGuess = 512 * bmalloc::MB;
+
+#if BOS(DARWIN)
+static size_t memorySizeAccordingToKernel()
+{
+#if BPLATFORM(IOS_FAMILY_SIMULATOR)
+    BUNUSED_PARAM(availableMemoryGuess);
+    // Pretend we have 1024MB of memory to make cache sizes behave like on device.
+    return 1024 * bmalloc::MB;
+#else
+    host_basic_info_data_t hostInfo;
+
+    mach_port_t host = mach_host_self();
+    mach_msg_type_number_t count = HOST_BASIC_INFO_COUNT;
+    kern_return_t r = host_info(host, HOST_BASIC_INFO, (host_info_t)&amp;hostInfo, &amp;count);
+    mach_port_deallocate(mach_task_self(), host);
+    if (r != KERN_SUCCESS)
+        return availableMemoryGuess;
+
+    if (hostInfo.max_mem &gt; std::numeric_limits&lt;size_t&gt;::max())
+        return std::numeric_limits&lt;size_t&gt;::max();
+
+    return static_cast&lt;size_t&gt;(hostInfo.max_mem);
+#endif
+}
+#endif</code></pre> 
+<p>这里有三个要点：</p> 
+<p>一是模拟器的内存size为1G；</p> 
+<p>二是对于真实设备，它主要计算结构体host_basic_info_data_t中max_mem的大小，然后取MIN(max_mem,std::numeric_limits&lt;size_t&gt;::max())，这里std::numeric_limits&lt;size_t&gt;::max()取当前设备可以表示的最大值；</p> 
+<p>三是上述计算失败时默认为512M。</p> 
+<p>再来看jatsamLimit的实现</p> 
+<pre class="has"><code class="language-cpp">#if BPLATFORM(IOS_FAMILY)
+static size_t jetsamLimit()
+{
+    memorystatus_memlimit_properties_t properties;
+    pid_t pid = getpid();
+    if (memorystatus_control(MEMORYSTATUS_CMD_GET_MEMLIMIT_PROPERTIES, pid, 0, &amp;properties, sizeof(properties)))
+        return 840 * bmalloc::MB;
+    if (properties.memlimit_active &lt; 0)
+        return std::numeric_limits&lt;size_t&gt;::max();
+    return static_cast&lt;size_t&gt;(properties.memlimit_active) * bmalloc::MB;
+}
+#endif</code></pre> 
+<p>这个方法实现有三种可能</p> 
+<p>1、如果memorystatus_control返回值不为0时，其返回值为840M</p> 
+<p>2、如果memoryStatus的限制属性memlimit_active&lt;0时，返回当前设备可以表示的最大值。</p> 
+<p>3、如果运算正常，则返回系统的取值。</p> 
+<p>这里jetsam的相关运算对我们开发者来说是黑盒无文档的，有兴趣的同学可以通过下面这篇文章了解一下</p> 
+<p><a href="https://juejin.im/entry/5a0c2b5d6fb9a0451170ab99" rel="nofollow" title="（译）Handling low memory conditions in iOS and Mavericks - 掘金">（译）Handling low memory conditions in iOS and Mavericks - 掘金</a></p> 
+<p>至此，我们可以获取iOS设备的ramsize了</p> 
+<pre class="has"><code class="language-cpp">#if BPLATFORM(IOS_FAMILY)
+    sizeAccordingToKernel = std::min(sizeAccordingToKernel, jetsamLimit());
+#endif
+    size_t multiple = 128 * bmalloc::MB;
+
+    // Round up the memory size to a multiple of 128MB because max_mem may not be exactly 512MB
+    // (for example) and we have code that depends on those boundaries.
+    return ((sizeAccordingToKernel + multiple - 1) / multiple) * multiple;</code></pre> 
+<p>那么进程被kill的内存上限为：</p> 
+<pre class="has"><code>return std::min(baseThreshold, static_cast&lt;size_t&gt;(ramSize() * 0.9));</code></pre> 
+<h2>第三、内存使用过度时白屏发生的具体流程是什么？</h2> 
+<p>发生白屏的基本流程如下图所示<img alt="" class="has" height="639" src="https://images2.imgbox.com/83/79/fF1juS5G_o.png" width="1200"></p> 
+<p></p> 
+<p>当我们给webview设置了navigationDelegate时，这里的delegate方法将由NavigationState这个类来触发。</p> 
+<p>MemoryPressureHandler是一个单例，当它判断当前内存使用过量时会触发WebProcess的memoryKillCallBack，此回调是在initializeWebProcess进行注册的，WebProcess通过IPC机制将消息转发给WebProcessProxy，WebProcessProxy调用requestTermination方法，然后调用了processDidTerminate---&gt;dispatchProcessDidTerminate,这里才会将ProcessDidTerminate的处理交给用户。</p> 
+<p><span style="color:#f33b45;"><em>这里需要说明一下，memoryKillCallback以及设置每隔30s检查内存，Apple的实现中都用宏包裹了，</em></span></p> 
+<pre class="has"><code class="language-cpp">#if (PLATFORM(MAC) &amp;&amp; __MAC_OS_X_VERSION_MAX_ALLOWED &gt;= 101200) || PLATFORM(GTK) || PLATFORM(WPE)
+        memoryPressureHandler.setShouldUsePeriodicMemoryMonitor(true);
+        memoryPressureHandler.setMemoryKillCallback([this] () {
+            WebCore::logMemoryStatisticsAtTimeOfDeath();
+            if (MemoryPressureHandler::singleton().processState() == WebsamProcessState::Active)
+                parentProcessConnection()-&gt;send(Messages::WebProcessProxy::DidExceedActiveMemoryLimit(), 0);
+            else
+                parentProcessConnection()-&gt;send(Messages::WebProcessProxy::DidExceedInactiveMemoryLimit(), 0);
+        });
+        memoryPressureHandler.setDidExceedInactiveLimitWhileActiveCallback([this] () {
+            parentProcessConnection()-&gt;send(Messages::WebProcessProxy::DidExceedInactiveMemoryLimitWhileActive(), 0);
+        });
+#endif</code></pre> 
+<p><span style="color:#f33b45;"><em>看起来并不是iOS的机制，但是我们从方法的调用关系进行了全局检索，目前发现内存超出导致的白屏只有这么一条调用链。</em></span></p> 
+<h2>第四、如果开发者不实现webViewWebContentProcessDidTerminate:(WKWebView *)webView的代理方法，默认的处理是什么？</h2> 
+<p>苹果对WebContentProcessDidTerminate的处理逻辑如下：</p> 
+<pre class="has"><code class="language-cpp">void WebPageProxy::dispatchProcessDidTerminate(ProcessTerminationReason reason)
+{
+    bool handledByClient = false;
+    if (m_loaderClient)
+        handledByClient = reason != ProcessTerminationReason::RequestedByClient &amp;&amp; m_loaderClient-&gt;processDidCrash(*this);
+    else
+        handledByClient = m_navigationClient-&gt;processDidTerminate(*this, reason);
+
+    if (!handledByClient &amp;&amp; shouldReloadAfterProcessTermination(reason))
+        tryReloadAfterProcessTermination();
+}</code></pre> 
+<p>这里的m_loaderClient只在苹果的单元测试中有使用，所以，正式版本的iOS下应该会执行</p> 
+<p>handledByClient = m_navigationClient-&gt;processDidTerminate(*this, reason);</p> 
+<p>这里如果开发者未实现webViewWebContentProcessDidTerminate的代理方法，它将返回false，进入苹果的默认逻辑：</p> 
+<pre class="has"><code>static bool shouldReloadAfterProcessTermination(ProcessTerminationReason reason)
+{
+    switch (reason) {
+    case ProcessTerminationReason::ExceededMemoryLimit:
+    case ProcessTerminationReason::ExceededCPULimit:
+    case ProcessTerminationReason::Crash:
+        return true;
+    case ProcessTerminationReason::NavigationSwap:
+    case ProcessTerminationReason::RequestedByClient:
+        break;
+    }
+    return false;
+}</code></pre> 
+<p>从这个方法可以看出，苹果认为在内存超出、CPU超出、以及发生了Crash的场景下需要重新刷新。这里有两点需要注意：</p> 
+<p>第一、重新刷新是苹果官方的默认处理webViewWebContentProcessDidTerminate的方法；</p> 
+<p>第二、重新刷新是有条件的。</p> 
+<p>再来看具体的刷新逻辑：</p> 
+<pre class="has"><code class="language-cpp">static unsigned maximumWebProcessRelaunchAttempts = 1;
+
+void WebPageProxy::tryReloadAfterProcessTermination()
+{
+    m_resetRecentCrashCountTimer.stop();
+
+    if (++m_recentCrashCount &gt; maximumWebProcessRelaunchAttempts) {
+        RELEASE_LOG_IF_ALLOWED(Process, "%p - WebPageProxy's process crashed and the client did not handle it, not reloading the page because we reached the maximum number of attempts", this);
+        m_recentCrashCount = 0;
+        return;
+    }
+    RELEASE_LOG_IF_ALLOWED(Process, "%p - WebPageProxy's process crashed and the client did not handle it, reloading the page", this);
+    reload(ReloadOption::ExpiredOnly);
+}</code></pre> 
+<p>这里每次crash时苹果会给crash标示+1，在标示不超过1时（其实只有m_recentCrashCount为0时），系统会进行刷新，当最近crash的次数超过一次时它便不会刷新，只是将标示归位为0，下次就可以刷新。</p> 
+<p>后记：我们在iOS的Safari上测试了safari的白屏处理逻辑，当第一次发生白屏时Safari会默认重刷，第二次时safari会展示错误加载页，提示当前页面多次发生了错误。这个逻辑和上面webkit的默认处理逻辑时相似的。</p> 
+<h2>第五、CPU使用过量的白屏是如何触发的？</h2> 
+<p>很遗憾，截止目前，苹果在iOS下没有监控CPU，只有mac下会监控。我们可以从mac的逻辑中窥探一二。</p> 
+<pre class="has"><code class="language-cpp">#if PLATFORM(MAC)
+    std::unique_ptr&lt;WebCore::CPUMonitor&gt; m_cpuMonitor;
+    std::optional&lt;double&gt; m_cpuLimit;
+#endif
+
+
+void WebProcess::updateCPUMonitorState(CPUMonitorUpdateReason reason)
+{
+#if PLATFORM(MAC)
+    if (!m_cpuLimit) {
+        if (m_cpuMonitor)
+            m_cpuMonitor-&gt;setCPULimit(std::nullopt);
+        return;
+    }
+
+    if (!m_cpuMonitor) {
+        m_cpuMonitor = std::make_unique&lt;CPUMonitor&gt;(cpuMonitoringInterval, [this](double cpuUsage) {
+            RELEASE_LOG(PerformanceLogging, "%p - WebProcess exceeded CPU limit of %.1f%% (was using %.1f%%) hasVisiblePages? %d", this, m_cpuLimit.value() * 100, cpuUsage * 100, hasVisibleWebPage());
+            parentProcessConnection()-&gt;send(Messages::WebProcessProxy::DidExceedCPULimit(), 0);
+        });
+    } else if (reason == CPUMonitorUpdateReason::VisibilityHasChanged) {
+        // If the visibility has changed, stop the CPU monitor before setting its limit. This is needed because the CPU usage can vary wildly based on visibility and we would
+        // not want to report that a process has exceeded its background CPU limit even though most of the CPU time was used while the process was visible.
+        m_cpuMonitor-&gt;setCPULimit(std::nullopt);
+    }
+    m_cpuMonitor-&gt;setCPULimit(m_cpuLimit.value());
+#else
+    UNUSED_PARAM(reason);
+#endif
+}</code></pre> 
+<p>这里有两个成员变量：m_cpuMonitor和m_cpuLimit，这两个成员变量只在mac下定义。m_cpuMonitor是一个unique的智能指针，它初始化时需要添加一个闭包来响应超过cpu使用量时的事件，这里的响应行为不难发现时向WebProcessProxy发送消息，WebProcessProxy处理逻辑如下：</p> 
+<pre class="has"><code class="language-cpp">void WebProcessProxy::didExceedCPULimit()
+{
+    for (auto&amp; page : pages()) {
+        if (page-&gt;isPlayingAudio()) {
+            RELEASE_LOG(PerformanceLogging, "%p - WebProcessProxy::didExceedCPULimit() WebProcess with pid %d has exceeded the background CPU limit but we are not terminating it because there is audio playing", this, processIdentifier());
+            return;
+        }
+
+        if (page-&gt;hasActiveAudioStream() || page-&gt;hasActiveVideoStream()) {
+            RELEASE_LOG(PerformanceLogging, "%p - WebProcessProxy::didExceedCPULimit() WebProcess with pid %d has exceeded the background CPU limit but we are not terminating it because it is capturing audio / video", this, processIdentifier());
+            return;
+        }
+    }
+
+    bool hasVisiblePage = false;
+    for (auto&amp; page : pages()) {
+        if (page-&gt;isViewVisible()) {
+            page-&gt;didExceedBackgroundCPULimitWhileInForeground();
+            hasVisiblePage = true;
+        }
+    }
+
+    // We only notify the client that the process exceeded the CPU limit when it is visible, we do not terminate it.
+    if (hasVisiblePage)
+        return;
+
+    RELEASE_LOG_ERROR(PerformanceLogging, "%p - WebProcessProxy::didExceedCPULimit() Terminating background WebProcess with pid %d that has exceeded the background CPU limit", this, processIdentifier());
+    logDiagnosticMessageForResourceLimitTermination(DiagnosticLoggingKeys::exceededBackgroundCPULimitKey());
+    requestTermination(ProcessTerminationReason::ExceededCPULimit);
+}</code></pre> 
+<p>可以看出：</p> 
+<p>第一、当前的web如果有窗口在播放音视频，则不做响应；</p> 
+<p>第二、当前web如果存在可见页面时不做响应；</p> 
+<p>第三、调用了requestTermination方法，和超过内存限制情形下进行同样的处理。</p> 
+<p>另：我们在WebKit的源码中没有看到Mac下m_cpuLimit的值的大小。</p> 
+<h2>第六、ProcessTerminationReason为Crash发生在哪些场景下？</h2> 
+<p>整个WebKit源码中只有一处调用了Crash的情况：</p> 
+<pre class="has"><code class="language-cpp">void WebProcessProxy::processDidTerminateOrFailedToLaunch()
+{
+    // Protect ourselves, as the call to disconnect() below may otherwise cause us
+    // to be deleted before we can finish our work.
+    Ref&lt;WebProcessProxy&gt; protect(*this);
+
+    if (auto* webConnection = this-&gt;webConnection())
+        webConnection-&gt;didClose();
+
+    auto pages = copyToVectorOf&lt;RefPtr&lt;WebPageProxy&gt;&gt;(m_pageMap.values());
+
+    shutDown();
+
+#if ENABLE(PUBLIC_SUFFIX_LIST)
+    if (pages.size() == 1) {
+        auto&amp; page = *pages[0];
+        String domain = topPrivatelyControlledDomain(WebCore::URL({ }, page.currentURL()).host().toString());
+        if (!domain.isEmpty())
+            page.logDiagnosticMessageWithEnhancedPrivacy(WebCore::DiagnosticLoggingKeys::domainCausingCrashKey(), domain, WebCore::ShouldSample::No);
+    }
+#endif
+
+    for (auto&amp; page : pages)
+        page-&gt;processDidTerminate(ProcessTerminationReason::Crash);
+}</code></pre> 
+<p>这里，当WebProcessProxy的processDidTerminateOrFailedToLaunch方法被调用时，它会发送消息给WebPageProxy，后续的处理和内存过度使用是一致的。现在我们来看processDidTerminateOrFailedToLaunch被调用的情况：</p> 
+<p>第一种调用情况：当前的IPC连接标示不合法时会触发</p> 
+<pre class="has"><code class="language-cpp">void WebProcessProxy::didFinishLaunching(ProcessLauncher* launcher, IPC::Connection::Identifier connectionIdentifier)
+{
+    RELEASE_ASSERT(isMainThreadOrCheckDisabled());
+
+    ChildProcessProxy::didFinishLaunching(launcher, connectionIdentifier);
+
+    if (!IPC::Connection::identifierIsValid(connectionIdentifier)) {
+        RELEASE_LOG_IF(m_websiteDataStore-&gt;sessionID().isAlwaysOnLoggingAllowed(), Process, "%p - WebProcessProxy didFinishLaunching - invalid connection identifier (web process failed to launch)", this);
+        processDidTerminateOrFailedToLaunch();
+        return;
+    }
+
+    ...
+}</code></pre> 
+<p>这里连接标示的合法性由mach_port来完成</p> 
+<pre class="has"><code class="language-cpp">#define MACH_PORT_VALID(name)				\
+		(((name) != MACH_PORT_NULL) &amp;&amp; 		\
+		 ((name) != MACH_PORT_DEAD))
+
+static bool identifierIsValid(Identifier identifier) { return MACH_PORT_VALID(identifier.port); }
+</code></pre> 
+<p>主要是验证标示的端口是否合法。</p> 
+<p>第二种情况：</p> 
+<p>当WebProcessProxy的didClose方法调用时会触发</p> 
+<pre class="has"><code class="language-cpp">void WebProcessProxy::didClose(IPC::Connection&amp;)
+{
+    RELEASE_LOG_IF(m_websiteDataStore-&gt;sessionID().isAlwaysOnLoggingAllowed(), Process, "%p - WebProcessProxy didClose (web process crash)", this);
+    processDidTerminateOrFailedToLaunch();
+}
+
+void WebProcessProxy::didReceiveInvalidMessage(IPC::Connection&amp; connection, IPC::StringReference messageReceiverName, IPC::StringReference messageName)
+{
+    WTFLogAlways("Received an invalid message \"%s.%s\" from the web process.\n", messageReceiverName.toString().data(), messageName.toString().data());
+
+    WebProcessPool::didReceiveInvalidMessage(messageReceiverName, messageName);
+
+    // Terminate the WebProcess.
+    terminate();
+
+    // Since we've invalidated the connection we'll never get a IPC::Connection::Client::didClose
+    // callback so we'll explicitly call it here instead.
+    didClose(connection);
+}</code></pre> 
+<p>didClose则是进程间通信时收到不合法的消息会触发。所以，综上：</p> 
+<p>Crash类型的进程终止一般都发生在进程通信机制中，当进程连接的端口不合法或者通信时发送的消息不合法时，则会被认为是发生了Crash，进程会终止。</p> 
+<h2>第七、RequestedByClient类型的进程终止发生的场景有哪些？</h2> 
+<p>这种类型进程终止在两个类中有体现：</p> 
+<p>WKWebView.mm：</p> 
+<pre class="has"><code class="language-cpp">- (void)_killWebContentProcessAndResetState
+{
+    Ref&lt;WebKit::WebProcessProxy&gt; protectedProcessProxy(_page-&gt;process());
+    protectedProcessProxy-&gt;requestTermination(WebKit::ProcessTerminationReason::RequestedByClient);
+}</code></pre> 
+<p> WKPage.cpp</p> 
+<pre class="has"><code class="language-cpp">void WKPageTerminate(WKPageRef pageRef)
+{
+    Ref&lt;WebProcessProxy&gt; protectedProcessProxy(toImpl(pageRef)-&gt;process());
+    protectedProcessProxy-&gt;requestTermination(ProcessTerminationReason::RequestedByClient);
+}</code></pre> 
+<p>这两个方法的调用全部在Webkit的单元测试中，因此开发者无法调用，属于WebKit的“特权”范畴，目前看它们的是提供给Apple内部来使用，而使用的时机和具体的业务场景没有强关联。</p> 
+<h2>第八、NavigationSwap发生在什么场景下？</h2> 
+<p>这里需要知道：WebKit有个进程池（ProcessPool），进程池中包含多个WebProcessProxy，页面每次加载时WebProcessProxy会去ProcessPool里面再次获取当前页面可能对应的WebProcessProxy，如果当前的WebProcessProxy与获取到的WebProcessProxy不是同一个时，则说明页面加载的进程发生了变化，此时需要交互页面加载的进程</p> 
+<pre class="has"><code class="language-cpp">void WebPageProxy::receivedNavigationPolicyDecision(PolicyAction policyAction, API::Navigation* navigation, ProcessSwapRequestedByClient processSwapRequestedByClient, WebFrameProxy&amp; frame, API::WebsitePolicies* policies, Ref&lt;PolicyDecisionSender&gt;&amp;&amp; sender)
+{
+    ........
+        auto proposedProcess = process().processPool().processForNavigation(*this, *navigation, processSwapRequestedByClient, policyAction, reason);
+        ASSERT(!reason.isNull());
+        
+        if (proposedProcess.ptr() != &amp;process()) {
+            RELEASE_LOG_IF_ALLOWED(ProcessSwapping, "%p - WebPageProxy::decidePolicyForNavigationAction, swapping process %i with process %i for navigation, reason: %{public}s", this, processIdentifier(), proposedProcess-&gt;processIdentifier(), reason.utf8().data());
+            LOG(ProcessSwapping, "(ProcessSwapping) Switching from process %i to new process (%i) for navigation %" PRIu64 " '%s'", processIdentifier(), proposedProcess-&gt;processIdentifier(), navigation-&gt;navigationID(), navigation-&gt;loggingString());
+            
+            RunLoop::main().dispatch([this, protectedThis = makeRef(*this), navigation = makeRef(*navigation), proposedProcess = WTFMove(proposedProcess)]() mutable {
+                continueNavigationInNewProcess(navigation, WTFMove(proposedProcess));
+            });
+     ........
+
+}</code></pre> 
+<p>而在continueNavigationInNewProcess处理中，WebKit先触发了processDidTerminate，然后做了“交换进程的操作”：</p> 
+<pre class="has"><code class="language-cpp">void WebPageProxy::continueNavigationInNewProcess(API::Navigation&amp; navigation, Ref&lt;WebProcessProxy&gt;&amp;&amp; process)
+{
+   ......
+    processDidTerminate(ProcessTerminationReason::NavigationSwap);
+
+    swapToWebProcess(WTFMove(process), navigation, mainFrameIDInPreviousProcess);
+
+   ......
+}</code></pre> 
+<p>这里的processDidTerminate就进入了与处理过度使用内存类似的逻辑了，But！！！！这种情况不会出现白屏，也不会回调给用户，我们再来看上述方法的实现：</p> 
+<pre class="has"><code class="language-cpp">void WebPageProxy::processDidTerminate(ProcessTerminationReason reason)
+{
+    if (reason != ProcessTerminationReason::NavigationSwap)
+        RELEASE_LOG_IF_ALLOWED(Process, "%p - WebPageProxy::processDidTerminate (pid %d), reason %d", this, processIdentifier(), reason);
+
+    ASSERT(m_isValid);
+
+#if PLATFORM(IOS_FAMILY)
+    if (m_process-&gt;isUnderMemoryPressure()) {
+        String domain = WebCore::topPrivatelyControlledDomain(WebCore::URL({ }, currentURL()).host().toString());
+        if (!domain.isEmpty())
+            logDiagnosticMessageWithEnhancedPrivacy(WebCore::DiagnosticLoggingKeys::domainCausingJetsamKey(), domain, WebCore::ShouldSample::No);
+    }
+#endif
+
+    // There is a nested transaction in resetStateAfterProcessExited() that we don't want to commit before the client call.
+    PageLoadState::Transaction transaction = m_pageLoadState.transaction();
+
+    resetStateAfterProcessExited(reason);
+
+    // For bringup of process swapping, NavigationSwap termination will not go out to clients.
+    // If it does *during* process swapping, and the client triggers a reload, that causes bizarre WebKit re-entry.
+    // FIXME: This might have to change
+    if (reason == ProcessTerminationReason::NavigationSwap)
+        m_webProcessLifetimeTracker.webPageLeavingWebProcess();
+    else {
+        navigationState().clearAllNavigations();
+        dispatchProcessDidTerminate(reason);
+    }
+
+   ......</code></pre> 
+<p>首先， WebPageProxy::processDidTerminate触发的log都避开了ProcessTerminationReason::NavigationSwap的情况；</p> 
+<p>其次，当reason为ProcessTerminationReason::NavigationSwap时，并不会执行dispatchProcessDidTerminate，而后者是回调真正处理白屏的逻辑。</p> 
+<p>所以，本质上这种情形的发生就是为了清空当前webProcessProxy的各种状态，为后续进程交换做好准备而已。</p> 
+<h2>第九、小结</h2> 
+<p>通过上述分析，我们可以知道，iOS设备上造成白屏的真正原因只有两个：</p> 
+<p>内存使用过度</p> 
+<p>进程通信机制出现错误</p> 
+<h2>第十、目前主流app对白屏的处理方式</h2> 
+<table align="center" border="1" cellpadding="1" cellspacing="1" style="width:500px;"><caption>
+   主流浏览器对白屏的处理方式 
+ </caption><tbody><tr><td>浏览器名称</td><td>白屏的处理方式</td></tr><tr><td>微信</td><td>每次发生时均会重新刷新</td></tr><tr><td>QQ</td><td>每次发生时均会重新刷新</td></tr><tr><td>Safari</td><td>第一次会刷新，并给出提示，第二次直接加载错误页，如下图1</td></tr><tr><td>京东</td><td>每次重刷或移除当前页面</td></tr><tr><td>微博</td><td>每次重新刷新</td></tr><tr><td>Chrome</td><td>直接展示错误页面，如下图2</td></tr></tbody></table> 
+<p>safari对白屏处理的效果图：</p> 
+<p><img alt="" class="has" height="500" src="https://images2.imgbox.com/df/d6/CmanYo7E_o.jpg" width="300"><img alt="" class="has" height="500" src="https://images2.imgbox.com/ec/9b/BUdWtp9K_o.jpg" width="300"></p> 
+<p>                                图1 Safari发生白屏后的处理效果图 </p> 
+<p>chrome的白屏处理效果：</p> 
+<p><img alt="" class="has" height="500" src="https://images2.imgbox.com/7f/ff/TdDUmFw5_o.png" width="281"></p> 
+<p>图2 Chrome的白屏处理示意图</p> 
+<p>全篇完！</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/3ecaf4a5e4c6c3838a54433fcc29f786/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">设计模式 之 代理模式</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/4d8295521afd0198d9d039b26a9ecb0b/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Autosar Time Sync 时间同步</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

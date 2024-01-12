@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Redis源码zmalloc内存管理(2) - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Redis源码zmalloc内存管理(2)" />
+<meta property="og:description" content="zmalloc内存管理(2)(Redis源码学习) 1. 背景介绍 在上一篇zmalloc内存管理(1)中留了一个问题，在 zmalloc 函数中用出现了条件编译，涉及到是否定义 HAVE_MALLOC_SIZE:
+#ifdef HAVE_MALLOC_SIZE update_zmalloc_stat_alloc(zmalloc_size(ptr)); return ptr; #else *((size_t*)ptr) = size; update_zmalloc_stat_alloc(size&#43;PREFIX_SIZE); return (char*)ptr&#43;PREFIX_SIZE; #endif 如果你所使用的环境编译redis时，根据所在Linux编译环境会检测到是否定义 HAVE_MALLOC_SIZE，然后决定执行时走哪一部分代码。
+下面就 HAVE_MALLOC_SIZE 进行相关介绍。
+2. 编译选项 下面是redis对应src目录下面的Makefile文件中的部分片段，进行说明
+uname_S := $(shell sh -c &#39;uname -s 2&gt;/dev/null || echo not&#39;) # Default allocator ifeq ($(uname_S),Linux) MALLOC=jemalloc else MALLOC=libc endif # Backwards compatibility for selecting an allocator ifeq ($(USE_TCMALLOC),yes) MALLOC=tcmalloc endif ifeq ($(USE_TCMALLOC_MINIMAL),yes) MALLOC=tcmalloc_minimal endif ifeq ($(USE_JEMALLOC),yes) MALLOC=jemalloc endif uname_S 那一句就是执行sh命令，在RHEL6.9中然后得出变量uname_S值为Linux，可以将改行括号里的命令直接拷贝到Linux命令行进行执行，就能看到结果。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/41ecfda22e4d223f6c37349c3604811a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-07-20T15:52:45+08:00" />
+<meta property="article:modified_time" content="2021-07-20T15:52:45+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Redis源码zmalloc内存管理(2)</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="zmalloc2Redis_0"></a>zmalloc内存管理(2)(Redis源码学习)</h2> 
+<h3><a id="1__2"></a>1. 背景介绍</h3> 
+<p>在上一篇zmalloc内存管理(1)中留了一个问题，在 zmalloc 函数中用出现了条件编译，涉及到是否定义 HAVE_MALLOC_SIZE:</p> 
+<pre><code class="prism language-c"><span class="token macro property">#<span class="token directive keyword">ifdef</span> HAVE_MALLOC_SIZE</span>
+    <span class="token function">update_zmalloc_stat_alloc</span><span class="token punctuation">(</span><span class="token function">zmalloc_size</span><span class="token punctuation">(</span>ptr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> ptr<span class="token punctuation">;</span>
+<span class="token macro property">#<span class="token directive keyword">else</span></span>
+    <span class="token operator">*</span><span class="token punctuation">(</span><span class="token punctuation">(</span>size_t<span class="token operator">*</span><span class="token punctuation">)</span>ptr<span class="token punctuation">)</span> <span class="token operator">=</span> size<span class="token punctuation">;</span>
+    <span class="token function">update_zmalloc_stat_alloc</span><span class="token punctuation">(</span>size<span class="token operator">+</span>PREFIX_SIZE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> <span class="token punctuation">(</span><span class="token keyword">char</span><span class="token operator">*</span><span class="token punctuation">)</span>ptr<span class="token operator">+</span>PREFIX_SIZE<span class="token punctuation">;</span>
+<span class="token macro property">#<span class="token directive keyword">endif</span></span>
+</code></pre> 
+<p>如果你所使用的环境编译redis时，根据所在Linux编译环境会检测到是否定义 HAVE_MALLOC_SIZE，然后决定执行时走哪一部分代码。<br> 下面就 HAVE_MALLOC_SIZE 进行相关介绍。</p> 
+<h3><a id="2__18"></a>2. 编译选项</h3> 
+<p>下面是redis对应src目录下面的Makefile文件中的部分片段，进行说明</p> 
+<pre><code class="prism language-shell">uname_S :<span class="token operator">=</span> <span class="token variable"><span class="token variable">$(</span>shell sh -c <span class="token string">'uname -s 2&gt;/dev/null || echo not'</span><span class="token variable">)</span></span>
+
+<span class="token comment"># Default allocator</span>
+ifeq <span class="token punctuation">(</span><span class="token variable"><span class="token variable">$(</span>uname_S<span class="token variable">)</span></span>,Linux<span class="token punctuation">)</span>
+	MALLOC<span class="token operator">=</span>jemalloc
+<span class="token keyword">else</span>
+	MALLOC<span class="token operator">=</span>libc
+endif
+
+<span class="token comment"># Backwards compatibility for selecting an allocator</span>
+ifeq <span class="token punctuation">(</span><span class="token variable"><span class="token variable">$(</span>USE_TCMALLOC<span class="token variable">)</span></span>,yes<span class="token punctuation">)</span>
+	MALLOC<span class="token operator">=</span>tcmalloc
+endif
+
+ifeq <span class="token punctuation">(</span><span class="token variable"><span class="token variable">$(</span>USE_TCMALLOC_MINIMAL<span class="token variable">)</span></span>,yes<span class="token punctuation">)</span>
+	MALLOC<span class="token operator">=</span>tcmalloc_minimal
+endif
+
+ifeq <span class="token punctuation">(</span><span class="token variable"><span class="token variable">$(</span>USE_JEMALLOC<span class="token variable">)</span></span>,yes<span class="token punctuation">)</span>
+	MALLOC<span class="token operator">=</span>jemalloc
+endif
+</code></pre> 
+<p>uname_S 那一句就是执行sh命令，在RHEL6.9中然后得出变量uname_S值为Linux，可以将改行括号里的命令直接拷贝到Linux命令行进行执行，就能看到结果。</p> 
+<p>接下来是条件判断语句，如果 uname_S 值等于 Linux，则将变量 MALLOC 赋值为 jemalloc(shell脚本中的变量是直接使用的)，反之则为libc。</p> 
+<h6><a id="_47"></a>说明：</h6> 
+<p>我在编译Redis-3.0 时，直接make报错失败，所以当时就按照 README 文件中的命令 <code>make MALLOC=libc</code> 能编译通过。文中说 jemalloc 是Linux系统中默认的内存分配方式，因为 jemalloc 进行内存操作，产生的内存碎片比较少。学习Redis源码开始时，主要是看内部实现细节，可以先以源码为主，屡清大概流程，至于内测分配方式，等对Redis源码阅读的差不多，架构等环节清楚后，再来研究这些细节。</p> 
+<p>后面的 ifeq 条件判断，都是针对不同的内存分配方式，来给予 MALLOC 不同的值。</p> 
+<h3><a id="3_zmalloc_54"></a>3. zmalloc内存分配方式</h3> 
+<p>上面2中的makefile中的相关变量值，会影响到后续zmalloc的源码条件编译选项，这样就能屏蔽Redis不同运行平台的差异，方便不同平台复用相同的函数。</p> 
+<p>HAVE_MALLOC_SIZE相关定义在 zmalloc.h 文件中，具体内容如下：</p> 
+<pre><code class="prism language-shell"><span class="token comment">#if defined(USE_TCMALLOC)</span>
+<span class="token comment">#define ZMALLOC_LIB ("tcmalloc-" __xstr(TC_VERSION_MAJOR) "." __xstr(TC_VERSION_MINOR))</span>
+<span class="token comment">#include &lt;google/tcmalloc.h&gt;</span>
+<span class="token comment">#if (TC_VERSION_MAJOR == 1 &amp;&amp; TC_VERSION_MINOR &gt;= 6) || (TC_VERSION_MAJOR &gt; 1)</span>
+<span class="token comment">#define HAVE_MALLOC_SIZE 1</span>
+<span class="token comment">#define zmalloc_size(p) tc_malloc_size(p)</span>
+<span class="token comment">#else</span>
+<span class="token comment">#error "Newer version of tcmalloc required"</span>
+<span class="token comment">#endif</span>
+
+<span class="token comment">#elif defined(USE_JEMALLOC)</span>
+<span class="token comment">#define ZMALLOC_LIB ("jemalloc-" __xstr(JEMALLOC_VERSION_MAJOR) "." __xstr(JEMALLOC_VERSION_MINOR) "." __xstr(JEMALLOC_VERSION_BUGFIX))</span>
+<span class="token comment">#include &lt;jemalloc/jemalloc.h&gt;</span>
+<span class="token comment">#if (JEMALLOC_VERSION_MAJOR == 2 &amp;&amp; JEMALLOC_VERSION_MINOR &gt;= 1) || (JEMALLOC_VERSION_MAJOR &gt; 2)</span>
+<span class="token comment">#define HAVE_MALLOC_SIZE 1</span>
+<span class="token comment">#define zmalloc_size(p) je_malloc_usable_size(p)</span>
+<span class="token comment">#else</span>
+<span class="token comment">#error "Newer version of jemalloc required"</span>
+<span class="token comment">#endif</span>
+
+<span class="token comment">#elif defined(__APPLE__)</span>
+<span class="token comment">#include &lt;malloc/malloc.h&gt;</span>
+<span class="token comment">#define HAVE_MALLOC_SIZE 1</span>
+<span class="token comment">#define zmalloc_size(p) malloc_size(p)</span>
+<span class="token comment">#endif</span>
+
+<span class="token comment">#ifndef ZMALLOC_LIB</span>
+<span class="token comment">#define ZMALLOC_LIB "libc"</span>
+<span class="token comment">#endif </span>
+<span class="token punctuation">..</span>.
+<span class="token comment">#ifndef HAVE_MALLOC_SIZE</span>
+size_t zmalloc_size<span class="token punctuation">(</span>void *ptr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">#endif</span>
+</code></pre> 
+<p>针对上面这段宏的预处理，可以得知：</p> 
+<pre><code>(1). 若系统存在 TCMALLOC，那就定义 ZMALLOC_LIB，并包含相应的头文件，内存相关操作函数就直接使用TCMALLOC。
+(2). 若系统存在 JEMALLOC，，那就定义 JEMALLOC_LIB，并包含相应的头文件，内存相关操作函数就直接使用JEMALLOC。
+(3). 若系统是苹果，则直接使用 malloc/malloc.h 中的相关函数操作内存。
+(4). 其它情况，在每一段分配好的空间前头，同时多分配一个定长的字段，用来记录分配的空间大小。 
+</code></pre> 
+<p>tc_malloc是google开源处理的一套内存管理库，是用C++实现的，jemalloc 也是一个内存创管理库，jemalloc聚集了malloc的使用过程中所验证的很多技术。</p> 
+<p>可能你有疑问系统不是有了malloc 吗，为什么还有这样的内存管理库？？ 由于经典的libc的分配器碎片率为较高，下面第二链接的文章对比了上面几个内存分配方式的碎片率对比。<br> 文中大概结论：采用tcmalloc时碎片率是最低的，为1.01，jemalloc为1.02，而libc的分配器碎片率为1.31，仅供参考，如有兴趣，可以自行验证。</p> 
+<p>目前是学习Redis源码阶段，可以先不用关心内存分配方式，先能成功编译安装Redis，调试源码，学习验证代码是最重要的，等后续可以再验证不同内存分配方式下Redis的表现。</p> 
+<p>另外针对malloc和free，有一定的缺陷，主要记录两点：</p> 
+<pre><code>(1). 频繁调用malloc，free会造成大量内存碎片，无法回收重新利用，造成内存使用率低。
+(2). 作为系统调用，其系统开销远远大于一般函数。
+</code></pre> 
+<p>本人才疏学浅，理解水平有限，如果有错误及不当之处，请批评指正。</p> 
+<p>如果对您有一点点帮助，请帮忙转发和关注工作号：hongmaolinux，感激不尽<sup>_</sup>!</p> 
+<p>参考链接：<br> https://blog.csdn.net/daniel_ustc/article/details/26478995</p> 
+<p>https://www.jb51.net/article/100575.htm</p> 
+<p>https://blog.csdn.net/jisuanji198509/article/details/115393116</p> 
+<p><img src="https://images2.imgbox.com/67/8c/PjF6GJ3x_o.jpg" alt="在这里插入图片描述"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/38f30868c6bb634971d9054f95eb38fb/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">jpa简介</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/ed32dfbc9eb27e2be505219671143c62/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">类型的转换</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

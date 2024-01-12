@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>k8s部署redis集群 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="k8s部署redis集群" />
+<meta property="og:description" content="写在前面 一般来说，REDIS部署有三种模式。
+单实例模式，一般用于测试环境。哨兵模式集群模式 后两者用于生产部署
+哨兵模式
+在redis3.0以前，要实现集群一般是借助哨兵sentinel工具来监控master节点的状态。
+如果master节点异常，则会做主从切换，将某一台slave作为master。
+引入了哨兵节点，部署更复杂，维护成本也比较高，并且性能和高可用性等各方面表现一般。
+集群模式
+3.0 后推出的 Redis 分布式集群解决方案
+主节点提供读写操作，从节点作为备用节点，不提供请求，只作为故障转移使用
+如果master节点异常，也是会自动做主从切换，将slave切换为master。
+总的来说，集群模式明显优于哨兵模式
+那么今天我们就来讲解下：k8s环境下，如何部署redis集群（三主三从）？
+前置准备 一、nfs安装 nfs # 服务端 # 1.安装 yum -y install nfs-utils # nfs文件系统 yum -y install rpcbind # rpc协议 # 2.配置（需要共享的文件夹） vi /etc/exports /opt/nfs/pv1 *(rw,sync,no_subtree_check,no_root_squash) /opt/nfs/pv2 *(rw,sync,no_subtree_check,no_root_squash) /opt/nfs/pv3 *(rw,sync,no_subtree_check,no_root_squash) /opt/nfs/pv4 *(rw,sync,no_subtree_check,no_root_squash) /opt/nfs/pv5 *(rw,sync,no_subtree_check,no_root_squash) /opt/nfs/pv6 *(rw,sync,no_subtree_check,no_root_squash) # 3.创建文件夹 mkdir -p /opt/nfs/pv{1..6} # 4.更新配置并重启nfs服务 exportfs -r #更新配置 systemctl restart rpcbind systemctl restart nfs systemctl enable nfs #开机启动 systemctl enable rpcbind # 5." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/9776e05b8bdf977843d8330e6933ad75/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-06-19T16:43:55+08:00" />
+<meta property="article:modified_time" content="2023-06-19T16:43:55+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">k8s部署redis集群</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h3>写在前面</h3> 
+<p>一般来说，REDIS部署有三种模式。</p> 
+<ol><li>单实例模式，一般用于测试环境。</li><li>哨兵模式</li><li>集群模式</li></ol> 
+<p>后两者用于生产部署</p> 
+<p><code>哨兵模式</code></p> 
+<blockquote> 
+ <p>在redis3.0以前，要实现集群一般是借助哨兵sentinel工具来监控master节点的状态。</p> 
+ <p>如果master节点异常，则会做主从切换，将某一台slave作为master。</p> 
+ <p>引入了哨兵节点，部署更复杂，维护成本也比较高，并且性能和高可用性等各方面表现一般。</p> 
+</blockquote> 
+<p><code>集群模式</code></p> 
+<blockquote> 
+ <p>3.0 后推出的 Redis 分布式集群解决方案</p> 
+ <p>主节点提供读写操作，从节点作为备用节点，不提供请求，只作为故障转移使用</p> 
+ <p>如果master节点异常，也是会自动做主从切换，将slave切换为master。</p> 
+</blockquote> 
+<p>总的来说，<code>集群模式</code>明显优于<code>哨兵模式</code></p> 
+<p>那么今天我们就来讲解下：<code>k8s环境下，如何部署redis集群（三主三从）？</code></p> 
+<h3>前置准备</h3> 
+<h4>一、nfs安装</h4> 
+<ul><li>nfs</li></ul> 
+<pre><code class="language-java"># 服务端
+
+# 1.安装
+yum -y install nfs-utils # nfs文件系统
+yum -y install rpcbind   # rpc协议
+
+# 2.配置（需要共享的文件夹）
+vi /etc/exports
+/opt/nfs/pv1 *(rw,sync,no_subtree_check,no_root_squash)
+/opt/nfs/pv2 *(rw,sync,no_subtree_check,no_root_squash)
+/opt/nfs/pv3 *(rw,sync,no_subtree_check,no_root_squash)
+/opt/nfs/pv4 *(rw,sync,no_subtree_check,no_root_squash)
+/opt/nfs/pv5 *(rw,sync,no_subtree_check,no_root_squash)
+/opt/nfs/pv6 *(rw,sync,no_subtree_check,no_root_squash)
+
+# 3.创建文件夹
+mkdir -p /opt/nfs/pv{1..6}
+
+# 4.更新配置并重启nfs服务
+exportfs -r  #更新配置
+systemctl restart rpcbind
+systemctl restart nfs
+systemctl enable nfs  #开机启动
+systemctl enable rpcbind
+
+# 5.验证
+showmount -e 192.168.4.xx #服务端验证NFS共享
+	&gt; Export list for 192.168.4.xx:
+	/opt/nfs/pv6 *
+        /opt/nfs/pv5 *
+        /opt/nfs/pv4 *
+        /opt/nfs/pv3 *
+        /opt/nfs/pv2 *
+        /opt/nfs/pv1 *
+
+rpcinfo -p #查看端口
+	
+# 客户端
+yum -y install nfs-utils
+systemctl restart nfs
+systemctl enable nfs  #开机启动</code></pre> 
+<p></p> 
+<blockquote> 
+ <p>这里说一下，为什么要安装nfs？</p> 
+</blockquote> 
+<p>是为了下面创建SC，PV做准备，PV需要使用nfs服务器。</p> 
+<h4>二、SC、PV 创建</h4> 
+<p>2.1创建SC</p> 
+<p>StorageClass：简称sc，存储类，是k8s平台为存储提供商提供存储接入的一种声明。通过sc和相应的存储插件(csi)为容器应用提供持久存储卷的能力。</p> 
+<p>vi redis-sc.yaml</p> 
+<pre><code class="language-python">apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: redis-sc
+provisioner: nfs-storage</code></pre> 
+<p></p> 
+<blockquote> 
+ <p>名称为<code>redis-sc</code></p> 
+</blockquote> 
+<p>执行创建sc：</p> 
+<pre><code class="language-java">kubectl apply -f redis-sc.yaml
+
+&gt; storageclass.storage.k8s.io/redis-sc created</code></pre> 
+<p></p> 
+<p>通过kuboard查看：</p> 
+<p><img alt="" height="150" src="https://images2.imgbox.com/58/69/UvxM0Xcx_o.png" width="621"></p> 
+<p> </p> 
+<p>2.2创建PV</p> 
+<p>PersistentVolume简称pv，持久化存储，是k8s为云原生应用提供一种拥有独立生命周期的、用户可管理的存储的抽象设计。</p> 
+<p>vi redis-pv.yaml</p> 
+<pre><code class="language-java">apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-pv1
+spec:
+  storageClassName: redis-sc
+  capacity:
+    storage: 200M
+  accessModes:
+    - ReadWriteMany
+  nfs:
+    server: 192.168.4.xx
+    path: "/opt/nfs/pv1"</code></pre> 
+<p></p> 
+<blockquote> 
+ <p>名称为<code>nfs-pv1</code>，对应的storageClassName为<code>redis-sc</code>，capacity容器200M，accessModes访问模式可被多节点读写</p> 
+ <p>对应nfs服务器<code>192.168.4.xx</code>，对应文件夹路径<code>/opt/nfs/pv1</code>（对应上面安装nfs服务器）</p> 
+ <p>以此类推，我们创建6个pv......</p> 
+</blockquote> 
+<p>执行创建sc：</p> 
+<pre></pre> 
+<pre><code class="language-bash">kubectl apply -f redis-pv.yaml
+
+&gt; persistentvolume/nfs-pv1 created
+  persistentvolume/nfs-pv2 created
+  persistentvolume/nfs-pv3 created
+  persistentvolume/nfs-pv4 created
+  persistentvolume/nfs-pv5 created
+  persistentvolume/nfs-pv6 created</code></pre> 
+<p></p> 
+<p>通过kuboard查看：</p> 
+<p><img alt="" height="480" src="https://images2.imgbox.com/a4/83/j2ps238J_o.png" width="618"></p> 
+<p> 通过kubectl查看：<code>kubectl get sc</code>、<code>kubectl get pv</code></p> 
+<p><img alt="" height="133" src="https://images2.imgbox.com/c6/c2/J8zhrhI2_o.png" width="623"></p> 
+<p> 这里说一下，为什么要创建SC，PV？</p> 
+<p>因为redis集群，最终需要对应的文件有，<code>redis.conf</code>、<code>nodes.conf</code>、<code>data</code></p> 
+<p>由此可见，这些文件每个节点，都得对应有自己得文件夹。</p> 
+<p>当然<code>redis.conf</code>可以是一个相同得，其他两个，就肯定是不一样得。</p> 
+<p>如果使用挂载文件夹即是 <code>Volume</code> 的情况部署一个pod，很明显，是不能满足的。</p> 
+<p>当然，你部署多个不一样的pod，也是可以做到，但是就得写6个部署yaml文件，后期维护也很复杂。</p> 
+<p>最好的效果是，写一个部署yaml文件，然后有6个replicas副本，就对应了我们redis集群（三主三从）。</p> 
+<p>那一个pod，再使用<code>Volume</code>挂载文件夹，这个只能是一个文件夹，是无法做到6个pod对应不同的文件夹。</p> 
+<p>所以这里，就引出了<code>SC</code>、<code>PV</code>了。</p> 
+<p>使用<code>SC</code>、<code>PV</code>就可以实现，这6个pod启动，就对应上我们创建的6个<code>PV</code>，那就实现了<code>redis.conf</code>、<code>nodes.conf</code>、<code>data</code>，这三个文件，存放的路径，就是不一样的路径了。</p> 
+<p>哈哈，说了，那么多，不知道，大家明不明白，不明白的可以继续往下看，或者自己部署实操一下，估计你就能明白，为啥要这么干了？</p> 
+<p class="img-center"><img alt="" height="140" src="https://images2.imgbox.com/88/37/IJB8hD1D_o.png" width="211"></p> 
+<p style="text-align:center;"> </p> 
+<h4>三、redis集群搭建</h4> 
+<p>RC、Deployment、DaemonSet都是面向无状态的服务，它们所管理的Pod的IP、名字，启停顺序等都是随机的，而StatefulSet是什么？顾名思义，有状态的集合，管理所有有状态的服务，比如MySQL、MongoDB集群等。</p> 
+<p>StatefulSet本质上是Deployment的一种变体，在v1.9版本中已成为GA版本，它为了解决有状态服务的问题，它所管理的Pod拥有<code>固定的Pod名称</code>，<code>启停顺序</code>，在StatefulSet中，Pod名字称为<code>网络标识</code>(hostname)，还必须要用到共享存储。</p> 
+<p><strong>在Deployment中，与之对应的服务是service，而在StatefulSet中与之对应的headless service，headless service，即无头服务，与service的区别就是它没有Cluster IP，解析它的名称时将返回该Headless Service对应的全部Pod的Endpoint列表。</strong></p> 
+<p>除此之外，StatefulSet在Headless Service的基础上又为StatefulSet控制的每个Pod副本创建了一个DNS域名，这个域名的格式为：</p> 
+<pre><code class="language-ruby">$(pod.name).$(headless server.name).${namespace}.svc.cluster.local</code></pre> 
+<p></p> 
+<p>也即是说，对于有状态服务，我们最好使用固定的网络标识（如域名信息）来标记节点，当然这也需要应用程序的支持（如Zookeeper就支持在配置文件中写入主机域名）。</p> 
+<p>StatefulSet基于Headless Service（即没有Cluster IP的Service）为Pod实现了稳定的网络标志（包括Pod的hostname和DNS Records），在Pod重新调度后也保持不变。同时，结合PV/PVC，StatefulSet可以实现稳定的持久化存储，就算Pod重新调度后，还是能访问到原先的持久化数据。</p> 
+<p>以下为使用StatefulSet部署Redis的架构，无论是Master还是Slave，都作为StatefulSet的一个副本，并且数据通过PV进行持久化，对外暴露为一个Service，接受客户端请求。</p> 
+<p>3.1创建headless服务</p> 
+<p>Headless service是StatefulSet实现稳定网络标识的基础。</p> 
+<p>vi redis-hs.yaml</p> 
+<pre><code class="language-bash">---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    k8s.kuboard.cn/layer: db
+    k8s.kuboard.cn/name: redis
+  name: redis-hs
+  namespace: jxbp
+spec:
+  ports:
+    - name: nnbary
+      port: 6379
+      protocol: TCP
+      targetPort: 6379
+  selector:
+    k8s.kuboard.cn/layer: db
+    k8s.kuboard.cn/name: redis
+  clusterIP: None</code></pre> 
+<p></p> 
+<blockquote> 
+ <p>命名空间为：<code>jxbp</code>，名称为：<code>redis-hs</code></p> 
+</blockquote> 
+<p>执行：</p> 
+<pre><code class="language-ruby">kubectl apply -f redis-hs.yaml &gt; service/redis-hs created</code></pre> 
+<p></p> 
+<blockquote> 
+ <p>网络访问：pod名称.headless名称.namespace名称.svc.cluster.local</p> 
+ <p>即：pod名称.redis-hs.jxbp.svc.cluster.local</p> 
+</blockquote> 
+<p>3.2创建redis对应pod集群</p> 
+<p>创建好Headless service后，就可以利用StatefulSet创建Redis 集群节点，这也是本文的核心内容。</p> 
+<p>vi redis.yaml</p> 
+<pre><code class="language-ruby">apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: jxbp
+  labels:
+    k8s.kuboard.cn/layer: db
+    k8s.kuboard.cn/name: redis
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      k8s.kuboard.cn/layer: db
+      k8s.kuboard.cn/name: redis
+  serviceName: redis
+  template:
+    metadata:
+      labels:
+        k8s.kuboard.cn/layer: db
+        k8s.kuboard.cn/name: redis
+    spec:
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: redis
+          image: 192.168.4.xx/jxbp/redis:6.2.6
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: "TCP"
+            - name: cluster
+              containerPort: 16379
+              protocol: "TCP"
+          volumeMounts:
+            - name: "redis-conf"
+              mountPath: "/etc/redis/redis.conf"
+            - name: "redis-data"
+              mountPath: "/data"
+      volumes:
+        - name: "redis-conf"
+          hostPath:
+            path: "/opt/redis/conf/redis.conf"
+            type: FileOrCreate
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: [ "ReadWriteMany" ]
+        resources:
+          requests:
+            storage: 200M
+        storageClassName: redis-sc</code></pre> 
+<p></p> 
+<blockquote> 
+ <p>名称为：<code>redis</code>，对应的镜像为：<code>redis:6.2.6</code>，</p> 
+ <p>挂载的文件：宿主机的<code>/opt/redis/conf/redis.conf</code>到redis容器的<code>/etc/redis/redis.conf</code>（redis.conf配置文件如下所示）</p> 
+ <p>PVC存储卷声明模板<code>volumeClaimTemplates</code>，指定了名称为<code>redis-sc</code>的SC（storageClassName）</p> 
+ <p>由于之前SC绑定了PV，所以这里的PVC和PV，就能一 一对应绑定上了。</p> 
+</blockquote> 
+<blockquote> 
+ <p>PV和PVC的关系，是一 一绑定的。如果这里不指定SC，那就会导致，PVC绑定PV，是一个混乱的过程，随机绑定PV了。</p> 
+</blockquote> 
+<ul><li>redis.conf</li></ul> 
+<pre><code class="language-ruby"># 一般配置
+bind 0.0.0.0
+port 6379
+daemonize no
+requirepass jxbd
+
+# 集群配置
+cluster-enabled yes
+cluster-config-file nodes.conf
+cluster-node-timeout 5000</code></pre> 
+<p>执行：</p> 
+<pre><code class="language-ruby">kubectl apply -f redis.yaml</code></pre> 
+<p></p> 
+<p>由上操作，我们已经创建好redis的6个副本了。</p> 
+<p>因为k8s部署redis集群的篇幅，有点长，剩下的内容，就留着下次分享了。</p> 
+<hr> 
+<p>好了，以上就是我个人的实操了。</p> 
+<p>个人理解，可能也不够全面，班门弄斧了。</p> 
+<p>好了，今天就先到这里了！！！^_^</p> 
+<p>如果觉得有收获的，帮忙<code>点赞、评论、收藏</code>一下呗！！！</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/4d1432a36ee7b5c682027fbd66cf6c23/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">基于微信小程序的智能推荐点餐系统</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/698580151a6ba5c3e66118ba2a7303a0/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">coverage代码覆盖率测试介绍</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

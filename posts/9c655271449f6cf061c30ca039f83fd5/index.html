@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>tensorflow2.4复现parnet网络模型实现猫狗分类 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="tensorflow2.4复现parnet网络模型实现猫狗分类" />
+<meta property="og:description" content="目录 前言1. Introduction（介绍）2. Related Work（相关工作）2.1 Analyzing importance of depth（分析网络深度的重要性）2.2 Scaling DNNs（深度神经网络的尺寸）2.3 Shallow networks（浅层网络）2.4 Multi-stream networks（多尺寸流的网络） 3. METHOD（网络设计方法）3.1 PARNET BLOCK3.2 DOWNSAMPLING AND FUSION BLOCK3.3 NETWORK ARCHITECTURE 4. RESULTS（结果展示）代码演示1. 导入库2. 设置超参数3. 数据预处理4. 构建ParNet5. 设置回调函数6. 训练模型7. 预测图片 前言 深度是深度神经网络的标志，但深度越大意味着顺序计算越多延迟也越大。这就引出了一个问题——是否有可能构建高性能的“非深度”神经网络？作者实现了一个12层的网络结构实现了top-1 accuracy over 80%on ImageNet的效果。分析网络设计的伸缩规则，并展示如何在不改变网络深度的情况下提高性能。
+下面我们就看看作者在论文中是怎么说的吧！
+论文地址：https://arxiv.org/abs/2110.07641
+1. Introduction（介绍） 人们普遍认为，大深度是高性能网络的重要组成部分，因为深度增加了网络的表征能力，并有助于学习越来越抽象的特征。但是大深度总是必要的吗?这个问题值得一问，因为大深度并非没有缺点。更深层次的网络会导致更多的顺序处理和更高的延迟;它很难并行化，也不太适合需要快速响应的应用程序。
+为此，作者进行了研究提出了ParNet。ParNet可以被有效的并行化，并且在速度和准确性上都优于Resnet。注意，尽管处理单元之间的通信带来了额外的延迟，但还是实现了这一点。如果可以进一步减少通信延迟，类似parnet的体系结构可以用于创建非常快速的识别系统。
+不仅如此，ParNet可以通过增加宽度、分辨率和分支数量来有效缩放，同时保持深度不变。作者观察到ParNet的性能并没有饱和，而是随着计算吞吐量的增加而增加。这表明，通过进一步增加计算，可以实现更高的性能，同时保持较小的深度(~ 10)和低延迟。
+下图是论文中ParNet与其它网络的比较。
+论文作者的贡献：
+首次证明，深度仅为12的神经网络可以在非常有竞争力的基准测试中取得高性能（ImageNet上80.7%）展示了如何利用ParNet中的并行结构进行快速、低延迟的推断研究了ParNet的缩放规则，并证明了恒定的低深度下的有效缩放 2. Related Work（相关工作） 2.1 Analyzing importance of depth（分析网络深度的重要性） 已有大量的研究证实了深层网络的优点，具有sigmoid激活的单层神经网络可以以任意小的误差近似任何函数，但是需要使用具有足够大宽度的网络。而要近似函数，具有非线性的深度网络需要的参数要比浅层网络所需要的参数少，而且在固定的预算参数下，深度网络的性能优于浅层网络，这通常被认为是大深度的主要优势之一。
+但是在这样的分析中，先前的工作只研究了线性顺序结构的浅层网络，不清楚这个结论是否仍然适用于其他设计。在这项工作中，作者表明浅层网络也可以表现得非常好，但关键是要有并行的子结构。
+2.2 Scaling DNNs（深度神经网络的尺寸） 有研究表明，增加深度、宽度和分辨率会导致卷积网络的有效缩放。我们也研究标度规则，但重点关注低深度的机制。我们发现，可以通过增加分支的数量、宽度和分辨率来有效地扩展ParNet，同时保持深度不变和较低。
+2.3 Shallow networks（浅层网络） 浅网络在理论机器学习中引起了广泛的关注。在无限宽的情况下，单层神经网络的行为类似于高斯过程，可以用核方法来理解训练过程。然而，与最先进的网络相比，这些模型没有竞争力，我们提供了经验证明，非深度网络可以与深度网络竞争。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/9c655271449f6cf061c30ca039f83fd5/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-03-30T15:36:49+08:00" />
+<meta property="article:modified_time" content="2022-03-30T15:36:49+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">tensorflow2.4复现parnet网络模型实现猫狗分类</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>目录</h4> 
+ <ul><li><a href="#_1" rel="nofollow">前言</a></li><li><a href="#1_Introduction_6" rel="nofollow">1. Introduction（介绍）</a></li><li><a href="#2_Related_Work_16" rel="nofollow">2. Related Work（相关工作）</a></li><li><ul><li><a href="#21_Analyzing_importance_of_depth_17" rel="nofollow">2.1 Analyzing importance of depth（分析网络深度的重要性）</a></li><li><a href="#22_Scaling_DNNs_20" rel="nofollow">2.2 Scaling DNNs（深度神经网络的尺寸）</a></li><li><a href="#23_Shallow_networks_22" rel="nofollow">2.3 Shallow networks（浅层网络）</a></li><li><a href="#24_Multistream_networks_24" rel="nofollow">2.4 Multi-stream networks（多尺寸流的网络）</a></li></ul> 
+  </li><li><a href="#3_METHOD_26" rel="nofollow">3. METHOD（网络设计方法）</a></li><li><ul><li><a href="#31_PARNET_BLOCK_27" rel="nofollow">3.1 PARNET BLOCK</a></li><li><a href="#32_DOWNSAMPLING_AND_FUSION_BLOCK_57" rel="nofollow">3.2 DOWNSAMPLING AND FUSION BLOCK</a></li><li><a href="#33_NETWORK_ARCHITECTURE_103" rel="nofollow">3.3 NETWORK ARCHITECTURE</a></li></ul> 
+  </li><li><a href="#4_RESULTS_108" rel="nofollow">4. RESULTS（结果展示）</a></li><li><a href="#_112" rel="nofollow">代码演示</a></li><li><ul><li><a href="#1__119" rel="nofollow">1. 导入库</a></li><li><a href="#2__134" rel="nofollow">2. 设置超参数</a></li><li><a href="#3__148" rel="nofollow">3. 数据预处理</a></li><li><a href="#4_ParNet_202" rel="nofollow">4. 构建ParNet</a></li><li><a href="#5__362" rel="nofollow">5. 设置回调函数</a></li><li><a href="#6__379" rel="nofollow">6. 训练模型</a></li><li><a href="#7__397" rel="nofollow">7. 预测图片</a></li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h2><a id="_1"></a>前言</h2> 
+<p>深度是深度神经网络的标志，但深度越大意味着顺序计算越多延迟也越大。这就引出了一个问题——是否有可能构建高性能的“非深度”神经网络？作者实现了一个12层的网络结构实现了top-1 accuracy over 80%on ImageNet的效果。分析网络设计的伸缩规则，并展示如何在不改变网络深度的情况下提高性能。<br><br> 下面我们就看看作者在论文中是怎么说的吧！</p> 
+<p>论文地址：https://arxiv.org/abs/2110.07641</p> 
+<h2><a id="1_Introduction_6"></a>1. Introduction（介绍）</h2> 
+<p>人们普遍认为，大深度是高性能网络的重要组成部分，因为深度增加了网络的表征能力，并有助于学习越来越抽象的特征。但是大深度总是必要的吗?这个问题值得一问，因为大深度并非没有缺点。更深层次的网络会导致更多的顺序处理和更高的延迟;它很难并行化，也不太适合需要快速响应的应用程序。<br><br> 为此，作者进行了研究提出了ParNet。ParNet可以被有效的并行化，并且在速度和准确性上都优于Resnet。注意，尽管处理单元之间的通信带来了额外的延迟，但还是实现了这一点。如果可以进一步减少通信延迟，类似parnet的体系结构可以用于创建非常快速的识别系统。<br><br> 不仅如此，ParNet可以通过增加宽度、分辨率和分支数量来有效缩放，同时保持深度不变。作者观察到ParNet的性能并没有饱和，而是随着计算吞吐量的增加而增加。这表明，通过进一步增加计算，可以实现更高的性能，同时保持较小的深度(~ 10)和低延迟。<br> 下图是论文中ParNet与其它网络的比较。<br> <img src="https://images2.imgbox.com/34/f5/89twbifB_o.png" alt="在这里插入图片描述"><br> 论文作者的贡献：</p> 
+<ol><li>首次证明，深度仅为12的神经网络可以在非常有竞争力的基准测试中取得高性能（ImageNet上80.7%）</li><li>展示了如何利用ParNet中的并行结构进行快速、低延迟的推断</li><li>研究了ParNet的缩放规则，并证明了恒定的低深度下的有效缩放</li></ol> 
+<h2><a id="2_Related_Work_16"></a>2. Related Work（相关工作）</h2> 
+<h3><a id="21_Analyzing_importance_of_depth_17"></a>2.1 Analyzing importance of depth（分析网络深度的重要性）</h3> 
+<p>已有大量的研究证实了深层网络的优点，具有sigmoid激活的单层神经网络可以以任意小的误差近似任何函数，但是需要使用具有足够大宽度的网络。而要近似函数，具有非线性的深度网络需要的参数要比浅层网络所需要的参数少，而且在固定的预算参数下，深度网络的性能优于浅层网络，这通常被认为是大深度的主要优势之一。<br><br> 但是在这样的分析中，先前的工作只研究了线性顺序结构的浅层网络，不清楚这个结论是否仍然适用于其他设计。在这项工作中，作者表明浅层网络也可以表现得非常好，但关键是要有<strong>并行的子结构</strong>。</p> 
+<h3><a id="22_Scaling_DNNs_20"></a>2.2 Scaling DNNs（深度神经网络的尺寸）</h3> 
+<p>有研究表明，增加深度、宽度和分辨率会导致卷积网络的有效缩放。我们也研究标度规则，但重点关注低深度的机制。我们发现，可以通过增加分支的数量、宽度和分辨率来有效地扩展ParNet，同时保持深度不变和较低。</p> 
+<h3><a id="23_Shallow_networks_22"></a>2.3 Shallow networks（浅层网络）</h3> 
+<p>浅网络在理论机器学习中引起了广泛的关注。在无限宽的情况下，单层神经网络的行为类似于高斯过程，可以用核方法来理解训练过程。然而，与最先进的网络相比，这些模型没有竞争力，我们提供了经验证明，非深度网络可以与深度网络竞争。</p> 
+<h3><a id="24_Multistream_networks_24"></a>2.4 Multi-stream networks（多尺寸流的网络）</h3> 
+<p>多流神经网络已被用于各种计算机视觉任务，如分割、检测、视频分类，我们也使用不同分辨率的流，但我们的网络要低得多，并且流在最后只融合一次，使并行化更容易。</p> 
+<h2><a id="3_METHOD_26"></a>3. METHOD（网络设计方法）</h2> 
+<h3><a id="31_PARNET_BLOCK_27"></a>3.1 PARNET BLOCK</h3> 
+<p>在RepVGG中提出了结构重参数化的思想，简单来说就是可以将3x3卷积，1x1卷积两个分支通过代数的处理变成另外的一个3x3的卷积操作。<br><br> 作者就是借鉴了Rep-VGG的初始块设计，并对其进行修改，使其更适合的非深度架构。<strong>但一个只有3×3卷积的非深度网络的挑战是感受野相当有限</strong>。为此，作者对结构进行了改进，如图所示：<br> <img src="https://images2.imgbox.com/c1/45/DbeiSKHL_o.png" alt="在这里插入图片描述"><br> 作者将上图的block称为RepVGG-SSE。<br> 因为ImageNet这样的大规模数据集，非深度网络可能没有足够的非线性，限制了它的表征能力。因此，作者用SiLU代替ReLU激活。<br> 代码如下：</p> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">SSEblock</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    bn <span class="token operator">=</span> BatchNormalization<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> GlobalAveragePool2D<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>bn<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> Conv2D<span class="token punctuation">(</span>filters<span class="token operator">=</span>filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> Activation<span class="token punctuation">(</span><span class="token string">'sigmoid'</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> Multiply<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>bn<span class="token punctuation">,</span> x<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token keyword">return</span> x
+<span class="token keyword">def</span> <span class="token function">FuseBlock</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    a <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token string">'valid'</span><span class="token punctuation">)</span>
+    b <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span> stride<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">)</span>
+    c <span class="token operator">=</span> Add<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>a<span class="token punctuation">,</span> b<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token keyword">return</span> c
+<span class="token keyword">def</span> <span class="token function">Stream</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    a <span class="token operator">=</span> SSEblock<span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">)</span>
+    b <span class="token operator">=</span> FuseBlock<span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">)</span>
+    c <span class="token operator">=</span> Add<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>a<span class="token punctuation">,</span> b<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    
+    c <span class="token operator">=</span> Silu<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>c<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> c
+</code></pre> 
+<h3><a id="32_DOWNSAMPLING_AND_FUSION_BLOCK_57"></a>3.2 DOWNSAMPLING AND FUSION BLOCK</h3> 
+<p>RepVGG-SSE block的输入与输出的大小是相同的，此外，ParNet结构中还有Downsampling block与fusion block。<br> Downsampling block的作用是降低分辨率，增加宽度，以实现多尺度处理。fusion block的作用是合并来自多个分辨率的信息。<br> 具体如下：</p> 
+<ol><li>在降采样 block 中添加了一个与卷积层并行的单层 SE 模块。</li><li>在 1×1 卷积分支中添加了 2D 平均池化。</li><li>融合 block 额外包含了一个串联（concatenation）层。由于串联，融合 block 的输入通道数是降采样 block 的两倍。<br> 具体结构如图所示：<br> <img src="https://images2.imgbox.com/1f/22/pwTKddQD_o.png" alt="在这里插入图片描述"><br> 左图是Fusion，右图是Downsampling_block<br> 代码如下：</li></ol> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">Fusion</span><span class="token punctuation">(</span>input1<span class="token punctuation">,</span> input2<span class="token punctuation">,</span> filters<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    group <span class="token operator">=</span> input1<span class="token punctuation">.</span>shape<span class="token punctuation">[</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span>
+    input1 <span class="token operator">=</span> BatchNormalization<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>input1<span class="token punctuation">)</span>
+    input2 <span class="token operator">=</span> BatchNormalization<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>input2<span class="token punctuation">)</span>
+    a <span class="token operator">=</span> Concatenate<span class="token punctuation">(</span>axis<span class="token operator">=</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>input1<span class="token punctuation">,</span> input2<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    a <span class="token operator">=</span> channel_shuffle<span class="token punctuation">(</span>a<span class="token punctuation">,</span> group<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> AveragePooling2D<span class="token punctuation">(</span>pool_size<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">(</span>a<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> stride<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> groups<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token string">'valid'</span><span class="token punctuation">)</span>
+    y <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>a<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span> stride<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">,</span> groups<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">)</span>
+    z <span class="token operator">=</span> GlobalAveragePool2D<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>a<span class="token punctuation">)</span>
+    z <span class="token operator">=</span> Conv2D<span class="token punctuation">(</span>filters<span class="token operator">=</span>filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> groups<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">(</span>z<span class="token punctuation">)</span>
+    z <span class="token operator">=</span> Activation<span class="token punctuation">(</span><span class="token string">'sigmoid'</span><span class="token punctuation">)</span><span class="token punctuation">(</span>z<span class="token punctuation">)</span>
+    a <span class="token operator">=</span> Add<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>x<span class="token punctuation">,</span> y<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    b <span class="token operator">=</span> Multiply<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>a<span class="token punctuation">,</span> z<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    out <span class="token operator">=</span> Silu<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>b<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> out
+<span class="token keyword">def</span> <span class="token function">Downsampling_block</span><span class="token punctuation">(</span>inputs<span class="token punctuation">,</span> filters<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    x <span class="token operator">=</span> AveragePooling2D<span class="token punctuation">(</span>pool_size<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">(</span>inputs<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token string">'valid'</span><span class="token punctuation">)</span>
+    
+    y <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>inputs<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span> stride<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">)</span>
+
+    z <span class="token operator">=</span> GlobalAveragePool2D<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>inputs<span class="token punctuation">)</span>
+    z <span class="token operator">=</span> Conv2D<span class="token punctuation">(</span>filters<span class="token operator">=</span>filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> use_bias<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span><span class="token punctuation">(</span>z<span class="token punctuation">)</span>
+    z <span class="token operator">=</span> Activation<span class="token punctuation">(</span><span class="token string">'sigmoid'</span><span class="token punctuation">)</span><span class="token punctuation">(</span>z<span class="token punctuation">)</span>
+    
+    a <span class="token operator">=</span> Add<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>x<span class="token punctuation">,</span> y<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    b <span class="token operator">=</span> Multiply<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>a<span class="token punctuation">,</span> z<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    
+    out <span class="token operator">=</span> Silu<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>b<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> out
+</code></pre> 
+<h3><a id="33_NETWORK_ARCHITECTURE_103"></a>3.3 NETWORK ARCHITECTURE</h3> 
+<p>ParNet架构示意图如下：<br> <img src="https://images2.imgbox.com/ce/09/gftCq5V5_o.png" alt="在这里插入图片描述"><br> 网络结构如下：<br> <img src="https://images2.imgbox.com/8f/70/yjKELVov_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="4_RESULTS_108"></a>4. RESULTS（结果展示）</h2> 
+<p><img src="https://images2.imgbox.com/08/3c/tiThhHW6_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/31/6b/UG7DozXK_o.png" alt="在这里插入图片描述"><br> 感谢博主：https://blog.csdn.net/weixin_44751294/article/details/120855280</p> 
+<h2><a id="_112"></a>代码演示</h2> 
+<p>参考代码：https://github.com/murufeng/awesome_lightweight_networks/blob/main/light_cnns/mobile_real_time_network/parnet.py<br> 数据集下载：<br> 链接：https://pan.baidu.com/s/1zs9U76OmGAIwbYr91KQxgg<br> 提取码：bhjx</p> 
+<p><strong>新建train.py文件、logs文件夹（存入模型文件）、logs1文件夹（查看TensorBoard）</strong></p> 
+<h3><a id="1__119"></a>1. 导入库</h3> 
+<pre><code class="prism language-python"><span class="token keyword">from</span> tensorflow<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>preprocessing<span class="token punctuation">.</span>image <span class="token keyword">import</span> ImageDataGenerator
+<span class="token keyword">from</span> tensorflow<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>optimizers <span class="token keyword">import</span> Adam
+<span class="token keyword">from</span> tensorflow<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>callbacks <span class="token keyword">import</span> EarlyStopping<span class="token punctuation">,</span> ModelCheckpoint<span class="token punctuation">,</span> LearningRateScheduler<span class="token punctuation">,</span> TensorBoard
+<span class="token keyword">from</span> tensorflow<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>layers <span class="token keyword">import</span> Input
+<span class="token keyword">import</span> tensorflow <span class="token keyword">as</span> tf
+<span class="token keyword">from</span> tensorflow<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>layers <span class="token keyword">import</span> <span class="token punctuation">(</span>
+    Conv2D<span class="token punctuation">,</span> BatchNormalization<span class="token punctuation">,</span> AveragePooling2D<span class="token punctuation">,</span> Activation<span class="token punctuation">,</span>
+    Multiply<span class="token punctuation">,</span> Add<span class="token punctuation">,</span> Concatenate<span class="token punctuation">,</span> Dense<span class="token punctuation">,</span> Input<span class="token punctuation">,</span> Flatten<span class="token punctuation">,</span> Reshape
+<span class="token punctuation">)</span>
+<span class="token keyword">from</span> tensorflow<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>models <span class="token keyword">import</span> Model
+</code></pre> 
+<h3><a id="2__134"></a>2. 设置超参数</h3> 
+<pre><code class="prism language-python">classes <span class="token operator">=</span> <span class="token number">2</span>
+batch_size <span class="token operator">=</span> <span class="token number">16</span>
+epochs <span class="token operator">=</span> <span class="token number">100</span>
+img_size <span class="token operator">=</span> <span class="token number">256</span>
+lr <span class="token operator">=</span> <span class="token number">1e</span><span class="token operator">-</span><span class="token number">3</span>
+datasets <span class="token operator">=</span> <span class="token string">'./dataset/data1_dog_cat'</span>
+gpus <span class="token operator">=</span> tf<span class="token punctuation">.</span>config<span class="token punctuation">.</span>experimental<span class="token punctuation">.</span>list_physical_devices<span class="token punctuation">(</span>device_type<span class="token operator">=</span><span class="token string">'GPU'</span><span class="token punctuation">)</span>
+<span class="token keyword">for</span> gpu <span class="token keyword">in</span> gpus<span class="token punctuation">:</span>
+    tf<span class="token punctuation">.</span>config<span class="token punctuation">.</span>experimental<span class="token punctuation">.</span>set_memory_growth<span class="token punctuation">(</span>gpu<span class="token punctuation">,</span> <span class="token boolean">True</span><span class="token punctuation">)</span>
+</code></pre> 
+<h3><a id="3__148"></a>3. 数据预处理</h3> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">data_process_func</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment"># ---------------------------------- #</span>
+    <span class="token comment">#   训练集进行的数据增强操作</span>
+    <span class="token comment">#   1. rotation_range -&gt; 随机旋转角度</span>
+    <span class="token comment">#   2. width_shift_range -&gt; 随机水平平移</span>
+    <span class="token comment">#   3. width_shift_range -&gt; 随机数值平移</span>
+    <span class="token comment">#   4. rescale -&gt; 数据归一化</span>
+    <span class="token comment">#   5. shear_range -&gt; 随机错切变换</span>
+    <span class="token comment">#   6. zoom_range -&gt; 随机放大</span>
+    <span class="token comment">#   7. horizontal_flip -&gt; 水平翻转</span>
+    <span class="token comment">#   8. brightness_range -&gt; 亮度变化</span>
+    <span class="token comment">#   9. fill_mode -&gt; 填充方式</span>
+    <span class="token comment"># ---------------------------------- #</span>
+    train_data <span class="token operator">=</span> ImageDataGenerator<span class="token punctuation">(</span>
+        rotation_range<span class="token operator">=</span><span class="token number">50</span><span class="token punctuation">,</span> 
+        width_shift_range<span class="token operator">=</span><span class="token number">0.1</span><span class="token punctuation">,</span> 
+        height_shift_range<span class="token operator">=</span><span class="token number">0.1</span><span class="token punctuation">,</span>
+        rescale<span class="token operator">=</span><span class="token number">1</span><span class="token operator">/</span><span class="token number">255.0</span><span class="token punctuation">,</span>
+        shear_range<span class="token operator">=</span><span class="token number">10</span><span class="token punctuation">,</span>
+        zoom_range<span class="token operator">=</span><span class="token number">0.1</span><span class="token punctuation">,</span>
+        horizontal_flip<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">,</span>
+        brightness_range<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">0.7</span><span class="token punctuation">,</span> <span class="token number">1.3</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        fill_mode<span class="token operator">=</span><span class="token string">'nearest'</span>
+    <span class="token punctuation">)</span>
+    <span class="token comment"># ---------------------------------- #</span>
+    <span class="token comment">#   测试集数据增加操作</span>
+    <span class="token comment">#   归一化即可</span>
+    <span class="token comment"># ---------------------------------- #</span>
+    test_data <span class="token operator">=</span> ImageDataGenerator<span class="token punctuation">(</span>
+        rescale<span class="token operator">=</span><span class="token number">1</span><span class="token operator">/</span><span class="token number">255</span>
+    <span class="token punctuation">)</span>
+    <span class="token comment"># ---------------------------------- #</span>
+    <span class="token comment">#   训练器生成器</span>
+    <span class="token comment">#   测试集生成器</span>
+    <span class="token comment"># ---------------------------------- #</span>
+    train_generator <span class="token operator">=</span> train_data<span class="token punctuation">.</span>flow_from_directory<span class="token punctuation">(</span>
+        <span class="token string-interpolation"><span class="token string">f'</span><span class="token interpolation"><span class="token punctuation">{<!-- --></span>datasets<span class="token punctuation">}</span></span><span class="token string">/train'</span></span><span class="token punctuation">,</span>
+        target_size<span class="token operator">=</span><span class="token punctuation">(</span>img_size<span class="token punctuation">,</span> img_size<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        
+        batch_size<span class="token operator">=</span>batch_size
+    <span class="token punctuation">)</span>
+    
+    test_generator <span class="token operator">=</span> test_data<span class="token punctuation">.</span>flow_from_directory<span class="token punctuation">(</span>
+        <span class="token string-interpolation"><span class="token string">f'</span><span class="token interpolation"><span class="token punctuation">{<!-- --></span>datasets<span class="token punctuation">}</span></span><span class="token string">/test'</span></span><span class="token punctuation">,</span>
+        target_size<span class="token operator">=</span><span class="token punctuation">(</span>img_size<span class="token punctuation">,</span> img_size<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        batch_size<span class="token operator">=</span>batch_size
+    <span class="token punctuation">)</span>
+    
+    <span class="token keyword">return</span> train_generator<span class="token punctuation">,</span> test_generator
+</code></pre> 
+<h3><a id="4_ParNet_202"></a>4. 构建ParNet</h3> 
+<pre><code class="prism language-python">
+<span class="token keyword">import</span> tensorflow <span class="token keyword">as</span> tf
+<span class="token keyword">from</span> tensorflow<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>layers <span class="token keyword">import</span> <span class="token punctuation">(</span>
+    Conv2D<span class="token punctuation">,</span> BatchNormalization<span class="token punctuation">,</span> AveragePooling2D<span class="token punctuation">,</span> Activation<span class="token punctuation">,</span>
+    Multiply<span class="token punctuation">,</span> Add<span class="token punctuation">,</span> Concatenate<span class="token punctuation">,</span> Dense<span class="token punctuation">,</span> Input<span class="token punctuation">,</span> Flatten<span class="token punctuation">,</span> Reshape
+<span class="token punctuation">)</span>
+<span class="token keyword">from</span> tensorflow<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>models <span class="token keyword">import</span> Model
+
+
+
+<span class="token comment"># 在宽和高上进行平均池化</span>
+<span class="token keyword">class</span> <span class="token class-name">GlobalAveragePool2D</span><span class="token punctuation">(</span>tf<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>layers<span class="token punctuation">.</span>Layer<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>GlobalAveragePool2D<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>keepdim <span class="token operator">=</span> <span class="token boolean">True</span>
+
+    <span class="token keyword">def</span> <span class="token function">call</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> inputs<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">return</span> tf<span class="token punctuation">.</span>compat<span class="token punctuation">.</span>v1<span class="token punctuation">.</span>reduce_mean<span class="token punctuation">(</span>inputs<span class="token punctuation">,</span> axis<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">,</span> keepdims<span class="token operator">=</span>self<span class="token punctuation">.</span>keepdim<span class="token punctuation">)</span>
+
+<span class="token keyword">class</span> <span class="token class-name">Silu</span><span class="token punctuation">(</span>tf<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>layers<span class="token punctuation">.</span>Layer<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> <span class="token operator">**</span>kwargs<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>Silu<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token operator">**</span>kwargs<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>activation <span class="token operator">=</span> tf<span class="token punctuation">.</span>nn<span class="token punctuation">.</span>silu
+
+    <span class="token keyword">def</span> <span class="token function">call</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> inputs<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">return</span> self<span class="token punctuation">.</span>activation<span class="token punctuation">(</span>inputs<span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">compute_output_shape</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> input_shape<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">return</span> input_shape
+
+    <span class="token keyword">def</span> <span class="token function">get_config</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        config <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">'activation'</span><span class="token punctuation">:</span> tf<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>activations<span class="token punctuation">.</span>serialize<span class="token punctuation">(</span>self<span class="token punctuation">.</span>activation<span class="token punctuation">)</span><span class="token punctuation">}</span>
+        base_config <span class="token operator">=</span> <span class="token builtin">super</span><span class="token punctuation">(</span>Silu<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>get_config<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token keyword">return</span> <span class="token builtin">dict</span><span class="token punctuation">(</span><span class="token builtin">list</span><span class="token punctuation">(</span>base_config<span class="token punctuation">.</span>items<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token builtin">list</span><span class="token punctuation">(</span>config<span class="token punctuation">.</span>items<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+<span class="token keyword">def</span> <span class="token function">conv_bn</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span>out_channels<span class="token punctuation">,</span>kernel_size<span class="token punctuation">,</span> stride<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> groups<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token string">'same'</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    x <span class="token operator">=</span> Conv2D<span class="token punctuation">(</span>filters<span class="token operator">=</span>out_channels<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span>kernel_size<span class="token punctuation">,</span>
+               strides<span class="token operator">=</span>stride<span class="token punctuation">,</span> groups<span class="token operator">=</span>groups<span class="token punctuation">,</span> use_bias<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> padding<span class="token operator">=</span>padding<span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> BatchNormalization<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> x
+    
+<span class="token keyword">def</span> <span class="token function">SSEblock</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    bn <span class="token operator">=</span> BatchNormalization<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> GlobalAveragePool2D<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>bn<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> Conv2D<span class="token punctuation">(</span>filters<span class="token operator">=</span>filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> Activation<span class="token punctuation">(</span><span class="token string">'sigmoid'</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> Multiply<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>bn<span class="token punctuation">,</span> x<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token keyword">return</span> x
+
+<span class="token keyword">def</span> <span class="token function">Downsampling_block</span><span class="token punctuation">(</span>inputs<span class="token punctuation">,</span> filters<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    x <span class="token operator">=</span> AveragePooling2D<span class="token punctuation">(</span>pool_size<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">(</span>inputs<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token string">'valid'</span><span class="token punctuation">)</span>
+    
+    y <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>inputs<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span> stride<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">)</span>
+
+    z <span class="token operator">=</span> GlobalAveragePool2D<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>inputs<span class="token punctuation">)</span>
+    z <span class="token operator">=</span> Conv2D<span class="token punctuation">(</span>filters<span class="token operator">=</span>filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> use_bias<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span><span class="token punctuation">(</span>z<span class="token punctuation">)</span>
+    z <span class="token operator">=</span> Activation<span class="token punctuation">(</span><span class="token string">'sigmoid'</span><span class="token punctuation">)</span><span class="token punctuation">(</span>z<span class="token punctuation">)</span>
+    
+    a <span class="token operator">=</span> Add<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>x<span class="token punctuation">,</span> y<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    b <span class="token operator">=</span> Multiply<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>a<span class="token punctuation">,</span> z<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    
+    out <span class="token operator">=</span> Silu<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>b<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> out
+
+<span class="token keyword">def</span> <span class="token function">channel_shuffle</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span> group<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    batchsize<span class="token punctuation">,</span> height<span class="token punctuation">,</span> width<span class="token punctuation">,</span> num_channels <span class="token operator">=</span> x<span class="token punctuation">.</span>shape
+    <span class="token keyword">assert</span> num_channels <span class="token operator">%</span> group <span class="token operator">==</span> <span class="token number">0</span>
+    group_channels <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>num_channels <span class="token operator">//</span> group<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> Reshape<span class="token punctuation">(</span><span class="token punctuation">(</span>height<span class="token punctuation">,</span> width<span class="token punctuation">,</span>group_channels<span class="token punctuation">,</span> group<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> tf<span class="token punctuation">.</span>transpose<span class="token punctuation">(</span>x<span class="token punctuation">,</span> perm<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">,</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">,</span><span class="token number">4</span><span class="token punctuation">,</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    x <span class="token operator">=</span> Reshape<span class="token punctuation">(</span><span class="token punctuation">(</span>height<span class="token punctuation">,</span> width<span class="token punctuation">,</span> num_channels<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> x
+
+<span class="token keyword">def</span> <span class="token function">Fusion</span><span class="token punctuation">(</span>input1<span class="token punctuation">,</span> input2<span class="token punctuation">,</span> filters<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    group <span class="token operator">=</span> input1<span class="token punctuation">.</span>shape<span class="token punctuation">[</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span>
+    input1 <span class="token operator">=</span> BatchNormalization<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>input1<span class="token punctuation">)</span>
+    input2 <span class="token operator">=</span> BatchNormalization<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>input2<span class="token punctuation">)</span>
+    a <span class="token operator">=</span> Concatenate<span class="token punctuation">(</span>axis<span class="token operator">=</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>input1<span class="token punctuation">,</span> input2<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    a <span class="token operator">=</span> channel_shuffle<span class="token punctuation">(</span>a<span class="token punctuation">,</span> group<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> AveragePooling2D<span class="token punctuation">(</span>pool_size<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">(</span>a<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> stride<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> groups<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token string">'valid'</span><span class="token punctuation">)</span>
+    y <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>a<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span> stride<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">,</span> groups<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">)</span>
+    z <span class="token operator">=</span> GlobalAveragePool2D<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>a<span class="token punctuation">)</span>
+    z <span class="token operator">=</span> Conv2D<span class="token punctuation">(</span>filters<span class="token operator">=</span>filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> groups<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">(</span>z<span class="token punctuation">)</span>
+    z <span class="token operator">=</span> Activation<span class="token punctuation">(</span><span class="token string">'sigmoid'</span><span class="token punctuation">)</span><span class="token punctuation">(</span>z<span class="token punctuation">)</span>
+    a <span class="token operator">=</span> Add<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>x<span class="token punctuation">,</span> y<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    b <span class="token operator">=</span> Multiply<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>a<span class="token punctuation">,</span> z<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    out <span class="token operator">=</span> Silu<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>b<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> out
+
+<span class="token keyword">def</span> <span class="token function">FuseBlock</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    a <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token string">'valid'</span><span class="token punctuation">)</span>
+    b <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span> stride<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">)</span>
+    c <span class="token operator">=</span> Add<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>a<span class="token punctuation">,</span> b<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token keyword">return</span> c
+
+<span class="token comment"># RepVGG-SSE</span>
+<span class="token keyword">def</span> <span class="token function">Stream</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    a <span class="token operator">=</span> SSEblock<span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">)</span>
+    b <span class="token operator">=</span> FuseBlock<span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">)</span>
+    c <span class="token operator">=</span> Add<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>a<span class="token punctuation">,</span> b<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    
+    c <span class="token operator">=</span> Silu<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>c<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> c
+
+<span class="token keyword">def</span> <span class="token function">ParNetEncoder</span><span class="token punctuation">(</span>inputs<span class="token punctuation">,</span> block_channels<span class="token punctuation">,</span> depth<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    x <span class="token operator">=</span> Downsampling_block<span class="token punctuation">(</span>inputs<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token comment"># 第一个并行子结构</span>
+    x <span class="token operator">=</span> Downsampling_block<span class="token punctuation">(</span>x<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    y <span class="token operator">=</span> Stream<span class="token punctuation">(</span>x<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token keyword">for</span> _ <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span>depth<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        y <span class="token operator">=</span> Stream<span class="token punctuation">(</span>y<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    y <span class="token operator">=</span> Downsampling_block<span class="token punctuation">(</span>y<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    
+    <span class="token comment"># 第二个并行子结构</span>
+    x <span class="token operator">=</span> Downsampling_block<span class="token punctuation">(</span>x<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    z <span class="token operator">=</span> Stream<span class="token punctuation">(</span>x<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token keyword">for</span> _ <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span>depth<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        z <span class="token operator">=</span> Stream<span class="token punctuation">(</span>z<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+
+    z <span class="token operator">=</span> Fusion<span class="token punctuation">(</span>y<span class="token punctuation">,</span> z<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token comment"># 第三个并行子结构</span>
+    x <span class="token operator">=</span> Downsampling_block<span class="token punctuation">(</span>x<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    a <span class="token operator">=</span> Stream<span class="token punctuation">(</span>x<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token keyword">for</span> _ <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span>depth<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        a <span class="token operator">=</span> Stream<span class="token punctuation">(</span>a<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    b <span class="token operator">=</span> Fusion<span class="token punctuation">(</span>z<span class="token punctuation">,</span> a<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    x <span class="token operator">=</span> Downsampling_block<span class="token punctuation">(</span>b<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">4</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token keyword">return</span> x
+
+<span class="token keyword">def</span> <span class="token function">ParNetDecoder</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span> n_classes<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    x <span class="token operator">=</span> AveragePooling2D<span class="token punctuation">(</span>pool_size<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> x <span class="token operator">=</span> Flatten<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> Dense<span class="token punctuation">(</span>n_classes<span class="token punctuation">,</span> activation<span class="token operator">=</span><span class="token string">'softmax'</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> x
+
+<span class="token keyword">def</span> <span class="token function">ParNet</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span> n_classes<span class="token punctuation">,</span> block_channels<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">64</span><span class="token punctuation">,</span> <span class="token number">128</span><span class="token punctuation">,</span> <span class="token number">256</span><span class="token punctuation">,</span> <span class="token number">512</span><span class="token punctuation">,</span> <span class="token number">2048</span><span class="token punctuation">]</span><span class="token punctuation">,</span> depth<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">4</span><span class="token punctuation">,</span> <span class="token number">5</span><span class="token punctuation">,</span> <span class="token number">5</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    x <span class="token operator">=</span> ParNetEncoder<span class="token punctuation">(</span>x<span class="token punctuation">,</span> block_channels<span class="token operator">=</span>block_channels<span class="token punctuation">,</span> depth<span class="token operator">=</span>depth<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> ParNetDecoder<span class="token punctuation">(</span>x<span class="token punctuation">,</span> n_classes<span class="token punctuation">)</span>
+    
+    <span class="token keyword">return</span> x
+
+<span class="token comment"># 四个不同大小版本的网络模型</span>
+<span class="token keyword">def</span> <span class="token function">parnet_s</span><span class="token punctuation">(</span>inputs<span class="token punctuation">,</span> classes<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">return</span> ParNet<span class="token punctuation">(</span>inputs<span class="token punctuation">,</span> classes<span class="token punctuation">,</span> block_channels<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">64</span><span class="token punctuation">,</span> <span class="token number">96</span><span class="token punctuation">,</span> <span class="token number">192</span><span class="token punctuation">,</span> <span class="token number">384</span><span class="token punctuation">,</span> <span class="token number">1280</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+
+<span class="token keyword">def</span> <span class="token function">parnet_m</span><span class="token punctuation">(</span>in_channels<span class="token punctuation">,</span> classes<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">return</span> ParNet<span class="token punctuation">(</span>in_channels<span class="token punctuation">,</span> classes<span class="token punctuation">,</span> block_channels<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">64</span><span class="token punctuation">,</span> <span class="token number">128</span><span class="token punctuation">,</span> <span class="token number">256</span><span class="token punctuation">,</span> <span class="token number">512</span><span class="token punctuation">,</span> <span class="token number">2048</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+
+<span class="token keyword">def</span> <span class="token function">parnet_l</span><span class="token punctuation">(</span>in_channels<span class="token punctuation">,</span> classes<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">return</span> ParNet<span class="token punctuation">(</span>in_channels<span class="token punctuation">,</span> classes<span class="token punctuation">,</span> block_channels<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">64</span><span class="token punctuation">,</span> <span class="token number">160</span><span class="token punctuation">,</span> <span class="token number">320</span><span class="token punctuation">,</span> <span class="token number">640</span><span class="token punctuation">,</span> <span class="token number">2560</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+
+<span class="token keyword">def</span> <span class="token function">parnet_xl</span><span class="token punctuation">(</span>in_channels<span class="token punctuation">,</span> classes<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">return</span> ParNet<span class="token punctuation">(</span>in_channels<span class="token punctuation">,</span> classes<span class="token punctuation">,</span> block_channels<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">64</span><span class="token punctuation">,</span> <span class="token number">200</span><span class="token punctuation">,</span> <span class="token number">400</span><span class="token punctuation">,</span> <span class="token number">800</span><span class="token punctuation">,</span> <span class="token number">3200</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+</code></pre> 
+<h3><a id="5__362"></a>5. 设置回调函数</h3> 
+<pre><code class="prism language-python"><span class="token comment"># 学习率调整</span>
+<span class="token keyword">def</span> <span class="token function">adjust_lr</span><span class="token punctuation">(</span>epoch<span class="token punctuation">,</span> lr<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"Seting to %s"</span> <span class="token operator">%</span> <span class="token punctuation">(</span>lr<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+    <span class="token keyword">return</span> lr <span class="token operator">*</span> <span class="token number">0.95</span>
+callbackss <span class="token operator">=</span> <span class="token punctuation">[</span>
+            EarlyStopping<span class="token punctuation">(</span>monitor<span class="token operator">=</span><span class="token string">'val_loss'</span><span class="token punctuation">,</span> patience<span class="token operator">=</span><span class="token number">15</span><span class="token punctuation">,</span> verbose<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            ModelCheckpoint<span class="token punctuation">(</span><span class="token string">'logs/ep{epoch:03d}-loss{loss:.3f}-val_loss{val_loss:.3f}.h5'</span><span class="token punctuation">,</span>monitor<span class="token operator">=</span><span class="token string">'val_loss'</span><span class="token punctuation">,</span>
+                            save_weights_only<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">,</span> save_best_only<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> period<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            LearningRateScheduler<span class="token punctuation">(</span>adjust_lr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            TensorBoard<span class="token punctuation">(</span>log_dir<span class="token operator">=</span><span class="token string">'./logs1'</span><span class="token punctuation">)</span>
+        <span class="token punctuation">]</span>
+</code></pre> 
+<h3><a id="6__379"></a>6. 训练模型</h3> 
+<p><strong>训练的是parnet_s版本</strong></p> 
+<pre><code class="prism language-python">inputs <span class="token operator">=</span> Input<span class="token punctuation">(</span>shape<span class="token operator">=</span><span class="token punctuation">(</span>img_size<span class="token punctuation">,</span>img_size<span class="token punctuation">,</span><span class="token number">3</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+train_generator<span class="token punctuation">,</span> test_generator <span class="token operator">=</span> data_process_func<span class="token punctuation">(</span><span class="token punctuation">)</span>
+model <span class="token operator">=</span> Model<span class="token punctuation">(</span>inputs<span class="token operator">=</span>inputs<span class="token punctuation">,</span> outputs<span class="token operator">=</span>parnet_s<span class="token punctuation">(</span>inputs<span class="token operator">=</span>inputs<span class="token punctuation">,</span> classes<span class="token operator">=</span>classes<span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token comment"># model.summary()</span>
+model<span class="token punctuation">.</span><span class="token builtin">compile</span><span class="token punctuation">(</span>optimizer<span class="token operator">=</span>Adam<span class="token punctuation">(</span>lr<span class="token operator">=</span>lr<span class="token punctuation">)</span><span class="token punctuation">,</span> loss<span class="token operator">=</span><span class="token string">'categorical_crossentropy'</span><span class="token punctuation">,</span> metrics<span class="token operator">=</span><span class="token punctuation">[</span><span class="token string">'accuracy'</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+model<span class="token punctuation">.</span>fit<span class="token punctuation">(</span>
+           x <span class="token operator">=</span> train_generator<span class="token punctuation">,</span>
+           validation_data <span class="token operator">=</span> test_generator<span class="token punctuation">,</span>
+           epochs <span class="token operator">=</span> epochs<span class="token punctuation">,</span>
+           callbacks <span class="token operator">=</span> callbackss
+          <span class="token punctuation">)</span>
+</code></pre> 
+<p><strong>训练完之后可在当前目录下输入cmd命令查看tensorboard：tensorboard --logdir=./logs1</strong></p> 
+<h3><a id="7__397"></a>7. 预测图片</h3> 
+<p><strong>新建predict文件</strong></p> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> tensorflow <span class="token keyword">as</span> tf
+<span class="token keyword">from</span> PIL <span class="token keyword">import</span> Image
+<span class="token keyword">from</span> tensorflow<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>models <span class="token keyword">import</span> load_model
+<span class="token keyword">from</span> tensorflow<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>models <span class="token keyword">import</span> Model
+<span class="token keyword">from</span> tensorflow<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>layers <span class="token keyword">import</span> Input
+<span class="token keyword">import</span> tensorflow <span class="token keyword">as</span> tf
+<span class="token keyword">from</span> tensorflow<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>layers <span class="token keyword">import</span> <span class="token punctuation">(</span>
+    Conv2D<span class="token punctuation">,</span> BatchNormalization<span class="token punctuation">,</span> AveragePooling2D<span class="token punctuation">,</span> Activation<span class="token punctuation">,</span>
+    Multiply<span class="token punctuation">,</span> Add<span class="token punctuation">,</span> Concatenate<span class="token punctuation">,</span> Dense<span class="token punctuation">,</span> Input<span class="token punctuation">,</span> Flatten<span class="token punctuation">,</span> Reshape
+<span class="token punctuation">)</span>
+<span class="token keyword">from</span> tensorflow<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>models <span class="token keyword">import</span> Model
+<span class="token keyword">from</span> tensorflow<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>preprocessing<span class="token punctuation">.</span>image <span class="token keyword">import</span> img_to_array<span class="token punctuation">,</span> load_img
+<span class="token keyword">import</span> numpy <span class="token keyword">as</span> np
+<span class="token keyword">import</span> os
+<span class="token keyword">import</span> matplotlib<span class="token punctuation">.</span>pyplot <span class="token keyword">as</span> plt
+
+<span class="token comment"># 在宽和高上进行平均池化</span>
+<span class="token keyword">class</span> <span class="token class-name">GlobalAveragePool2D</span><span class="token punctuation">(</span>tf<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>layers<span class="token punctuation">.</span>Layer<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>GlobalAveragePool2D<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>keepdim <span class="token operator">=</span> <span class="token boolean">True</span>
+
+    <span class="token keyword">def</span> <span class="token function">call</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> inputs<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">return</span> tf<span class="token punctuation">.</span>compat<span class="token punctuation">.</span>v1<span class="token punctuation">.</span>reduce_mean<span class="token punctuation">(</span>inputs<span class="token punctuation">,</span> axis<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">,</span> keepdims<span class="token operator">=</span>self<span class="token punctuation">.</span>keepdim<span class="token punctuation">)</span>
+
+<span class="token keyword">class</span> <span class="token class-name">Silu</span><span class="token punctuation">(</span>tf<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>layers<span class="token punctuation">.</span>Layer<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> <span class="token operator">**</span>kwargs<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>Silu<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token operator">**</span>kwargs<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>activation <span class="token operator">=</span> tf<span class="token punctuation">.</span>nn<span class="token punctuation">.</span>silu
+
+    <span class="token keyword">def</span> <span class="token function">call</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> inputs<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">return</span> self<span class="token punctuation">.</span>activation<span class="token punctuation">(</span>inputs<span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">compute_output_shape</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> input_shape<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">return</span> input_shape
+
+    <span class="token keyword">def</span> <span class="token function">get_config</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        config <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">'activation'</span><span class="token punctuation">:</span> tf<span class="token punctuation">.</span>keras<span class="token punctuation">.</span>activations<span class="token punctuation">.</span>serialize<span class="token punctuation">(</span>self<span class="token punctuation">.</span>activation<span class="token punctuation">)</span><span class="token punctuation">}</span>
+        base_config <span class="token operator">=</span> <span class="token builtin">super</span><span class="token punctuation">(</span>Silu<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>get_config<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token keyword">return</span> <span class="token builtin">dict</span><span class="token punctuation">(</span><span class="token builtin">list</span><span class="token punctuation">(</span>base_config<span class="token punctuation">.</span>items<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token builtin">list</span><span class="token punctuation">(</span>config<span class="token punctuation">.</span>items<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+<span class="token keyword">def</span> <span class="token function">conv_bn</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span>out_channels<span class="token punctuation">,</span>kernel_size<span class="token punctuation">,</span> stride<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> groups<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token string">'same'</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    x <span class="token operator">=</span> Conv2D<span class="token punctuation">(</span>filters<span class="token operator">=</span>out_channels<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span>kernel_size<span class="token punctuation">,</span>
+               strides<span class="token operator">=</span>stride<span class="token punctuation">,</span> groups<span class="token operator">=</span>groups<span class="token punctuation">,</span> use_bias<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> padding<span class="token operator">=</span>padding<span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> BatchNormalization<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> x
+
+<span class="token keyword">def</span> <span class="token function">SSEblock</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    bn <span class="token operator">=</span> BatchNormalization<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> GlobalAveragePool2D<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>bn<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> Conv2D<span class="token punctuation">(</span>filters<span class="token operator">=</span>filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> Activation<span class="token punctuation">(</span><span class="token string">'sigmoid'</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> Multiply<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>bn<span class="token punctuation">,</span> x<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token keyword">return</span> x
+
+<span class="token keyword">def</span> <span class="token function">Downsampling_block</span><span class="token punctuation">(</span>inputs<span class="token punctuation">,</span> filters<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    x <span class="token operator">=</span> AveragePooling2D<span class="token punctuation">(</span>pool_size<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">(</span>inputs<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token string">'valid'</span><span class="token punctuation">)</span>
+
+    y <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>inputs<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span> stride<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">)</span>
+
+    z <span class="token operator">=</span> GlobalAveragePool2D<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>inputs<span class="token punctuation">)</span>
+    z <span class="token operator">=</span> Conv2D<span class="token punctuation">(</span>filters<span class="token operator">=</span>filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> use_bias<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span><span class="token punctuation">(</span>z<span class="token punctuation">)</span>
+    z <span class="token operator">=</span> Activation<span class="token punctuation">(</span><span class="token string">'sigmoid'</span><span class="token punctuation">)</span><span class="token punctuation">(</span>z<span class="token punctuation">)</span>
+
+    a <span class="token operator">=</span> Add<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>x<span class="token punctuation">,</span> y<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    b <span class="token operator">=</span> Multiply<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>a<span class="token punctuation">,</span> z<span class="token punctuation">]</span><span class="token punctuation">)</span>
+
+    out <span class="token operator">=</span> Silu<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>b<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> out
+
+<span class="token keyword">def</span> <span class="token function">channel_shuffle</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span> group<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    batchsize<span class="token punctuation">,</span> height<span class="token punctuation">,</span> width<span class="token punctuation">,</span> num_channels <span class="token operator">=</span> x<span class="token punctuation">.</span>shape
+    <span class="token keyword">assert</span> num_channels <span class="token operator">%</span> group <span class="token operator">==</span> <span class="token number">0</span>
+    group_channels <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>num_channels <span class="token operator">//</span> group<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> Reshape<span class="token punctuation">(</span><span class="token punctuation">(</span>height<span class="token punctuation">,</span> width<span class="token punctuation">,</span>group_channels<span class="token punctuation">,</span> group<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> tf<span class="token punctuation">.</span>transpose<span class="token punctuation">(</span>x<span class="token punctuation">,</span> perm<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">,</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">,</span><span class="token number">4</span><span class="token punctuation">,</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    x <span class="token operator">=</span> Reshape<span class="token punctuation">(</span><span class="token punctuation">(</span>height<span class="token punctuation">,</span> width<span class="token punctuation">,</span> num_channels<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> x
+
+<span class="token keyword">def</span> <span class="token function">Fusion</span><span class="token punctuation">(</span>input1<span class="token punctuation">,</span> input2<span class="token punctuation">,</span> filters<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    group <span class="token operator">=</span> input1<span class="token punctuation">.</span>shape<span class="token punctuation">[</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span>
+    input1 <span class="token operator">=</span> BatchNormalization<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>input1<span class="token punctuation">)</span>
+    input2 <span class="token operator">=</span> BatchNormalization<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>input2<span class="token punctuation">)</span>
+    a <span class="token operator">=</span> Concatenate<span class="token punctuation">(</span>axis<span class="token operator">=</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>input1<span class="token punctuation">,</span> input2<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    a <span class="token operator">=</span> channel_shuffle<span class="token punctuation">(</span>a<span class="token punctuation">,</span> group<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> AveragePooling2D<span class="token punctuation">(</span>pool_size<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">(</span>a<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> stride<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> groups<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token string">'valid'</span><span class="token punctuation">)</span>
+    y <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>a<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span> stride<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">,</span> groups<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">)</span>
+    z <span class="token operator">=</span> GlobalAveragePool2D<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>a<span class="token punctuation">)</span>
+    z <span class="token operator">=</span> Conv2D<span class="token punctuation">(</span>filters<span class="token operator">=</span>filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> groups<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">(</span>z<span class="token punctuation">)</span>
+    z <span class="token operator">=</span> Activation<span class="token punctuation">(</span><span class="token string">'sigmoid'</span><span class="token punctuation">)</span><span class="token punctuation">(</span>z<span class="token punctuation">)</span>
+    a <span class="token operator">=</span> Add<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>x<span class="token punctuation">,</span> y<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    b <span class="token operator">=</span> Multiply<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>a<span class="token punctuation">,</span> z<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    out <span class="token operator">=</span> Silu<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>b<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> out
+
+<span class="token keyword">def</span> <span class="token function">FuseBlock</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    a <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token string">'valid'</span><span class="token punctuation">)</span>
+    b <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span> stride<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">)</span>
+    c <span class="token operator">=</span> Add<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>a<span class="token punctuation">,</span> b<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token keyword">return</span> c
+
+<span class="token comment"># RepVGG-SSE</span>
+<span class="token keyword">def</span> <span class="token function">Stream</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    a <span class="token operator">=</span> SSEblock<span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">)</span>
+    b <span class="token operator">=</span> FuseBlock<span class="token punctuation">(</span>x<span class="token punctuation">,</span> filters<span class="token punctuation">)</span>
+    c <span class="token operator">=</span> Add<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">[</span>a<span class="token punctuation">,</span> b<span class="token punctuation">]</span><span class="token punctuation">)</span>
+
+    c <span class="token operator">=</span> Silu<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>c<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> c
+
+<span class="token keyword">def</span> <span class="token function">ParNetEncoder</span><span class="token punctuation">(</span>inputs<span class="token punctuation">,</span> block_channels<span class="token punctuation">,</span> depth<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    x <span class="token operator">=</span> Downsampling_block<span class="token punctuation">(</span>inputs<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token comment"># 第一个并行子结构</span>
+    x <span class="token operator">=</span> Downsampling_block<span class="token punctuation">(</span>x<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    y <span class="token operator">=</span> Stream<span class="token punctuation">(</span>x<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token keyword">for</span> _ <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span>depth<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        y <span class="token operator">=</span> Stream<span class="token punctuation">(</span>y<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    y <span class="token operator">=</span> Downsampling_block<span class="token punctuation">(</span>y<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+
+    <span class="token comment"># 第二个并行子结构</span>
+    x <span class="token operator">=</span> Downsampling_block<span class="token punctuation">(</span>x<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    z <span class="token operator">=</span> Stream<span class="token punctuation">(</span>x<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token keyword">for</span> _ <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span>depth<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        z <span class="token operator">=</span> Stream<span class="token punctuation">(</span>z<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+
+    z <span class="token operator">=</span> Fusion<span class="token punctuation">(</span>y<span class="token punctuation">,</span> z<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token comment"># 第三个并行子结构</span>
+    x <span class="token operator">=</span> Downsampling_block<span class="token punctuation">(</span>x<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    a <span class="token operator">=</span> Stream<span class="token punctuation">(</span>x<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token keyword">for</span> _ <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span>depth<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        a <span class="token operator">=</span> Stream<span class="token punctuation">(</span>a<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    b <span class="token operator">=</span> Fusion<span class="token punctuation">(</span>z<span class="token punctuation">,</span> a<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    x <span class="token operator">=</span> Downsampling_block<span class="token punctuation">(</span>b<span class="token punctuation">,</span> block_channels<span class="token punctuation">[</span><span class="token number">4</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token keyword">return</span> x
+
+<span class="token keyword">def</span> <span class="token function">ParNetDecoder</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span> n_classes<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    x <span class="token operator">=</span> AveragePooling2D<span class="token punctuation">(</span>pool_size<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> x <span class="token operator">=</span> Flatten<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> Dense<span class="token punctuation">(</span>n_classes<span class="token punctuation">,</span> activation<span class="token operator">=</span><span class="token string">'softmax'</span><span class="token punctuation">)</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> x
+
+<span class="token keyword">def</span> <span class="token function">ParNet</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span> n_classes<span class="token punctuation">,</span> block_channels<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">64</span><span class="token punctuation">,</span> <span class="token number">128</span><span class="token punctuation">,</span> <span class="token number">256</span><span class="token punctuation">,</span> <span class="token number">512</span><span class="token punctuation">,</span> <span class="token number">2048</span><span class="token punctuation">]</span><span class="token punctuation">,</span> depth<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">4</span><span class="token punctuation">,</span> <span class="token number">5</span><span class="token punctuation">,</span> <span class="token number">5</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    x <span class="token operator">=</span> ParNetEncoder<span class="token punctuation">(</span>x<span class="token punctuation">,</span> block_channels<span class="token operator">=</span>block_channels<span class="token punctuation">,</span> depth<span class="token operator">=</span>depth<span class="token punctuation">)</span>
+    x <span class="token operator">=</span> ParNetDecoder<span class="token punctuation">(</span>x<span class="token punctuation">,</span> n_classes<span class="token punctuation">)</span>
+
+    <span class="token keyword">return</span> x
+
+<span class="token comment"># 四个不同大小版本的网络模型</span>
+<span class="token keyword">def</span> <span class="token function">parnet_s</span><span class="token punctuation">(</span>inputs<span class="token punctuation">,</span> classes<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">return</span> ParNet<span class="token punctuation">(</span>inputs<span class="token punctuation">,</span> classes<span class="token punctuation">,</span> block_channels<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">64</span><span class="token punctuation">,</span> <span class="token number">96</span><span class="token punctuation">,</span> <span class="token number">192</span><span class="token punctuation">,</span> <span class="token number">384</span><span class="token punctuation">,</span> <span class="token number">1280</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+
+<span class="token keyword">def</span> <span class="token function">parnet_m</span><span class="token punctuation">(</span>in_channels<span class="token punctuation">,</span> classes<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">return</span> ParNet<span class="token punctuation">(</span>in_channels<span class="token punctuation">,</span> classes<span class="token punctuation">,</span> block_channels<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">64</span><span class="token punctuation">,</span> <span class="token number">128</span><span class="token punctuation">,</span> <span class="token number">256</span><span class="token punctuation">,</span> <span class="token number">512</span><span class="token punctuation">,</span> <span class="token number">2048</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+
+<span class="token keyword">def</span> <span class="token function">parnet_l</span><span class="token punctuation">(</span>in_channels<span class="token punctuation">,</span> classes<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">return</span> ParNet<span class="token punctuation">(</span>in_channels<span class="token punctuation">,</span> classes<span class="token punctuation">,</span> block_channels<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">64</span><span class="token punctuation">,</span> <span class="token number">160</span><span class="token punctuation">,</span> <span class="token number">320</span><span class="token punctuation">,</span> <span class="token number">640</span><span class="token punctuation">,</span> <span class="token number">2560</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+
+<span class="token keyword">def</span> <span class="token function">parnet_xl</span><span class="token punctuation">(</span>in_channels<span class="token punctuation">,</span> classes<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">return</span> ParNet<span class="token punctuation">(</span>in_channels<span class="token punctuation">,</span> classes<span class="token punctuation">,</span> block_channels<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">64</span><span class="token punctuation">,</span> <span class="token number">200</span><span class="token punctuation">,</span> <span class="token number">400</span><span class="token punctuation">,</span> <span class="token number">800</span><span class="token punctuation">,</span> <span class="token number">3200</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+
+datasets <span class="token operator">=</span> <span class="token string">'./dataset/data1_dog_cat/test'</span>
+names <span class="token operator">=</span> os<span class="token punctuation">.</span>listdir<span class="token punctuation">(</span>datasets<span class="token punctuation">)</span>
+weight <span class="token operator">=</span> <span class="token string">'./model_data/val_loss0.145_test_acc0.947_parnet_dog.h5'</span> <span class="token comment"># 模型文件路径</span>
+net <span class="token operator">=</span> parnet_s
+classes <span class="token operator">=</span> <span class="token number">2</span>
+img_size <span class="token operator">=</span> <span class="token number">256</span>
+
+<span class="token comment"># 归一化</span>
+<span class="token keyword">def</span> <span class="token function">preprocess_input</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    x <span class="token operator">/=</span> <span class="token number">255</span>
+
+    <span class="token keyword">return</span> x
+inputs <span class="token operator">=</span> Input<span class="token punctuation">(</span>shape<span class="token operator">=</span><span class="token punctuation">(</span>img_size<span class="token punctuation">,</span>img_size<span class="token punctuation">,</span><span class="token number">3</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+model <span class="token operator">=</span> Model<span class="token punctuation">(</span>inputs<span class="token operator">=</span>inputs<span class="token punctuation">,</span> outputs<span class="token operator">=</span>parnet_s<span class="token punctuation">(</span>inputs<span class="token operator">=</span>inputs<span class="token punctuation">,</span> classes<span class="token operator">=</span>classes<span class="token punctuation">)</span><span class="token punctuation">)</span>
+model<span class="token punctuation">.</span>load_weights<span class="token punctuation">(</span>weight<span class="token punctuation">)</span>
+<span class="token keyword">while</span> <span class="token boolean">True</span><span class="token punctuation">:</span>
+
+    img_path <span class="token operator">=</span> <span class="token builtin">input</span><span class="token punctuation">(</span><span class="token string">'input img_path:'</span><span class="token punctuation">)</span>
+    <span class="token keyword">try</span><span class="token punctuation">:</span>
+        img <span class="token operator">=</span> Image<span class="token punctuation">.</span><span class="token builtin">open</span><span class="token punctuation">(</span>img_path<span class="token punctuation">)</span>
+        img <span class="token operator">=</span> img<span class="token punctuation">.</span>resize<span class="token punctuation">(</span><span class="token punctuation">(</span>img_size<span class="token punctuation">,</span> img_size<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        image_data <span class="token operator">=</span> np<span class="token punctuation">.</span>expand_dims<span class="token punctuation">(</span>preprocess_input<span class="token punctuation">(</span>np<span class="token punctuation">.</span>array<span class="token punctuation">(</span>img<span class="token punctuation">,</span> np<span class="token punctuation">.</span>float32<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span>
+    <span class="token keyword">except</span><span class="token punctuation">:</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'The path is error!'</span><span class="token punctuation">)</span>
+        <span class="token keyword">continue</span>
+    <span class="token keyword">else</span><span class="token punctuation">:</span>
+        plt<span class="token punctuation">.</span>imshow<span class="token punctuation">(</span>img<span class="token punctuation">)</span>
+        plt<span class="token punctuation">.</span>axis<span class="token punctuation">(</span><span class="token string">'off'</span><span class="token punctuation">)</span>
+        p <span class="token operator">=</span>model<span class="token punctuation">.</span>predict<span class="token punctuation">(</span>image_data<span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>
+        pred_name <span class="token operator">=</span> names<span class="token punctuation">[</span>np<span class="token punctuation">.</span>argmax<span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">]</span>
+        plt<span class="token punctuation">.</span>title<span class="token punctuation">(</span><span class="token string">'%s:%.3f'</span><span class="token operator">%</span><span class="token punctuation">(</span>pred_name<span class="token punctuation">,</span> np<span class="token punctuation">.</span><span class="token builtin">max</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        plt<span class="token punctuation">.</span>show<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+
+</code></pre> 
+<p>输入预测图片路径<br> 效果如下：<br> 猫的概率100%<br> <img src="https://images2.imgbox.com/9d/3a/iqEv7kXZ_o.png" alt="在这里插入图片描述"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/d01454d824ee5fa0bc138f0d84f1c065/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Part5-1-1 Nodejs 基础</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/7a1dc23d37ee236fa4b8413e6261dcfc/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">MMCV-Registry类代码详解(1)</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

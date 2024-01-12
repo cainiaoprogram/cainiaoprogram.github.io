@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>百度 RT-DETR 算法原理解析 | 超越YOLO的目标检测新高度？ - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="百度 RT-DETR 算法原理解析 | 超越YOLO的目标检测新高度？" />
+<meta property="og:description" content="文章目录 0. 前言1. RT-DETR结构设计1.1 主干网络1.2 颈部网络1.3 数据增强和训练策略 2. Query Selection 和 Decoder3. 实验结果3.1 设置3.2 与SOTA的比较3.3 关于混合编码器的消融研究3.4 关于IoU感知的查询选择的消融研究3.5 关于解码器的消融研究 总结参考文献 0. 前言 论文地址：https://arxiv.org/abs/2304.08069
+代码地址：https://github.com/PaddlePaddle/PaddleDetection
+中文翻译：https://blog.csdn.net/weixin_43694096/article/details/131353118
+这篇博文将介绍百度的RT-DETR，首先让我们来看一下RT-DETR的论文标题，它声称“在实时目标检测领域打败YOLO”。尽管从数据的角度来看，RT-DETR似乎确实在某些方面超越了YOLO，但与经过时间考验的YOLO相比，仍有许多需要进一步研究和探索的地方。当然，在当前Transformer技术如此火热的今天，RT-DETR绝对是是一个非常引人注目的方向。接下来，我们将深入探讨RT-DETR。
+与最新的YOLOv8算法相比，RT-DETR在训练时间方面要求更少，大约只需要进行 75 75 75 到 80 80 80 轮训练（而YOLOv8通常需要进行 300 300 300 到 400 400 400 轮训练）。此外，RT-DETR对数据增强的依赖较小。在相同的测试条件下，RT-DETR表现更出色，具有更好的性能和平衡，而且速度也与YOLO相当。
+虽然YOLO检测器在目标检测中表现出色，但它面临一个重要问题，就是需要使用NMS（非极大值抑制）来处理多个重叠的检测框，这会导致速度延迟并且难以进行有效的优化。
+为了克服这个问题，研究人员将目光转向了DETR(DEtection TRansformer)，这是一种基于Transformer架构的端到端目标检测器。与YOLO不同，DETR无需NMS后处理，它可以直接在网络中完成整个目标检测过程。
+然而，虽然DETR在消除NMS的需求方面具有优势，但与YOLO系列检测器相比，它的处理速度明显较慢。这意味着尽管不需要NMS，但在速度方面并没有表现出明显的优势。因此，这个问题促使研究人员寻找一种方法，设计一个实时的端到端目标检测器，以克服NMS对速度的延迟影响。
+由此，百度正式推出了——RT-DETR (Real-Time DEtection TRansformer) ，一种基于 DETR 架构的实时端到端检测器，其在速度和精度上取得了 SOTA 性能。
+每次提到DETR，我们不得不说到NMS，NMS是目标检测领域的一项重要后处理技术，旨在解决检测器生成的存在重叠的多个检测框的问题。该技术的核心包括两个关键超参数：置信度阈值和IoU（交并比）阈值。
+首先，NMS会将置信度低于设定置信度阈值的检测框直接过滤掉，即将那些置信度不高的框排除。接着，对于那些交并比(IoU)大于设定IoU阈值的检测框，NMS会保留其中置信度较高的框，而将置信度较低的框排除。这一过程将不断迭代执行，直到对所有目标类别的检测框都进行了处理。
+NMS算法的执行时间主要受两个因素影响，即预测框的数量和上述两个阈值的设定。为了详细研究这一影响，作者使用了YOLOv5（基于锚点的方法）和YOLOv8（无锚点方法）进行了实验，考察了不同置信度阈值下保留的检测框数量，以及在不同超参数组合下检测器在COCO验证集上的性能和NMS的执行时间。
+实验结果表明，NMS不仅会减慢检测器的推理速度，还需要仔细选择合适的超参数才能实现最佳性能。这一实验结果强调了设计实时端到端目标检测器的重要性，以克服NMS引入的性能瓶颈和不足之处。
+为了验证这一观点，我们利用YOLOv5（基于锚点）和YOLOv8（无锚点）进行实验。我们首先统计在相同输入图像下，通过不同的分数阈值对输出框进行过滤后剩余的预测框数量。我们从0.001到0.25之间随机选择一些分数作为阈值，统计两个检测器的剩余预测框并绘制成直方图，直观地反映了NMS对其超参数的敏感性，如图2所示。
+此外，我们以YOLOv8为例，评估了该模型在COCO val2017数据集上的准确率，并在不同的NMS超参数下测试了NMS操作的执行时间。需要注意的是，我们在实验中采用的NMS后处理操作是指TensorRT efficientNMSPlugin，其中包含多个CUDA内核，包括EfficientNMSFilter、RadixSort、EfficientNMS等，我们只报告EfficientNMS内核的执行时间。我们在T4 GPU上进行速度测试，上述实验中的输入图像和预处理保持一致。我们使用的超参数及相应结果如表1所示。
+1. RT-DETR结构设计 接下来，我们来介绍一下RT-DETR的结构。从结构上来看，RT-DETR可以分为三部分：主干网络、颈部网络以及头部网络。下面分别来说一下这三部分。
+1.1 主干网络 对于 backbone 部分，采用了经典的 ResNet 和可缩放的 HGNetv2 两种，两种 backbone 各训练了两个版本 ，以 HGNetv2 为 backbone 的 RT-DETR 包括 L 和 X 版本，以 ResNet 为 backbone 的 RT-DETR 则包括 RT-DETR-R50 和 RT-DETR-R101 。 RT-DETR-R50 / 101 做主干是方便和现有的DETR变体进行对比，而 RT-DETR-HGNet-L / X 则用来和现有的实时检测器进行对比，值得注意的是，HGNetv2是由百度自家研发的主干结构。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/08b7830bd35d917389dec5656b4613dc/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-10-12T17:53:17+08:00" />
+<meta property="article:modified_time" content="2023-10-12T17:53:17+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">百度 RT-DETR 算法原理解析 | 超越YOLO的目标检测新高度？</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><ul><li><a href="#0__4" rel="nofollow">0. 前言</a></li><li><a href="#1_RTDETR_52" rel="nofollow">1. RT-DETR结构设计</a></li><li><ul><li><a href="#11__58" rel="nofollow">1.1 主干网络</a></li><li><a href="#12__67" rel="nofollow">1.2 颈部网络</a></li><li><a href="#13__111" rel="nofollow">1.3 数据增强和训练策略</a></li></ul> 
+   </li><li><a href="#2_Query_Selection__Decoder_117" rel="nofollow">2. Query Selection 和 Decoder</a></li><li><a href="#3__136" rel="nofollow">3. 实验结果</a></li><li><ul><li><a href="#31__138" rel="nofollow">3.1 设置</a></li><li><a href="#32_SOTA_144" rel="nofollow">3.2 与SOTA的比较</a></li><li><a href="#33__154" rel="nofollow">3.3 关于混合编码器的消融研究</a></li><li><a href="#34_IoU_174" rel="nofollow">3.4 关于IoU感知的查询选择的消融研究</a></li><li><a href="#35__189" rel="nofollow">3.5 关于解码器的消融研究</a></li></ul> 
+   </li><li><a href="#_201" rel="nofollow">总结</a></li><li><a href="#_215" rel="nofollow">参考文献</a></li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<hr> 
+<h3><a id="0__4"></a>0. 前言</h3> 
+<p><img src="https://images2.imgbox.com/58/e3/wKqFfbS5_o.png" alt="在这里插入图片描述"></p> 
+<p>论文地址：<a href="https://arxiv.org/abs/2304.08069" rel="nofollow">https://arxiv.org/abs/2304.08069</a></p> 
+<p>代码地址：<a href="https://github.com/PaddlePaddle/PaddleDetection">https://github.com/PaddlePaddle/PaddleDetection</a></p> 
+<p>中文翻译：<a href="https://blog.csdn.net/weixin_43694096/article/details/131353118">https://blog.csdn.net/weixin_43694096/article/details/131353118</a></p> 
+<hr> 
+<p>这篇博文将介绍百度的<code>RT-DETR</code>，首先让我们来看一下<code>RT-DETR</code>的论文标题，它声称“<strong>在实时目标检测领域打败YOLO</strong>”。尽管从数据的角度来看，<code>RT-DETR</code>似乎确实在某些方面超越了<code>YOLO</code>，但与经过时间考验的<code>YOLO</code>相比，仍有许多需要进一步研究和探索的地方。当然，在当前<code>Transformer</code>技术如此火热的今天，<code>RT-DETR</code>绝对是是一个非常引人注目的方向。接下来，我们将深入探讨<code>RT-DETR</code>。</p> 
+<p><img src="https://images2.imgbox.com/1b/bf/VuC8iZ6p_o.png" alt="在这里插入图片描述"></p> 
+<p>与最新的<code>YOLOv8</code>算法相比，<code>RT-DETR</code>在训练时间方面要求更少，大约只需要进行 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         75 
+        
+       
+      
+        75 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">75</span></span></span></span></span> 到 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         80 
+        
+       
+      
+        80 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">80</span></span></span></span></span> 轮训练（而<code>YOLOv8</code>通常需要进行 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         300 
+        
+       
+      
+        300 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">300</span></span></span></span></span> 到 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         400 
+        
+       
+      
+        400 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">400</span></span></span></span></span> 轮训练）。此外，<code>RT-DETR</code>对数据增强的依赖较小。在相同的测试条件下，<code>RT-DETR</code>表现更出色，具有更好的性能和平衡，而且速度也与<code>YOLO</code>相当。</p> 
+<p>虽然<code>YOLO</code>检测器在目标检测中表现出色，但它面临一个重要问题，就是需要使用<code>NMS</code>（非极大值抑制）来处理多个重叠的检测框，这会导致速度延迟并且难以进行有效的优化。</p> 
+<p>为了克服这个问题，研究人员将目光转向了<code>DETR(DEtection TRansformer)</code>，这是一种基于<code>Transformer</code>架构的端到端目标检测器。与<code>YOLO</code>不同，<code>DETR</code>无需<code>NMS</code>后处理，它可以直接在网络中完成整个目标检测过程。</p> 
+<p>然而，虽然<code>DETR</code>在消除<code>NMS</code>的需求方面具有优势，但与<code>YOLO</code>系列检测器相比，它的处理速度明显较慢。这意味着尽管不需要<code>NMS</code>，但在速度方面并没有表现出明显的优势。因此，这个问题促使研究人员寻找一种方法，设计一个实时的端到端目标检测器，以克服<code>NMS</code>对速度的延迟影响。</p> 
+<p>由此，百度正式推出了——<strong>RT-DETR</strong> (<strong>R</strong>eal-<strong>T</strong>ime <strong>DE</strong>tection <strong>TR</strong>ansformer) ，一种基于 <code>DETR</code> 架构的实时端到端检测器，其在速度和精度上取得了 <code>SOTA</code> 性能。</p> 
+<p>每次提到<code>DETR</code>，我们不得不说到<code>NMS</code>，<code>NMS</code>是目标检测领域的一项重要后处理技术，旨在解决检测器生成的存在重叠的多个检测框的问题。该技术的核心包括两个关键超参数：置信度阈值和<code>IoU</code>（交并比）阈值。</p> 
+<p>首先，<code>NMS</code>会将置信度低于设定置信度阈值的检测框直接过滤掉，即将那些置信度不高的框排除。接着，对于那些交并比<code>(IoU)</code>大于设定<code>IoU</code>阈值的检测框，<code>NMS</code>会保留其中置信度较高的框，而将置信度较低的框排除。这一过程将不断迭代执行，直到对所有目标类别的检测框都进行了处理。</p> 
+<p><code>NMS</code>算法的执行时间主要受两个因素影响，即预测框的数量和上述两个阈值的设定。为了详细研究这一影响，作者使用了<code>YOLOv5</code>（基于锚点的方法）和<code>YOLOv8</code>（无锚点方法）进行了实验，考察了不同置信度阈值下保留的检测框数量，以及在不同超参数组合下检测器在<code>COCO</code>验证集上的性能和<code>NMS</code>的执行时间。</p> 
+<p>实验结果表明，<code>NMS</code>不仅会减慢检测器的推理速度，还需要仔细选择合适的超参数才能实现最佳性能。这一实验结果强调了设计实时端到端目标检测器的重要性，以克服<code>NMS</code>引入的性能瓶颈和不足之处。</p> 
+<blockquote> 
+ <p>为了验证这一观点，我们利用YOLOv5（基于锚点）和YOLOv8（无锚点）进行实验。我们首先统计在相同输入图像下，通过不同的分数阈值对输出框进行过滤后剩余的预测框数量。我们从0.001到0.25之间随机选择一些分数作为阈值，统计两个检测器的剩余预测框并绘制成直方图，直观地反映了NMS对其超参数的敏感性，如图2所示。<br> <img src="https://images2.imgbox.com/03/ff/mdSlEEzO_o.png" alt="在这里插入图片描述"></p> 
+</blockquote> 
+<blockquote> 
+ <p>此外，我们以YOLOv8为例，评估了该模型在COCO val2017数据集上的准确率，并在不同的NMS超参数下测试了NMS操作的执行时间。需要注意的是，我们在实验中采用的NMS后处理操作是指TensorRT efficientNMSPlugin，其中包含多个CUDA内核，包括EfficientNMSFilter、RadixSort、EfficientNMS等，我们只报告EfficientNMS内核的执行时间。我们在T4 GPU上进行速度测试，上述实验中的输入图像和预处理保持一致。我们使用的超参数及相应结果如表1所示。<br> <img src="https://images2.imgbox.com/9d/84/d6AWCwG1_o.png" alt="在这里插入图片描述"></p> 
+</blockquote> 
+<hr> 
+<h3><a id="1_RTDETR_52"></a>1. RT-DETR结构设计</h3> 
+<p><img src="https://images2.imgbox.com/08/ce/YobQAKBp_o.png" alt="在这里插入图片描述"></p> 
+<p>接下来，我们来介绍一下<code>RT-DETR</code>的结构。从结构上来看，<code>RT-DETR</code>可以分为三部分：<strong>主干网络</strong>、<strong>颈部网络</strong>以及<strong>头部网络</strong>。下面分别来说一下这三部分。</p> 
+<h4><a id="11__58"></a>1.1 主干网络</h4> 
+<p><img src="https://images2.imgbox.com/27/a6/qV0xR6BG_o.png" alt="在这里插入图片描述"></p> 
+<p>对于 <code>backbone</code> 部分，采用了经典的 <code>ResNet</code> 和可缩放的<code> HGNetv2</code> 两种，两种<code> backbone</code> 各训练了两个版本 ，以 <code>HGNetv2</code> 为 <code>backbone</code> 的 <code>RT-DETR</code> 包括<code> L</code> 和 <code>X</code> 版本，以<code> ResNet</code> 为 <code>backbone</code> 的<code> RT-DETR</code> 则包括 <code>RT-DETR-R50</code> 和 <code>RT-DETR-R101</code> 。 <code>RT-DETR-R50 / 101</code> 做主干是方便和现有的<code>DETR</code>变体进行对比，而 <code>RT-DETR-HGNet-L / X</code> 则用来和现有的实时检测器进行对比，值得注意的是，<code>HGNetv2</code>是由百度自家研发的主干结构。</p> 
+<p>与<code>YOLO</code>相似的地方在于，<code>RT-DETR</code>最终会输出三种不同尺寸的特征图，它们相对于输入图像的分辨率下采样倍数分别是 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         8 
+        
+       
+      
+        8 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">8</span></span></span></span></span> 倍、<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         16 
+        
+       
+      
+        16 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">16</span></span></span></span></span> 倍和 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         32 
+        
+       
+      
+        32 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">32</span></span></span></span></span> 倍。这与主流的<code>YOLO</code>算法相似。除此之外，在主干结构的其他方面，<code>RT-DETR</code>并没有特别的地方。</p> 
+<h4><a id="12__67"></a>1.2 颈部网络</h4> 
+<p><img src="https://images2.imgbox.com/a1/3f/lruOu0WE_o.png" alt="在这里插入图片描述"></p> 
+<p>对于颈部网络部分，<code>RT-DETR</code> 采用了一层 <code>Transformer</code> 的 <code>Encoder</code> ，文中这个颈部网络叫做 <code>Efficient Hybrid Encoder</code>，其包括两部分：<code>Attention-based Intra-scale Feature Interaction (AIFI)</code> 和 <code>CNN-based Cross-scale Feature-fusion Module (CCFM) </code>，这个<code>AIFI </code>模块有一点值得注意，这个模块只对<code>S5</code>特征图进行处理，</p> 
+<p>对于<code>AIFI</code>模块，它首先将二维的 <code>S5</code> 特征拉成向量，然后交给<code>AIFI</code>模块处理，其数学过程就是多头自注意力与 <code>FFN</code>，随后，再将输出<code>Reshape</code>回二维，记作 <code>F5</code>，以便去完成后续的所谓的“跨尺度特征融合”。</p> 
+<p><img src="https://images2.imgbox.com/1d/f1/2BmI8zQu_o.png" alt="在这里插入图片描述"></p> 
+<p>对于<code>CCFM</code>模块，以<code>YOLO</code>的角度看这个结构的话，这个<code>CCFM</code>模块就是一个<code>FPN/PAN</code>结构。关于<code>CCFM</code>模块中的<code>Fusion</code>文中也给了详细的结构图，是由 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         2 
+        
+       
+      
+        2 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">2</span></span></span></span></span> 个<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         1 
+        
+       
+         × 
+        
+       
+         1 
+        
+       
+      
+        1×1 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7278em; vertical-align: -0.0833em;"></span><span class="mord">1</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">×</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">1</span></span></span></span></span> 卷积和 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         N 
+        
+       
+      
+        N 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.109em;">N</span></span></span></span></span>个 <code>RepBlock</code> 构成的，这里之所以写成 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         N 
+        
+       
+      
+        N 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.109em;">N</span></span></span></span></span> ，我觉得是因为 <code>RT-DETR</code> 可以进行缩放处理，通过调整 <code>CCFM</code>中<code>RepBlock</code> 的数量和 <code>Encoder</code> 的编码维度分别控制 <code>Hybrid Encoder</code> 的深度和宽度，同时对 <code>backbone</code> 进行相应的调整即可实现检测器的缩放。</p> 
+<p><img src="https://images2.imgbox.com/d8/c8/cMsSAiEN_o.png" alt="在这里插入图片描述"></p> 
+<p>之所以<code>RT-DETR</code>的<code>AIFI</code>只处理最后的<code>S5</code>特征，文中解释是出于两点考虑：</p> 
+<ol><li>以前的<code>DETR</code>模型，如<code>Deformable DETR</code>，通常会将来自多个尺度的特征图拉平成一个非常长的向量，这样做可以使不同尺度之间的特征相互交互，但会导致巨大的计算量和计算时间。<code>RT-DETR</code>认为这是当前<code>DETR</code>模型速度较慢的主要原因之一。</li><li><code>RT-DETR</code>认为<code>S5</code>特征相对于较浅的<code>S3</code>和<code>S4</code>特征来说，具有更深、更高级和更丰富的语义特征。这些语义特征对于<code>Transformer</code>模型更加重要，因为它们对于区分不同物体的特征非常有用，而浅层特征由于缺乏良好的语义特征并不是很丰富。</li></ol> 
+<p>综上，<code>RT-DETR </code>的作者团队认为将编码器仅应用于<code>S5</code>特征图，而不是所有尺度的特征图，有助于显著减少计算量和提高计算速度，同时不会对模型的性能造成很明显的损害。</p> 
+<p>关于这个设想，作者也是做了详细的实验，</p> 
+<p><img src="https://images2.imgbox.com/8a/4c/4G9z8Y6W_o.png" alt="在这里插入图片描述"></p> 
+<blockquote> 
+ <p>计算瓶颈分析。为了加快训练收敛速度并改善性能，Zhu等人 [43] 建议引入多尺度特征并提出了可变形注意力机制来减少计算量。然而，尽管注意力机制的改进减少了计算开销，但输入序列的大幅增加仍导致编码器成为计算瓶颈，阻碍了DETR的实时实现。正如[17]中报告的那样，编码器占据了GFLOPs的49%，但仅贡献了Deformable-DETR [43]中11%的AP。为了克服这一障碍，我们分析了多尺度变换器编码器中存在的计算冗余，并设计了一系列变种来证明同时进行内部尺度和跨尺度特征交互在计算上效率低下。</p> 
+ <p>从低级特征中提取出高级特征，这些特征包含了图像中物体的丰富语义信息。直观上讲，在连接多尺度特征上进行特征交互是多余的。为了验证这一观点，我们重新思考了编码器的结构，并设计了一系列具有不同编码器的变种，如图5所示。这些变种逐步提高了模型的准确性，同时通过将多尺度特征交互分解为内部尺度交互和跨尺度融合的两步操作，显著降低了计算成本（详细指标参见表3）。我们首先将DINO-R50 [40]中的多尺度变换器编码器作为基准A进行移除。然后，插入不同形式的编码器，基于基准A产生一系列变种，具体如下所述：</p> 
+ <p>A → B：变体B插入了一个单尺度的Transformer编码器，它使用了一个Transformer块的层。每个尺度的特征共享编码器，进行内部尺度的特征交互，然后将输出的多尺度特征进行连接。<br> B → C：变体C在B的基础上引入了基于尺度的特征融合，将连接的多尺度特征输入编码器进行特征交互。<br> C → D：变体D将多尺度特征的内部尺度交互和跨尺度融合解耦。首先，使用单尺度的Transformer编码器进行内部尺度交互，然后利用类似于PANet [21]的结构进行跨尺度融合。<br> D → E：变体E在D的基础上进一步优化多尺度特征的内部尺度交互和跨尺度融合，采用了我们设计的高效混合编码器。</p> 
+</blockquote> 
+<h4><a id="13__111"></a>1.3 数据增强和训练策略</h4> 
+<p>对于数据增强和训练策略部分，<code>RT-DETR</code>的数据增强采用的是基础的随机颜色抖动、随机翻转、裁剪和 <code>Resize</code> ，并且在验证和推理时图像的输入尺寸统一为 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         640 
+        
+       
+      
+        640 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">640</span></span></span></span></span> ，与 <code>DETR</code> 系列的处理方式有较大的不同，主要是为了满足实时性的要求。<code>RT-DETR</code>的训练策略则是和 <code>DETR</code> 系列基本相同，优化器同样采用 <code>AdamW</code> ，默认在 <code>COCO train2017</code> 上训练 <code>6x </code>，即 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         72 
+        
+       
+      
+        72 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">72</span></span></span></span></span> 个 <code>epoch</code> 。</p> 
+<hr> 
+<h3><a id="2_Query_Selection__Decoder_117"></a>2. Query Selection 和 Decoder</h3> 
+<p>为了进一步提高 <code>RT-DETR</code> 的精度，作者又将目光移向了 <code>DETR</code> 架构的另外两个关键组件：<code>Query Selection</code>和 <code>Decoder</code></p> 
+<p><code>Query Selection</code> 的作用是从 <code>Encoder</code> 输出的特征序列中选择固定数量的特征作为 <code>object queries</code> ，其经过 <code>Decoder</code> 后由预测头映射为置信度和边界框。现有的 <code>DETR</code> 变体都是利用这些特征的分类分数直接选择 <code>Top-K</code> 特征。然而，由于分类分数和 <code>IoU</code> 分数的分布存在不一致，分类得分高的预测框并不一定是和 <code>GT</code> 最接近的框，这导致高分类分数低 <code>IoU</code> 的框会被选中，而低分类分数高 <code>IoU</code> 的框会被丢弃，这将会损害检测器的性能。</p> 
+<p>为解决这一问题，作者提出了 <code>IoU-aware Query Selection</code> ，通过在训练期间约束检测器对高 <code>IoU</code> 的特征产生高分类分数，对低 <code>IoU</code> 的特征产生低分类分数。从而使得模型根据分类分数选择的 <code>Top-K</code> 特征对应的预测框同时具有高分类分数和高 <code>IoU</code> 分数。</p> 
+<p><img src="https://images2.imgbox.com/40/c3/69MghXAK_o.png" alt="在这里插入图片描述"></p> 
+<blockquote> 
+ <p>其中，<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+        
+          y 
+         
+        
+          ˆ 
+         
+        
+       
+         yˆ 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.8889em; vertical-align: -0.1944em;"></span><span class="mord mathnormal" style="margin-right: 0.0359em;">y</span><span class="mord">ˆ</span></span></span></span></span>和<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+        
+          y 
+         
+        
+       
+         y 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em; vertical-align: -0.1944em;"></span><span class="mord mathnormal" style="margin-right: 0.0359em;">y</span></span></span></span></span>分别表示预测和真实值，<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+        
+          y 
+         
+        
+          ˆ 
+         
+        
+       
+         yˆ 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.8889em; vertical-align: -0.1944em;"></span><span class="mord mathnormal" style="margin-right: 0.0359em;">y</span><span class="mord">ˆ</span></span></span></span></span> = {<!-- --><span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+        
+          ˆ 
+         
+        
+          c 
+         
+        
+       
+         ˆc 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord">ˆ</span><span class="mord mathnormal">c</span></span></span></span></span>,<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+        
+          ˆ 
+         
+        
+          b 
+         
+        
+       
+         ˆb 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord">ˆ</span><span class="mord mathnormal">b</span></span></span></span></span>} 和 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+        
+          y 
+         
+        
+          = 
+         
+         
+         
+           c 
+          
+         
+           , 
+          
+         
+           b 
+          
+         
+        
+       
+         y = {c, b} 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em; vertical-align: -0.1944em;"></span><span class="mord mathnormal" style="margin-right: 0.0359em;">y</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.8889em; vertical-align: -0.1944em;"></span><span class="mord"><span class="mord mathnormal">c</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mord mathnormal">b</span></span></span></span></span></span>，<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+        
+          c 
+         
+        
+       
+         c 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.4306em;"></span><span class="mord mathnormal">c</span></span></span></span></span> 和 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+        
+          b 
+         
+        
+       
+         b 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal">b</span></span></span></span></span> 分别表示类别和边界框。我们将 IoU 分数引入到分类分支的目标函数中（类似于VFL），以实现对正样本的分类和定位的一致性约束。<br> 文中通过可视化这些编码器特征的置信度分数以及与 <code>GT</code> 之间的 <code>IoU</code> 分数后发现，<code>IoU-aware Query Selection</code>（蓝色点）明显提高了被选中特征的质量（集中于右上角）。</p> 
+</blockquote> 
+<p>对于 <code>Decoder</code> ，作者并没有对其结构进行调整，论文中说目的是为了方便使用高精度的 <code>DETR</code> 的大检测模型对轻量级 <code>DETR</code> 检测器进行蒸馏。</p> 
+<p><img src="https://images2.imgbox.com/a4/ed/dxP3mJn9_o.png" alt="在这里插入图片描述"></p> 
+<hr> 
+<h3><a id="3__136"></a>3. 实验结果</h3> 
+<h4><a id="31__138"></a>3.1 设置</h4> 
+<p>数据集：我们在<code>Microsoft COCO</code>数据集上进行了大量实验，以验证所提出的检测器。在消融研究中，我们在<code>COCO train2017</code>上进行训练，并在<code>COCO val2017</code>数据集上进行验证。我们使用标准的<code>COCO AP</code>指标，使用单尺度图像作为输入。</p> 
+<p>实现细节：我们使用<code>ResNet</code> 和<code>HGNetv2</code>系列在<code>ImageNet</code> 上进行预训练的模型作为我们的骨干网络，这些模型来自于<code>PaddleClas2</code> 。<code>AIFI</code>包括<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         1 
+        
+       
+      
+        1 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">1</span></span></span></span></span>个<code>Transformer</code>层，<code>CCMF</code>中的融合块默认由<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         3 
+        
+       
+      
+        3 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">3</span></span></span></span></span>个<code>RepBlocks</code>组成。在<code>IoU-aware query selection</code>中，我们选择前 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         300 
+        
+       
+      
+        300 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">300</span></span></span></span></span> 个编码器特征来初始化解码器的物体查询。解码器的训练策略和超参数几乎遵循<code>DINO</code> 的设置。我们使用<code>AdamW</code>优化器进行训练，基本学习率为<code>0.0001</code>，权重衰减为<code>0.0001</code>，全局梯度剪裁范数为<code>0.0001</code>，线性预热步数为<code>2000</code>。骨干网络的学习率设置遵循[4]的方式。我们还使用指数移动平均（EMA），衰减率为<code>0.9999</code>。如果不特别指定，<code>1×</code>配置意味着总共训练<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         12 
+        
+       
+      
+        12 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">12</span></span></span></span></span>个<code>epoch</code>。最终报告的结果使用<code>6×</code>配置。<strong>数据增强包括随机的{颜色扭曲、扩展、裁剪、翻转、调整大小}操作</strong>，参考了[36]的设置。</p> 
+<h4><a id="32_SOTA_144"></a>3.2 与SOTA的比较</h4> 
+<p><img src="https://images2.imgbox.com/90/a3/tbSxxi4o_o.png" alt="在这里插入图片描述"></p> 
+<p>表2将我们提出的<code>RT-DETR</code>与其他实时端到端目标检测器进行了比较。我们提出的<code>RT-DETR-L</code>实现了<code>53.0%</code>的<code>AP</code>和<code>114帧/秒</code>，而<code>RT-DETR-X</code>实现了<code>54.8%</code>的<code>AP</code>和<code>74帧/秒</code>，在速度和准确性方面都优于同等规模的YOLO检测器。此外，我们提出的<code>RT-DETR-R50</code>实现了<code>53.1%</code>的<code>AP</code>和<code>108帧/秒</code>，而<code>RT-DETR-R101</code>实现了<code>54.3%</code>的<code>AP</code>和<code>74帧/秒</code>，在速度和准确性方面都优于同等主干网络的最先进端到端检测器。</p> 
+<p>与实时检测器相比。为了公平比较，在端到端设置中（速度测试方法参见第3.2节），我们将缩放的<code>RT-DETR</code>的速度和准确性与当前的实时检测器进行比较。在表2中，我们将缩放的<code>RT-DETR</code>与<code>YOLOv5 [10]、PP-YOLOE [36]、YOLOv6v3.0 [14]、YOLOv7 [33]和YOLOv8 [11]</code>进行了比较。与<code>YOLOv5-L / PP-YOLOE-L / YOLOv7-L</code>相比，<code>RT-DETR-L</code>显著提高了准确性，提高了<code>4.0% / 1.6% / 1.8%的AP</code>，增加了<code>111.1% / 21.3% / 107.3%</code>的<code>FPS</code>，并减少了<code>30.4% / 38.5% / 11.1%</code>的参数数量。与<code>YOLOv5-X / PP-YOLOE-X / YOLOv7-X</code>相比，<code>RT-DETR-X</code>提高了<code>4.1% / 2.5% / 1.9%</code>的准确性，增加了<code>72.1% / 23.3% / 64.4%</code>的<code>FPS</code>，并减少了<code>22.1% / 31.6% / 5.6%</code>的参数数量。与<code>YOLOv6-L / YOLOv8-L</code>相比，<code>RT-DETR-L</code>在准确性上提高了<code>0.2% / 0.1%</code>的<code>AP</code>，速度提高了<code>15.2% / 60.6%</code>，参数数量减少了<code>45.8% / 25.6%</code>。与<code>YOLOv8-X</code>相比，<code>RT-DETR-X</code>在准确性上提高了<code>0.9%</code>的<code>AP</code>，速度提高了<code>48.0%</code>的<code>FPS</code>，并减少了<code>1.5%</code>的参数数量。</p> 
+<p>与端到端检测器相比。表2显示，<code>RT-DETR</code>在所有使用相同主干网络的端到端检测器中实现了最先进的性能。与<code>DINO-Deformable-DETR-R50 [40]</code>相比，<code>RT-DETR-R50</code>显著提高了准确性，提高了<code>2.2%</code>的<code>AP（53.1% AP对比50.9% AP）</code>，速度提高了<code>21</code>倍<code>（108 FPS对比5 FPS）</code>，并减少了<code>10.6%</code>的参数数量。与<code>SMCA-DETR-R101 [6]</code>相比，<code>RT-DETR-R101</code>显著提高了<code>8.0%</code>的<code>AP</code>准确性。</p> 
+<h4><a id="33__154"></a>3.3 关于混合编码器的消融研究</h4> 
+<p><img src="https://images2.imgbox.com/e8/26/JKceQ93M_o.png" alt="在这里插入图片描述"></p> 
+<p>表3：将多尺度特征融合拆分为内尺度交互和跨尺度融合的两步操作的分析实验结果。</p> 
+<hr> 
+<p>为了验证我们关于编码器的分析的正确性以及提出的混合编码器的有效性，我们评估了在 <code>T4 ``GPU</code>上设计的一组变体的指标，包括<code>AP</code>、参数数量和延迟。实验结果如表3所示。</p> 
+<p><code>B</code>变体相比<code>A</code>变体提高了<code>1.9%</code>的<code>AP</code>，同时参数数量增加了<code>3%</code>，延迟增加了<code>54%</code>。这证明了尺度内特征交互的重要性，但原始的<code>Transformer</code>编码器的计算代价很高。</p> 
+<p><code>C</code>变体相比<code>B</code>变体提高了<code>0.7%</code>的<code>AP</code>，参数数量保持不变，但延迟增加了<code>20%</code>。这表明跨尺度特征融合也是必要的。</p> 
+<p><code>D</code>变体相比<code>C</code>变体提高了<code>0.8%</code>的<code>AP</code>，参数数量增加了<code>9%</code>，但延迟减少了<code>8%</code>。这表明解耦尺度内交互和跨尺度融合可以在提高准确性的同时减少计算量。</p> 
+<p>与原始的<code>D</code>变体相比，<code>DS5</code>减少了<code>35%</code>的延迟，同时提高了<code>0.4%</code>的<code>AP</code>。这证明了较低级别特征的尺度内交互是不必要的。</p> 
+<p>最后，我们提出的混合编码器所配备的E变体相比D变体提高了<code>1.5%</code>的<code>AP</code>。尽管参数数量增加了<code>20%</code>，但延迟减少了<code>24%</code>，使编码器在计算上更高效。</p> 
+<h4><a id="34_IoU_174"></a>3.4 关于IoU感知的查询选择的消融研究</h4> 
+<p>我们对<code>IoU</code>感知的查询选择进行了割除研究，并在4中展示了定量实验结果。我们采用的查询选择根据分类得分选择前<code>K</code>个（<code>K = 300</code>）编码器特征作为内容查询，并将对应的边界框作为初始位置查询。我们比较了两种查询选择在<code>val2017</code>上选择的编码器特征，并计算了分类得分大于<code>0.5</code>和同时得分大于<code>0.5</code>的比例，分别对应于<code>“Propcls”</code>和<code>“Propboth”</code>列。结果表明，通过<code>IoU</code>感知的查询选择所选择的编码器特征不仅增加了高分类得分的比例（<code>0.82%</code>对比<code>0.35%</code>），而且提供了更多具有高分类得分和高<code>IoU</code>得分的特征（<code>0.67%</code>对比<code>0.30%</code>）。我们还在<code>val2017</code>上评估了使用两种类型的查询选择训练的检测器的准确性，其中<code>IoU</code>感知的查询选择实现了<code>0.8%</code>的<code>AP</code>改进（<code>48.7% AP</code>对比<code>47.9% AP</code>）。</p> 
+<hr> 
+<p><img src="https://images2.imgbox.com/f8/38/EFsT2nok_o.png" alt="在这里插入图片描述"></p> 
+<p>表4：<code>IoU</code>感知查询选择消融研究结果。<code>Propcls</code>和<code>Propboth</code>分别表示分类得分大于<code>0.5</code>和两个得分都大于<code>0.5</code>的比例。</p> 
+<hr> 
+<h4><a id="35__189"></a>3.5 关于解码器的消融研究</h4> 
+<p><img src="https://images2.imgbox.com/b4/f0/q9yHbmWg_o.png" alt="在这里插入图片描述"></p> 
+<p>表5：解码器的消融研究结果。<code>ID</code>表示解码器层的索引，<code>AP</code>表示不同解码器层所获得的模型准确性。<code>Detk</code>表示具有<code>k</code>个解码器层的检测器。结果基于使用<code>6×</code>调度设置的<code>RT-DETR-R50</code>报告。</p> 
+<hr> 
+<p>表5显示了<code>RT-DETR</code>在不同解码器层数下的准确性和速度。当解码器层数为6时，检测器实现了最佳的<code>53.1% AP</code>准确性。我们还分析了每个解码器层对推理速度的影响，并得出结论每个解码器层的消耗约为<code>0.5</code>毫秒。此外，我们发现解码器相邻层之间的准确性差异随着解码器层索引的增加逐渐减小。以<code>6</code>层解码器为例，仅使用<code>5</code>层进行推理在准确性上仅损失<code>0.1% AP</code>（<code>53.1% AP</code>对比<code>53.0% AP</code>），同时将延迟降低了<code>0.5</code>毫秒（<code>9.3</code>毫秒对比<code>8.8</code>毫秒）。因此，<code>RT-DETR</code>通过使用不同的解码器层支持推理速度的灵活调整，无需重新训练推理，从而便于实时检测器的实际应用。</p> 
+<hr> 
+<h3><a id="_201"></a>总结</h3> 
+<p>在这篇博客中，我们只是轻触了 <code>RT-DETR</code> 的表面，讨论了其核心原理和潜在应用，更多的细节还是要通过代码去挖掘~</p> 
+<p>感谢阅读本文，我是迪菲赫尔曼，如果您觉得有所收获，请点赞和关注，获取有关深度学习和计算机视觉的更多更新。如果您有任何问题或建议，请随时留言，让我们一起探索深度学习的奇妙世界。</p> 
+<p>如果您对改进 YOLO 有兴趣，欢迎关注我的专栏 ！</p> 
+<p><a href="https://blog.csdn.net/weixin_43694096/category_12261956.html?spm=1001.2014.3001.5482">《YOLOv8改进实战》</a></p> 
+<hr> 
+<h3><a id="_215"></a>参考文献</h3> 
+<p><a href="https://mp.weixin.qq.com/s/o03QM2rZNjHVto36gcV0Yw" rel="nofollow">超越YOLOv8，飞桨推出精度最高的实时检测器RT-DETR！</a></p> 
+<p><a href="https://zhuanlan.zhihu.com/p/626659049" rel="nofollow">《目标检测》-第33章-浅析RT-DETR</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/0249f5d3c6a92139fe0a5a3ae6954c16/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">ubuntu mmdetection配置</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/0c51c4cec939fd6e372a9a741ddb2b1b/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">java agent部署到tomcat上</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

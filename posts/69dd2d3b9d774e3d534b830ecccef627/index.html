@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>FreeRTOS学习笔记（5、定时器、中断管理、调试与优化） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="FreeRTOS学习笔记（5、定时器、中断管理、调试与优化）" />
+<meta property="og:description" content="FreeRTOS学习笔记（5、定时器、中断管理、调试与优化） 前言往期学习笔记链接学习工程定时器定时器的三要素守护任务定时器的状态定时器的基本使用1、创建定时器并书写中断回调函数2、开启定时器 定时器消除抖动普通的外部中断定时器防抖 中断管理两套API函数的区别xHigherPriorityTaskWoken 参数使用`portEND_SWITCHING_ISR` 宏来切换任务定时器在ISR中的使用 资源管理如何访问临界资源1、任务访问临界资源2、任务和中断访问临界资源 禁止任务调度如何屏蔽中断 调试和优化调试1、打印（printf）2、断言3、Trace4、回调函数 HookMalloc Hook函数栈溢出Hook函数 优化栈的使用情况 CPU的运行时间获取任务统计信息、CPU的占用率等1、开启定时器中断2、配置宏3、获取任务统计信息 or CPU占用率 前言 这是第五弹，由于CSDN长度的限制，所以把FreeRTOS学习分为几部分来发，这是第五部分
+主要包括定时器、中断管理、调试和优化等
+往期学习笔记链接 第一弹：FreeRTOS学习笔记（1、FreeRTOS初识、任务的创建以及任务状态理论、调度算法等）
+第二弹: FreeRTOS学习笔记（2、同步与互斥通信、队列、队列集的使用）
+第三弹: FreeRTOS学习笔记（3、信号量、互斥量的使用）
+第四弹: FreeRTOS学习笔记（4、事件组、任务通知）
+第五弹: FreeRTOS学习笔记（5、定时器、中断管理、调试与优化）
+学习工程 所有学习工程
+oufen / FreeRTOS学习
+都在我的Gitee工程当中，大家可以参考学习
+定时器 闹钟什么时候响，闹钟响了之后要做什么事情，这个闹钟是一次性的还是周期性的
+定时器的三要素 超时时间(定时器周期)回调函数单次触发还是周期性的触发 守护任务 守护任务的作用 处理命令，从命令队列中取出命令、处理执行定时器的回调函数 能否及时执行定时器中断回调函数，严重依赖于守护任务的优先级
+创建定时器后，然后启动定时器
+启动定时器，实质上是向队列中写入命令数据，第二个参数就是等待时间，如果队列满的话，就无法写入队列，阻塞等待
+启动定时器时，会记录启动定时器的当前tick,此时的tick是初始时间，当定时器过了定时时间后，即当前时间tick&gt;=初始tick&#43;定时时间时，就会触发Timer
+对于一次性的定时器，将会触发一次
+对于周期性的定时器，将会周期性的触发
+定时器回调函数应该尽快执行完，如果执行时间过长，将会阻碍其他定时器函数的执行
+在定时器中断回调函数中不要使用delay,不能进入阻塞状态
+可以调用在任务中使用的函数，但是等待事件要设置为0，即刻返回，不可以阻塞
+否则将会影响其他任务的执行，一直堵塞在定时器中断回调函数中
+触发指的是回调函数被调用，被谁调用呢？
+tick中断中去调用回调函数 （在Linux中调用）在FreeRTOS中，只能在某个任务中执行 tick中断，每定时1次，就会判断一下，有没有超时的定时器，如果有的话将会唤醒这个任务，调用回调函数，这个任务被称为守护任务
+守护任务的函数
+当tick中断把守护任务唤醒之后，如果他的优先级比较高的话，最高的话就可以执行定时器的回调函数
+如果优先级比较低，就会被更高优先级任务抢占，那么定时器中断回调函数就无法执行，从而阻塞
+守护任务的三个宏定义，一旦使用定时器就需要定义这三个宏，分别表示守护任务的优先级、队列长度、任务分配栈的大小
+守护任务执行Timer回调函数，如果其他任务想要设置Timer，只能通过队列发消息给守护任务（比如启动定时器）
+用户使用定时器时，实质都是把某些命令都发送到定时器命令队列里
+把数据存入队列，对方任务就会被唤醒，就会从队列里取出命令，从而修改定时器的值
+写入队列，都会有等待时间
+定时器的状态 定时器中有两个状态
+Dormant状态 （休眠状态）Running状态 （运行状态） 当创建定时器时，这个定时器处于Dormant状态，定时器并未运行，我们可以修改定时器的，启动/复位/修改周期" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/69dd2d3b9d774e3d534b830ecccef627/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-08-28T15:30:11+08:00" />
+<meta property="article:modified_time" content="2023-08-28T15:30:11+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">FreeRTOS学习笔记（5、定时器、中断管理、调试与优化）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atelier-sulphurpool-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>FreeRTOS学习笔记（5、定时器、中断管理、调试与优化）</h4> 
+ <ul><li><ul><li><a href="#_1" rel="nofollow">前言</a></li><li><a href="#_7" rel="nofollow">往期学习笔记链接</a></li><li><a href="#_15" rel="nofollow">学习工程</a></li><li><a href="#_19" rel="nofollow">定时器</a></li><li><ul><li><a href="#_23" rel="nofollow">定时器的三要素</a></li><li><a href="#_30" rel="nofollow">守护任务</a></li><li><a href="#_89" rel="nofollow">定时器的状态</a></li><li><a href="#_108" rel="nofollow">定时器的基本使用</a></li><li><ul><li><a href="#1_110" rel="nofollow">1、创建定时器并书写中断回调函数</a></li><li><a href="#2_126" rel="nofollow">2、开启定时器</a></li></ul> 
+    </li><li><a href="#_149" rel="nofollow">定时器消除抖动</a></li><li><ul><li><a href="#_155" rel="nofollow">普通的外部中断</a></li><li><a href="#_160" rel="nofollow">定时器防抖</a></li></ul> 
+   </li></ul> 
+   </li><li><a href="#_173" rel="nofollow">中断管理</a></li><li><ul><li><a href="#API_233" rel="nofollow">两套API函数的区别</a></li><li><a href="#xHigherPriorityTaskWoken__238" rel="nofollow">xHigherPriorityTaskWoken 参数</a></li><li><a href="#portEND_SWITCHING_ISR__252" rel="nofollow">使用`portEND_SWITCHING_ISR` 宏来切换任务</a></li><li><a href="#ISR_256" rel="nofollow">定时器在ISR中的使用</a></li></ul> 
+   </li><li><a href="#_268" rel="nofollow">资源管理</a></li><li><ul><li><a href="#_273" rel="nofollow">如何访问临界资源</a></li><li><ul><li><a href="#1_277" rel="nofollow">1、任务访问临界资源</a></li><li><a href="#2_284" rel="nofollow">2、任务和中断访问临界资源</a></li></ul> 
+    </li><li><a href="#_294" rel="nofollow">禁止任务调度</a></li><li><a href="#_302" rel="nofollow">如何屏蔽中断</a></li></ul> 
+   </li><li><a href="#_331" rel="nofollow">调试和优化</a></li><li><ul><li><a href="#_333" rel="nofollow">调试</a></li><li><ul><li><a href="#1printf_342" rel="nofollow">1、打印（printf）</a></li><li><a href="#2_355" rel="nofollow">2、断言</a></li><li><a href="#3Trace_389" rel="nofollow">3、Trace</a></li><li><a href="#4__Hook_398" rel="nofollow">4、回调函数 Hook</a></li><li><ul><li><a href="#Malloc_Hook_405" rel="nofollow">Malloc Hook函数</a></li><li><a href="#Hook_423" rel="nofollow">栈溢出Hook函数</a></li></ul> 
+    </li></ul> 
+    </li><li><a href="#_457" rel="nofollow">优化</a></li><li><ul><li><a href="#_465" rel="nofollow">栈的使用情况</a></li></ul> 
+    </li><li><a href="#_473" rel="nofollow"></a></li><li><ul><li><a href="#CPU_487" rel="nofollow">CPU的运行时间</a></li><li><a href="#CPU_501" rel="nofollow">获取任务统计信息、CPU的占用率等</a></li><li><ul><li><a href="#1_506" rel="nofollow">1、开启定时器中断</a></li><li><a href="#2_516" rel="nofollow">2、配置宏</a></li><li><a href="#3_or_CPU_536" rel="nofollow">3、获取任务统计信息 or CPU占用率</a></li></ul> 
+    </li></ul> 
+   </li></ul> 
+  </li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h3><a id="_1"></a>前言</h3> 
+<blockquote> 
+ <p>这是第五弹，由于CSDN长度的限制，所以把FreeRTOS学习分为几部分来发，这是第五部分<br> <br><br> 主要包括<code>定时器、中断管理、调试和优化</code>等</p> 
+</blockquote> 
+<h3><a id="_7"></a>往期学习笔记链接</h3> 
+<blockquote> 
+ <p><code>第一弹</code>：<a href="https://blog.csdn.net/cyaya6/article/details/132482017?spm=1001.2014.3001.5501">FreeRTOS学习笔记（1、FreeRTOS初识、任务的创建以及任务状态理论、调度算法等）</a><br> <code>第二弹</code>: <a href="https://blog.csdn.net/cyaya6/article/details/132507836?spm=1001.2014.3001.5501">FreeRTOS学习笔记（2、同步与互斥通信、队列、队列集的使用）</a><br> <code>第三弹</code>: <a href="https://blog.csdn.net/cyaya6/article/details/132507946?spm=1001.2014.3001.5501">FreeRTOS学习笔记（3、信号量、互斥量的使用）</a><br> <code>第四弹</code>: <a href="https://blog.csdn.net/cyaya6/article/details/132515584?spm=1001.2014.3001.5501">FreeRTOS学习笔记（4、事件组、任务通知）</a><br> <code>第五弹</code>: <a href="https://blog.csdn.net/cyaya6/article/details/132539520?spm=1001.2014.3001.5501">FreeRTOS学习笔记（5、定时器、中断管理、调试与优化）</a></p> 
+</blockquote> 
+<h3><a id="_15"></a>学习工程</h3> 
+<blockquote> 
+ <p><code>所有学习工程</code><br> <a href="https://gitee.com/cyaya6/free-rtos-learning" rel="nofollow">oufen / FreeRTOS学习</a><br> <code>都在我的Gitee工程当中，大家可以参考学习</code></p> 
+</blockquote> 
+<h3><a id="_19"></a>定时器</h3> 
+<p>闹钟什么时候响，闹钟响了之后要做什么事情，这个闹钟是一次性的还是周期性的</p> 
+<h4><a id="_23"></a>定时器的三要素</h4> 
+<ul><li>超时时间(定时器周期)</li><li>回调函数</li><li>单次触发还是周期性的触发</li></ul> 
+<h4><a id="_30"></a>守护任务</h4> 
+<ul><li>守护任务的作用 
+  <ul><li>处理命令，从命令队列中取出命令、处理</li><li>执行定时器的回调函数</li></ul> </li></ul> 
+<blockquote> 
+ <p>能否及时执行定时器中断回调函数，严重依赖于守护任务的优先级</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/ce/84/1QuE4lHW_o.png" alt="image.png"><br> <img src="https://images2.imgbox.com/1a/5c/Dw6hXPM3_o.png" alt="image.png"></p> 
+<p>创建定时器后，然后启动定时器</p> 
+<p>启动定时器，实质上是向队列中写入命令数据，第二个参数就是等待时间，如果队列满的话，就无法写入队列，阻塞等待</p> 
+<p><img src="https://images2.imgbox.com/51/39/RKdqDhbP_o.png" alt="image.png"></p> 
+<p>启动定时器时，会记录启动定时器的当前tick,此时的tick是初始时间，当定时器过了定时时间后，即当前时间tick&gt;=初始tick+定时时间时，就会触发Timer</p> 
+<p>对于一次性的定时器，将会触发一次<br> 对于周期性的定时器，将会周期性的触发</p> 
+<blockquote> 
+ <p>定时器回调函数应该尽快执行完，如果执行时间过长，将会阻碍其他定时器函数的执行</p> 
+ <p>在定时器中断回调函数中不要使用delay,不能进入阻塞状态</p> 
+ <p>可以调用在任务中使用的函数，但是等待事件要设置为0，即刻返回，不可以阻塞<br> 否则将会影响其他任务的执行，一直堵塞在定时器中断回调函数中</p> 
+</blockquote> 
+<p>触发指的是回调函数被调用，被谁调用呢？</p> 
+<ul><li>tick中断中去调用回调函数 （在Linux中调用）</li><li>在FreeRTOS中，只能在某个任务中执行</li></ul> 
+<blockquote> 
+ <p>tick中断，每定时1次，就会判断一下，有没有超时的定时器，如果有的话将会唤醒这个任务，调用回调函数，这个任务被称为守护任务</p> 
+</blockquote> 
+<p>守护任务的函数<br> <img src="https://images2.imgbox.com/4e/18/RxPaIsvM_o.png" alt="image.png"></p> 
+<p><img src="https://images2.imgbox.com/30/da/OWOdY9b0_o.png" alt="image.png"></p> 
+<p><strong>当tick中断把守护任务唤醒之后，如果他的优先级比较高的话，最高的话就可以执行定时器的回调函数</strong><br> <strong>如果优先级比较低，就会被更高优先级任务抢占，那么定时器中断回调函数就无法执行，从而阻塞</strong></p> 
+<blockquote> 
+ <p>守护任务的三个宏定义，一旦使用定时器就需要定义这三个宏，分别表示守护任务的优先级、队列长度、任务分配栈的大小</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/fc/fe/xt7LX5TM_o.png" alt="image.png"></p> 
+<p>守护任务执行Timer回调函数，如果其他任务想要设置Timer，只能通过队列发消息给守护任务（比如启动定时器）</p> 
+<p><img src="https://images2.imgbox.com/16/02/15ICs8P4_o.png" alt="image.png"></p> 
+<p>用户使用定时器时，实质都是把某些命令都发送到定时器命令队列里<br> 把数据存入队列，对方任务就会被唤醒，就会从队列里取出命令，从而修改定时器的值</p> 
+<p>写入队列，都会有等待时间</p> 
+<h4><a id="_89"></a>定时器的状态</h4> 
+<p>定时器中有两个状态</p> 
+<ul><li>Dormant状态 （休眠状态）</li><li>Running状态 （运行状态）</li></ul> 
+<p><img src="https://images2.imgbox.com/54/20/4EnNNApA_o.png" alt="image.png"></p> 
+<p>当<code>创建定时器</code>时，这个<code>定时器处于Dormant状态</code>，定时器并未运行，我们可以修改定时器的，启动/复位/修改周期<br> 然后<code>从Dormant状态变为Running状态</code>，这个状态在等待定时时间到，时间到了之后函数将会被调用</p> 
+<p>一次性定时器和周期性定时器不同的在于<br> <code>周期性定时器被调用后，仍然处于运行状态，会等待下一个超时时间</code><br> 对于<code>一次性定时器，执行一次后，就不再等待，从Running状态变为Dormant状态</code></p> 
+<p><code>从Running状态进入Dormant状态</code>还可以<code>通过xTimerStop()，停止定时器</code></p> 
+<h4><a id="_108"></a>定时器的基本使用</h4> 
+<h5><a id="1_110"></a>1、创建定时器并书写中断回调函数</h5> 
+<p>创建定时器时需要定义相关宏，这是关于守护任务的相关宏<br> <img src="https://images2.imgbox.com/da/65/xtW5JtMc_o.png" alt="image.png"><br> <img src="https://images2.imgbox.com/9f/85/rT7AUjBg_o.png" alt="image.png"></p> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">configUSE_TIMERS</span> 					<span class="token expression"><span class="token number">1</span> 					  </span><span class="token comment">/*定时器相关宏*/</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">configTIMER_TASK_PRIORITY</span> 			<span class="token expression">configMAX_PRIORITIES </span><span class="token comment">/*守护任务优先级 设置成最大*/</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">configTIMER_QUEUE_LENGTH</span>    		<span class="token expression"><span class="token number">10</span>					</span><span class="token comment">/*守护任务队列的长度*/</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">configTIMER_TASK_STACK_DEPTH</span>        <span class="token expression"><span class="token number">100</span>				   </span><span class="token comment">/*守护任务队列的栈大小*/</span></span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/31/32/tzGnXE0B_o.png" alt="image.png"><br> <img src="https://images2.imgbox.com/1f/df/dH1m5Jjo_o.png" alt="image.png"></p> 
+<h5><a id="2_126"></a>2、开启定时器</h5> 
+<p><img src="https://images2.imgbox.com/01/1e/5fPcGG6z_o.png" alt="image.png"></p> 
+<p>定时100ms，打印一次数据<br> <img src="https://images2.imgbox.com/35/74/3aQ5k8Ka_o.png" alt="image.png"><br> 可以看到定时器中断回调函数打断了task1的执行<br> 守护任务调用的定时器中断回调函数，优先级最高<br> <img src="https://images2.imgbox.com/f2/df/1spnaO2b_o.png" alt="image.png"></p> 
+<p>如果修改守护任务的优先级，设置成比task1低<br> <img src="https://images2.imgbox.com/14/da/drwVTezl_o.png" alt="image.png"><br> <img src="https://images2.imgbox.com/d4/ed/xeaEjFXv_o.png" alt="image.png"><br> 可以看到守护任务调用中断回调函数并没有抢占task1<br> <img src="https://images2.imgbox.com/16/d8/rdw3v02Z_o.png" alt="image.png"><br> <img src="https://images2.imgbox.com/c1/22/Stgfjjas_o.png" alt="image.png"></p> 
+<blockquote> 
+ <p>任务的优先级最多只能达到最大值-1，不能达到最大值</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/81/cf/9a7CZ7zZ_o.png" alt="image.png"></p> 
+<p>定时器的函数，实际上是在另外一个task中运行的，这个task也要有优先级，如果优先级比其他task低，那么守护任务调用回调函数，就无法进入中断，打断其他task的执行</p> 
+<h4><a id="_149"></a>定时器消除抖动</h4> 
+<p>按下按键之后，有可能会产生多次震动，再抖动过程中可能会产生中断，从而进入中断多次</p> 
+<p>我们需要消除这些抖动</p> 
+<h5><a id="_155"></a>普通的外部中断</h5> 
+<p><img src="https://images2.imgbox.com/a6/ee/Rg9kyWIH_o.png" alt="image.png"></p> 
+<h5><a id="_160"></a>定时器防抖</h5> 
+<p><img src="https://images2.imgbox.com/0d/2c/ObvC8qmq_o.png" alt="image.png"></p> 
+<p>可以看出，按键被触发多次，但是回调函数获取里只获得了一次<br> 外部中断处理按键思路，当按键被按下，会产生下降沿或者上升沿，这个时候就会触发中断，在中断服务函数里再次判断按键状态，这个时候才读取按键的值</p> 
+<p>定时器处理按键消抖，当按键被按下，进入外部中断服务处理函数，然后复位定时器，等待一段定时器周期，然后进入定时器中断回调函数，进行处理按键值,这个时候按键的键值将会是正确的<br> <img src="https://images2.imgbox.com/6c/d7/pyYcZn7E_o.png" alt="image.png"></p> 
+<p><img src="https://images2.imgbox.com/18/a9/ptAveOqX_o.png" alt="image.png"></p> 
+<h3><a id="_173"></a>中断管理</h3> 
+<p>当用户按下按键时，触发了按键中断，这个时候中断的处理流程是</p> 
+<ul><li>CPU跳到固定地址去执行代码，这个固定地址称为中断向量，这个跳转是硬件实现的</li><li>执行代码做啥子 
+  <ul><li>保存现场，task1被打断，需要先保存task1的运行环境，比如各类寄存器的值</li><li>分辨中断，调用中断处理函数（ISR interrupt service routine）</li><li>恢复现场，继续运行task1,或者运行其他优先级更高的任务</li></ul> </li></ul> 
+<p><img src="https://images2.imgbox.com/f8/16/p9NtdVjT_o.png" alt="image.png"></p> 
+<p>如果中断非常耗时，对于中断的处理就要分为两部分</p> 
+<ul><li>ISR:尽快做些清理、记录的工作，然后触发某个任务</li><li>任务：更复杂的事情放在任务中处理</li></ul> 
+<p><img src="https://images2.imgbox.com/47/49/Y7kl8IpI_o.png" alt="image.png"><br> ISR的优先级高于任务，如果不高于任务的话，就无法打断任务，进入中断</p> 
+<p>就拿队列来说明，使用普通的函数和使用中断<br> <img src="https://images2.imgbox.com/50/20/TyELTW2K_o.png" alt="image.png"></p> 
+<p>1、阻塞，当队列满后，ISR不能阻塞，会立马返回一个err<br> 在任务中使用队列的话，写队列，当队列满后可以阻塞等待</p> 
+<blockquote> 
+ <p>但是在ISR中写队列，即使队列满了也不能写队列，因为一旦阻塞，中断就阻塞</p> 
+</blockquote> 
+<p>中断一旦阻塞，其他任务就不能运行</p> 
+<p>2、写队列时，队列满，ISR立马返回，不会阻塞<br> 队列满时<br> 在任务中，可以决定是否立马返回(返回err)，还是决定阻塞等待(把任务放到等待链表中并且阻塞等待)，阻塞的话将会发起任务调度，让其他task运行</p> 
+<blockquote> 
+ <p>在ISR中，立马返回，不会阻塞</p> 
+</blockquote> 
+<p>3、两者参数不一样</p> 
+<p>4、写队列时，唤醒等待任务<br> 写队列时<br> 在任务中写队列，会把等待任务的队列唤醒（把等待任务的等待链表的task移到就绪链表task中去，从阻塞态变为就绪态），如果被唤醒任务的优先级更高的话，将会发起调度</p> 
+<blockquote> 
+ <p>在ISR中，会唤醒，但是不会调度，但是会记录下来，是否需要发起调度</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/ac/0b/PAaI7iNS_o.png" alt="image.png"></p> 
+<blockquote> 
+ <p>FreeRTOS中很多API函数都有两套：一套在任务中使用，另一套在ISR中使用。后者的函数名含有"FromISR"后缀。</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/1a/83/RQBLWynq_o.png" alt="image.png"></p> 
+<p><img src="https://images2.imgbox.com/c7/45/IJV4hMOE_o.png" alt="image.png"></p> 
+<h4><a id="API_233"></a>两套API函数的区别</h4> 
+<p><img src="https://images2.imgbox.com/1d/cd/BCChGw3R_o.png" alt="image.png"><br> <img src="https://images2.imgbox.com/eb/42/9jL0ZLN0_o.png" alt="image.png"></p> 
+<h4><a id="xHigherPriorityTaskWoken__238"></a>xHigherPriorityTaskWoken 参数</h4> 
+<p><img src="https://images2.imgbox.com/89/4d/fbQhTkmO_o.png" alt="image.png"></p> 
+<p>ISR和普通的在任务调用函数不一样，以队列为例，写队列时，队列满了会发生阻塞，当向队列中写入数据时，会唤醒等待任务，其他高优先级的任务将会抢占执行<br> 但是在ISR中，并不会阻塞，但是会唤醒等待任务，是否执行决定于<code>xHigherPriorityTaskWoken</code>参数</p> 
+<p><code>xHigherPriorityTaskWoken</code>初始值为pdFALSE,当ISR中调用函数，唤醒等待任务后，判断<code>xHigherPriorityTaskWoken</code>,如果为pdTRUE的话，就开启任务调度</p> 
+<p><img src="https://images2.imgbox.com/65/a8/tcS4qkIF_o.png" alt="image.png"></p> 
+<p>多次调用ISR函数，但是我们只在最后决定是否任务切换<br> <img src="https://images2.imgbox.com/f5/a5/iKdklFB5_o.png" alt="image.png"></p> 
+<h4><a id="portEND_SWITCHING_ISR__252"></a>使用<code>portEND_SWITCHING_ISR</code> 宏来切换任务</h4> 
+<p><img src="https://images2.imgbox.com/43/b5/Ty2aDp32_o.png" alt="image.png"></p> 
+<h4><a id="ISR_256"></a>定时器在ISR中的使用</h4> 
+<p>在ISR中复位定时器，本质即是向队列发数据</p> 
+<p>ISR中使用ISR函数，并不会进入阻塞状态<br> <img src="https://images2.imgbox.com/c2/e4/XiC3rHLG_o.png" alt="image.png"><br> <img src="https://images2.imgbox.com/6d/0e/Zqh0ouzJ_o.png" alt="image.png"></p> 
+<p>可以看到，在中断中使用ISR函数实现了按键的消抖<br> <img src="https://images2.imgbox.com/df/ee/963gZO7n_o.png" alt="image.png"></p> 
+<h3><a id="_268"></a>资源管理</h3> 
+<p>在多个任务去访问，队列、信号量、互斥量、事件组、任务通知时，每个任务在运行时都不能有其他任务的干扰<br> 只能互斥的（独占的）运行访问</p> 
+<h4><a id="_273"></a>如何访问临界资源</h4> 
+<p>临界资源，只能由一个任务互斥的使用的资源，就叫做临界资源</p> 
+<h5><a id="1_277"></a>1、任务访问临界资源</h5> 
+<p>比如有两个任务都去获取这个临界资源,那么访问临界资源前，首先禁止任务调度</p> 
+<ul><li>taskA访问时，禁用任务调度，那么taskB就无法访问了，这时taskA就是互斥的使用临界资源</li><li>taskB同</li></ul> 
+<h5><a id="2_284"></a>2、任务和中断访问临界资源</h5> 
+<p>任务和中断都可以访问临界资源，那么访问临界资源前，首先关闭中断</p> 
+<ul><li>taskA先关闭中断，那么中断被屏蔽，taskA就可以互斥的访问临界资源</li><li>中断运行过程中，taskA本来就无法执行，所以taskA无法抢占中断访问临界资源</li></ul> 
+<blockquote> 
+ <p>中断也可以关闭其他中断，以确保临界资源始终是被当前中断所独占的</p> 
+</blockquote> 
+<h4><a id="_294"></a>禁止任务调度</h4> 
+<p>当当前task调用此函数时，任务调度器将会被禁止，此时访问临界资源时，当前任务就是独占使用（互斥）<br> <img src="https://images2.imgbox.com/b7/7f/tPTdiotz_o.png" alt="image.png"></p> 
+<p>恢复任务调度器<br> <img src="https://images2.imgbox.com/2c/53/Lq8ZkgH6_o.png" alt="image.png"></p> 
+<h4><a id="_302"></a>如何屏蔽中断</h4> 
+<p>屏蔽中断是指屏蔽某些优先级较低的中断</p> 
+<blockquote> 
+ <p>Contrex M3 和 Contrex M4的中断优先级排列</p> 
+</blockquote> 
+<p>复位 -3<br> NMI -2<br> 硬件错误 -1<br> 不使用SysCall的中断 0-190<br> 使用SysCall的中断 191-255</p> 
+<p>使用SysCall的中断，是调用FreeRTOS的API的中断</p> 
+<p>屏蔽中断，只能屏蔽某一类的中断(使用到SysCall的中断)<br> 而不能够屏蔽掉更高优先级的一类中断(没有使用到SysCall)</p> 
+<p>在使用更高优先级的中断的时候，不能够去使用到SysCall</p> 
+<p>屏蔽中断分为在中断中屏蔽和在任务中屏蔽</p> 
+<ul><li>在任务中屏蔽，使用<code>taskENTER_CRITICA()/taskEXIT_CRITICAL()</code>，屏蔽中断/开启中断</li><li>在ISR中屏蔽中断，使用<code>taskENTER_CRITICAL_FROM_ISR()/taskEXIT_CRITICAL_FROM_ISR()</code>,屏蔽中断or开启中断</li></ul> 
+<p><img src="https://images2.imgbox.com/ed/cc/h27wnxSI_o.png" alt="image.png"><br> <img src="https://images2.imgbox.com/ce/d6/QHdvubfT_o.png" alt="image.png"></p> 
+<h3><a id="_331"></a>调试和优化</h3> 
+<h4><a id="_333"></a>调试</h4> 
+<p>FreeRTOS提供了很多种调试手段</p> 
+<ul><li>打印</li><li>断言 <code>configASSERT</code></li><li>Trace</li><li>Hook函数(回调函数)</li></ul> 
+<h5><a id="1printf_342"></a>1、打印（printf）</h5> 
+<p><code>printf</code>:FreeRTOS中使用到了Use MicroLIB库，来实现<code>printf函数</code><br> 我们只需要实现一下函数即可使用printf<br> <img src="https://images2.imgbox.com/72/4a/LdGQDGpv_o.png" alt="image.png"><br> <img src="https://images2.imgbox.com/d5/5c/zY7mimtQ_o.png" alt="image.png"></p> 
+<p>实现printf函数即可</p> 
+<pre><code class="prism language-c"><span class="token keyword">int</span> <span class="token function">fputc</span><span class="token punctuation">(</span> <span class="token keyword">int</span> ch<span class="token punctuation">,</span> FILE <span class="token operator">*</span>f <span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<h5><a id="2_355"></a>2、断言</h5> 
+<p>在一般的c语言当中，断言就是一个函数</p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span>  <span class="token function">assert</span><span class="token punctuation">(</span>scalar  expression<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>它的作用是，确保expression为真，如果expression为假的话就中止程序</p> 
+<p>在FreeRTOS中，使用的是<code>configASSERT()</code><br> <img src="https://images2.imgbox.com/09/03/GQeB3prC_o.png" alt="image.png"><br> 比如</p> 
+<pre><code class="prism language-c"><span class="token comment">/*如果x为False 就让程序陷入死循环 从而阻塞运行*/</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">configASSERT</span><span class="token expression"><span class="token punctuation">(</span>x<span class="token punctuation">)</span>  <span class="token keyword">if</span><span class="token punctuation">(</span><span class="token operator">!</span>x<span class="token punctuation">)</span> <span class="token keyword">while</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span></span></span>
+</code></pre> 
+<p>还可以获得更多有效信息</p> 
+<pre><code class="prism language-c"><span class="token comment">/*如果x为False， 打印出此时的文件名，函数名，和发生err的行数*/</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">configASSERT</span><span class="token expression"><span class="token punctuation">(</span>x<span class="token punctuation">)</span>  </span><span class="token punctuation">\</span>
+	<span class="token expression"><span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>x<span class="token punctuation">)</span> </span><span class="token punctuation">\</span>
+	<span class="token expression"><span class="token punctuation">{<!-- --></span></span></span>
+		<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"%s %s %d\r\n"</span><span class="token punctuation">,</span> <span class="token constant">__FILE__</span><span class="token punctuation">,</span> __FUNCTION__<span class="token punctuation">,</span> <span class="token constant">__LINE__</span><span class="token punctuation">)</span><span class="token punctuation">;</span> \
+        <span class="token keyword">while</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span> \
+ 	<span class="token punctuation">}</span>
+</code></pre> 
+<blockquote> 
+ <p>configASSERT(x)中，如果x为假，表示发生了很严重的错误，必须停止系统的运行。</p> 
+</blockquote> 
+<h5><a id="3Trace_389"></a>3、Trace</h5> 
+<p>FreeRTOS中定义了很多trace开头的宏，这些宏被放在系统的关键位置</p> 
+<blockquote> 
+ <p>它们一般都是空的宏，这不会影响代码：不影响编程处理的程序大小、不影响运行时间。</p> 
+ <p>我们要调试某些功能时，可以修改宏：修改某些标记变量、打印信息等待。</p> 
+</blockquote> 
+<h5><a id="4__Hook_398"></a>4、回调函数 Hook</h5> 
+<p>回调函数Hook，一般分为两种回调函数</p> 
+<ul><li>Malloc Hook函数</li><li>栈溢出 Hook函数</li></ul> 
+<h6><a id="Malloc_Hook_405"></a>Malloc Hook函数</h6> 
+<p>当malloc失败时，可以提供一个Malloc 回调函数</p> 
+<p>内存越界经常发生在堆的使用过程</p> 
+<blockquote> 
+ <p>堆也就是使用Malloc得到的内存</p> 
+</blockquote> 
+<p>并没有很好的方法监测内存越界，但是可以提供一些回调函数</p> 
+<p>Malloc失败时，如果在FreeRTOSConfig.h里配置<code>configUSE_MALLOC_FAILED_HOOK</code>为1，会调用回调函数</p> 
+<pre><code class="prism language-c"><span class="token comment">/*malloc失败时，可以调用此回调函数，可以在里面打印出相关err信息*/</span>
+<span class="token keyword">void</span> <span class="token function">vApplicationMallocFailedHook</span><span class="token punctuation">(</span> <span class="token keyword">void</span> <span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<h6><a id="Hook_423"></a>栈溢出Hook函数</h6> 
+<p>在任务的执行过程中，局部变量什么的都是存放在栈内，栈的大小可能会溢出</p> 
+<p>而栈又有一个栈顶指针和一个栈底指针，当每次入栈，SP指针就会+1</p> 
+<p>当栈顶指针的值 &gt; 栈底指针的值时，就会溢出</p> 
+<p>如何判断栈是否溢出？</p> 
+<ul><li>方法1（比对pxTopOfStack的地址和pxStack的地址） 
+  <ul><li>当前任务被切换出去之前，它的整个运行现场都被保存在栈里，这时<strong>很可能</strong>就是它对栈的使用到达了峰值</li><li>这种方法很高效，但是并不准确</li><li>比如，任务在运行过程中，调用了函数A，大量的使用了栈，调用完A之后才被调度</li></ul> </li></ul> 
+<p><img src="https://images2.imgbox.com/5c/03/VpHDzujV_o.png" alt="image.png"></p> 
+<ul><li>方法2 
+  <ul><li>创建任务时，它的栈被填入固定的值，比如：0xA5 （所有的栈空间被填入0xA5）</li><li>然后检测栈里最后16字节的数据，如果不是0xA5的话表示栈即将、或者已经被用完了</li><li>没有方法1快速，但是也足够快</li><li>能捕获<strong>几乎所有</strong>的栈溢出</li><li>为什么是几乎所有？可能有些函数使用栈时，非常凑巧地把栈设置为0xA5：几乎不可能</li></ul> </li></ul> 
+<p><img src="https://images2.imgbox.com/96/c1/7aAR1VgS_o.png" alt="image.png"></p> 
+<blockquote> 
+ <p>(从栈底从栈顶向上查找，对于连续16个字节的0xA5就表示是空闲的，没有被占用的，也称之为<code>水位</code>。</p> 
+ <p>一旦查找出某一个不是0xA5，就知道了从这个字节开始，上面的栈空间都是被用过的栈)</p> 
+ <p>当水位接近于0的时候，就表示栈即将溢出</p> 
+</blockquote> 
+<h4><a id="_457"></a>优化</h4> 
+<blockquote> 
+ <p>在FreeRTOS中，我们也可以查看任务使用CPU的情况、使用栈的情况，然后针对性地进行优化。</p> 
+</blockquote> 
+<p>这就是查看"任务的统计"信息</p> 
+<h5><a id="_465"></a>栈的使用情况</h5> 
+<p>在创建任务时分配了栈，可以填入固定的数值比如0xa5，以后可以使用以下函数查看"栈的高水位"，也就是还有多少空余的栈空间</p> 
+<pre><code class="prism language-c">UBaseType_t <span class="token function">uxTaskGetStackHighWaterMark</span><span class="token punctuation">(</span> TaskHandle_t xTask <span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<h4><a id="_473"></a></h4> 
+<blockquote> 
+ <p>从栈底往栈顶逐个字节地判断，它们的值持续是0xa5就表示它是空闲的</p> 
+</blockquote> 
+<blockquote> 
+ <p>从栈底从栈顶向上查找，对于连续16个字节的0xA5就表示是空闲的，没有被占用的，也称之为<code>水位</code>。</p> 
+ <p>一旦查找出某一个不是0xA5，就知道了从这个字节开始，上面的栈空间都是被用过的栈)</p> 
+ <p>当水位接近于0的时候，就表示栈即将溢出</p> 
+</blockquote> 
+<p>一般来说，保证水位十几个字节即可</p> 
+<h5><a id="CPU_487"></a>CPU的运行时间</h5> 
+<blockquote> 
+ <p>对于同优先级的任务，它们按照时间片轮流运行：一个任务执行一个Tick，另一个任务也执行一个Tick。</p> 
+</blockquote> 
+<p>不可以在tick中断中，统计当前任务的累积运行时间，因为如果有更高优先级的任务就绪后，当前任务还没运行一个完整的tick就被抢占了</p> 
+<p>使用一个定时器，让其定时周期比tick还短，比如0.1ms<br> <img src="https://images2.imgbox.com/4a/8c/ltuwiSfc_o.png" alt="image.png"></p> 
+<p><img src="https://images2.imgbox.com/33/4e/dVM4R5yA_o.png" alt="image.png"><br> <img src="https://images2.imgbox.com/d9/5c/AnZEphNC_o.png" alt="image.png"></p> 
+<h5><a id="CPU_501"></a>获取任务统计信息、CPU的占用率等</h5> 
+<p>不使用tick中断来获取任务的运行时间，tick中断1ms一次，太慢了<br> 使用一个较快的定时器来获得任务的运行时间，这里采用0.1ms</p> 
+<h6><a id="1_506"></a>1、开启定时器中断</h6> 
+<p>这里的定时器中断采用0.1ms一次</p> 
+<p>有点奇怪啊，我使用定时器2不行<br> 后面一查看，原来这个FreeRTOS的源码自带的MCU的型号是<br> <img src="https://images2.imgbox.com/15/22/IXLjraBr_o.png" alt="image.png"><br> <img src="https://images2.imgbox.com/8d/17/9t0k4t9N_o.png" alt="image.png"></p> 
+<h6><a id="2_516"></a>2、配置宏</h6> 
+<p><img src="https://images2.imgbox.com/9e/1c/oqPkW3Qs_o.png" alt="image.png"></p> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">configGENERATE_RUN_TIME_STATS</span> <span class="token expression"><span class="token number">1</span> </span><span class="token comment">/*初始化更快的定时器*/</span></span>
+<span class="token comment">/*使用更快定时器 这个宏定义在任务调度函数里使用*/</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">portCONFIGURE_TIMER_FOR_RUN_TIME_STATS</span>  <span class="token expression">Timer3_Init  </span></span>
+<span class="token comment">/*得到定时器的当前时间*/</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">portGET_RUN_TIME_COUNTER_VALUE</span> <span class="token expression">TimerGetCount </span></span>
+
+<span class="token comment">/*获得任务统计信息相关宏定义*/</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">configUSE_TRACE_FACILITY</span> <span class="token expression"><span class="token number">1</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">configUSE_STATS_FORMATTING_FUNCTIONS</span> <span class="token expression"><span class="token number">1</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">configSUPPORT_DYNAMIC_ALLOCATION</span> <span class="token expression"><span class="token number">1</span></span></span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/ea/05/J23KOX1e_o.png" alt="image.png"><br> <img src="https://images2.imgbox.com/57/1f/yg6l01Gh_o.png" alt="image.png"></p> 
+<h6><a id="3_or_CPU_536"></a>3、获取任务统计信息 or CPU占用率</h6> 
+<p><img src="https://images2.imgbox.com/d9/82/0vLsaDVi_o.png" alt="image.png"></p> 
+<p>获取任务统计信息<br> <img src="https://images2.imgbox.com/fd/9e/6FurzsN9_o.png" alt="image.png"></p> 
+<p>获取CPU占用率<br> <img src="https://images2.imgbox.com/2a/6c/XZnZGRiI_o.png" alt="image.png"></p> 
+<p><img src="https://images2.imgbox.com/36/78/AVahxPg9_o.png" alt="image.png"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/98a3665add1f5663c612ec9e479985a2/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">（视频教程）单细胞转录组多组差异基因分析及可视化函数</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/53895f2d720124d199bed5698e95f9b8/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">FreeRTOS学习笔记（4、事件组、任务通知）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

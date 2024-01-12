@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>STM32之IO模拟串口篇 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="STM32之IO模拟串口篇" />
+<meta property="og:description" content="概述： 硬件：基于stm32f767igt6水星板开发；
+软件：使用了RT-Thread实时操作系统，两个空闲IO口。PE2用作串口TX端，搭配一个定时器控制发送时序；PE3用作串口RX端，并使能外部中断，触发外部中断则开启一个接收定时器。
+GitHub代码下载地址
+1 . UART简介： 1.1 UART协议： 空闲位：当uart处于空闲状态（线路没有数据传输）时，TX、RX线都处于高电平状态（逻辑“1”），一般需要把相应IO口配置为上拉。
+起始位：由高电平跳变为低电平，且持续一个位宽度，表示触发起始信号。
+数据位：数据位可以5、6、7或8位，从最低位开始一位接着一位的传送。
+校验位：有奇、偶或无校验。
+奇校验：数据位&#43;校验位的“1”的位数总和为奇数；
+偶校验：数据位&#43;校验位的“1”的位数总和为偶数；
+例如：奇校验中，数据位“1”的位数为偶数个，则此时校验位为“1”。
+无校验：顾名思义就是没有校验位，数据位后面接停止位。（通常配置为无校验。）
+停止位：将数据线拉为高电平，可以设置停止位宽度为1位、1.5位或者2位。
+波特率：在串口中波特率为每秒传送的bit数；通信双方必须设置相同的波特率，否则接收的数据为乱码。波特率9600时，传输1bit所需时间为（1/9600）us，大约为104us。
+1.2 UART工作原理： UART 为全双工通信，通常需要三条线： TX(发送)、 RX(接收)和 GND(地线)。数据串行一位一位的传送。
+发送数据：空闲状态TX处于高电平,将TX拉为低电平，宽度为1bit时间，接着数据按低位到高位依次发送，数据发送完毕后，如果有校验位，则发送奇偶校验位，最后发送停止位，这样一帧数据就发送完成了。（若发送多字节数据时，就连续发送多帧数据即可。）
+接收数据：RX线路处于高电平(空闲态)时，当RX检测到下降沿（高电平变为低电平）时，说明线路有数据要传输，按照约定的波特率从低位到高位接收数据，数据接收完毕后，如果有校验位，则接收奇偶校验位，最后接收停止位。
+2 . IO模拟UART通信 2.1 模拟TX发送端 2.1.1 自定义发送数据结构体： 发送状态分为空闲和发送中；还有一个发送数据缓冲区。
+typedef enum _TX_STATE_{ AUART_TX_IDLE = 0, //发送空闲 AUART_TX_SEND, //数据发送 }TX_STATE; typedef struct _AUART_TX_{ uint8_t tx_data_buffer[TX_DATA_MAX]; //发送数据缓冲区 uint8_t cur_bit; //当前数据字节位 volatile uint8_t start_flag; //启动位标志位 TX_STATE tx_state; //发送状态 uint32_t bound; //波特率 uint16_t one_bit_time; //发送1bit时间 uint16_t data_cur; //当前数据 uint16_t tx_data_len; //发送数据长度 }AUART_TX; 2." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/5b89633b89b9787f65c5e7c4983a2f49/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-07-26T23:23:01+08:00" />
+<meta property="article:modified_time" content="2022-07-26T23:23:01+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">STM32之IO模拟串口篇</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h2></h2> 
+<h2>概述：</h2> 
+<p>硬件：基于stm32f767igt6水星板开发；</p> 
+<p>软件：使用了RT-Thread实时操作系统，两个空闲IO口。PE2用作串口TX端，搭配一个定时器控制发送时序；PE3用作串口RX端，并使能外部中断，触发外部中断则开启一个接收定时器。</p> 
+<p><a class="link-info" href="https://github.com/Qurry97/stm32f767/tree/Auart" title="GitHub代码下载地址">GitHub代码下载地址</a></p> 
+<p></p> 
+<h2>1 . UART简介：</h2> 
+<h3>1.1 UART协议：</h3> 
+<p><span style="color:#be191c;">空闲位</span>：当uart处于空闲状态（线路没有数据传输）时，TX、RX线都处于高电平状态（逻辑“1”），一般需要把相应IO口配置为上拉。</p> 
+<p><span style="color:#be191c;">起始位</span>：由高电平跳变为低电平，且持续一个位宽度，表示触发起始信号。</p> 
+<p><span style="color:#be191c;">数据位</span>：数据位可以5、6、7或8位，从最低位开始一位接着一位的传送。</p> 
+<p><span style="color:#be191c;">校验位</span>：有奇、偶或无校验。</p> 
+<p>        奇校验：数据位+校验位的“1”的位数总和为奇数；</p> 
+<p>        偶校验：数据位+校验位的“1”的位数总和为偶数；</p> 
+<p>例如：奇校验中，数据位“1”的位数为偶数个，则此时校验位为“1”。</p> 
+<p>        无校验：顾名思义就是没有校验位，数据位后面接停止位。（通常配置为无校验。）</p> 
+<p><span style="color:#be191c;">停止位</span>：将数据线拉为高电平，可以设置停止位宽度为1位、1.5位或者2位。</p> 
+<p><span style="color:#be191c;">波特率</span>：在串口中波特率为每秒传送的bit数；通信双方必须设置相同的波特率，否则接收的数据为乱码。波特率9600时，传输1bit所需时间为（1/9600）us，大约为104us。</p> 
+<p></p> 
+<h3>1.2 UART工作原理：</h3> 
+<p>UART 为全双工通信，通常需要三条线： TX(发送)、 RX(接收)和 GND(地线)。数据串行一位一位的传送。</p> 
+<p><span style="color:#be191c;">发送数据</span>：空闲状态TX处于高电平,将TX拉为低电平，宽度为1bit时间，接着数据按低位到高位依次发送，数据发送完毕后，如果有校验位，则发送奇偶校验位，最后发送停止位，这样一帧数据就发送完成了。（若发送多字节数据时，就连续发送多帧数据即可。）</p> 
+<p></p> 
+<p><span style="color:#be191c;">接收数据</span>：RX线路处于高电平(空闲态)时，当RX检测到下降沿（高电平变为低电平）时，说明线路有数据要传输，按照约定的波特率从低位到高位接收数据，数据接收完毕后，如果有校验位，则接收奇偶校验位，最后接收停止位。</p> 
+<p></p> 
+<h2>2 . IO模拟UART通信</h2> 
+<h3>2.1 模拟TX发送端</h3> 
+<h4>2.1.1 自定义发送数据结构体：</h4> 
+<p>        发送状态分为空闲和发送中；还有一个发送数据缓冲区。</p> 
+<pre><code class="language-cpp">
+typedef enum _TX_STATE_{
+    AUART_TX_IDLE = 0,      //发送空闲
+    AUART_TX_SEND,          //数据发送
+}TX_STATE;
+
+typedef struct _AUART_TX_{
+    uint8_t  tx_data_buffer[TX_DATA_MAX];   //发送数据缓冲区
+    uint8_t  cur_bit;                       //当前数据字节位
+    volatile uint8_t  start_flag;           //启动位标志位
+    TX_STATE tx_state;                      //发送状态
+    uint32_t bound;                         //波特率
+    uint16_t one_bit_time;                  //发送1bit时间
+    uint16_t data_cur;                      //当前数据
+    uint16_t tx_data_len;                   //发送数据长度
+}AUART_TX;</code></pre> 
+<p></p> 
+<h4>2.1.2 配置发送端IO口：</h4> 
+<p>        使能对应IO口的时钟，然后把IO口配置为推挽输出、上拉，如果配置为开漏输出则只能拉低电平，高电平需要外部接上拉电阻，上拉作用为不工作时处于高电平（空闲态）。</p> 
+<pre><code>void TX_IO_Config(void)
+{
+    GPIO_InitTypeDef GPIO_Initure;
+
+    __HAL_RCC_GPIOE_CLK_ENABLE();  
+    GPIO_Initure.Pin=GPIO_PIN_2;                //PE2
+    GPIO_Initure.Mode=GPIO_MODE_OUTPUT_PP;      //输出推挽模式
+    GPIO_Initure.Pull=GPIO_PULLUP;              //上拉
+    GPIO_Initure.Speed=GPIO_SPEED_HIGH;
+    HAL_GPIO_Init(GPIOE,&amp;GPIO_Initure);
+
+    auart_tx.tx_state = AUART_TX_IDLE;
+}</code></pre> 
+<p></p> 
+<h4>2.1.3 一帧数据位函数封装：</h4> 
+<pre><code class="language-cpp">/***   auart开始位   ***/
+void Auart_Send_Start(void)
+{
+    if(TX_IO_Read != GPIO_HIGH){
+        TX_IO_Write(GPIO_HIGH);
+        rt_hw_us_delay(5);
+    }
+    TX_IO_Write(GPIO_LOW);
+}
+
+/***   auart停止位   ***/
+void Auart_Send_Stop(void)
+{
+    TX_IO_Write(GPIO_HIGH);
+}
+
+/***   auart空闲   ***/
+void Auart_Send_Idle(void)
+{
+    TX_IO_Write(GPIO_HIGH);
+    TIM_Stop(&amp;TIM2_Handler);
+    auart_tx.tx_state =AUART_TX_IDLE;
+}</code></pre> 
+<p></p> 
+<h4>2.1.4 数据发送：</h4> 
+<p>        待发送的数据准备好后，开启一个定时器。</p> 
+<pre><code class="language-cpp">/***   auart发送开启   ***/
+void Auart_Send_Open(void)
+{
+    TIM_Start(&amp;TIM2_Handler , auart_tx.one_bit_time);
+    auart_tx.tx_state = AUART_TX_SEND;
+}
+
+/***   auart发送数据   ***/
+void Auart_Send_Data(uint8_t *str)
+{
+    auart_tx.data_cur = 0;
+    auart_tx.cur_bit  = 0;
+    auart_tx.start_flag = 0;
+	auart_tx.tx_data_len = 0 ;
+    memset(&amp;auart_tx.tx_data_buffer , 0 , sizeof(auart_tx.tx_data_buffer));
+	for(int i = 0 ; *str!='\0' ; i++){
+        auart_tx.tx_data_buffer[i] = *str;
+        str++ ;
+        auart_tx.tx_data_len++ ;
+    }
+    Auart_Send_Open();
+}</code></pre> 
+<p></p> 
+<h4>2.1.5 发送定时器配置：</h4> 
+<p>        使用的是TIMER2，这个定时器挂载在APB1上，时钟为108MHz；预分频器值Prescaler配为108，定时器向上计数，自动重加载值Period先不设定，后面动态根据波特率值进行设定，假设波特率为9600，则自动重加载值配置为104，这样每104us定时器就会触发溢出更新，调用HAL_TIM_PeriodElapsedCallback进行数据处理。</p> 
+<pre><code class="language-cpp">// us中断触发一次
+void TIM2_Init(void)
+{
+	TIM2_Handler.Instance=TIM2;                         
+    TIM2_Handler.Init.Prescaler=108;                    
+    TIM2_Handler.Init.CounterMode=TIM_COUNTERMODE_UP;    
+    //TIM2_Handler.Init.Period=arr;                       
+    TIM2_Handler.Init.ClockDivision=TIM_CLOCKDIVISION_DIV1;
+    HAL_TIM_Base_Init(&amp;TIM2_Handler);	
+	__HAL_TIM_ENABLE(&amp;TIM2_Handler);
+}
+
+void HAL_TIM_Base_MspInit(TIM_HandleTypeDef *htim)
+{
+    if(htim-&gt;Instance==TIM2){
+		__HAL_RCC_TIM2_CLK_ENABLE();            //使能TIM2时钟
+		HAL_NVIC_SetPriority(TIM2_IRQn,2,1);    //设置中断优先级，抢占优先级2，子优先级1
+		HAL_NVIC_EnableIRQ(TIM2_IRQn);          //开启ITM2中断   
+	}
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if(htim==(&amp;TIM2_Handler)){
+        if(auart_tx.tx_state == AUART_TX_SEND)
+            Auart_Send_Data_Handler();
+    }
+}
+
+
+
+/***   auart数据发送处理函数   ***/
+void Auart_Send_Data_Handler(void)
+{
+    if(auart_tx.data_cur &lt; auart_tx.tx_data_len){
+
+        if(auart_tx.start_flag == 0){
+            Auart_Send_Start();
+            auart_tx.start_flag = 1;
+            return ;
+        }
+
+        if(auart_tx.cur_bit &lt; 8){
+            if(Auart_Tx_Data_Read_Bit(auart_tx.data_cur , auart_tx.cur_bit) == 0){
+				TX_IO_Write(GPIO_LOW);
+			}
+            else{
+                TX_IO_Write(GPIO_HIGH);
+            }
+            auart_tx.cur_bit++;
+        }
+        else{
+            auart_tx.cur_bit = 0;
+            auart_tx.data_cur++;
+            auart_tx.start_flag = 0;
+            Auart_Send_Stop();
+        }
+    }
+    else{
+        Auart_Send_Idle();
+    }
+}</code></pre> 
+<p></p> 
+<h4>2.1.6 编写数据发送线程：</h4> 
+<p>        uart1为输出打印，模拟串口AUART_BOUND配置为9600，每间隔三秒就发送一串数据，并输出打印信息。</p> 
+<pre><code class="language-cpp">static void auart_tx_thread(void *p)
+{
+    uart1_init(19200);     //printf输出串口
+	Auart_Init(AUART_BOUND);
+	while(1){
+		Auart_Send_Data("Qurry hello!");
+		DEBUG("auart_tx_thread :%s\r\n",auart_tx.tx_data_buffer);
+        rt_thread_mdelay(3000);
+	}
+}
+
+
+int auart_tx_thread_init(void)
+{
+	rt_thread_t thread = RT_NULL;
+	thread = rt_thread_create("auart_txthr", auart_tx_thread, RT_NULL, 10*1024, 5, 10); 
+    if(thread == RT_NULL)
+    {
+        return RT_ERROR;
+    }
+    rt_thread_startup(thread);
+	return RT_EOK;
+}
+</code></pre> 
+<p></p> 
+<h4>2.1.7 IO模拟发送端调试：</h4> 
+<p>模拟发送IO口连接到TTL-USB串口工具的RX端，接上GND，然后打开串口工具查看调试信息。</p> 
+<p class="img-center"><img alt="" height="530" src="https://images2.imgbox.com/59/bf/aFxdQb1u_o.png" width="1054"></p> 
+<p class="img-center"><img alt="" height="530" src="https://images2.imgbox.com/d9/64/5PYiQMhn_o.png" width="1057"></p> 
+<p> </p> 
+<h4> 2.1.8 连接逻辑分析仪：</h4> 
+<p>        逻辑分析仪配置为9600，对IO发送的数据进行解析，解析的数据正是“Qurry hello!”。至此，模拟发送端验证成功。</p> 
+<p><img alt="" height="863" src="https://images2.imgbox.com/98/d7/sCNjU9P5_o.png" width="773"></p> 
+<p> </p> 
+<p class="img-center"><img alt="" height="543" src="https://images2.imgbox.com/1f/a6/WVaOtvUH_o.png" width="1200"></p> 
+<p> </p> 
+<p></p> 
+<h3>2.2 模拟RX接收端</h3> 
+<h4>2.2.1  自定义接收结构体：</h4> 
+<p>        接收状态分为空闲和接受中，最好再添加一个接收错误的状态，因为数据过多过快发送，难免会接收错误，rx_data_buffer为接收缓冲区，cur_bit为当前接收数据的具体位数，data_cur表示接收数据的具体哪个字节。</p> 
+<pre><code class="language-cpp">typedef enum _RX_STATE_{
+    AUART_RX_IDLE = 0,     //读取空闲
+    AUART_RX_READ,         //数据读取
+}RX_STATE;
+
+typedef struct _AUART_RX_{
+    uint8_t  rx_data_buffer[RX_DATA_MAX];   //读取数据缓冲区
+    volatile uint8_t  cur_bit;              //当前数据字节位
+    volatile uint16_t data_cur;             //接受数据当前位置   
+    RX_STATE rx_state;                      //接受状态   
+}AUART_RX;</code></pre> 
+<h4></h4> 
+<h4>2.2.2 配置接收端IO：</h4> 
+<p>        接收IO口配置为输入模式、上拉，并开启外部中断，设置优先级，下降沿触发中断；当空闲态转为接收态的时候就会触发外部中断，在外部中断处理函数中关闭外部中断，并打开接收定时器，等待接收的数据处理完成再次打开外部中断和关闭接收定时器即可。</p> 
+<pre><code class="language-cpp">void RX_IO_Config(void)
+{
+    GPIO_InitTypeDef GPIO_Initure;
+
+    __HAL_RCC_GPIOE_CLK_ENABLE();  
+    GPIO_Initure.Pin=GPIO_PIN_3;                //PE3
+    GPIO_Initure.Mode=GPIO_MODE_IT_FALLING;     //输入模式下降沿触发
+    GPIO_Initure.Pull=GPIO_PULLUP;              //上拉
+    GPIO_Initure.Speed=GPIO_SPEED_HIGH;
+    HAL_GPIO_Init(GPIOE,&amp;GPIO_Initure); 
+
+    HAL_NVIC_SetPriority(EXTI3_IRQn,1,2);  
+    HAL_NVIC_EnableIRQ(EXTI3_IRQn);
+
+    auart_rx.rx_state = AUART_RX_IDLE; 
+}</code></pre> 
+<pre><code class="language-cpp">void EXTI3_IRQHandler(void)
+{
+    HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_3);
+}
+
+/***   GPIOE_3外部中断处理函数   ***/
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+	if(auart_rx.rx_state == AUART_RX_IDLE){
+		HAL_NVIC_DisableIRQ(EXTI3_IRQn);
+		TIM_Start(&amp;TIM5_Handler , auart_tx.one_bit_time);  //开启接收定时器5	
+	}
+}</code></pre> 
+<h4>2.2.3 接收定时器配置：</h4> 
+<p>        定时器5也是挂载在APB1上，时钟为108MHz，配置原理同发送端一样，在TIM_Start中配置重新计数和开启定时器中断，在TIM_Stop中则关闭中断。</p> 
+<p>        在配置定时器时可以先单独编写程序测试定时器配置是否正确，例如让它1s触发一次溢出中断，这样在后面接收数据出错时就可以一定程度上先排除定时器时序的问题。</p> 
+<pre><code class="language-cpp">void TIM5_Init(void)
+{
+	TIM5_Handler.Instance=TIM5;                         
+    TIM5_Handler.Init.Prescaler=108;                    
+    TIM5_Handler.Init.CounterMode=TIM_COUNTERMODE_UP;    
+    //TIM5_Handler.Init.Period=arr;                       
+    TIM5_Handler.Init.ClockDivision=TIM_CLOCKDIVISION_DIV1;
+    HAL_TIM_Base_Init(&amp;TIM5_Handler);
+	__HAL_TIM_ENABLE(&amp;TIM5_Handler);
+}
+
+
+void TIM_Start(TIM_HandleTypeDef *htim , uint16_t arr)
+{
+    __HAL_TIM_SET_AUTORELOAD(htim , arr);  //动态设置定时器重加载值
+    __HAL_TIM_SET_COUNTER(htim,0);         //重新计数
+    __HAL_TIM_ENABLE_IT(htim, TIM_IT_UPDATE);
+	
+}
+
+void TIM_Stop(TIM_HandleTypeDef *htim)
+{
+    __HAL_TIM_DISABLE_IT(htim, TIM_IT_UPDATE);
+}
+
+void HAL_TIM_Base_MspInit(TIM_HandleTypeDef *htim)
+{
+    .....
+
+    else if(htim-&gt;Instance==TIM5){
+		__HAL_RCC_TIM5_CLK_ENABLE();  
+		HAL_NVIC_SetPriority(TIM5_IRQn,2,0);
+		HAL_NVIC_EnableIRQ(TIM5_IRQn);
+    }
+}
+</code></pre> 
+<p></p> 
+<h4>2.2.4  接收数据处理：</h4> 
+<p>        当检测到bit0不为低电平（起始信号）时，说明没有数据要接收了，则可以关闭接收定时器，重新开启外部中断。rt_sem_release为接收线程的信号量。</p> 
+<pre><code class="language-cpp">
+/***  接收数据当前字节的位值处理  ***/
+void Auart_Rx_Data_Bit(uint16_t Cur , uint8_t Bit ,uint8_t Bit_Data)
+{
+    auart_rx.rx_data_buffer[Cur] |= (Bit_Data &lt;&lt; (Bit-1));
+}
+
+
+/***   auart数据接收处理函数   ***/
+void Auart_Read_Data_Handler(void)
+{
+    switch (auart_rx.cur_bit){
+        case 0:
+            if(RX_IO_Read != GPIO_LOW){
+                TIM_Stop(&amp;TIM5_Handler);
+				rt_sem_release(auart_rx_sem);               
+                break;
+            }
+            auart_rx.cur_bit++;
+            break;
+
+        case 9:
+            if(auart_rx.data_cur &lt; (RX_DATA_MAX - 1)){
+                auart_rx.data_cur++;
+            }
+            else{
+                TIM_Stop(&amp;TIM5_Handler);
+				rt_sem_release(auart_rx_sem);
+            }
+            auart_rx.cur_bit = 0;
+            break;
+
+        default:
+            Auart_Rx_Data_Bit(auart_rx.data_cur , auart_rx.cur_bit ,(uint8_t)RX_IO_Read);
+            auart_rx.cur_bit++;
+            break;
+    }
+
+}</code></pre> 
+<h4>2.2.5 编写接收线程：</h4> 
+<p>        当接受完数据，释放了信号量后才进入线程进行数据处理，并把接收的数据用uart1打印出来。</p> 
+<pre><code class="language-cpp">rt_sem_t auart_rx_sem = RT_NULL;
+
+/****   处理完接收数据后重新使能接收中断                   ***/
+void read_rx_data()
+{
+	DEBUG("rx:%s ,%d\r\n",auart_rx.rx_data_buffer,RX_IO_Read);
+	memset(&amp;auart_rx , 0 , sizeof(auart_rx));
+	HAL_NVIC_EnableIRQ(EXTI3_IRQn);
+	auart_rx.rx_state = AUART_RX_IDLE;
+}
+
+static void auart_rx_thread(void *p)
+{
+    auart_rx_sem = rt_sem_create("rx_sem", 0, RT_IPC_FLAG_PRIO);
+    if(auart_rx_sem == RT_NULL){
+        DEBUG("auart_rx_sem create failed !!!\r\n");
+    }
+
+	while(1){
+        if(rt_sem_take(auart_rx_sem, RT_WAITING_FOREVER) != RT_EOK){
+			rt_thread_mdelay(10);
+            continue;
+        }
+		read_rx_data();
+	}
+}
+
+
+int auart_rx_thread_init(void)
+{
+	rt_thread_t thread = RT_NULL;
+	thread = rt_thread_create("auart_rxthr", auart_rx_thread, RT_NULL, 10*1024, 4, 10); 
+    if(thread == RT_NULL)
+    {
+        return RT_ERROR;
+    }
+    rt_thread_startup(thread);
+	return RT_EOK;
+}
+</code></pre> 
+<p></p> 
+<h4>2.2.6 接收端调试：</h4> 
+<p>        串口调试工具软件配置好波特率9600，使用TTL-USB串口工具的TX端连接逻辑分析仪，发送数据，先查看要接收的数据波形，如下发送数据“Qurry”波形：</p> 
+<p class="img-center"><img alt="" height="797" src="https://images2.imgbox.com/94/9e/34fqXBc8_o.png" width="1058"></p> 
+<p> </p> 
+<p class="img-center"><img alt="" height="373" src="https://images2.imgbox.com/65/5b/HBeF4htl_o.png" width="1200"></p> 
+<p> </p> 
+<p>        现在TTL-USB调试工具TX、RX分别接模拟RX口和模拟TX口，接上GND，用调试工具软件发送数据，开启了发送、接收线程，测试如下：</p> 
+<p class="img-center"><img alt="" height="708" src="https://images2.imgbox.com/4c/f2/FGFk0yfq_o.png" width="1056"></p> 
+<p> </p> 
+<p class="img-center"><img alt="" height="536" src="https://images2.imgbox.com/98/68/mrkzUiwo_o.png" width="1056"></p> 
+<p> </p> 
+<p></p> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e66dd25bfb63946e1488b7d28ac9b51b/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">java日期格式化为json字符串，看这个就够了</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/f16eee7c0dc071d811cc63d6c48112e6/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">tomcat的使用教程</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Kafka高性能核心——pageCache与zeroCopy - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Kafka高性能核心——pageCache与zeroCopy" />
+<meta property="og:description" content="PageCache与ZeroCopy PageCache即页面缓存，它是操作系统实现的一种主要的磁盘缓存，它的目的就是减少对磁盘IO的操作。
+具体来说，就是把磁盘中的数据缓存到内存里，然后把对磁盘的访问变成对内存的访问。
+目前很多一些主流的框架或者架构设计，为了弥补性能上的差异，基本上都是用“磁盘”做缓存的，也就是说可以把所有内存当做磁盘用。
+相信很多做过高并发项目的一些小伙伴们都会知道，我们一开始最早期可能会读关系型数据库，关系型数据库一旦压力大了，大家可能就会想到的策略是分库分表，分库分表也可能不满足我们的需求，就有可能会用一些非关系型数据库，或者remote cache，比如redis这种，那么像一些入口级别流量非常非常高的话，可能你的redis都扛不住，这个时候我们就可能借助于内存。
+比如在我们的磁盘中有一个1.txt，我们想把它读到应用程序里，那对于OS级别做了哪些事情呢？
+当一个进程准备去读取磁盘上内容的时候，操作系统首先不会去准备读磁盘文件，而是先检查在PageCache中是否存在，如果存在那就说明是命中了，直接把数据返回，这样就减少对物理盘的IO操作。如果缓存页不存在，那么这时候才会发起一次IO请求，然后把读取到的数据先加入缓存页，最后再返回给进程，这个也可以理解为就是一个空间换时间。
+读数据是这样做的，那么如果是写呢？
+如果有一个文件，我想写入磁盘中，那同样操作系统也会检查这个数据是否存在缓存页中，如果不存在它就会在缓存页中添加相应的页，然后把数据写到页里面，然后修改过的页也就变成脏页了，操作系统会在合适的时机把脏页中的数据刷到磁盘里，以保证数据的一致性。
+上述就是一个最简单的文件读写的过程。
+那如果我们想把磁盘中的文件读到内存里，然后读到应用程序里，再写入到另外一个应用程序，那这个过程它会经过哪些过程呢？
+我们来看一下这幅图：
+我们废话不多说，看下面这幅图：
+首先，我们看最右侧，操作系统会先把物理磁盘中的内容先写到内核读取的缓冲区，这是操作系统级别的，属于内核空间上下文。
+左边这一块就是用户缓冲区，属于应用程序的上下文。
+然后用户缓冲区会读取操作系统级别的内核缓冲区中的数据，这个时候应用程序里就有数据了。那如果再想把它写入到另外一个应用程序，就需要再从应用缓冲区把数据写入到内核缓冲区，然后再把数据转入到Socket缓冲区，然后到达实际的物理网口，最后通过网络传给另一个消费者。
+这个就是我们一个正常的文件读取然后写入到另外一端的过程，它会经历好几次的Copy，第一次Copy到内核中，第二次Copy是到用户缓冲区，然后又从用户缓冲区Copy到操作系统内核缓存，最后再拷贝到Socket的缓冲区，再写入到网卡，一共经历了四次的Copy，这是我们一个传统文件的读写。
+而Kafka采用的是零拷贝，节省了很多次Copy，我们来看看Kafka对一个文件是怎么做的呢？
+因为我们Kafka都是采用Pull的机制，消费者在读取数据的时候，肯定是需要将服务端的磁盘文件中数据读取出来，通常情况下，我们Kafka会有多个订阅者，生产者发布的消息会被不同的消费者多次消费，为了优化这个流程，Kafka内部就是采用了ZeroCopy，Kafka大量使用了缓存页和ZeroCopy这也是它高性能非常非常至关重要的原因。
+虽然消息都是被写到缓存页的，然后由操作系统负责具体的刷盘策略和刷盘任务。
+我们看下图：
+这个图就是描述了一个经典的ZeroCopy技术了，它跟应用程序是完全没有关联的，我们右边应用程序完全不做任何Copy，磁盘文件只在用户内核的空间上下文做一次Copy，然后直接写到网卡，也就是说我们ZeroCopy只是把磁盘文件复制到了页面缓存，然后把数据从页面缓存直接发送到网卡中，也就是说发送给不同的订阅者的时候，都可以使用同一个页面缓存，而避免了重复复制的操作。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/9dd89ab5384bb33065315fc03947a043/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-12-15T23:18:58+08:00" />
+<meta property="article:modified_time" content="2021-12-15T23:18:58+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Kafka高性能核心——pageCache与zeroCopy</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="PageCacheZeroCopy_0"></a>PageCache与ZeroCopy</h3> 
+<p>PageCache即页面缓存，它是操作系统实现的一种主要的磁盘缓存，它的目的就是减少对磁盘IO的操作。<br> 具体来说，就是把磁盘中的数据缓存到内存里，然后把对磁盘的访问变成对内存的访问。<br> 目前很多一些主流的框架或者架构设计，为了弥补性能上的差异，基本上都是用“磁盘”做缓存的，也就是说可以把所有内存当做磁盘用。<br> 相信很多做过高并发项目的一些小伙伴们都会知道，我们一开始最早期可能会读关系型数据库，关系型数据库一旦压力大了，大家可能就会想到的策略是分库分表，分库分表也可能不满足我们的需求，就有可能会用一些非关系型数据库，或者remote cache，比如redis这种，那么像一些入口级别流量非常非常高的话，可能你的redis都扛不住，这个时候我们就可能借助于内存。</p> 
+<p>比如在我们的磁盘中有一个1.txt，我们想把它读到应用程序里，那对于OS级别做了哪些事情呢？</p> 
+<p>当一个进程准备去读取磁盘上内容的时候，操作系统首先不会去准备读磁盘文件，而是先检查在PageCache中是否存在，如果存在那就说明是命中了，直接把数据返回，这样就减少对物理盘的IO操作。如果缓存页不存在，那么这时候才会发起一次IO请求，然后把读取到的数据先加入缓存页，最后再返回给进程，这个也可以理解为就是一个空间换时间。</p> 
+<p>读数据是这样做的，那么如果是写呢？<br> 如果有一个文件，我想写入磁盘中，那同样操作系统也会检查这个数据是否存在缓存页中，如果不存在它就会在缓存页中添加相应的页，然后把数据写到页里面，然后修改过的页也就变成脏页了，操作系统会在合适的时机把脏页中的数据刷到磁盘里，以保证数据的一致性。</p> 
+<p>上述就是一个最简单的文件读写的过程。</p> 
+<p>那如果我们想把磁盘中的文件读到内存里，然后读到应用程序里，再写入到另外一个应用程序，那这个过程它会经过哪些过程呢？<br> 我们来看一下这幅图：<br> 我们废话不多说，看下面这幅图：<br> <img src="https://images2.imgbox.com/b5/09/BnMcRnFc_o.png" alt="在这里插入图片描述"><br> 首先，我们看最右侧，操作系统会先把物理磁盘中的内容先写到内核读取的缓冲区，这是操作系统级别的，属于内核空间上下文。<br> 左边这一块就是用户缓冲区，属于应用程序的上下文。<br> 然后用户缓冲区会读取操作系统级别的内核缓冲区中的数据，这个时候应用程序里就有数据了。那如果再想把它写入到另外一个应用程序，就需要再从应用缓冲区把数据写入到内核缓冲区，然后再把数据转入到Socket缓冲区，然后到达实际的物理网口，最后通过网络传给另一个消费者。<br> 这个就是我们一个正常的文件读取然后写入到另外一端的过程，它会经历好几次的Copy，第一次Copy到内核中，第二次Copy是到用户缓冲区，然后又从用户缓冲区Copy到操作系统内核缓存，最后再拷贝到Socket的缓冲区，再写入到网卡，一共经历了四次的Copy，这是我们一个传统文件的读写。</p> 
+<p>而Kafka采用的是零拷贝，节省了很多次Copy，我们来看看Kafka对一个文件是怎么做的呢？</p> 
+<p>因为我们Kafka都是采用Pull的机制，消费者在读取数据的时候，肯定是需要将服务端的磁盘文件中数据读取出来，通常情况下，我们Kafka会有多个订阅者，生产者发布的消息会被不同的消费者多次消费，为了优化这个流程，Kafka内部就是采用了ZeroCopy，Kafka大量使用了缓存页和ZeroCopy这也是它高性能非常非常至关重要的原因。<br> 虽然消息都是被写到缓存页的，然后由操作系统负责具体的刷盘策略和刷盘任务。<br> 我们看下图：<br> <img src="https://images2.imgbox.com/13/db/BGRDXQHG_o.png" alt="在这里插入图片描述"><br> 这个图就是描述了一个经典的ZeroCopy技术了，它跟应用程序是完全没有关联的，我们右边应用程序完全不做任何Copy，磁盘文件只在用户内核的空间上下文做一次Copy，然后直接写到网卡，也就是说我们ZeroCopy只是把磁盘文件复制到了页面缓存，然后把数据从页面缓存直接发送到网卡中，也就是说发送给不同的订阅者的时候，都可以使用同一个页面缓存，而避免了重复复制的操作。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/01f10f2a3c8e24f81314274794440ba2/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Windows使用bat脚本实现MySQL的启动与关闭</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/0bb2255e68bc8d9e45e63480ea3ec768/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">关于四位数的反向输出</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

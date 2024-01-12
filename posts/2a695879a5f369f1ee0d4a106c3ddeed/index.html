@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>应用使用Druid连接池经常性断链问题分析 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="应用使用Druid连接池经常性断链问题分析" />
+<meta property="og:description" content="前段时间有应用使用Druid连接池经常的提示断链报错，整个问题排查分析过程很有意思。这里将Druid连接池、数据库层以及负载均衡层的配置分析下，记录整个问题的分析过程，同时梳理下Druid连接池的配置和连接保活及回收机制。
+1、问题背景 应用通过数据库连接池申请连接，再通过负载均衡连接到数据库代理然后访问数据库，这是一个典型的架构，如下图所示：
+但是系统上线后应用总是出现偶发性的断链报错，经常性的出现以下错误信息：
+discard connection com.mysql.jdbc.exceptions.jdbc4.CommunicationsException: Communications link failure The last packet successfully received from the server was 72,557 milliseconds ago. The last packet sent successfully to the server was 0 milliseconds ago. 根据错误日志初步判断肯定是与 DB之间的链接已经断开，尝试使用了一个已经断开的链接才会引起这个错误发生，但是根据Druid的连接检查功能，不应出现这样的问题。接下去了解下Druid连接池的基本配置以及连接保活和回收机制。
+2、Druid连接池 2.1 Druid连接概览 Druid是开源的数据库连接池，它结合了C3P0、DBCP、Proxool等DB池的优点，同时加入了日志监控，可以很好的监控DB池连接和SQL的执行情况。
+在druidDataSource中有一个重入锁和衍生的两个condition：一个监控连接池是否为空，一个监控连接池不为空。在druidDataSource中有两个线程，一个生成连接CreateConnectionThread，一个回收连接DestoryConnectionThread。在创建、获取、回收的时候都会使用这些锁和condition。每次获取Connection都会调用init，内部使用inited标识DataSource是否已经初始化OK。每次获取Connection都会需要进行加锁保证线程安全，所有操作都在加锁后执行。如果连接池内没有连接了，则调用empty.signal()，通知CreateThread创建连接，并且等待指定的时间，被唤醒之后再去查看是否有可用连接。 2.2 Druid参数配置说明 1）基本属性
+name：配置这个属性的意义在于，如果存在多个数据源，监控的时候可以通过名字来区分开来。如果没有配置，将会生成一个名字，格式是：“DataSource-” &#43; System.identityHashCode(this).url：连接数据库的url，不同数据库不一样。例如：mysql : jdbc:mysql://10.20.153.104:3306/druid2、oracle : jdbc:oracle:thin:@10.20.149.85:1521:ocnautousername：连接数据库的用户名password：连接数据库的密码driverClassName：这一项可配可不配，如果不配置druid会根据url自动识别dbType，然后选择相应的driverClassName 2）连接池大小
+initialSize：初始化时建立物理连接的个数。初始化发生在显示调用init方法，或者第一次getConnection时。缺省值为0maxActive：最大连接池数量。缺省值为8minIdle：最小连接池数量。缺省值为0maxWait：获取连接时最大等待时间，单位毫秒。配置了maxWait之后，缺省启用公平锁，并发效率会有所下降，如果需要可以通过配置useUnfairLock属性为true使用非公平锁。缺省值为-1 3）连接检测
+testOnBorrow：申请连接时执行validationQuery检测连接是否有效，做了这个配置会降低性能。缺省值为truetestOnReturn：归还连接时执行validationQuery检测连接是否有效，做了这个配置会降低性能。缺省值为falsetestWhileIdle：建议配置为true，不影响性能，并且保证安全性。申请连接的时候检测，如果空闲时间大于timeBetweenEvictionRunsMillis，执行validationQuery检测连接是否有效。缺省值为falsetimeBetweenEvictionRunsMillis：有两个含义：1) Destroy线程会检测连接的间隔时间，如果连接空闲时间大于等于minEvictableIdleTimeMillis则关闭物理连接。2) testWhileIdle的判断依据。缺省值为60smaxEvictableIdleTimeMillis：连接空闲时间大于该值，不管minidle是多少都关闭这个连接。缺省值为7小时minEvictableIdleTimeMillis：连接空闲时间大于该值并且池中空闲连接数大于minidle则关闭这个连接。缺省值为30分钟maxPoolPreparedStatementPerConnectionSize：要启用PSCache，必须配置大于0，当大于0时，poolPreparedStatements自动触发修改为true。在Druid中，不会存在Oracle下PSCache占用内存过多的问题，可以把这个数值配置大一些，比如说100。缺省值为-1PhyTimeoutMillis：物理连接打开的时间超过这个超时时间，并且不再使用时会关闭这个物理连接，一般不建议打开validationQuery：用来检测连接是否有效的sql，要求是一个查询语句，常用select ‘x’。如果validationQuery为null，testOnBorrow、testOnReturn、testWhileIdle都不会起作用。缺省值为nullvalidationQueryTimeout：单位：秒，检测连接是否有效的超时时间。底层调用jdbc Statement对象的void setQueryTimeout(int seconds)方法。缺省值为-1keepAlive：连接池中的minIdle数量以内的连接，并且连接的空闲时间大于keepAliveBetweenTimeMillis但小于minEvictableIdleTimeMillis，则会执行validationQuery来保持连接的有效性。缺省值为falsekeepAliveBetweenTimeMillis：打开KeepAlive时，当连接的空闲时间超过该值，会使用validationQuery执行一次查询，检查连接是否可用。缺省值为120s 4）缓存语句
+poolPreparedStatements：是否缓存preparedStatement，也就是PSCache。PSCache对支持游标的数据库性能提升巨大，比如说oracle。在mysql下建议关闭。缺省值为falsesharePrepareStatementsmaxPoolPreparedStatementPerConnectionSize：要启用PSCache，必须配置大于0，当大于0时，poolPreparedStatements自动触发修改为true。在Druid中，不会存在Oracle下PSCache占用内存过多的问题，可以把这个数值配置大一些，比如说100。缺省值为-1 2.3 Druid连接池使用 使用druid连接池，主要是使用DruidDataSourceFactory创建出DataSource数据源对象，然后调用其getConnection方法获取数据库连接对象，拿到连接对象之后，和其它数据库连接不同的是当调用连接的close方法时，底层不再是关闭销毁连接对象，而是将连接对象放入到连接池中，以便后续新的请求到来时，直接拿去使用。
+import com.alibaba.druid.pool.DruidDataSourceFactory; import javax." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/2a695879a5f369f1ee0d4a106c3ddeed/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-07-05T08:56:33+08:00" />
+<meta property="article:modified_time" content="2022-07-05T08:56:33+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">应用使用Druid连接池经常性断链问题分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>前段时间有应用使用Druid连接池经常的提示断链报错，整个问题排查分析过程很有意思。这里将Druid连接池、数据库层以及负载均衡层的配置分析下，记录整个问题的分析过程，同时梳理下Druid连接池的配置和连接保活及回收机制。</p> 
+<hr> 
+<h5><a id="1_3"></a>1、问题背景</h5> 
+<p>应用通过数据库连接池申请连接，再通过负载均衡连接到数据库代理然后访问数据库，这是一个典型的架构，如下图所示：</p> 
+<p><img src="https://images2.imgbox.com/24/ed/RkJjJ97Q_o.png" alt="在这里插入图片描述"></p> 
+<p>但是系统上线后应用总是出现偶发性的断链报错，经常性的出现以下错误信息：</p> 
+<pre><code>discard connection
+com.mysql.jdbc.exceptions.jdbc4.CommunicationsException: Communications link failure
+The last packet successfully received from the server was 72,557 milliseconds ago. The last packet sent successfully to the server was 0 milliseconds ago.
+</code></pre> 
+<p>根据错误日志<strong>初步判断肯定是与 DB之间的链接已经断开，尝试使用了一个已经断开的链接才会引起这个错误发生</strong>，但是根据Druid的连接检查功能，不应出现这样的问题。接下去了解下Druid连接池的基本配置以及连接保活和回收机制。</p> 
+<h5><a id="2Druid_18"></a>2、Druid连接池</h5> 
+<h6><a id="21_Druid_19"></a>2.1 Druid连接概览</h6> 
+<p><strong>Druid是开源的数据库连接池</strong>，它结合了C3P0、DBCP、Proxool等DB池的优点，同时加入了日志监控，可以很好的监控DB池连接和SQL的执行情况。</p> 
+<p><img src="https://images2.imgbox.com/d7/41/bSaPZZiA_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>在druidDataSource中有一个重入锁和衍生的两个condition：一个监控连接池是否为空，一个监控连接池不为空。</li><li>在druidDataSource中有两个线程，一个<strong>生成连接CreateConnectionThread，一个回收连接DestoryConnectionThread</strong>。在创建、获取、回收的时候都会使用这些锁和condition。</li><li>每次获取Connection都会调用init，内部使用inited标识DataSource是否已经初始化OK。</li><li>每次获取Connection都会需要进行加锁保证线程安全，所有操作都在加锁后执行。</li><li>如果连接池内没有连接了，则调用empty.signal()，通知CreateThread创建连接，并且等待指定的时间，被唤醒之后再去查看是否有可用连接。</li></ul> 
+<h6><a id="22_Druid_31"></a>2.2 Druid参数配置说明</h6> 
+<p>1）基本属性</p> 
+<ul><li>name：配置这个属性的意义在于，如果存在多个数据源，监控的时候可以通过名字来区分开来。如果没有配置，将会生成一个名字，格式是：“DataSource-” + System.identityHashCode(this).</li><li>url：连接数据库的url，不同数据库不一样。例如：mysql : jdbc:mysql://10.20.153.104:3306/druid2、oracle : jdbc:oracle:thin:@10.20.149.85:1521:ocnauto</li><li>username：连接数据库的用户名</li><li>password：连接数据库的密码</li><li>driverClassName：这一项可配可不配，如果不配置druid会根据url自动识别dbType，然后选择相应的driverClassName</li></ul> 
+<p>2）连接池大小</p> 
+<ul><li>initialSize：初始化时建立物理连接的个数。初始化发生在显示调用init方法，或者第一次getConnection时。缺省值为0</li><li><strong>maxActive</strong>：最大连接池数量。缺省值为8</li><li><strong>minIdle</strong>：最小连接池数量。缺省值为0</li><li>maxWait：获取连接时最大等待时间，单位毫秒。配置了maxWait之后，缺省启用公平锁，并发效率会有所下降，如果需要可以通过配置useUnfairLock属性为true使用非公平锁。缺省值为-1</li></ul> 
+<p>3）连接检测</p> 
+<ul><li>testOnBorrow：申请连接时执行validationQuery检测连接是否有效，做了这个配置会降低性能。缺省值为true</li><li>testOnReturn：归还连接时执行validationQuery检测连接是否有效，做了这个配置会降低性能。缺省值为false</li><li><strong>testWhileIdle</strong>：建议配置为true，不影响性能，并且保证安全性。申请连接的时候检测，如果空闲时间大于timeBetweenEvictionRunsMillis，执行validationQuery检测连接是否有效。缺省值为false</li><li><strong>timeBetweenEvictionRunsMillis</strong>：有两个含义：1) Destroy线程会检测连接的间隔时间，如果连接空闲时间大于等于minEvictableIdleTimeMillis则关闭物理连接。2) testWhileIdle的判断依据。缺省值为60s</li><li><strong>maxEvictableIdleTimeMillis</strong>：连接空闲时间大于该值，不管minidle是多少都关闭这个连接。缺省值为7小时</li><li><strong>minEvictableIdleTimeMillis</strong>：连接空闲时间大于该值并且池中空闲连接数大于minidle则关闭这个连接。缺省值为30分钟</li><li>maxPoolPreparedStatementPerConnectionSize：要启用PSCache，必须配置大于0，当大于0时，poolPreparedStatements自动触发修改为true。在Druid中，不会存在Oracle下PSCache占用内存过多的问题，可以把这个数值配置大一些，比如说100。缺省值为-1</li><li>PhyTimeoutMillis：物理连接打开的时间超过这个超时时间，并且不再使用时会关闭这个物理连接，一般不建议打开</li><li><strong>validationQuery</strong>：用来检测连接是否有效的sql，要求是一个查询语句，常用select ‘x’。如果validationQuery为null，testOnBorrow、testOnReturn、testWhileIdle都不会起作用。缺省值为null</li><li>validationQueryTimeout：单位：秒，检测连接是否有效的超时时间。底层调用jdbc Statement对象的void setQueryTimeout(int seconds)方法。缺省值为-1</li><li><strong>keepAlive</strong>：连接池中的minIdle数量以内的连接，并且连接的空闲时间大于keepAliveBetweenTimeMillis但小于minEvictableIdleTimeMillis，则会执行validationQuery来保持连接的有效性。缺省值为false</li><li><strong>keepAliveBetweenTimeMillis</strong>：打开KeepAlive时，当连接的空闲时间超过该值，会使用validationQuery执行一次查询，检查连接是否可用。缺省值为120s</li></ul> 
+<p>4）缓存语句</p> 
+<ul><li>poolPreparedStatements：是否缓存preparedStatement，也就是PSCache。PSCache对支持游标的数据库性能提升巨大，比如说oracle。在mysql下建议关闭。缺省值为false</li><li>sharePrepareStatements</li><li>maxPoolPreparedStatementPerConnectionSize：要启用PSCache，必须配置大于0，当大于0时，poolPreparedStatements自动触发修改为true。在Druid中，不会存在Oracle下PSCache占用内存过多的问题，可以把这个数值配置大一些，比如说100。缺省值为-1</li></ul> 
+<h6><a id="23_Druid_68"></a>2.3 Druid连接池使用</h6> 
+<p>使用druid连接池，主要是<strong>使用DruidDataSourceFactory创建出DataSource数据源对象</strong>，然后调用其getConnection方法获取数据库连接对象，拿到连接对象之后，和其它数据库连接不同的是当调用连接的close方法时，底层不再是关闭销毁连接对象，而是将连接对象放入到连接池中，以便后续新的请求到来时，直接拿去使用。</p> 
+<pre><code>import com.alibaba.druid.pool.DruidDataSourceFactory;
+import javax.sql.DataSource;
+import java.io.InputStream;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.util.Properties;
+public class druidtest {
+public static void main(String[] args) throws Exception {
+//加载配置文件
+        InputStream is = druidtest.class.getClassLoader().getResourceAsStream("druid.properties");
+        Properties prop = new Properties();
+        prop.load(is);
+//根据配置文件内容，创建出数据源对象
+        DataSource dataSource = DruidDataSourceFactory.createDataSource(prop);
+//通过数据源对象获取数据库连接
+        //如果连接池中的连接已经被用完，则会等待一定的时间（所配置的时间）
+        //如果等待超时，就会抛出异常
+        Connection con = dataSource.getConnection();
+//执行 sql 语句，获取并打印结果集
+        String sql = "select e_id,e_name,e_age from employee";
+        PreparedStatement pst = con.prepareStatement(sql);
+        ResultSet rs = pst.executeQuery();
+        while(rs.next()) {
+            System.out.println(
+                    rs.getInt("e_id") + "\t" +
+                    rs.getString("e_name") + "\t" +
+                    rs.getInt("e_age"));
+        }
+//释放资源
+        rs.close();
+        pst.close();
+//这里的关闭连接，并没有关闭和销毁连接而是把连接对象，放入到连接池中，供后续访问时直接拿去使用
+        con.close();
+}
+}
+</code></pre> 
+<p>注意其中的<mark>con.close()</mark>，这里的关闭连接，并没有关闭和销毁连接而是把连接对象，放入到连接池中，供后续访问时直接拿去使用。</p> 
+<h6><a id="24__110"></a>2.4 连接保活和回收机制</h6> 
+<h6><a id="241__111"></a>2.4.1 连接保活</h6> 
+<p>为了防止一个数据库连接太久没有使用，而被其它下层的服务关闭，druid中<strong>定义了KeepAlive选项</strong>，机制上与TCP中的类似。保活机制能够保证连接池中的连接是真实有效的连接，假如遇到特殊情况导致连接不可用时，keepAlive机制将无效连接进行驱逐。保活机制是由守护线程DestroyConnectionThread发起的，启动后守护线程会进入无线循环，根据心跳间隔时间timeBetweenEvictionRunsMillis循环调用DestoryTask线程，默认时间为60s。</p> 
+<p>1）开启KeepAlive</p> 
+<pre><code>// 一个连接在连接池中最小生存的时间
+dataSurce.setMinEvictableIdleTimeMillis(60 * 1000);单位毫秒
+// 开启keepAlive
+dataSource.setKeepAlive(true);
+</code></pre> 
+<p>2）DruidDataSource中的两个成员变量</p> 
+<pre><code>// 存放检查需要抛弃的连接
+private DruidConnectionHolder[] evictConnections;
+// 用来存放需要连接检查的存活连接
+private DruidConnectionHolder[] keepAliveConnections;
+</code></pre> 
+<p>如果KeepAlive打开，当一个连接的空闲时间超过keepAliveBetweenTimeMillis时，则会将此连接放入此连接放入keepAliveConnections数组，然后使用validationQuery执行一次查询。</p> 
+<pre><code>if (keepAlive &amp;&amp; idleMillis &gt;= keepAliveBetweenTimeMillis) {
+                        keepAliveConnections[keepAliveCount++] = connection;
+}
+…
+if (keepAliveCount &gt; 0) {
+     // keep order
+     for (int i = keepAliveCount - 1; i &gt;= 0; --i) {
+                DruidConnectionHolder holer = keepAliveConnections[i];
+                Connection connection = holer.getConnection();
+                holer.incrementKeepAliveCheckCount();
+
+                boolean validate = false;
+                try {
+                    this.validateConnection(connection);
+                    validate = true;
+                } catch (Throwable error) {
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("keepAliveErr", error);
+                    }
+                    // skip
+                }
+</code></pre> 
+<p>如果本次validationQuery执行失败，则关闭该链接，并丢弃。</p> 
+<h6><a id="242__155"></a>2.4.2 数据源收缩</h6> 
+<p>在Druid数据源初始化的时候，会创建一个定时运行的DestroyTask，该任务的主要目的是<strong>将已空闲时间满足关闭条件的连接关闭</strong>。</p> 
+<p>1）当前连接存活时长 &gt; 配置的物理连接时间时长，则放入evictConnections</p> 
+<pre><code>if (phyConnectTimeMillis &gt; phyTimeoutMillis) {
+    evictConnections[evictCount++] = connection;
+    continue;
+}
+</code></pre> 
+<p>2）空闲时间 &gt; 最小驱逐时间</p> 
+<pre><code>                    if (idleMillis &gt;= minEvictableIdleTimeMillis) {
+                        if (checkTime &amp;&amp; i &lt; checkCount) {
+                            evictConnections[evictCount++] = connection;
+                            continue;
+                        } else if (idleMillis &gt; maxEvictableIdleTimeMillis) {
+                            evictConnections[evictCount++] = connection;
+                            continue;
+                        }
+                    }
+…
+        if (evictCount &gt; 0) {
+            for (int i = 0; i &lt; evictCount; ++i) {
+                DruidConnectionHolder item = evictConnections[i];
+                Connection connection = item.getConnection();
+                JdbcUtils.close(connection);
+                destroyCountUpdater.incrementAndGet(this);
+            }
+            Arrays.fill(evictConnections, null);
+        }
+</code></pre> 
+<p>从代码逻辑中可以看到，对于要关闭的空闲连接选择逻辑如下：</p> 
+<ul><li>对于空闲时间&gt; minEvictableIdleTimeMillis的连接，仅会关闭poolingCount-minIdle个，后面的连接不受影响；</li><li>处于&gt; maxEvictableIdleTimeMillis的空闲连接则会直接关闭；</li><li>timeBetweenEvictionRunsMillis即为该定时任务运行的间隔；</li><li>minEvictableIdleTimeMillis为可关闭连接的最小空闲时间</li></ul> 
+<h6><a id="25_Druid_196"></a>2.5 Druid连接生命周期</h6> 
+<p>Druid连接的生命周期从两个维度去看：<strong>一个是应用使用方，包括连接的申请、使用和关闭；一个是Druid自己管理的连接池，包括连接的创建和回收、保活机制等</strong>。具体如下所示：</p> 
+<p><img src="https://images2.imgbox.com/a1/4d/yU4b7pCY_o.png" alt="在这里插入图片描述"></p> 
+<p>1）客户端连接管理</p> 
+<ul><li>客户端发起连接请求从Druid连接池申请连接，如果连接池内连接不够会调用CreateThread创建连接；</li><li>客户端拿到连接后，访问数据库进行操作；</li><li>连接操作完成后，释放数据库资源并close连接，这一步通常是由应用主动去做的，连接关闭后会回收，归还给Druid连接池。</li></ul> 
+<p>2）Druid连接池管理</p> 
+<ul><li>Druid连接池设置<strong>最小连接数minIdle和最大连接数maxActive</strong>，最小连接数支持预热功能，应用每次申请连接的时候不需要重新初始化，高并发下可以提升性能；</li><li>连接池会定时进行连接保活，KeepAlive的周期由timeBetweenEvictionRunsMillis控制（默认值60s），当发现连接的空闲时长超过keepAliveBetweenTimeMillis（默认值120s）时，会主动发起链路保活，一般是向数据库发起SQL查询，这个SQL语句可以自定义，通常为“select 1 from dual”</li><li>为了防止连接泄露，会定时回收空闲的连接，对于连接空闲时间大于minEvictableIdleTimeMillis（默认为30分钟）并且连接池中空闲连接数大于minIdle则关闭这个连接；如果连接空闲时间大于maxEvictableIdleTimeMillis（默认值为7小时）则直接关闭连接</li><li>从上可以看出，如果没有连接保活，当设置minIdle后会有一部分在最小连接内的连接因为空闲连接超时被关闭；当然如果设置了KeepAlive并且当保活的检测频率和keepAliveBetweenTimeMillis小于minEvictableIdleTimeMillis时，就不会出现空闲连接被关闭的情况。</li></ul> 
+<h5><a id="3_212"></a>3、问题分析</h5> 
+<p>回到应用断链的问题，基于Druid连接池的设置和应用访问数据库整个链路的超时设置，以MySQL数据库为例，可以得到下面配置：</p> 
+<p><img src="https://images2.imgbox.com/6c/63/mZDTWjyh_o.png" alt="在这里插入图片描述"></p> 
+<h6><a id="31_JDBCurl_217"></a>3.1 应用JDBC的url连接配置</h6> 
+<p>JDBC的url连接配置中connectTimeout和socketTimeout都属于TCP层面的超时</p> 
+<ul><li><strong>connectTimeout</strong>：表示的是数据库驱动与数据库服务器建立TCP连接的超时时间。超时以后可能会出现以下异常信息</li></ul> 
+<pre><code>com.mysql.jdbc.exceptions.jdbc4.CommunicationsException: Communications link failure
+The last packet sent successfully to the server was 0 milliseconds ago. The driver has not received any packets from the server.
+    at sun.reflect.NativeConstructorAccessorImpl.newInstance0(Native Method)
+    at sun.reflect.NativeConstructorAccessorImpl.newInstance(NativeConstructorAccessorImpl.java:62)
+    ...
+Caused by: java.net.SocketTimeoutException: connect timed out
+    at java.net.PlainSocketImpl.socketConnect(Native Method)
+    at java.net.AbstractPlainSocketImpl.doConnect(AbstractPlainSocketImpl.java:350)
+    ...
+</code></pre> 
+<ul><li><strong>socketTimeout</strong>：通过TCP连接发送数据后，等待响应的超时时间。通常是在sql的执行时间超过了socket timeout设置的情况下出现。超时以后会出现类似的报错信息：</li></ul> 
+<pre><code>com.mysql.jdbc.exceptions.jdbc4.CommunicationsException: Communications link failure
+The last packet successfully received from the server was 3,080 milliseconds ago.  The last packet sent successfully to the server was 3,005 milliseconds ago.
+    ...
+Caused by: java.net.SocketTimeoutException: Read timed out
+    at java.net.SocketInputStream.socketRead0(Native Method)
+    at java.net.SocketInputStream.socketRead(SocketInputStream.java:116)
+</code></pre> 
+<h6><a id="32__244"></a>3.2 数据库层超时设置</h6> 
+<p>以MySQL为例，在数据库层设置空闲连接的<strong>超时参数wait_timeout，默认为7小时</strong>，超过后会自动断开空闲连接。在实际过程中，应用通过负载均衡或者Druid连接到数据库，如果负载均衡没有开启会话保持或者Druid没有连接保活机制，客户端的连接空闲时间超过7小时后，会在数据库层主动杀掉。但是既然已经使用了Druid连接池，那么应用端的数据库连接就可以由Druid进行很好的管理。</p> 
+<h6><a id="33_Druid_247"></a>3.3 Druid连接配置</h6> 
+<p>从应用断链报错信息来看，不是超过7小时断开，而是300s左右，所以排除了数据库层主动断链的问题。再来分析下Druid端的配置，和连接有关的参数如下：</p> 
+<pre><code>datasource.druid.validationQuery=SELECT 1 from dual
+datasource.druid.validationQueryTimeout=2000
+datasource.druid.testWhileIdle=true
+datasource.druid.minIdle=50
+datasource.druid.maxActive=100
+datasource.druid.minEvictableIdleTimeMillis=300000
+datasource.druid.timeBetweenEvictionRunsMillis=600000
+datasource.druid.keepAlive=true
+datasource.druid.keepAliveBetweenTimeMillis=300s
+</code></pre> 
+<ol><li>Druid的KeepAlive开关是打开的，连接保活的机制是生效的。默认情况下druid采用的是mysql.ping协议进行检查，使用检查语句“SELECT 1 from dual”同样更新session的闲置时间，这里不存在问题</li><li>Druid的链路保活检测周期是timeBetweenEvictionRunsMillis为600s，默认值为60s，应用考虑到性能调整了检测周期。如果空闲连接超过600s，满足检测周期是可以重新进行保活的，但是如果连接空闲时间小于600s而被close掉，那就不是Druid这边导致的，也就是该问题中300s左右链路断开了。</li></ol> 
+<h6><a id="34__264"></a>3.4 负载均衡的会话保持配置</h6> 
+<p>有一点很容易忽略的就是<strong>负载均衡的会话保持</strong>，会话保持是指在负载均衡器上有一种机制，在作负载均衡的同时，还保证同一用户相关连的访问请求会被分配到同一台服务器上。<strong>会话保持是有时间限制的，以F5为例默认为5分钟，也就是检测到连接空闲超过5分钟，会主动将它断开</strong>。这里似乎找到了问题点了，Druid连接池的保活是10分钟而负载均衡这边的空闲连接检测是5分钟，当有连接的空闲时间超过5分钟但是小于10分钟后，会被负载均衡这边杀掉，应用在使用这个连接的时候当然会报断链的错误了。最后是调整了负载均衡的会话保持的检测时间，以规避类似的问题。</p> 
+<h5><a id="4_267"></a>4、总结</h5> 
+<p>应用在使用Druid连接池访问数据库的时候，需要根据业务TPS和并发调整合适的配置，以利用Druid连接池的实现对连接的创建、保活和释放管理。当遇到类似断链的问题的时候，要从端到端的每个点进行排查分析，以定位到最终的原因，比如这次的负载均衡的配置是很难想到的。应用从Druid申请了连接后，这个连接已经超出Druid的管理范围，需要由应用自己去做处理，及时的close归还到连接池里，否则的话数据库端的连接会越来越多，而且空闲连接超过一定时间后也会被数据库层或者负载均衡层断掉进而出现断链的错误，这个就需要应用做额外的处理了。</p> 
+<hr> 
+<blockquote> 
+ <p>参考资料：</p> 
+</blockquote> 
+<ol><li>https://github.com/alibaba/druid/wiki/</li><li>https://www.cnblogs.com/studyjobs/p/15888552.html</li><li>https://www.jianshu.com/p/131998f9777d</li><li>https://blog.csdn.net/qq_45533884/article/details/107392617</li></ol> 
+<blockquote> 
+ <p>转载请注明原文地址：<a href="https://blog.csdn.net/solihawk/article/details/125612396">https://blog.csdn.net/solihawk/article/details/125612396</a><br> 文章会同步在公众号“牧羊人的方向”更新，感兴趣的可以关注公众号，谢谢！<br> <img src="https://images2.imgbox.com/7e/eb/FFHbMqEZ_o.jpg" alt="在这里插入图片描述"></p> 
+</blockquote>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/640c0d429bdf6af627ed7b1e08772140/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">WEB端实现文件夹上传</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/257bd00fa3a7436c732d17c70a23a476/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">技术干货 | MindSpore AI科学计算系列（四）：AlphaFold2分析</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

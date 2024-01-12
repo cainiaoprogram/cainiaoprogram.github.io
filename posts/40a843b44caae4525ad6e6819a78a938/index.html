@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Fuzz_AFL学习 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Fuzz_AFL学习" />
+<meta property="og:description" content="Fuzz what：从维基百科上看，模糊处理是对代码库或可执行文件的自动输入测试。在摸索过程中，无效或意外（有时是随机）的数据被提供给可执行文件，希望能找到一些未定义的行为，或漏洞。why： 模糊测试对于以下方面很有价值： 从不受信任的来源接收输入的软件（安全性）;理智性检查两个复杂算法的等价性（正确性）;验证接受复杂输入的大容量 API 的稳定性（稳定性）， 例如解压缩器，即使所有输入都是可信的。 where： 特定于 C/C&#43;&#43; 的错误，需要清理器捕获： 释放后使用，缓冲区溢出未初始化内存的使用内存泄漏 算术错误： 除以零、整数/浮点数溢出、无效的按位移位 普通崩溃： 空取消引用，未捕获异常 并发错误： 数据竞赛， 死锁 资源使用错误： 内存耗尽、挂起或无限循环、无限递归（堆栈溢出） 逻辑错误： 同一协议的两个实现之间的差异往返一致性错误（例如压缩输入、解压缩、与原始内容进行比较）断言失败 AFL深入学习 fuzz运行中的细节 那模糊测试产生的输入样例呢？
+libFuzzer将输入样例作为一个字节数组，并将它的指针与长度传入给接口函数。AFL采用了另一种思路，将之视为文件！
+像前面的例子，这个文件就是stdin标准输入，afl-fuzzer把标准输入重定向到其产生的测试样例，这样在程序中scanf/cin就相当于在利用测试样例了。
+另外如果有其他需要？譬如读取的是二进制格式的输入而非终端字符。
+办法之一就是使用C标准库的freopen函数将标准输入以二进制文件的形式打开，然后使用fread等函数对之进行读取。
+另一个办法就是在命令行的--后程序参数中加一个@@，这是一个占位符，AFL发现这个占位符就不会把测试样例重定向给stdin，转而将值保存为一个磁盘文件，然后在main函数中，@@占位符对应的argv就是该文件的路径字符串，读取之即可。
+在Fuzzing共享库时，可能需要编写一个简单demo，将输入传递给要Fuzzing的库（其实大多数项目中都自带了类似的demo）。这种情况下，可以通过设置LD_LIBRARY_PATH让程序加载经过AFL插桩的.so文件，不过最简单的方法是静态构建
+libFuzzer将整个被测对象视为一个函数接口，每次测试视为循环体中对函数的一次调用。但是AFL不然，他将被测对象看作一个可执行程序，每次测试视为对程序的一次调用，自然也会在新的进程环境中。
+一次Fuzzing过程通常会持续很长时间，如果这期间运行afl-fuzz实例的终端终端被意外关闭了，那么Fuzzing也会被中断。而通过在screen session中启动每个实例，可以方便的连接和断开。
+afl-fuzz并行Fuzzing，一般的做法是通过-M参数指定一个主Fuzzer(Master Fuzzer)、通过-S参数指定多个从Fuzzer(Slave Fuzzer)
+多系统并行的基本工作原理类似于单系统并行中描述的机制，你需要一个简单的脚本来完成两件事。在本地系统上，压缩每个fuzzer实例目录中queue下的文件，通过SSH分发到其他机器上解压。
+种子库要求与原则 (1) 有效的输入
+尽管有时候无效输入会产生bug和崩溃，但有效输入可以更快的找到更多执行路径。
+(2) 尽量小的体积
+较小的文件会不仅可以减少测试和处理的时间，也能节约更多的内存，AFL给出的建议是最好小于1 KB，但其实可以根据自己测试的程序权衡，这在AFL文档的perf_tips.txt中有具体说明。
+种子库修剪
+语料库蒸馏（Corpus Distillation）
+AFL提供了两个工具来帮助我们完成这部工作——afl-cmin和afl-tmin。
+afl-cmin的核心思想是：尝试找到与语料库全集具有相同覆盖范围的最小子集。举个例子：假设有多个文件，都覆盖了相同的代码，那么就丢掉多余的文件。
+整体的大小得到了改善，接下来还要对每个文件进行更细化的处理。afl-tmin缩减文件体积的原理这里就不深究了，有机会会在后面文章中解释，这里只给出使用方法（其实也很简单，有兴趣的朋友可以自己搜一搜）。
+afl-tmin有两种工作模式，instrumented mode和crash mode。
+处理测试结果 确定造成这些crashes的bug是否可以利用，怎么利用
+crash exploration mode：这是afl-fuzz的一种运行模式，也称为peruvian rabbit mode，用于确定bug的可利用性
+triage_crashes：AFL源码的experimental目录中有一个名为triage_crashes.sh的脚本，可以帮助我们触发收集到的crashes
+crashwalk：如果你想得到更细致的crashes分类结果，以及导致crashes的具体原因，那么crashwalk就是不错的选择之一。这个工具基于gdb的exploitable插件，安装也相对简单，在ubuntu上
+afl-collec：是afl-utils套件中的一个工具，同样也是基于exploitable来检查crashes的可利用性。它可以自动删除无效的crash样本、删除重复样本以及自动化样本分类。
+代码覆盖率 基本块（Basic Block）：缩写为BB，指一组顺序执行的指令，BB中第一条指令被执行后，后续的指令也会被全部执行，每个BB中所有指令的执行次数是相同的" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/40a843b44caae4525ad6e6819a78a938/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-07-07T16:06:00+08:00" />
+<meta property="article:modified_time" content="2023-07-07T16:06:00+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Fuzz_AFL学习</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="Fuzz_0"></a>Fuzz</h2> 
+<ul><li>what：从维基百科上看，模糊处理是对代码库或可执行文件的自动输入测试。在摸索过程中，无效或意外（有时是随机）的数据被提供给可执行文件，希望能找到一些未定义的行为，或漏洞。</li><li>why： 
+  <ul><li>模糊测试对于以下方面很有价值： 
+    <ul><li>从不受信任的来源接收输入的软件（安全性）;</li><li>理智性检查两个复杂算法的等价性（正确性）;</li><li>验证接受复杂输入的大容量 API 的稳定性（稳定性）， 例如解压缩器，即使所有输入都是可信的。</li></ul> </li></ul> </li><li>where： 
+  <ul><li>特定于 C/C++ 的错误，需要<a href="https://github.com/google/sanitizers">清理器</a>捕获： 
+    <ul><li>释放后使用，缓冲区溢出</li><li>未初始化内存的使用</li><li>内存泄漏</li></ul> </li><li>算术错误： 
+    <ul><li>除以零、整数/浮点数溢出、无效的按位移位</li></ul> </li><li>普通崩溃： 
+    <ul><li>空取消引用，未捕获异常</li></ul> </li><li>并发错误： 
+    <ul><li>数据竞赛， 死锁</li></ul> </li><li>资源使用错误： 
+    <ul><li>内存耗尽、挂起或无限循环、无限递归（堆栈溢出）</li></ul> </li><li>逻辑错误： 
+    <ul><li>同一协议的两个实现之间的差异</li><li>往返一致性错误（例如压缩输入、解压缩、与原始内容进行比较）</li><li>断言失败</li></ul> </li></ul> </li></ul> 
+<h2><a id="AFL_26"></a>AFL深入学习</h2> 
+<h3><a id="fuzz_28"></a>fuzz运行中的细节</h3> 
+<p>那模糊测试产生的输入样例呢？</p> 
+<p>libFuzzer将输入样例作为一个字节数组，并将它的指针与长度传入给接口函数。AFL采用了另一种思路，将之视为文件！</p> 
+<p>像前面的例子，这个文件就是<code>stdin</code>标准输入，<code>afl-fuzzer</code>把标准输入重定向到其产生的测试样例，这样在程序中<code>scanf/cin</code>就相当于在利用测试样例了。</p> 
+<p>另外如果有其他需要？譬如读取的是二进制格式的输入而非终端字符。</p> 
+<p>办法之一就是使用C标准库的<code>freopen</code>函数将标准输入以二进制文件的形式打开，然后使用<code>fread</code>等函数对之进行读取。</p> 
+<p>另一个办法就是在命令行的<code>--</code>后程序参数中加一个<code>@@</code>，这是一个占位符，AFL发现这个占位符就不会把测试样例重定向给<code>stdin</code>，转而将值保存为一个磁盘文件，然后在<code>main</code>函数中，<code>@@</code>占位符对应的<code>argv</code>就是该文件的路径字符串，读取之即可。</p> 
+<p>在Fuzzing共享库时，可能需要编写一个简单demo，将输入传递给要Fuzzing的库（其实大多数项目中都自带了类似的demo）。这种情况下，可以通过设置<code>LD_LIBRARY_PATH</code>让程序加载经过AFL插桩的.so文件，不过最简单的方法是静态构建</p> 
+<p>libFuzzer将整个被测对象视为一个函数接口，每次测试视为循环体中对函数的一次调用。但是AFL不然，他将被测对象看作一个可执行程序，每次测试视为对程序的一次调用，自然也会在新的进程环境中。</p> 
+<p>一次Fuzzing过程通常会持续很长时间，如果这期间运行afl-fuzz实例的终端终端被意外关闭了，那么Fuzzing也会被中断。而通过在<code>screen session</code>中启动每个实例，可以方便的连接和断开。</p> 
+<p><code>afl-fuzz</code>并行Fuzzing，一般的做法是通过<code>-M</code>参数指定一个主Fuzzer(<code>Master Fuzzer</code>)、通过<code>-S</code>参数指定多个从Fuzzer(<code>Slave Fuzzer</code>)</p> 
+<p>多系统并行的基本工作原理类似于单系统并行中描述的机制，你需要一个简单的脚本来完成两件事。在本地系统上，压缩每个fuzzer实例目录中<code>queue</code>下的文件，通过SSH分发到其他机器上解压。</p> 
+<hr> 
+<h3><a id="_54"></a>种子库要求与原则</h3> 
+<p><strong>(1) 有效的输入</strong></p> 
+<p>尽管有时候无效输入会产生bug和崩溃，但有效输入可以更快的找到更多执行路径。</p> 
+<p><strong>(2) 尽量小的体积</strong></p> 
+<p>较小的文件会不仅可以减少测试和处理的时间，也能节约更多的内存，AFL给出的建议是最好小于1 KB，但其实可以根据自己测试的程序权衡，这在AFL文档的<code>perf_tips.txt</code>中有具体说明。</p> 
+<p>种子库修剪</p> 
+<p>语料库蒸馏（Corpus Distillation）</p> 
+<p>AFL提供了两个工具来帮助我们完成这部工作——<code>afl-cmin</code>和<code>afl-tmin</code>。</p> 
+<p><code>afl-cmin</code>的核心思想是：<strong>尝试找到与语料库全集具有相同覆盖范围的最小子集</strong>。举个例子：假设有多个文件，都覆盖了相同的代码，那么就丢掉多余的文件。</p> 
+<p>整体的大小得到了改善，接下来还要对每个文件进行更细化的处理。afl-tmin缩减文件体积的原理这里就不深究了，有机会会在后面文章中解释，这里只给出使用方法（其实也很简单，有兴趣的朋友可以自己搜一搜）。</p> 
+<p><code>afl-tmin</code>有两种工作模式，<code>instrumented mode</code>和<code>crash mode</code>。</p> 
+<hr> 
+<h3><a id="_78"></a>处理测试结果</h3> 
+<p>确定造成这些crashes的bug是否可以利用，怎么利用</p> 
+<p>crash exploration mode：这是afl-fuzz的一种运行模式，也称为<strong>peruvian rabbit mode</strong>，用于确定bug的可利用性</p> 
+<p>triage_crashes：AFL源码的experimental目录中有一个名为triage_crashes.sh的脚本，可以帮助我们触发收集到的crashes</p> 
+<p>crashwalk：如果你想得到更细致的crashes分类结果，以及导致crashes的具体原因，那么crashwalk就是不错的选择之一。这个工具基于gdb的exploitable插件，安装也相对简单，在ubuntu上</p> 
+<p>afl-collec：是afl-utils套件中的一个工具，同样也是基于exploitable来检查crashes的可利用性。它可以自动删除无效的crash样本、删除重复样本以及自动化样本分类。</p> 
+<hr> 
+<h3><a id="_92"></a>代码覆盖率</h3> 
+<p>基本块（Basic Block）：缩写为BB，指一组顺序执行的指令，BB中第一条指令被执行后，后续的指令也会被全部执行，每个BB中所有指令的执行次数是相同的</p> 
+<p>边（edge）：AFL的技术白皮书中提到fuzzer通过插桩代码捕获边（edge）覆盖率。那么什么是edge呢？我们可以将程序看成一个控制流图（CFG），图的每个节点表示一个基本块，而edge就被用来表示在基本块之间的转跳。知道了每个基本块和跳转的执行次数，就可以知道程序中的每个语句和分支的执行次数，从而获得比记录BB更细粒度的覆盖率信息。</p> 
+<p>元组（tuple）：具体到AFL的实现中，使用二元组(branch_src, branch_dst)来记录当前基本块 + 前一基本块 的信息，从而获取目标的执行流程和代码覆盖情况</p> 
+<p>如何计算我们的测试用例对前面测试目标的代码覆盖率：</p> 
+<p>GCOV：它随gcc一起发布，所以不需要再单独安装，和afl-gcc插桩编译的原理一样，gcc编译时生成插桩的程序，用于在执行时生成代码覆盖率信息。</p> 
+<p>LCOV：它是GCOV的图形前端，可以收集多个源文件的gcov数据，并创建包含使用覆盖率信息注释的源代码HTML页面。</p> 
+<p>afl-cov：可以快速帮助我们调用前面两个工具处理来自afl-fuzz测试用例的代码覆盖率结果。在ubuntu中可以使用<code>apt-get install afl-cov</code>安装afl-cov</p> 
+<h2><a id="AFLAFL_108"></a>AFL++/AFL文档详细阅读</h2> 
+<h3><a id="AFL_110"></a>基于AFL的相关改进工作</h3> 
+<ul><li>智能调度：搜索策略-&gt;挑选种子 
+  <ul><li>AFLFast 
+    <ul><li>fast, coe, explore, quad, lin, exploit</li></ul> </li><li>MOpt 
+    <ul><li>最优粒子群算法</li></ul> </li></ul> </li></ul> 
+<h3><a id="AFLAFL_118"></a>AFL++相较于AFL的改进</h3> 
+<ul><li>种子调度，增添了： 
+  <ul><li>AFLFAST</li><li>mmopt</li><li>稀有调度</li></ul> </li><li>Custom Mutator API 
+  <ul><li>插件系统可以很容易地对新的研究想法进行原型化，并为行业专业人员提供了一种简单的方法来根据他们的目标定制测试用例</li></ul> </li><li>MOpt的Core模式和Pilot模式</li><li>afl++支持几种检测后端:LLVM、GCC、QEMU、Unicorn和QBDI。最重要的是，它提供了一个代理模块，可以适应将测试用例转发到目标，并为afl-fuzz提供任何类型的覆盖，甚至是远程和非覆盖</li></ul> 
+<h3><a id="AFL_129"></a>流程（AFL++）</h3> 
+<p><img src="https://images2.imgbox.com/97/23/oUGkWSAg_o.png" alt="在这里插入图片描述"><br> 对不同的目标进行模糊测试 <a href="https://github.com/AFLplusplus/AFLplusplus/blob/stable/docs/best_practices.md#fuzzing-a-target-with-source-code-available">AFLplus/best_practices.md at stable ·AFLplus/AFLplusplus (github.com)</a></p> 
+<p>以下为使用可用的源代码对目标进行模糊测试：</p> 
+<h4><a id="_135"></a>检测目标</h4> 
+<p><img src="https://images2.imgbox.com/b1/e4/yRbB9sNB_o.png" alt="在这里插入图片描述"></p> 
+<ul><li> <p>根据clang/clang++版本和gcc版本进行选择编译器</p> 
+  <ul><li> <p>LTO</p> 
+    <ul><li>被解决的问题：BB随机编号，无法发现新路径</li><li>配置/拓展 
+      <ul><li>共享库：要检测的每个共享库都必须单独编译</li><li>词典：编译时，基于字符串比较的字典会自动 生成并放入目标二进制文件中</li><li>加速fuzz：为了进一步加快模糊测试的速度，可以设置一个固定的共享内存映射</li></ul> </li></ul> </li><li> <p>LLVM</p> 
+    <ul><li>应用场景：特定于 clang 的，并不适用于GCC</li><li>llvm持久模式：AFL++ 在单个分叉中多次模糊目标进程，而不是为每个模糊执行分叉一个新进程</li></ul> </li><li> <p>GCC</p> 
+    <ul><li>应用场景：特定于 gcc 的，并不适用于 LLVM</li></ul> </li></ul> </li><li> <p>不同模式可选择对应检测选项</p> 
+  <ul><li>如：拆分整数、字符串、浮点数和开关比较；仅检测指定的零件</li></ul> </li><li> <p>选择消毒器：使用消毒剂可以允许查找不一定会导致崩溃的错误</p> 
+  <ul><li>每个清理器只应运行一个 afl-fuzz 实例 类型</li><li>某些消毒剂不能一起使用</li></ul> </li><li> <p>修改目标：如果目标具有使模糊测试更加困难的特征，例如校验和， HMAC 等，然后修改源代码，以便检查这些值删除</p> </li><li> <p>编译目标源代码</p> 
+  <ul><li>避免检测共享库</li></ul> </li></ul> 
+<h4><a id="_164"></a>准备模糊测试活动</h4> 
+<p><img src="https://images2.imgbox.com/91/b3/IrqFDYHS_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>收集输入</li><li>使输入语料库唯一 
+  <ul><li>使用 AFL++ 工具从语料库中删除未在目标中生成新的路径/覆盖范围<code>afl-cmin</code></li></ul> </li><li>最小化语料库文件 
+  <ul><li>在目标中仍遍历相同路径的输入文件越短， 模糊会越好，为每个文件执行<code>afl-tmin</code></li></ul> </li></ul> 
+<h4><a id="_172"></a>模糊目标</h4> 
+<p><img src="https://images2.imgbox.com/c6/28/Nxgh7J5S_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>运行 afl-fuzz 
+  <ul><li>添加字典：默认情况下，AFL更适合对紧凑数据格式的fuzzing，包括图像、多媒体、压缩数据、正则表达式语法，或者shell脚本等；对一些格式繁琐、冗余的数据，如HTML，SQL和JavaScript等，支持并不好。为了避免构建语法敏感型的工具所带来的麻烦，afl-fuzz提供了一种方式可以对语言关键字、magic headers或者其他特殊的符号和目标数据类型相关的符号。 
+    <ul><li>通过创建一个新目录并将每个令牌放在单独的文件中， 在这种情况下，无需转义或以其他方式格式化数据</li><li>通过创建一个平面文本文件，其中令牌在 名称=“值”的格式</li></ul> </li><li>控制内存使用和超时 
+    <ul><li>afl-fuzz 不强制实施内存限制，系统可能会用完内存，可以用选项减少内存</li></ul> </li><li>使用多个内核 
+    <ul><li>尽可能多的内核/线程来进行模糊，应该有一个主模糊器和尽可能多的辅助模糊器</li></ul> </li><li>使用多台机器进行模糊测试 
+    <ul><li>只需确保每台服务器只有一个且只有一个实例，并且它的名称是唯一的</li></ul> </li><li>模糊运动的状态 
+    <ul><li>AFL++ 附带脚本以显示模糊测试的状态运动</li></ul> </li><li>停止模糊测试，重新启动模糊测试，添加新种子 
+    <ul><li>Control-C</li></ul> </li><li>检查模糊测试的覆盖范围</li><li>提高速度 
+    <ul><li>使用<a href="https://github.com/AFLplusplus/AFLplusplus/blob/stable/instrumentation/README.persistent_mode.md">持续模式</a></li><li>使用指向输入文件</li><li>在启动第一个afl-fuzz实例之前运行重新启动</li></ul> </li></ul> </li></ul> 
+<h4><a id="_194"></a>崩溃分析</h4> 
+<p><img src="https://images2.imgbox.com/89/db/4DkUAIdk_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>崩溃分类 
+  <ul><li>基于覆盖范围的崩溃分组通常会产生一个小数据集可以手动或使用非常简单的 GDB 或 Valgrind 脚本快速分类</li></ul> </li><li>“崩溃探索”模式 <code>-C</code> 
+  <ul><li>在此模式下，模糊器将一个或多个崩溃的测试用例作为输入和使用其反馈驱动的模糊测试策略来非常快速地枚举所有代码 在程序中保持崩溃状态时可以访问的路径。输出是一个小型文件语料库，可以非常快速地检查以查看攻击者对错误地址的控制程度，或者是否有可能通过最初的越界阅读。</li></ul> </li></ul> 
+<h3><a id="AFL_201"></a>要点（AFL）</h3> 
+<h4><a id="_203"></a>边界覆盖率</h4> 
+<ul><li>AFL 中为了更方便的描述边界（edge），将源基本块和目的基本块的配对组合称为 tuple</li><li>通过记录 tuple 信息就可以统计边界覆盖率了，程序记录 tuple 的命中数，命中数被划分成 8 个组别</li></ul> 
+<h5><a id="_208"></a>记录覆盖率</h5> 
+<pre><code>//插桩伪代码
+cur_location = &lt;COMPILE_TIME_RANDOM&gt;; //每个代码块生成一个随机数，作为其“位置”的记录
+shared_mem[cur_location ^ prev_location]++;  //对分支处的”源位置“和”目标位置“进行异或，并将异或的结果作为该分支的key，保存每个分支的执行次数（就是在用hash记录元组及覆盖情况），这里可能会碰撞
+prev_location = cur_location &gt;&gt; 1; //所有自己跳转到自己计算得到的hash的key都是0，要避免这种情况，于是进行移位操作
+</code></pre> 
+<p>具体代码中，变量<code>__afl_prev_loc</code>保存的是前一次跳转的”位置”，其值与<code>ecx</code>（这里的<code>ecx</code>，保存的是伪代码中的<code>cur_location</code>）做异或后，保存在<code>edi</code>中，并以<code>edx</code>（共享内存）为基址，对<code>edi</code>下标处进行加一操作。而<code>ecx</code>的值右移1位后，保存在了变量<code>__afl_prev_loc</code>中。</p> 
+<p>在每个插桩处，afl-as会添加相应指令，将<code>ecx</code>的值设为0到MAP_SIZE之间的某个随机数，从而实现了伪代码中的<code>cur_location = &lt;COMPILE_TIME_RANDOM&gt;;</code></p> 
+<p>AFL为每个代码块生成一个随机数，作为其“位置”的记录；随后，对分支处的”源位置“和”目标位置“进行异或，并将异或的结果作为该分支的key，保存每个分支的执行次数。用于保存执行次数的实际上是一个哈希表，大小为<code>MAP_SIZE=64K</code>，当然会存在碰撞的问题；根据AFL文档中的介绍，对于不是很复杂的目标，碰撞概率还是可以接受的</p> 
+<p>AFL需要将<code>cur_location</code>右移1位后，再保存到<code>prev_location</code>中。官方文档中解释了这样做的原因。假设target中存在<code>A-&gt;A</code>和<code>B-&gt;B</code>这样两个跳转，如果不右移，那么这两个分支对应的异或后的key都是0，从而无法区分；另一个例子是<code>A-&gt;B</code>和<code>B-&gt;A</code>，如果不右移，这两个分支对应的异或后的key也是相同的</p> 
+<h5><a id="_225"></a>计算覆盖率</h5> 
+<ul><li> <p>fuzzer对<code>trace_bits</code>（共享内存）进行预处理</p> 
+  <ul><li> <p>target是将每个分支的执行次数用1个byte来储存，而fuzzer则进一步把这个执行次数归入8种buckets中</p> <pre><code>static const u8 count_class_lookup8[256] = {
+//左边为分支执行次数   //右边为记述byte
+  [0]           = 0, 
+  [1]           = 1, 
+  [2]           = 2, 
+  [3]           = 4, 
+  [4 ... 7]     = 8, 
+  [8 ... 15]    = 16,
+  [16 ... 31]   = 32,
+  [32 ... 127]  = 64,
+  [128 ... 255] = 128
+
+};
+</code></pre> </li><li> <p>这样处理之后，对分支执行次数就会有一个简单的归类</p> </li><li> <p>对于某些mutated input来说，如果这次执行没有出现崩溃等异常输出，fuzzer还会检查其是否新增了执行路径。具体来说，是对<code>trace_bits</code>计算hash并来实现</p> </li><li> <p>通过比较hash值，就可以判断<code>trace_bits</code>是否发生了变化，从而判断此次mutated input是否带来了新路径，为之后的fuzzing提供参考信息</p> </li></ul> </li></ul> 
+<h4><a id="_253"></a>插桩</h4> 
+<p>所插入代码从用途上都是分为两类：1）记录目标程序执行过程中的 tuple 信息，需保证在每个基本块上都有插入；2）必要的初始操作以及维护一个 forkserver。</p> 
+<h5><a id="_257"></a>不同的插桩模式</h5> 
+<ul><li> <p>普通模式</p> 
+  <ul><li>在汇编阶段，插入指令后再交由真正的 as 汇编器处理。这里将会查找汇编文件中的 .text 节区并在各控制转移指令处插入跳板 trampoline_fmt_32／trampoline_fmt_64</li><li>跳板的作用是跳转到具体的实现部分 main_payload_32／main_payload_64，此部分指令只会插入一次。如： main_payload_32 部分： 
+    <ul><li>其中一个分支是用于记录目标程序执行过程中的 tuple 信息</li><li>另一分支在进行初始操作之外，主要作用是维护 forkserver，它会将已经初始化好的目标进程，例如暂停在 main 函数入口，按需再 fork 出一个子进程交予 fuzzer 进行测试，即 fuzzer 是被 fuzz 进程的父进程，借助 copy-on-write 特性，此方法可以极大的提高 fuzz 效率。forkserver 和 fuzzer 间是通过 pipe 管道进行通信的，除了控制命令，fork 成功后的 PID 以及 waitpid 返回状态都是借由此方式传递 
+      <ul><li>forkserver：为了避免execve()的开销，AFL使用了所谓的Forkserver。fuzzer将一个forkserver注入目标，通过IPC机制控制。每当AFL需要执行一个测试用例时，它就写入输入，然后告诉目标fork自己。子进程将执行测试用例，父进程等待这个时候。forkserver也可以稍后在目标中分叉。在这种情况下，fuzzer不需要每次运行昂贵的初始化和启动例程。</li></ul> </li></ul> </li></ul> </li><li> <p>llvm 模式：代码首先由编译器前端 clang 处理后得到中间代码 IR，再经过各 pass 工作节点的优化和转换，最终交给编译器后端生成机器码</p> </li><li> <p>AFL 的插桩思路是通过编写 pass 来实现 tuple 信息的记录，在此过程中会对每一基本块都插入探针</p> </li><li> <p>初始化和 forkserver 操作则通过链接完成</p> </li><li> <p>qemu 模式</p> 
+  <ul><li>直接利用 QEMU 内置的跟踪功能，并通过 patch 源码的方式来实现 afl-as.h 中的操作</li></ul> </li><li> <p>共享内存</p> <p>插桩后的target（目标文件），会记录执行过程中的分支信息；随后，fuzzer便可以根据这些信息，判断这次执行的整体流程和代码覆盖情况。AFL使用共享内存，来完成以上信息在fuzzer和target之间的传递。</p> 
+  <ul><li>uzzer在启动时，会执行<code>setup_shm()</code>方法进行配置。其首先调用<code>shemget()</code>分配一块共享内存，大小<code>MAP_SIZE</code>为64K</li><li>分配成功后，该共享内存的标志符会被设置到环境变量中，从而之后<code>fork()</code>得到的子进程可以通过该环境变量，得到这块共享内存的标志符，fuzzer本身，会使用变量<code>trace_bits</code>来保存共享内存的地址，每次target执行之前，fuzzer首先将该共享内容清零</li><li>target会检查是否已经将共享内存映射完成，通过调用<code>shmat()</code>，target将这块共享内存也映射到了自己的内存空间中，并将其地址保存在<code>__afl_area_ptr</code>及<code>edx</code>中</li><li>如果使用了fork server模式，那么上述获取共享内存的操作，是在fork server中进行；随后fork出来的子进程，只需直接使用这个共享内存即可</li></ul> </li></ul> 
+<h4><a id="fuzzer__285"></a>fuzzer 实现</h4> 
+<ul><li> <p>初始化</p> 
+  <ul><li>trace_bits 和 virgin_bits 的 bitmap 来分别记录当前的 tuple 信息及总的 tuple 信息，其中 trace_bits 位于共享内存上，能方便进程间的通信。另外，还分别通过名为 virgin_tmout 和 virgin_crash 的 bitmap 来记录 fuzz 过程中出现的所有目标程序 timeout 及 crash 时的 tuple 信息</li><li>forkserver 由 init_forkserver 函数来完成，也就是运行 afl-as.h 文件 main_payload 中维护 forkserver 的分支，这样一来 run_target 函数只需关注和 forkserver 的交互即可，而不必每次都重新创建一个目标进程，其中，fsrv_ctl_fd 管道用于写，fsrv_st_fd 管道用来读</li></ul> </li><li> <p>fuzzing 策略： AFL 中用到的 fuzzing 策略分为两类，即确定性策略和随机性策略</p> </li><li> <p><img src="https://images2.imgbox.com/41/a1/mMpxGV0O_o.png" alt="在这里插入图片描述"></p> </li><li> <p>其中确定性策略又分为位翻转、字节翻转、算术加减、整数替换、字典替换和字典插入（bitflip, arithmetic, interest, dictionary），是非dumb mode（<code>-d</code>）和主fuzzer（<code>-M</code>）会进行的操作，其变异方式没有随机性，目的是为了生成更多简洁有效的测试用例，不过由于此类策略比较耗时，因此测试用例只会进行一轮这样的操作在确定性策略 fuzzing 过程中，如果发现后续的变异操作已经在前面进行过了，为避免重复将会跳过该操作，如果没有重复则由 common_fuzz_stuff 函数将变异后的内容写入测试文件并运行目标程序</p> 
+  <ul><li> <p>bitflip：</p> 
+    <ul><li>token检测：在进行bitflip 1/1变异时，对于每个byte的最低位(least significant bit)翻转还进行了额外的处理：如果连续多个bytes的最低位被翻转后，程序的执行路径都未变化，而且与原始执行路径不一致，那么就把这一段连续的bytes判断是一条token。</li><li>effector map：在进行bitflip 8/8变异时，AFL还生成了一个非常重要的信息——effector map，具体地，在对每个byte进行翻转时，如果其造成执行路径与原始路径不一致，就将该byte在effector map中标记为1，即“有效”的，否则标记为0，即“无效”的。这样做的逻辑是：如果一个byte完全翻转，都无法带来执行路径的变化，那么这个byte很有可能是属于”data”，而非”metadata”（例如size, flag等），对整个fuzzing的意义不大。</li></ul> </li><li> <p>arithmetic</p> 
+    <ul><li>整数加减变异</li><li>AFL智能地跳过某些arithmetic变异：第一种情况就是前面提到的effector map：如果一个整数的所有bytes都被判断为“无效”，那么就跳过对整数的变异。第二种情况是之前bitflip已经生成过的变异：如果加/减某个数后，其效果与之前的某种bitflip相同，那么这次变异肯定在上一个阶段已经执行过了，此次便不会再执行。</li></ul> </li><li> <p>interest</p> 
+    <ul><li>用于替换的是AFL预设的一些比较特殊的数，基本都是可能会造成溢出的数</li><li>effector map仍然会用于判断是否需要变异；此外，如果某个interesting value，是可以通过bitflip或者arithmetic变异达到，那么这样的重复性变异也是会跳过的</li></ul> </li><li> <p>dictionary</p> 
+    <ul><li>将用户提供的tokens/自动检测的tokens依次替换/插入到原文件中</li><li>用户提供的tokens，是在词典文件中设置并通过<code>-x</code>选项指定的，如果没有则跳过相应的子阶段</li></ul> </li><li> <p>havoc和splice则存在随机性，是所有状况的fuzzer（是否dumb mode、主从fuzzer）都会执行的变异，而如果一个测试用例在执行完随机性策略后仍未产生新状态，则会将其与另一测试用例随机拼接后再次交由随机性策略处理。</p> 
+    <ul><li>havoc包含了对原文件的多轮变异，每一轮都是将多种方式组合（stacked）而成</li><li>splice是将两个seed文件拼接得到新的文件，并对这个新文件继续执行havoc变异<br> <img src="https://images2.imgbox.com/a9/1f/uhkTBDt6_o.png" alt="在这里插入图片描述"></li></ul> </li></ul> </li><li> <p>语料库更迭</p> 
+  <ul><li>随着 fuzzing 的深入，目标程序会产生越来越多的执行路径，相应测试用例能否加入语料库 queue 队列取决于 trace_bits 是否出现新状态。我们已经知道 fuzzer 会通过 virgin_bits 来记录目标程序的总 tuple 信息，每个 tuple 对应一个字节，初始值为 0xFF，即各比特位均为 1。如此设计自是有用意，可否记得之前提过每个 tuple 都分为 8 个命中组，固每个比特位可对应一个命中组，若无此类新状态出现其值仍为 1，若出现其值则置 0。这也是为何执行完目标程序后要调用 classify_counts 函数对此次记录的各 tuple 命中数进行归组，这样只需将执行完归组操作后的 trace_bits 和 virgin_bits 做个比对就能判断出是否有新状态产生，同时，采用位运算也是为了提高代码执行的速率</li><li>在 fuzzer 中维护着一个覆盖了当前所有 tuple 状态的语料库子集，这些测试用例被标记为 “favored”，它们在性能上相对较优，因此能获得更大的 fuzz 概率，即 fuzz_one 函数开始部分所做的判断。要得到这样的集合需要借助一个称为 top_rated 的数组，它保存有各 tuple 状态当前相应的最优测试用例，当有新状态产生时，我们判断其是否较 top_rated 中已有的成员更优</li><li>如果 top_rated 数组被更新，那么之后会调用 cull_queue 函数，它会顺序遍历 top_rated 数组中的测试用例，直到选出的测试用例集合能完全覆盖当前所有的 tuple 状态，即完成语料库中 “favored” 集合的更新</li></ul> </li></ul> 
+<h4><a id="_316"></a>辅助模块</h4> 
+<ul><li>语料库及测试用例的最小化 
+  <ul><li>“favored” 集合即为精简后的语料库子集，afl-cmin 中的思路类似但更复杂且会将冗余的测试用例删除。至于测试用例的最小化，其目的是尽可能的移除测试用例中的数据，同时保持目标程序的执行状态不变，对于不产生 crash 的测试用例我们可基于前面讨论的插桩技术来判断这些简化操作对目标程序的执行路径是否有影响，afl-tmin.c 中所用到的简化操作分为块清 ‘0’、块移除和字符清 ‘0’</li></ul> </li><li>并行 fuzzing 
+  <ul><li>通过 afl-gotcpu 工具来获取 CPU 的使用情况，进而决定增加或减少 afl-fuzz 例程，并可通过 afl-whatsup 工具统计各并行例程的结果。并行的一大好处是可以实现各例程间的语料库共享，从而加快 fuzz 过程</li></ul> </li><li>语法字典 
+  <ul><li>字典对 fuzzer 性能的提升也很关键，我们知道 AFL 变异引擎的确定性策略中包含字典替换和字典插入操作，这使得我们在 fuzz 一些强语法性的文件格式时能获得更高的代码覆盖率，虽然此方法离直接生成符合特定语法格式的测试用例还有距离，但实际效果也还算理想。libtokencap 目录下的代码旨在方便我们生成字典文件，通过对 strcmp()、memcmp() 这类函数进行类似 hook 的操作我们可提取参数中的语法关键字</li></ul> </li><li>内存检测工具 
+  <ul><li>为了更好的检测与内存错误相关的 bug，AFL 还引入了对内存检测工具 asan（address sanitizer）的支持</li></ul> </li></ul> 
+<h3><a id="AFL_327"></a>AFL++可以改进的方向</h3> 
+<ul><li> <p>afl++对多线程的扩展还不是很理想。由于它决定使用文件系统进行测试用例交付，至少对于不是LLVM的后端是这样，并且由于依赖于fork()系统调用来实现某些目标，因此大部分时间都花在内核上。为快照开发Linux内核模式是朝这个方向迈出的第一步。我们使afl++代码完全线程安全。逻辑上的下一步是多线程支持，最小化并行fuzzer之间的同步开销</p> </li><li> <p>哈希碰撞问题</p> </li><li> <p>当前的目标是使用最常用的最佳插装、突变和调度作为默认配置。对于未来的工作，通过之前对目标的静态分析来找到这些指标，可能会提出一个最佳努力的最佳解决方案——例如，大量的strcmp可能是使用RedQueen和其他指标的指标</p> </li><li> <p>虽然自定义Mutator已经为研究人员提供了很大的灵活性，但其目标是添加额外的插件功能来替换或添加构建模块(如调度程序、执行程序和队列)的功能</p> </li><li> <p>AFL++ 检查信号（SIGSEGV，SIGABRT等）。安装自定义处理程序的程序这些信号可能需要注释掉相关代码。在同一个静脉，模糊目标生成的子进程中的故障可能会逃避检测，除非您手动添加一些代码来捕获它</p> </li><li> <p>与任何其他暴力工具一样，模糊器提供的覆盖范围有限，如果 加密、校验和、加密签名或压缩用于 完全包装要测试的实际数据格式</p> </li><li> <p>ASAN 和 64 位二进制文件有一些bug，这不是由于 AFL-Fuzz 的任何特定故障</p> </li><li> <p>没有直接支持模糊测试网络服务、后台守护程序、 或需要 UI 交互才能工作的交互式应用。需要制作简单的代码更改，使它们以更传统的方式运行</p> </li><li> <p>高效性：AFL++ 已经非常高效，但是在某些特定的场景下，仍然有优化的空间。比如，对于大型项目和长时间运行的应用程序，AFL++ 的效率可能有待提高。</p> </li><li> <p>自适应性：AFL++ 目前依赖于用户手动选择变异策略，如果能够实现自适应变异策略选择，将会更加高效</p> </li><li> <p>兼容性：AFL++ 目前支持多种编程语言和输入格式，但是仍然有一些语言和格式不支持。如果能够扩展支持范围，将会更加实用</p> </li><li> <p>多样性：AFL++ 目前使用的变异策略相对较少，如果能够增加更多的变异策略，将会生成更多样化的测试用例，从而提高测试覆盖率</p> </li></ul> 
+<h2><a id="_348"></a>源码分析</h2> 
+<p><img src="https://images2.imgbox.com/f2/94/fqS7u67k_o.jpg" alt="图片"></p> 
+<h2><a id="_352"></a>参考资料</h2> 
+<p>[<a href="https://bbs.kanxue.com/thread-249912.htm" rel="nofollow">原创]漏洞挖掘技术之 AFL 项目分析-二进制漏洞-看雪论坛-安全社区|安全招聘|bbs.pediy.com (kanxue.com)</a></p> 
+<p><a href="https://rk700.github.io/2017/12/28/afl-internals/" rel="nofollow">AFL内部实现细节小记 - 记事本 (rk700.github.io)</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/00061030b2b4ec79c51d218ed195150f/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">在工作表中调用Python自定义函数</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/e7d4079cbefd143b2b158ba8df2ef5b7/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Zabbix监控系统及安装部署</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

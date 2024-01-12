@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Android资源管理框架-------之AssetManager2总述（一） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Android资源管理框架-------之AssetManager2总述（一）" />
+<meta property="og:description" content="Android对于资源管理这个模块的折腾从Android-Lollipop开始就从未停止过：Android-Lollipop引入了Runtime Resources Overlay，但是bug比较多，多得根本不能用；Android-Marshmallow算是修正了这些bug，Runtime Resources Overlay终于可以生效了。然而，从Android-Nougat开始，到Android-Oreo，再到Android-Pie，这三个版本又对整个Android资源管理模块进行了彻彻底底的重构。比如，在Android N中引入了aapt2，将Android资源的编译分成了两个过程：编译和链接，并将之前的架构彻底推翻重建，另外，ResourcesManager类和Resources也大变样，功能增强不少；Android O中引入了AssetManager2，将AssetManager中ResTable相关的概念彻底废除，引入了更加直观的ApkAssets、LoadedArsc、LoadedPackage等概念，并且增加了OverlayManagerService等系统服务。但是在这个版本中，AssetManager2只是增加了相关代码，并未真正启用，真正使用的还是原来的AssetManager；在Android P中，java层引入了ApkAssets相关的接口，AssetManager2真正替换掉了原来的AssetManager；到了android-10，又引入了overlay相关的策略来增加安全控制。至此，Android资源管理模块算是完成了重构。其中AAPT2算是对AAPT的推倒重建，两者之间没有依赖关系，所以我们后面可以不用学习AAPT了，毕竟它只是一个过了时的编译工具（说实话，我还是挺喜欢aapt那种代码风格的，对aapt2的风格却不怎么喜欢）；但AssetManager2和AssetManager相比，并非一个单独的模块，它本身就是继承自AssetManager的（可能是为了兼容吧），它的代码仍然和AssetManager的放在一起，它仍然使用了原来AssetManager中的不少数据结构，所以，前面我们介绍了那么多AssetManager相关的东西，还是非常有必要的。AssetManager2的代码，我们基于目前最新的Android 10来分析。
+相同点 有了前面AssetManager的基础，AssetManager2理解起来就会容易得多。其实在资源的获取方面，AssetManaager2的思路和流程与AssetManager相比，基本是一致的：根据资源id，分别得到PackageId、typeIndex、entryIndex；根据PackageId找到对应PackageGroup的索引，进而得到对应的PackageGroup；从对应的PackageGroup中根据typeIndex拿到该PackageGroup中所有包该类型的资源；遍历这些资源，根据entryIndex，从中选取最符合设备当前配置的entry；如果有资源共享库，还需要查一下DynamicReferenceTable，将动态引用转化为静态引用；如果有必要，还要把得到的静态引用解析一下，大概就是这么个流程。
+不同点 然后，我们重点说说AssetManager2的不同吧。首先就是代码风格了，这个我适应了很久。按道理说，同一个模块的代码，整体风格应该保持一致吧。但看看AssetManager2，再看看AssetManager，我还以为我看错了，感觉就像一个人上半身西装领带，下半身拖鞋裤衩一样，违和感太强了，哈哈。
+我们知道AssetManager在native层，有大量的代码放在ResourceTypes.cpp(以及ResourceTypes.h)中，AssetManager2则对这部分代码做了整理，从中抽取出了部分代码单独存放，这样结构显得清晰了一些。总体来讲，AssetManager的一些关键类比较庞大，而AssetManager2中则对它们做了拆分。
+当然，最重要的在于，AssetManager2的整体架构和AssetManager完全不一样，资源的组织方式也完全不同。在AssetManager中，资源的核心处理逻辑都是放在ResTable这个类中的；而在AssetManager2中，则完全废弃了这个类，而是把资源处理的核心逻辑直接放到了AssetManager2这个类中。同时引入了ApkAssets、LoadedArsc、LoadedPackage等类，来分担原来ResTable的功能。特别是ApkAssets概念的引入，它会直接影响到应用层的API。比如，Android P以及以后的版本中AssetManager类增加了Builder类，应用层也新增了ApkAssets类，用来创建AssetManager对象。也就是说，ApkAssets的概念是从应用到底层贯穿整个资源管理模块的。
+新增主要文件 frameworks/base/libs/androidfw/include/androidfw/AssetManager2.h
+frameworks/base/libs/androidfw/AssetManager2.cpp
+AssetManager2类是AssetManager的子类，可以认为相当于之前的AssetManager &#43; ResTable，由于没有了ResTable类，所以AssetManager2做了部分ResTable的工作。
+frameworks/base/core/java/android/content/res/ApkAssets.java
+frameworks/base/libs/androidfw/include/androidfw/ApkAssets.h
+frameworks/base/libs/androidfw/ApkAssets.cpp
+一个ApkAssets对应于一个APK包，ApkAssets关注的重点在于这个包里的resources.arsc以及这个APK包对应的idmap文件（如果有的话）。另外，ApkAssets也是AssetManager2中非常重要的概念，之前版本的资源管理模块中没有数据结构与之对应。
+frameworks/base/libs/androidfw/include/androidfw/LoadedArsc.h
+frameworks/base/libs/androidfw/LoadedArsc.cpp
+这两个文件中定义了两个非常重要的类LoadedArsc和LoadedPackage。一个LoadedArsc对应于一个APK中的resources.arsc文件。我们知道一个resources.arsc中只有两种数据结构，一个是Global String Pool，一个是Package，LoadedArsc的内容也是如此。一个LoadedPackage则对应于一个LoadedArsc中的（或者说resources.arsc中的）Package，我们可以简单认为它相当于之前版本的资源管理模块中的ResTable::Package。
+frameworks/base/libs/androidfw/include/androidfw/Idmap.h
+frameworks/base/libs/androidfw/Idmap.cpp
+从之前的ResTable中分拆出来的idmap文件解析相关的逻辑被放到了这两个文件中。
+frameworks/base/libs/androidfw/include/androidfw/AttributeFinder.h
+frameworks/base/libs/androidfw/include/androidfw/AttributeResolution.h
+frameworks/base/libs/androidfw/AttributeResolution.cpp
+Theme和style相关，从之前的Theme相关模块中分离出来的，主要用于属性的查找和解析。
+关键数据结构 // framework/base/libs/androidfw/include/androidfw/AssetManager2.h class AssetManager2 { //...... 省略非关键代码 //用来存储该AssetManager2已经加载的所有APK包 std::vector&lt;const ApkAssets*&gt; apk_assets_; /** * 用来将apk_assets_分组，概念和之前的ResTable::PackageGroup一样 * 主要还是用来处理Runtime Resources Overlay的 * 但它内部的结构已经完全和ResTable::PackageGroup不一样了 */ std::vector&lt;PackageGroup&gt; package_groups_; /** * 叫package_ids_很容易让人费解，感觉还是叫package_map比较合适 * 因为它和ResTable::mPackageMap的作用一模一样 * 它的key表示APK包也就是ApkAssets的id，比如应用是0x7f，系统是0x01等 * 它的value表示PK包也就是ApkAssets所在的PackageGroup在package_groups_中的索引 */ std::array&lt;uint8_t, std::numeric_limits&lt;uint8_t&gt;::max() &#43; 1&gt; package_ids_; //表示设备当前的配置信息，相当于ResTable::mParams ResTable_config configuration_; /** * 相当于ResTable::PackageGroup::bags，用来缓存资源的Bag * 它的key表示一个资源的id，比如一个style，一个array * 它的value 表示已经从resources." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/d5beb1873298e096e2f07f769f8521ab/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-01-04T19:41:43+08:00" />
+<meta property="article:modified_time" content="2020-01-04T19:41:43+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Android资源管理框架-------之AssetManager2总述（一）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>        Android对于资源管理这个模块的折腾从Android-Lollipop开始就从未停止过：Android-Lollipop引入了<a href="https://blog.csdn.net/dayong198866/article/details/96107063">Runtime Resources Overlay</a>，但是bug比较多，多得根本不能用；Android-Marshmallow算是修正了这些bug，<a href="https://blog.csdn.net/dayong198866/article/details/96107063">Runtime Resources Overlay</a>终于可以生效了。然而，从Android-Nougat开始，到Android-Oreo，再到Android-Pie，这三个版本又对整个Android资源管理模块进行了彻彻底底的重构。比如，在Android N中引入了aapt2，将Android资源的编译分成了两个过程：编译和链接，并将之前的架构彻底推翻重建，另外，<code>ResourcesManager</code>类和<code>Resources</code>也大变样，功能增强不少；Android O中引入了AssetManager2，将AssetManager中<code>ResTable</code>相关的概念彻底废除，引入了更加直观的<code>ApkAssets</code>、<code>LoadedArsc</code>、<code>LoadedPackage</code>等概念，并且增加了OverlayManagerService等系统服务。但是在这个版本中，AssetManager2只是增加了相关代码，并未真正启用，真正使用的还是原来的AssetManager；在Android P中，java层引入了<code>ApkAssets</code>相关的接口，AssetManager2真正替换掉了原来的AssetManager；到了android-10，又引入了overlay相关的策略来增加安全控制。至此，Android资源管理模块算是完成了重构。其中AAPT2算是对AAPT的推倒重建，两者之间没有依赖关系，所以我们后面可以不用学习AAPT了，毕竟它只是一个过了时的编译工具（说实话，我还是挺喜欢aapt那种代码风格的，对aapt2的风格却不怎么喜欢）；但AssetManager2和AssetManager相比，并非一个单独的模块，它本身就是继承自AssetManager的（可能是为了兼容吧），它的代码仍然和AssetManager的放在一起，它仍然使用了原来AssetManager中的不少数据结构，所以，前面我们介绍了那么多AssetManager相关的东西，还是非常有必要的。AssetManager2的代码，我们基于目前最新的Android 10来分析。</p> 
+<h4><a id="_2"></a>相同点</h4> 
+<p>        有了前面AssetManager的基础，AssetManager2理解起来就会容易得多。其实在资源的获取方面，AssetManaager2的思路和流程与AssetManager相比，基本是一致的：根据资源id，分别得到PackageId、typeIndex、entryIndex；根据PackageId找到对应<code>PackageGroup</code>的索引，进而得到对应的<code>PackageGroup</code>；从对应的<code>PackageGroup</code>中根据typeIndex拿到该<code>PackageGroup</code>中所有包该类型的资源；遍历这些资源，根据entryIndex，从中选取最符合设备当前配置的entry；如果有资源共享库，还需要查一下<code>DynamicReferenceTable</code>，将动态引用转化为静态引用；如果有必要，还要把得到的静态引用解析一下，大概就是这么个流程。</p> 
+<h4><a id="_6"></a>不同点</h4> 
+<p>        然后，我们重点说说AssetManager2的不同吧。首先就是代码风格了，这个我适应了很久。按道理说，同一个模块的代码，整体风格应该保持一致吧。但看看AssetManager2，再看看AssetManager，我还以为我看错了，感觉就像一个人上半身西装领带，下半身拖鞋裤衩一样，违和感太强了，哈哈。</p> 
+<p>        我们知道AssetManager在native层，有大量的代码放在<code>ResourceTypes.cpp(以及ResourceTypes.h)</code>中，AssetManager2则对这部分代码做了整理，从中抽取出了部分代码单独存放，这样结构显得清晰了一些。总体来讲，AssetManager的一些关键类比较庞大，而AssetManager2中则对它们做了拆分。</p> 
+<p>        当然，最重要的在于，AssetManager2的整体架构和AssetManager完全不一样，资源的组织方式也完全不同。在AssetManager中，资源的核心处理逻辑都是放在<code>ResTable</code>这个类中的；而在AssetManager2中，则完全废弃了这个类，而是把资源处理的核心逻辑直接放到了<code>AssetManager2</code>这个类中。同时引入了<code>ApkAssets</code>、<code>LoadedArsc</code>、<code>LoadedPackage</code>等类，来分担原来<code>ResTable</code>的功能。特别是<code>ApkAssets</code>概念的引入，它会直接影响到应用层的API。比如，Android P以及以后的版本中<code>AssetManager</code>类增加了Builder类，应用层也新增了<code>ApkAssets</code>类，用来创建<code>AssetManager</code>对象。也就是说，<code>ApkAssets</code>的概念是从应用到底层贯穿整个资源管理模块的。</p> 
+<h4><a id="_14"></a>新增主要文件</h4> 
+<p>frameworks/base/libs/androidfw/include/androidfw/AssetManager2.h<br> frameworks/base/libs/androidfw/AssetManager2.cpp<br>         <code>AssetManager2</code>类是<code>AssetManager</code>的子类，可以认为相当于之前的<code>AssetManager</code> + <code>ResTable</code>，由于没有了<code>ResTable</code>类，所以<code>AssetManager2</code>做了部分<code>ResTable</code>的工作。</p> 
+<p>frameworks/base/core/java/android/content/res/ApkAssets.java<br> frameworks/base/libs/androidfw/include/androidfw/ApkAssets.h<br> frameworks/base/libs/androidfw/ApkAssets.cpp<br>         一个ApkAssets对应于一个APK包，<code>ApkAssets</code>关注的重点在于这个包里的resources.arsc以及这个APK包对应的idmap文件（如果有的话）。另外，ApkAssets也是AssetManager2中非常重要的概念，之前版本的资源管理模块中没有数据结构与之对应。</p> 
+<p>frameworks/base/libs/androidfw/include/androidfw/LoadedArsc.h<br> frameworks/base/libs/androidfw/LoadedArsc.cpp<br>         这两个文件中定义了两个非常重要的类<code>LoadedArsc</code>和<code>LoadedPackage</code>。一个<code>LoadedArsc</code>对应于一个APK中的resources.arsc文件。我们知道一个resources.arsc中只有两种数据结构，一个是Global String Pool，一个是Package，<code>LoadedArsc</code>的内容也是如此。一个<code>LoadedPackage</code>则对应于一个<code>LoadedArsc</code>中的（或者说resources.arsc中的）Package，我们可以简单认为它相当于之前版本的资源管理模块中的<code>ResTable::Package</code>。</p> 
+<p>frameworks/base/libs/androidfw/include/androidfw/Idmap.h<br> frameworks/base/libs/androidfw/Idmap.cpp<br>         从之前的<code>ResTable</code>中分拆出来的idmap文件解析相关的逻辑被放到了这两个文件中。</p> 
+<p>frameworks/base/libs/androidfw/include/androidfw/AttributeFinder.h<br> frameworks/base/libs/androidfw/include/androidfw/AttributeResolution.h<br> frameworks/base/libs/androidfw/AttributeResolution.cpp<br>         Theme和style相关，从之前的Theme相关模块中分离出来的，主要用于属性的查找和解析。</p> 
+<h4><a id="_38"></a>关键数据结构</h4> 
+<pre><code class="prism language-cpp"><span class="token comment">// framework/base/libs/androidfw/include/androidfw/AssetManager2.h</span>
+<span class="token keyword">class</span> <span class="token class-name">AssetManager2</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">//...... 省略非关键代码</span>
+    
+    <span class="token comment">//用来存储该AssetManager2已经加载的所有APK包</span>
+    std<span class="token operator">::</span>vector<span class="token operator">&lt;</span><span class="token keyword">const</span> ApkAssets<span class="token operator">*</span><span class="token operator">&gt;</span> apk_assets_<span class="token punctuation">;</span>
+    
+    <span class="token comment">/**
+     * 用来将apk_assets_分组，概念和之前的ResTable::PackageGroup一样
+     * 主要还是用来处理Runtime Resources Overlay的
+     * 但它内部的结构已经完全和ResTable::PackageGroup不一样了
+     */</span>
+    std<span class="token operator">::</span>vector<span class="token operator">&lt;</span>PackageGroup<span class="token operator">&gt;</span> package_groups_<span class="token punctuation">;</span>
+
+    <span class="token comment">/**
+     * 叫package_ids_很容易让人费解，感觉还是叫package_map比较合适
+     * 因为它和ResTable::mPackageMap的作用一模一样
+     * 它的key表示APK包也就是ApkAssets的id，比如应用是0x7f，系统是0x01等
+     * 它的value表示PK包也就是ApkAssets所在的PackageGroup在package_groups_中的索引
+     */</span>
+    std<span class="token operator">::</span>array<span class="token operator">&lt;</span><span class="token keyword">uint8_t</span><span class="token punctuation">,</span> std<span class="token operator">::</span>numeric_limits<span class="token operator">&lt;</span><span class="token keyword">uint8_t</span><span class="token operator">&gt;</span><span class="token operator">::</span><span class="token function">max</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token number">1</span><span class="token operator">&gt;</span> package_ids_<span class="token punctuation">;</span>
+
+    <span class="token comment">//表示设备当前的配置信息，相当于ResTable::mParams</span>
+    ResTable_config configuration_<span class="token punctuation">;</span>
+
+    <span class="token comment">/**
+     * 相当于ResTable::PackageGroup::bags，用来缓存资源的Bag
+     * 它的key表示一个资源的id，比如一个style，一个array
+     * 它的value 表示已经从resources.arsc中解析出来了的，该资源的所有Bag
+     */</span>
+    std<span class="token operator">::</span>unordered_map<span class="token operator">&lt;</span><span class="token keyword">uint32_t</span><span class="token punctuation">,</span> util<span class="token operator">::</span>unique_cptr<span class="token operator">&lt;</span>ResolvedBag<span class="token operator">&gt;&gt;</span> cached_bags_<span class="token punctuation">;</span>
+    
+    <span class="token comment">/**
+     * 我们知道当我们获取资源的时候，系统需要选取最符合当前配置的资源
+     * 这个过程包括match、isBetterThan、isMore，isMoreSpecificThan等比较过程
+     * 这个变量决定是否记录这些过程
+     */</span>
+    <span class="token keyword">bool</span> resource_resolution_logging_enabled_ <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+    
+    <span class="token comment">//当resource_resolution_logging_enabled_ == true时，用来记录这个过程用的</span>
+    <span class="token keyword">mutable</span> Resolution last_resolution<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>        其中最核心的是<code>apk_assets_</code>、<code>package_groups_</code>、<code>package_ids_</code>和<code>configuration_</code>这几个成员最为核心，它们在一定程度上代表了AssetManager2中资源的组织方式，资源的加载、查找等过程的实现，也必须依赖这几个成员。我们看到Bag资源的缓存也从<code>ResTable::PackageGroup</code>类被移动到了<code>AssetManager2</code>类。我们先来看看代表一个APK包的<code>ApkAssets</code>：</p> 
+<pre><code class="prism language-cpp"><span class="token comment">// framework/base/libs/androidfw/include/androidfw/ApkAssets.h</span>
+<span class="token keyword">class</span> <span class="token class-name">ApkAssets</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">//...... 省略非关键代码</span>
+
+    <span class="token comment">//一个智能指针，表示一个压缩包，也就是我们的APK</span>
+    ZipArchivePtr zip_handle_<span class="token punctuation">;</span>
+
+    <span class="token comment">//我们的apk的路径</span>
+    <span class="token keyword">const</span> std<span class="token operator">::</span>string path_<span class="token punctuation">;</span>
+
+    <span class="token comment">//APK的最近一次修改时间</span>
+    time_t last_mod_time_<span class="token punctuation">;</span>
+
+    <span class="token comment">//一个智能指针，表示APK中resources.arsc</span>
+    std<span class="token operator">::</span>unique_ptr<span class="token operator">&lt;</span>Asset<span class="token operator">&gt;</span> resources_asset_<span class="token punctuation">;</span>
+    
+    <span class="token comment">//一个智能指针，表示一个idmap文件</span>
+    std<span class="token operator">::</span>unique_ptr<span class="token operator">&lt;</span>Asset<span class="token operator">&gt;</span> idmap_asset_<span class="token punctuation">;</span>
+    
+    <span class="token comment">/**
+     * 一个智能指针，表示一个resources.arsc
+     * 和resources_asset_的区别在于，resources_asset_是表示APK中的resources.arsc文件
+     * 而loaded_arsc_则是对这个文件加载解析后的一个数据结构
+     */</span>
+    std<span class="token operator">::</span>unique_ptr<span class="token operator">&lt;</span><span class="token keyword">const</span> LoadedArsc<span class="token operator">&gt;</span> loaded_arsc_<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>        一个<code>ApkAssets</code>对象包括了一个APK的全部信息，包括动态的（load到内存后的，比如<code>loaded_arsc_</code>）和静态的（文件本身的，比如代表resources.arsc以及idmap文件的Asset）。这也是AssetManager2的一种思想吧，就是所有一个类会包括与之相关的全部信息；而原来的AssetManager则是分开的，动态的信息全部放到<code>ResTable</code>中，静态的信息全部放到<code>ZipSet</code>、<code>SharedZip</code>等数据结构中。idmap文件虽然没有打包在overlay package中，但对于一个overlay package而言，它也是这个包本身的重要部分，所以也就一起记录在<code>ApkAssets</code>对象中了。当然，<code>ApkAssets</code>的概念在java层也同样存在，并且它还是Android Framework API的一部分，当然它只是一个空壳，具体实现还在native层，java层的<code>ApkAssets</code>我们那再以后会说，这里就不啰嗦那么多了，我们接下来看看它的重要成员<code>LoadedArsc</code>：</p> 
+<pre><code class="prism language-cpp"><span class="token comment">// framework/base/libs/androidfw/include/androidfw/LoadedArsc.h</span>
+<span class="token keyword">class</span> <span class="token class-name">LoadedArsc</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">//...... 省略非关键代码</span>
+
+    <span class="token comment">//Global String Pool</span>
+    ResStringPool global_string_pool_<span class="token punctuation">;</span>
+
+    <span class="token comment">//packages，对应resources.arsc中的类型为RES_TABLE_PACKAGE_TYPE的chunk</span>
+    std<span class="token operator">::</span>vector<span class="token operator">&lt;</span>std<span class="token operator">::</span>unique_ptr<span class="token operator">&lt;</span><span class="token keyword">const</span> LoadedPackage<span class="token operator">&gt;&gt;</span> packages_<span class="token punctuation">;</span>
+
+    <span class="token comment">//是否是系统资源</span>
+    <span class="token keyword">bool</span> system_ <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>        <code>LoadedArsc</code>非常简单，主要就是一个Global String Pool和多个Package，这和resources.arsc中的内容是一致的。需要说明的是，我们看到从Android Lollipop版本（更早的没确认过）开始，系统就是支持一个resources.arsc中存在多个Package的，但是到现在也并没有哪个应用或者某个系统模块使用了这一特性。至少我还没有见到过哪个resources.arsc是1个Global String Pool + N个package的模式，大家都是一个1个Global String Pool + 1个package。所以，这个特性还是有待充分开发的。当然，难度比较大，因为它涉及到了打包的具体细节，可能还要修改aapt2。</p> 
+<pre><code class="prism language-cpp"><span class="token comment">// framework/base/libs/androidfw/include/androidfw/LoadedArsc.h</span>
+<span class="token keyword">class</span> <span class="token class-name">LoadedPackage</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">//...... 省略非关键代码</span>
+
+    <span class="token comment">//Type String Pool</span>
+    ResStringPool type_string_pool_<span class="token punctuation">;</span>
+
+    <span class="token comment">//key String Pool</span>
+    ResStringPool key_string_pool_<span class="token punctuation">;</span>
+
+    <span class="token comment">//package name </span>
+    std<span class="token operator">::</span>string package_name_<span class="token punctuation">;</span>
+
+    <span class="token comment">//pacakge id</span>
+    <span class="token keyword">int</span> package_id_ <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/**
+     * type Id的偏移量,需要说明的是
+     * type Id是从1开始的，如果type_id_offset_的值为2
+     * 那么type Id将会从3开始
+     */</span> 
+    <span class="token keyword">int</span> type_id_offset_ <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+
+    <span class="token comment">//该package是否为资源共享库</span>
+    <span class="token keyword">bool</span> dynamic_ <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+
+    <span class="token comment">//该package是否为系统资源库</span>
+    <span class="token keyword">bool</span> system_ <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+
+    <span class="token comment">//该package是否为overlay pacakge</span>
+    <span class="token keyword">bool</span> overlay_ <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+
+    <span class="token comment">//该pacakge是否定义了overlay policy信息</span>
+    <span class="token keyword">bool</span> defines_overlayable_ <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/**
+     * 对应于resources.arsc中的TypeSpec
+     * using TypeSpecPtr = util::unique_cptr&lt;TypeSpec&gt;;
+     */</span>
+    ByteBucketArray<span class="token operator">&lt;</span>TypeSpecPtr<span class="token operator">&gt;</span> type_specs_<span class="token punctuation">;</span>
+
+    <span class="token comment">//仅作遍历时时使用，可以无视</span>
+    ByteBucketArray<span class="token operator">&lt;</span><span class="token keyword">uint32_t</span><span class="token operator">&gt;</span> resource_ids_<span class="token punctuation">;</span>
+ 
+    <span class="token comment">/**
+     * 这个package所引用的资源共享库
+     * DynamicPackageEntry就两个成员
+     * 一个是资源共享库的name，
+     * 一个是资源共享库的id，需要注意的是，这个id是本package编译时
+     * 给资源共享库临时分配的id，在运行时由于加载顺序的关系，同一个资源共享库的id可能会
+     * 和编译时不一样，所以这中间要有一个转换的过程，这就是DynamicReferenceTable的主要作用
+     */</span>
+    std<span class="token operator">::</span>vector<span class="token operator">&lt;</span>DynamicPackageEntry<span class="token operator">&gt;</span> dynamic_package_map_<span class="token punctuation">;</span>
+
+    <span class="token comment">//后面的这两个成员都和RRO策略有关，到时候我们会详细说明，这里可以不用太在意</span>
+    <span class="token comment">/**
+     * vector中的每一个元素表示一种策略，比如这个package允许相同签名的overlay package
+     * 覆盖的所有资源算是一个策略；又比如这个package允许/product分区的overlay package
+     * 覆盖的所有资源又是一个策略。std::unordered_set&lt;uint32_t&gt;表是这个策略允许覆盖的所有
+     * 资源的id
+     */</span>
+    std<span class="token operator">::</span>vector<span class="token operator">&lt;</span><span class="token keyword">const</span> std<span class="token operator">::</span>pair<span class="token operator">&lt;</span>OverlayableInfo<span class="token punctuation">,</span> std<span class="token operator">::</span>unordered_set<span class="token operator">&lt;</span><span class="token keyword">uint32_t</span><span class="token operator">&gt;&gt;</span><span class="token operator">&gt;</span> overlayable_infos_<span class="token punctuation">;</span>
+    std<span class="token operator">::</span>unordered_map<span class="token operator">&lt;</span>std<span class="token operator">::</span>string<span class="token punctuation">,</span> std<span class="token operator">::</span>string<span class="token operator">&gt;</span> overlayable_map_<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>        <code>AssetManager2</code>中还有一个非常重要的结构：<code>AssetManager2::PackageGroup</code>，它的概念和<code>ResTable::PackageGroup</code>相同，都是为了存储RRO中的target package和overlay package而提出的。不过，它的实现和以前已经有了不同：</p> 
+<pre><code class="prism language-cpp"><span class="token comment">// framework/base/libs/androidfw/include/androidfw/AssetManager2.h</span>
+
+<span class="token comment">/**
+ * 这个结构体可以认为是一个缓存，为了加快获取资源的速度
+ * 代表一个ResTable_typeSpec中，符合设备当前配置的所有ResTable_type
+ * 这里的符合表示ResTable_config的match方法返回true
+ */</span>
+<span class="token keyword">struct</span> FilteredConfigGroup <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//该ResTable_typeSpec中符合设备当前配置的所有的config</span>
+    std<span class="token operator">::</span>vector<span class="token operator">&lt;</span>ResTable_config<span class="token operator">&gt;</span> configurations<span class="token punctuation">;</span>
+    <span class="token comment">///该ResTable_typeSpec中符合设备当前配置的所有的ResTable_type</span>
+    std<span class="token operator">::</span>vector<span class="token operator">&lt;</span><span class="token keyword">const</span> ResTable_type<span class="token operator">*</span><span class="token operator">&gt;</span> types<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token comment">/**
+ * 这个结构体我们可以简单理解为LoadedPackage + 缓存
+ */</span>
+<span class="token keyword">struct</span> ConfiguredPackage <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// A pointer to the immutable, loaded package info.</span>
+    <span class="token keyword">const</span> LoadedPackage<span class="token operator">*</span> loaded_package_<span class="token punctuation">;</span>
+
+    <span class="token comment">// A mutable AssetManager-specific list of configurations that match the AssetManager's</span>
+    <span class="token comment">// current configuration. This is used as an optimization to avoid checking every single</span>
+    <span class="token comment">// candidate configuration when looking up resources.</span>
+    <span class="token comment">/**
+     * 我们在获取资源的时候，要根据设备的当前配置信息，去选择最合适的资源项
+     * 这个过程我们之前讲过，要经过match、isBetterThan、isMoreSpecificThan
+     * 等比较的过程。现在为了加快获取资源的速度，在加载完资源后，系统就会先选出match
+     * 设备当前配置的资源，存放在filtered_configs_中。当我们获取资源的时候，就可以
+     * 跳过这个步骤了。filtered_configs_中的每一项代表一个ResTable_typeSpec中
+     * 符合设备当前配置的所有ResTable_type
+     */</span>
+    ByteBucketArray<span class="token operator">&lt;</span>FilteredConfigGroup<span class="token operator">&gt;</span> filtered_configs_<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">//代表一个PackageGroup</span>
+<span class="token keyword">struct</span> PackageGroup <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// The set of packages that make-up this group.</span>
+    <span class="token comment">/**
+     * PackageGroup中的所有package（我们可以简单认为就是LoadedPackage对象）
+     * 换句话说就是target package 和它的所有overlay package
+     * 如果一个Package没有overlay package，那么它应该独占一个PackageGroup
+     */</span>
+    std<span class="token operator">::</span>vector<span class="token operator">&lt;</span>ConfiguredPackage<span class="token operator">&gt;</span> packages_<span class="token punctuation">;</span>
+
+    <span class="token comment">// The cookies associated with each package in the group. They share the same order as</span>
+    <span class="token comment">// packages_.</span>
+    <span class="token comment">/**
+     * ApkAssetsCookie就是一个32位的int值
+     * cookies 表示PackageGroup中的所有package（我们可以简单认为就是LoadedPackage对象）
+     * 所在的ApkAssets对象在AssetManager2::apk_assets_中的索引
+     * 这里需要注意的是，一个ApkAssets对象中是有可能包含多个LoadedPackage对象的
+     */</span>
+    std<span class="token operator">::</span>vector<span class="token operator">&lt;</span>ApkAssetsCookie<span class="token operator">&gt;</span> cookies_<span class="token punctuation">;</span>
+
+    <span class="token comment">// A library reference table that contains build-package ID to runtime-package ID mappings.</span>
+    <span class="token comment">//DynamicRefTable，就是ResTable::DynamicRefTable.用来保存</span>
+    <span class="token comment">//资源共享库的编译时id和运行时id的映射关系</span>
+    DynamicRefTable dynamic_ref_table<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>        我们看到<code>AssetManager2::PackageGroup</code>和<code>ResTable::PackageGroup</code>相比，概念还是原来的概念，不过实现上有了一些变动：把对Bag资源的缓存移动到了<code>AssetManager2::cached_bags_</code>中，另外为了加快资源的查找速度，<code>AssetManager2::PackageGroup</code>还会提前缓存好符合设备当前配置的资源信息。另外，如果一个resources.arsc中包含了多个package，也就是一个<code>LoadedArsc</code>中包含了多个<code>LoadedPackage</code>的话，那么这些<code>LoadedPackage</code>虽然不一定会被分到同一个<code>AssetManager2::PackageGroup</code>中，但它们的cookie值会是相同的，毕竟它们来自同一个资源包。可能这句话不太好理解，不过没关系，在后面的文章中我们会详细解释的。最后我们看一下AssetManager2中主要的数据结构和resources.arsc中主要数据结构的对应关系：<br> <img src="https://images2.imgbox.com/bc/ee/CnzmsvAS_o.png" alt="在这里插入图片描述"><br>         图片比较大，建议点击一下，放大了看，这样比较清晰。我们对这个图稍作说明：</p> 
+<ul><li>图中最右面的那个表示一个资源包（我们可以简单理解为一个APK啦，dex什么的请无视）中的主要数据结构</li><li>剩下的数据结构都是AssetManager2中为了方便资源管理而定义的</li><li><code>PackageGroup::cookies</code>、<code>AssetManager2::configuration_</code>、<code>ApkAssets::idmap_asset_</code>三个变量我们没有画出其内部的数据结构图。其中<code>PackageGroup::cookies</code>和<code>AssetManager2::configuration_</code>一个表示资源包的索引值，一个表示设备当前的配置信息，很好理解，我们不再详说；<code>ApkAssets::idmap_asset_</code>对应这个资源包的idmap文件（这个时候这个资源包是一个overlay package，idmap文件位于/data/resource-cache/目录下）,我们后面介绍RRO的时候会详说，这里也不再详述。</li><li>一个<code>AssetManager2</code>中包含多个<code>ApkAssets</code></li><li>一个<code>ApkAssets</code>对应一个资源包（也就是APK啦），并且它内部会有一个<code>LoadedArsc</code></li><li>一个<code>LoadedArsc</code>对应一个资源包中的resources.arsc文件，它内部会有一个Global String Pool，对应于resources.arsc中的Global String Pool；它内部还会有一个或者多个<code>LoadedPackage</code></li><li>一个<code>LoadedPackage</code>对应于resources.arsc中的一个<code>ResTable_package</code>，它内部会有一个Type String Pool、一个Key String Pool、N个typeSpec、一个记录其引用的资源共享库的数据结构（<code>dynamic_package_map_</code>）、一些RRO策略相关的数据结构（<code>overlayable_infos_</code>等），它们都对应于resources.arsc中相应的数据段。</li><li>一个<code>AssetManager2</code>中还会包含多个<code>PackageGroup</code>对象。<code>PackageGroup</code>在resources.arsc中并没有数据结构与其对应，它是Android为了方便管理RRO中的target package 和它所有overlay packages而定义的一个结构体。target package 和它所有overlay packages会被放到同一个<code>PackageGroup</code>中，它里面会有多个<code>ConfiguredPackage</code>，而每一个<code>ConfiguredPackage</code>中都会有一个<code>LoadedPackage</code>对象作为成员。也就是说，<code>PackageGroup</code>是<code>LoadedPackage</code>除了<code>LoadedArsc</code>–&gt;<code>ApkAssets</code>外的另外一种组织形式，如图中的红色虚线箭头。我们可以认为图中的橙色箭头+黑色箭头是一种组织形式；红色虚箭头+ 黑箭头是另外一种组织形式。当然，<code>PackageGroup</code>中还会记录target package引用的资源共享库的编译时索引和运行时索引之间的映射关系，也就是<code>PackageGroup::dynamic_ref_table</code>。它的生成需要依赖target package中的<code>dynamic_package_map_</code>，自然也就会依赖resources.arsc中的<code>ResTable_lib_header</code>等数据结构。</li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/c69ed5d3aa93fdc56d285c4a8526b27f/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">依赖倒置原则</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/09a1da55781e184a34bbd82a4eec2aa9/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">如何快速的将OpenCV集成到自己的Android项目中</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

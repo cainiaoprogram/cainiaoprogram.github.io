@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>由Asset中的double free引发的Android系统及APP崩溃问题分析 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="由Asset中的double free引发的Android系统及APP崩溃问题分析" />
+<meta property="og:description" content="前言 这个问题在来小米之前就遇到并解决过，当时的解决方案与朴老师的初步解决方案一样，本文在之前的初步分析结果之上进一步进行了深入分析，最终得出了当前看起来相对合理并符合原来架构设计的最终方案。
+文中引用了朴老师抓的backtrace，同时在进一步分析的过程中朴老师也提出的大量有建设性的问题，感谢朴老师！
+一、问题现象 1、systemui高频崩溃
+2、system server崩溃导致重启
+二、解决方案 通过初步分析、深入分析（具体分析过程和关键代码及log在下面）我们知道了问题的原因：
+1、_CompressedAsset::getBuffer不是线程安全的
+2、多个AssetManager一起share同一个_CompressedAsset对象，而不同的AssetManager在对_CompressedAsset进行get和set时存在多线程并发竞争同一资源的场景
+3、多线程对_CompressedAsset进行get和set时没有用同一个lock同步
+4、两个线程同时走进_CompressedAsset::getBuffer并发生double free
+针对问题的根本原因，给出以下解决方案：
+对临界资源的get和set用同一个lock同步，有序访问。
+patch已同步提交给AOSP review并merged，patch详情请猛击：https://android-review.googlesource.com/#/c/271434/
+三、初步分析 1、查看崩溃时的backtrace，发现是对象析构时free memory时出问题了，为什么？
+backtrace: #00 pc 0003d546 /system/lib/libc.so (arena_run_dalloc&#43;97) #01 pc 0003e5e9 /system/lib/libc.so (je_arena_dalloc_large&#43;24) #02 pc 000463d9 /system/lib/libc.so (ifree&#43;700) #03 pc 0000fa13 /system/lib/libc.so (free&#43;10) #04 pc 00018f15 /system/lib/libandroidfw.so (android::StreamingZipInflater::~StreamingZipInflater()&#43;44) #05 pc 0000dc3f /system/lib/libandroidfw.so (android::_CompressedAsset::getBuffer(bool)&#43;62) #06 pc 000177c3 /system/lib/libandroidfw.so (android::ResTable::add(android::Asset*, android::Asset*, int, bool)&#43;22) #07 pc 00010a33 /system/lib/libandroidfw.so (android::AssetManager::appendPathToResTable(android::AssetManager::asset_path const&amp;, unsigned int*) const&#43;270) #08 pc 00010e5f /system/lib/libandroidfw." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/b3eaddc0ba6c1020b7a6e0d7356b0ba5/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2016-10-14T15:33:45+08:00" />
+<meta property="article:modified_time" content="2016-10-14T15:33:45+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">由Asset中的double free引发的Android系统及APP崩溃问题分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="_0"></a>前言</h3> 
+<p>这个问题在来小米之前就遇到并解决过，当时的解决方案与朴老师的初步解决方案一样，本文在之前的初步分析结果之上进一步进行了深入分析，最终得出了当前看起来相对合理并符合原来架构设计的最终方案。<br> 文中引用了朴老师抓的backtrace，同时在进一步分析的过程中朴老师也提出的大量有建设性的问题，感谢朴老师！</p> 
+<h3><a id="_4"></a>一、问题现象</h3> 
+<p>1、systemui高频崩溃</p> 
+<p>2、system server崩溃导致重启</p> 
+<h3><a id="_9"></a>二、解决方案</h3> 
+<p>通过初步分析、深入分析（具体分析过程和关键代码及log在下面）我们知道了问题的原因：</p> 
+<p>1、_CompressedAsset::getBuffer不是线程安全的</p> 
+<p>2、多个AssetManager一起share同一个_CompressedAsset对象，而不同的AssetManager在对_CompressedAsset进行get和set时存在多线程并发竞争同一资源的场景</p> 
+<p>3、多线程对_CompressedAsset进行get和set时没有用同一个lock同步</p> 
+<p>4、两个线程同时走进_CompressedAsset::getBuffer并发生double free</p> 
+<p>针对问题的根本原因，给出以下解决方案：</p> 
+<p>对临界资源的get和set用同一个lock同步，有序访问。</p> 
+<p>patch已同步提交给AOSP review并merged，patch详情请猛击：<a href="https://android-review.googlesource.com/#/c/271434/" rel="nofollow">https://android-review.googlesource.com/#/c/271434/</a><br> <img src="https://images2.imgbox.com/ad/78/YDqsgAMt_o.png" alt="最终方案"></p> 
+<h3><a id="_27"></a>三、初步分析</h3> 
+<p>1、查看崩溃时的backtrace，发现是对象析构时free memory时出问题了，为什么？</p> 
+<pre><code>backtrace:
+    #00 pc 0003d546  /system/lib/libc.so (arena_run_dalloc+97)
+    #01 pc 0003e5e9  /system/lib/libc.so (je_arena_dalloc_large+24)
+    #02 pc 000463d9  /system/lib/libc.so (ifree+700)
+    #03 pc 0000fa13  /system/lib/libc.so (free+10)
+    #04 pc 00018f15  /system/lib/libandroidfw.so (android::StreamingZipInflater::~StreamingZipInflater()+44)
+    #05 pc 0000dc3f  /system/lib/libandroidfw.so (android::_CompressedAsset::getBuffer(bool)+62)
+    #06 pc 000177c3  /system/lib/libandroidfw.so (android::ResTable::add(android::Asset*, android::Asset*, int, bool)+22)
+    #07 pc 00010a33  /system/lib/libandroidfw.so (android::AssetManager::appendPathToResTable(android::AssetManager::asset_path const&amp;, unsigned int*) const+270)
+    #08 pc 00010e5f  /system/lib/libandroidfw.so (android::AssetManager::getResTable(bool) const+102)
+    #09 pc 00080935  /system/lib/libandroid_runtime.so
+    #10 pc 0001a963  /data/dalvik-cache/arm/system@framework@boot.oat
+</code></pre> 
+<p>之前抓的system server double free crash时的coredump中的thread trace：<br> <img src="https://images2.imgbox.com/1f/d3/39hnM8FT_o.png" alt="旧的thread trace"><br> 2、查看backtrace对应的源码发现是在_CompressedAsset::getBuffer函数中的delete mZipInflater;时挂掉的，为什么？</p> 
+<pre><code>/*
+ * Get a pointer to a read-only buffer of data.
+ *
+ * The first time this is called, we expand the compressed data into a
+ * buffer.
+ */
+const void* _CompressedAsset::getBuffer(bool)
+{
+    unsigned char* buf = NULL;
+
+    if (mBuf != NULL)
+        return mBuf;
+
+    /*
+     * Allocate a buffer and read the file into it.
+     */
+    buf = new unsigned char[mUncompressedLen];
+    if (buf == NULL) {
+        ALOGW("alloc %ld bytes failed\n", (long) mUncompressedLen);
+        goto bail;
+    }
+
+    if (mMap != NULL) {
+        if (!ZipUtils::inflateToBuffer(mMap-&gt;getDataPtr(), buf,
+                mUncompressedLen, mCompressedLen))
+            goto bail;
+    } else {
+        assert(mFd &gt;= 0);
+
+        /*
+         * Seek to the start of the compressed data.
+         */
+        if (lseek(mFd, mStart, SEEK_SET) != mStart)
+            goto bail;
+
+        /*
+         * Expand the data into it.
+         */
+        if (!ZipUtils::inflateToBuffer(mFd, buf, mUncompressedLen,
+                mCompressedLen))
+            goto bail;
+    }
+
+    /*
+     * Success - now that we have the full asset in RAM we
+     * no longer need the streaming inflater
+     */
+    delete mZipInflater;
+    mZipInflater = NULL;
+
+    mBuf = buf;
+    buf = NULL;
+
+bail:
+    delete[] buf;
+    return mBuf;
+}
+</code></pre> 
+<p>3、继续查看源码，mZipInflater在_CompressedAsset构造时会被赋值为NULL，delete NULL不会有问题，也就是说mZipInflater一定被创建了，继续找代码发现是在openChunk函数中被创建的</p> 
+<pre><code>/*
+ * Constructor.
+ */
+_CompressedAsset::_CompressedAsset(void)
+    : mStart(0), mCompressedLen(0), mUncompressedLen(0), mOffset(0),
+      mMap(NULL), mFd(-1), mZipInflater(NULL), mBuf(NULL)
+{
+}
+</code></pre> 
+<pre><code>/*
+ * Open a chunk of compressed data in a mapped region.
+ *
+ * Nothing is expanded until the first read call.
+ */
+status_t _CompressedAsset::openChunk(FileMap* dataMap, size_t uncompressedLen)
+{
+    assert(mFd &lt; 0);        // no re-open
+    assert(mMap == NULL);
+    assert(dataMap != NULL);
+
+    mMap = dataMap;
+    mStart = -1;        // not used
+    mCompressedLen = dataMap-&gt;getDataLength();
+    mUncompressedLen = uncompressedLen;
+    assert(mOffset == 0);
+
+    if (uncompressedLen &gt; StreamingZipInflater::OUTPUT_CHUNK_SIZE) {
+        mZipInflater = new StreamingZipInflater(dataMap, uncompressedLen);
+    }
+    return NO_ERROR;
+}
+</code></pre> 
+<p>4、回到原来的问题，既然mZipInflater一定被创建了，那么为什么delete它时会挂掉？内存被踩？野指针？double free？仔细看_CompressedAsset以及Asset的代码，以及出问题时的backtrace，发现被踩的可能性比较小，因为每次都是死在同一个地方，如果是被踩应该是随机的死，不会每次都死在同一个地方，好了先排除内存被踩的可能性。</p> 
+<p>5、继续分析是否有野指针的可能，野指针正常是分配了一块内存用指针记录下来内存地址，然后free之后没有置空指针或者是指针变量没有初始化是随机值，导致在使用这个指针的时候出现问题，通过看mZipInflater被使用的代码，发现既不是没有初始化的野指针，也不是free之后没有置空的野指针，好了又排除了野指针的可能。</p> 
+<p>6、继续分析double free的可能，其实free之后没有置空再次使用并free的野指针是double free的一种简单情况，通过看代码发现mZipInflater被delete之后会置空，所以现在就要考虑一种复杂的double free情况，就是多线程并发时，同时走到了delete mZipInflater;导致第二个线程double free，从出问题的backtrace以及对应的_CompressedAsset的getBuffer代码来看这种情况是很有可能发生的，因为getBuffer以及getBuffer的调用者没有对getBuffer中的临界资源加锁以及做任何同步来保证线程安全，再看一下getBuffer的代码：</p> 
+<pre><code>const void* _CompressedAsset::getBuffer(bool)
+{
+    unsigned char* buf = NULL;
+
+    if (mBuf != NULL)
+        return mBuf;
+
+    /*
+     * Allocate a buffer and read the file into it.
+     */
+    buf = new unsigned char[mUncompressedLen];
+    if (buf == NULL) {
+        ALOGW("alloc %ld bytes failed\n", (long) mUncompressedLen);
+        goto bail;
+    }
+
+    if (mMap != NULL) {
+        if (!ZipUtils::inflateToBuffer(mMap-&gt;getDataPtr(), buf,
+                mUncompressedLen, mCompressedLen))
+            goto bail;
+    } else {
+        assert(mFd &gt;= 0);
+
+        /*
+         * Seek to the start of the compressed data.
+         */
+        if (lseek(mFd, mStart, SEEK_SET) != mStart)
+            goto bail;
+
+        /*
+         * Expand the data into it.
+         */
+        if (!ZipUtils::inflateToBuffer(mFd, buf, mUncompressedLen,
+                mCompressedLen))
+            goto bail;
+    }
+
+    /*
+     * Success - now that we have the full asset in RAM we
+     * no longer need the streaming inflater
+     */
+    delete mZipInflater;
+    mZipInflater = NULL;
+
+    mBuf = buf;
+    buf = NULL;
+
+bail:
+    delete[] buf;
+    return mBuf;
+}
+</code></pre> 
+<p>考虑下面的场景：</p> 
+<pre><code>Thread A调用getBuffer
+Thread B调用getBuffer
+Thread A走到delete mZipInflater
+Thread B在Thread A走完delete mZipInflater还没有执行mZipInflater = NULL时也走到了delete mZipInflater
+</code></pre> 
+<p>如果同时有多个上面的线程做这样的事情，上面的场景是很容易出现的，所以就发生了double free，该如何解决？</p> 
+<p>7、通过初步分析backtrace和review代码，发现上面的调用代码的逻辑关系都是对的，上层的调用以及AssetManager都对自己的操作在内部有lock来同步了，而发生问题时是两个不同的AssetManager访问了同一个Asset对象导致的，虽然每个AssetManager都对自己操作进行了同步，但是它们的同步无法对公共的Asset对象生效，既然如此那我们就在Asset自己内部来加lock同步吧，初步方案如下：</p> 
+<p><img src="https://images2.imgbox.com/5e/a9/CEMuOIqQ_o.png" alt="初步方案"></p> 
+<p>代码也一并给AOSP去review了，patch进了我们的代码库之后同样的问题也没有再出现过了，但是问题就这样结束了吗？当然没有，因为这样的剧情没意思，观众喜欢跌宕起伏的剧情！</p> 
+<h3><a id="_219"></a>四、深入分析</h3> 
+<p>1、很遗憾，AOSP不采纳这个patch，原因是_CompressedAsset是非线程安全的，需要使用者自己保证线程安全，需要我们找到使用者并使其保证线程安全。好你丫的，给你提patch提高系统稳定性，你还挑三拣四的。。。。。不过话说回来我们还得再争取争取，与AOSP的人理论，说这个patch至少能提升系统稳定性啥的，不过最终理论的结果是codereview-2变成了两个，有兴趣的观众可以猛击链接查看：<a href="https://android-review.googlesource.com/#/c/235040/" rel="nofollow">https://android-review.googlesource.com/#/c/235040/</a></p> 
+<p>2、冷静下来仔细想想，AOSP的人说的也有道理（看起来有点像鸡蛋里挑骨头），那鸡蛋里是不是真有骨头？好吧，接下来就继续找这个骨头：_CompressedAsset的使用者为什么没有做好同步保护？</p> 
+<p>3、对着代码看呀看，对着backtrace看呀看，终于发现了端倪</p> 
+<pre><code>#0  0xb6f6f546 in arena_run_dalloc (arena=arena@entry=0xb5127040, run=&lt;optimized out&gt;, dirty=dirty@entry=true, cleaned=cleaned@entry=false) at external/jemalloc/src/arena.c:1270
+#1  0xb6f705c2 in je_arena_dalloc_large_locked (arena=arena@entry=0xb5127040, chunk=chunk@entry=0x8a900000, ptr=ptr@entry=0x8a90a000) at external/jemalloc/src/arena.c:2063
+#2  0xb6f705ec in je_arena_dalloc_large (arena=0xb5127040, chunk=chunk@entry=0x8a900000, ptr=ptr@entry=0x8a90a000) at external/jemalloc/src/arena.c:2071
+#3  0xb6f783dc in je_arena_dalloc (try_tcache=true, ptr=0x8a90a000, chunk=0x8a900000) at external/jemalloc/include/jemalloc/internal/arena.h:1168
+#4  je_idalloct (try_tcache=true, ptr=0x8a90a000) at external/jemalloc/include/jemalloc/internal/jemalloc_internal.h:774
+#5  je_iqalloct (try_tcache=true, ptr=0x8a90a000) at external/jemalloc/include/jemalloc/internal/jemalloc_internal.h:793
+#6  je_iqalloc (ptr=0x8a90a000) at external/jemalloc/include/jemalloc/internal/jemalloc_internal.h:800
+#7  ifree (ptr=0x8a90a000) at external/jemalloc/src/jemalloc.c:1228
+#8  0xb6f41a14 in free (mem=&lt;optimized out&gt;) at bionic/libc/bionic/malloc_debug_common.cpp:251
+#9  0xb6c74f06 in android::StreamingZipInflater::~StreamingZipInflater (this=0x8eb24280, __in_chrg=&lt;optimized out&gt;) at frameworks/base/libs/androidfw/StreamingZipInflater.cpp:93
+#10 0xb6c69c42 in android::_CompressedAsset::getBuffer (this=0x8eb32330) at frameworks/base/libs/androidfw/Asset.cpp:887
+#11 0xb6c737c4 in android::ResTable::add (this=0x8e870c00, asset=asset@entry=0x8eb32330, idmapAsset=idmapAsset@entry=0x0, cookie=cookie@entry=5, copyData=copyData@entry=false)
+    at frameworks/base/libs/androidfw/ResourceTypes.cpp:3371
+#12 0xb6c6ca36 in android::AssetManager::appendPathToResTable (this=this@entry=0x8e838390, ap=..., entryIdx=entryIdx@entry=0x89de3444) at frameworks/base/libs/androidfw/AssetManager.cpp:678
+#13 0xb6c6ce62 in android::AssetManager::getResTable (this=0x8e838390, required=&lt;optimized out&gt;) at frameworks/base/libs/androidfw/AssetManager.cpp:727
+#14 0xb6c6cebc in android::AssetManager::getResources (this=&lt;optimized out&gt;, required=required@entry=true) at frameworks/base/libs/androidfw/AssetManager.cpp:813
+#15 0xb6ea5b20 in android::android_content_AssetManager_getStringBlockCount (env=&lt;optimized out&gt;, clazz=&lt;optimized out&gt;) at frameworks/base/core/jni/android_util_AssetManager.cpp:886 
+</code></pre> 
+<pre><code>#0  syscall () at bionic/libc/arch-arm/bionic/syscall.S:44
+#1  0xb6f46016 in __futex (timeout=0x0, value=2, op=128, ftx=0xb5127048) at bionic/libc/private/bionic_futex.h:45
+#2  __futex_wait_ex (ftx=ftx@entry=0xb5127048, shared=shared@entry=false, value=value@entry=2, timeout=0x0) at bionic/libc/private/bionic_futex.h:66
+#3  0xb6f463ac in _normal_lock (shared=0, mutex=0xb5127048) at bionic/libc/bionic/pthread_mutex.cpp:337
+#4  pthread_mutex_lock (mutex=mutex@entry=0xb5127048) at bionic/libc/bionic/pthread_mutex.cpp:457
+#5  0xb6f6fb78 in je_malloc_mutex_lock (mutex=0xb5127048) at external/jemalloc/include/jemalloc/internal/mutex.h:77
+#6  arena_bin_nonfull_run_get (bin=0xb5127300, arena=0xb5127040) at external/jemalloc/src/arena.c:1468
+#7  arena_bin_malloc_hard (arena=arena@entry=0xb5127040, bin=bin@entry=0xb5127300) at external/jemalloc/src/arena.c:1515
+#8  0xb6f6fdf6 in je_arena_tcache_fill_small (arena=0xb5127040, tbin=tbin@entry=0x8eb0e098, binind=binind@entry=5, prof_accumbytes=prof_accumbytes@entry=0) at external/jemalloc/src/arena.c:1573
+#9  0xb6f7d97a in je_tcache_alloc_small_hard (tcache=tcache@entry=0x8eb0e000, tbin=tbin@entry=0x8eb0e098, binind=binind@entry=5) at external/jemalloc/src/tcache.c:72
+#10 0xb6f79552 in je_tcache_alloc_small (zero=false, size=&lt;optimized out&gt;, tcache=0x8eb0e000) at external/jemalloc/include/jemalloc/internal/tcache.h:272
+#11 je_arena_malloc (try_tcache=true, zero=false, size=&lt;optimized out&gt;, arena=0x0) at external/jemalloc/include/jemalloc/internal/arena.h:1074
+#12 je_imalloct (arena=0x0, try_tcache=true, size=&lt;optimized out&gt;) at external/jemalloc/include/jemalloc/internal/jemalloc_internal.h:647
+#13 je_imalloc (size=&lt;optimized out&gt;) at external/jemalloc/include/jemalloc/internal/jemalloc_internal.h:656
+#14 imalloc_body (usize=&lt;synthetic pointer&gt;, size=&lt;optimized out&gt;) at external/jemalloc/src/jemalloc.c:920
+#15 je_malloc (size=&lt;optimized out&gt;) at external/jemalloc/src/jemalloc.c:932
+#16 0xb6f41a40 in malloc (bytes=&lt;optimized out&gt;) at bionic/libc/bionic/malloc_debug_common.cpp:259
+#17 0xb6f0eb0c in operator new (size=size@entry=44) at bionic/libc/bionic/new.cpp:26
+#18 0xb6c73230 in android::ResTable::parsePackage (this=this@entry=0x8eb85180, pkg=pkg@entry=0x8a923b88, header=0x8eb58040) at frameworks/base/libs/androidfw/ResourceTypes.cpp:5806
+#19 0xb6c73600 in android::ResTable::addInternal (this=this@entry=0x8eb85180, data=&lt;optimized out&gt;, data@entry=0x8a91a000, dataSize=&lt;optimized out&gt;, idmapData=idmapData@entry=0x0, 
+    idmapDataSize=idmapDataSize@entry=0, cookie=cookie@entry=5, copyData=copyData@entry=false) at frameworks/base/libs/androidfw/ResourceTypes.cpp:3539
+#20 0xb6c73824 in android::ResTable::add (this=0x8eb85180, asset=asset@entry=0x8eb32330, idmapAsset=idmapAsset@entry=0x0, cookie=cookie@entry=5, copyData=copyData@entry=false)
+    at frameworks/base/libs/androidfw/ResourceTypes.cpp:3389
+#21 0xb6c6ca36 in android::AssetManager::appendPathToResTable (this=this@entry=0x8eb2c160, ap=..., entryIdx=entryIdx@entry=0x8b8d4444) at frameworks/base/libs/androidfw/AssetManager.cpp:678
+#22 0xb6c6ce62 in android::AssetManager::getResTable (this=0x8eb2c160, required=&lt;optimized out&gt;) at frameworks/base/libs/androidfw/AssetManager.cpp:727
+#23 0xb6c6cebc in android::AssetManager::getResources (this=&lt;optimized out&gt;, required=required@entry=true) at frameworks/base/libs/androidfw/AssetManager.cpp:813
+#24 0xb6ea5b20 in android::android_content_AssetManager_getStringBlockCount (env=&lt;optimized out&gt;, clazz=&lt;optimized out&gt;) at frameworks/base/core/jni/android_util_AssetManager.cpp:886
+</code></pre> 
+<pre><code> "Binder_1" prio=5 tid=10 Native
+   at android.content.res.AssetManager.getStringBlockCount(Native method)
+   at android.content.res.AssetManager.makeStringBlocks(AssetManager.java:263)
+   at android.content.res.AssetManager.ensureStringBlocks(AssetManager.java:255)
+   - locked &lt;0x138b32bf&gt; (a android.content.res.AssetManager)
+   at android.content.res.Resources.&lt;init&gt;(Resources.java:240)
+   at android.content.res.MiuiResources.&lt;init&gt;(MiuiResources.java:109)
+   at android.app.ResourcesManager.getTopLevelResources(ResourcesManager.java:231)
+   at android.app.ActivityThread.getTopLevelResources(ActivityThread.java:1630)
+   at android.app.LoadedApk.getResources(LoadedApk.java:533)
+   at android.app.ContextImpl.&lt;init&gt;(ContextImpl.java:2256)
+   at android.app.ContextImpl.createApplicationContext(ContextImpl.java:2102)
+   at android.content.ContextWrapper.createApplicationContext(ContextWrapper.java:671)
+   at android.app.Notification$Builder.rebuild(Notification.java:3205)
+   at android.service.notification.NotificationListenerService$INotificationListenerWrapper.onNotificationPosted(NotificationListenerService.java:615)
+   at android.service.notification.INotificationListener$Stub.onTransact(INotificationListener.java:71)
+   at android.os.Binder.execTransact(Binder.java:446)
+</code></pre> 
+<pre><code>"Binder_3" prio=5 tid=20 Native 
+   at android.content.res.AssetManager.getStringBlockCount(Native method)
+   at android.content.res.AssetManager.makeStringBlocks(AssetManager.java:263)
+   at android.content.res.AssetManager.ensureStringBlocks(AssetManager.java:255)
+   - locked &lt;0x38f64cea&gt; (a android.content.res.AssetManager)
+   at android.content.res.Resources.&lt;init&gt;(Resources.java:240)
+   at android.content.res.MiuiResources.&lt;init&gt;(MiuiResources.java:109)
+   at android.app.ResourcesManager.getTopLevelResources(ResourcesManager.java:231)
+   at android.app.ActivityThread.getTopLevelResources(ActivityThread.java:1630)
+   at android.app.LoadedApk.getResources(LoadedApk.java:533)
+   at android.app.ContextImpl.&lt;init&gt;(ContextImpl.java:2256)
+   at android.app.ContextImpl.createApplicationContext(ContextImpl.java:2102)
+   at android.content.ContextWrapper.createApplicationContext(ContextWrapper.java:671)
+   at android.app.Notification$Builder.rebuild(Notification.java:3205)
+   at android.service.notification.NotificationListenerService$INotificationListenerWrapper.onNotificationPosted(NotificationListenerService.java:615)
+   at android.service.notification.INotificationListener$Stub.onTransact(INotificationListener.java:71)
+   at android.os.Binder.execTransact(Binder.java:446) 
+</code></pre> 
+<p>4、首先捋清问题相关的Native关键对象之间的包含关系：</p> 
+<p><code>AssetManager包含ZipSet，ZipSet mZipSet;</code></p> 
+<p><code>ZipSet包含SharedZip，mutable Vector&lt;sp&lt;SharedZip&gt; &gt; mZipFile;</code></p> 
+<p><code>SharedZip包含Asset，Asset* mResourceTableAsset;</code></p> 
+<p>这里的mResourceTableAsset就对应我们出问题时的_CompressedAsset，既然上面的初步分析是多个AssetManager访问同一个Asset导致的问题，那可能有观众会想知道不同的AssetManager是如何共享同一个Asset，好吧，接下来满足观众的好奇心，继续看代码：</p> 
+<pre><code>    class SharedZip : public RefBase {
+    public:
+        static sp&lt;SharedZip&gt; get(const String8&amp; path, bool createIfNotPresent = true);
+
+        ZipFileRO* getZip();
+
+        Asset* getResourceTableAsset();
+        Asset* setResourceTableAsset(Asset* asset);
+
+        ResTable* getResourceTable();
+        ResTable* setResourceTable(ResTable* res);
+
+        bool isUpToDate();
+
+        void addOverlay(const asset_path&amp; ap);
+        bool getOverlay(size_t idx, asset_path* out) const;
+
+    protected:
+        ~SharedZip();
+
+    private:
+        SharedZip(const String8&amp; path, time_t modWhen);
+        SharedZip(); // &lt;-- not implemented
+
+        String8 mPath;
+        ZipFileRO* mZipFile;
+        time_t mModWhen;
+
+        Asset* mResourceTableAsset;
+        ResTable* mResourceTable;
+
+        Vector&lt;asset_path&gt; mOverlays;
+
+        static Mutex gLock;
+        static DefaultKeyedVector&lt;String8, wp&lt;SharedZip&gt; &gt; gOpen;
+    };
+</code></pre> 
+<p>发现原来SharedZip的get方法是静态的，并且还有一个静态的gOpen成员，继续看一下SharedZip的get方法是如何实现的：</p> 
+<pre><code>sp&lt;AssetManager::SharedZip&gt; AssetManager::SharedZip::get(const String8&amp; path,
+        bool createIfNotPresent)
+{
+    AutoMutex _l(gLock);
+    time_t modWhen = getFileModDate(path);
+    sp&lt;SharedZip&gt; zip = gOpen.valueFor(path).promote();
+    if (zip != NULL &amp;&amp; zip-&gt;mModWhen == modWhen) {
+        return zip;
+    }
+    if (zip == NULL &amp;&amp; !createIfNotPresent) {
+        return NULL;
+    }
+    zip = new SharedZip(path, modWhen);
+    gOpen.add(path, zip);
+    return zip;
+
+}
+</code></pre> 
+<p>get的时候会先在gOpen里面找，如果找到了就直接返回，找不到就new一个，所以对于同时存在的多个AssetManager，在传同样的path参数时不同的AssetManager会获取到同一个SharedZip，其实不同的AssetManager共享的是SharedZip，看到这里就明白了，还记得上面的对象包含关系吗？不记得也没关系，再看一下，SharedZip包含Asset，也就是说SharedZip共享，它的Asset成员也同样被共享。</p> 
+<p>5、在分析代码的过程中我们还发现SharedZip是继承RefBase的，这样就可以通过sp和wp来管理SharedZip对象的生命周期，同时get方法返回的是sp&lt; AssetManager::SharedZip &gt;被存在ZipSet的mutable Vector&lt; sp &lt; SharedZip &gt; &gt;中，而每个AssetManager都有自己独立的ZipSet，所以当有多个AssetManager存在并共享同一个SharedZip对象时，共享的SharedZip对象的引用计数就会是AssetManager的数量，当一个AssetManager对象销毁回收时只会对SharedZip对象的引用计数减1，只要有一个AssetManager存在共享的SharedZip对象就不会被释放，由于有sp这一层关系，所以不会存在多个线程同时析构SharedZip的情况，因为SharedZip对象的引用计数减1时是原子操作，因此它的析构函数不会被多个线程同时调用，那么析构函数中的delete mResourceTableAsset;也不会被多线程同时调用，mResourceTableAsset也就是_CompressedAsset的析构函数中调用的close函数也不会被多线程同时调用，同样close中的delete mZipInflater;也不会被多线程同时调用。</p> 
+<pre><code>AssetManager::SharedZip::~SharedZip()
+{
+    if (kIsDebug) {
+        ALOGI("Destroying SharedZip %p %s\n", this, (const char*)mPath);
+    }
+    if (mResourceTable != NULL) {
+        delete mResourceTable;
+    }
+    if (mResourceTableAsset != NULL) {
+        delete mResourceTableAsset;
+    }
+    if (mZipFile != NULL) {
+        delete mZipFile;
+        ALOGV("Closed '%s'\n", mPath.string());
+    }
+}
+</code></pre> 
+<pre><code>_CompressedAsset::~_CompressedAsset(void)
+{
+    close();
+}
+
+</code></pre> 
+<pre><code>void _CompressedAsset::close(void)
+{
+    if (mMap != NULL) {
+        delete mMap;
+        mMap = NULL;
+    }
+
+    delete[] mBuf;
+    mBuf = NULL;
+
+    delete mZipInflater;
+    mZipInflater = NULL;
+
+    if (mFd &gt; 0) {
+        ::close(mFd);
+        mFd = -1;
+    }
+}
+</code></pre> 
+<p>6、拉回战线，继续之前的问题，_CompressedAsset的使用者为什么没有做好同步保护？</p> 
+<p>通过backtrace和代码发现是多线程调用的状态下AssetManager::SharedZip::setResourceTableAsset(Asset* asset)和AssetManager::SharedZip::getResourceTableAsset()没有同步，A线程和B线程都同时走到了appendPathToResTable函数中，问题场景如下：</p> 
+<pre><code>a、线程A被调度到，先调用getZipResourceTableAsset没有获取到asset，然后调用openNonAssetInPathLocked获得了一个
+asset对象并调用setZipResourceTableAsset将这个对象保存，在保存的过程中会先AutoMutex _l(gLock);然后
+mResourceTableAsset = asset;最后asset-&gt;getBuffer(true);这个getBuffer相对耗时因为有IO相关的操作
+b、线程B被调度到，调用getZipResourceTableAsset获取到了线程A刚刚mResourceTableAsset = asset;的asset，
+并继续执行到了mResources-&gt;add(ass, idmap, *entryIdx + 1, !shared);在add函数中会调用asset的getBuffer()
+c、线程A再次被调度到，并执行到了delete mZipInflater;
+d、线程B在线程A刚执行完delete mZipInflater;时也再次被调度到，并执行到了delete mZipInflater;
+</code></pre> 
+<p>接着double free的问题就发生了，问题对应的关键代码如下：<br> <img src="https://images2.imgbox.com/31/6c/Y2cEBanH_o.png" alt=""><br> get和set没有做好同步，set中调用了getBuffer<br> <img src="https://images2.imgbox.com/ab/b1/HuxNkfRC_o.png" alt=""><br> 两个线程同时走到了appendPathToResTable中<br> <img src="https://images2.imgbox.com/9b/c5/Pi4yB6RY_o.png" alt=""><br> add函数中调用了getBuffer<br> <img src="https://images2.imgbox.com/ff/47/p7taePFg_o.png" alt=""><br> getBuffer中调用了delete mZipInflater</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e77b30fc2aa461b4fc2bd3359d5e7213/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">bootstrap设置table的样式</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/f816762ab0310321030ba3869adca178/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">微信小程序 开发运营接入指南 设计规则</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>32_Win32 共享内存 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="32_Win32 共享内存" />
+<meta property="og:description" content="Win32 共享内存 内存映射文件 很多文本编辑软件都提供了一个剪裁行尾空格的功能，例如EditPlus软件的编辑菜单项→格式→剪裁行尾空格。在调用ReadFile()函数读取文件时，每次读取一定大小的字节数例如64字节，这涉及一个缓冲区边界的问题。如果缓冲区的未尾有一个或多个空格，那么如何判断这些空格是单词之间的空格还是行尾的空格呢.因为缓冲区的末尾不一定正好是换行&#34;\r\n&#34;，所以类似这样的问题并不能很好解决。我们可以一次读入整个文件，但是在Win32程序中可以使用的内存空间只有2GB大小(实际上无法申请这么大的内存)，如果文件大小超过2GB怎么办呢?
+内存映射文件提供了一组独立的函数，通过内存映射文件函数可以将磁盘上一个文件的全部或部分映射到进程虚拟地址空间的某个位置，完成映射后，程序就能够通过内存指针像访问内存一样对磁盘上的文件进行读写操作。
+具体机制是，对磁盘文件所映射的内存的读写操作会通过系统底层自动实现对磁盘文件的读写。实际上还是需要把相关数据读入物理内存，类似于虚拟内存管理函数，内存映射文件会预订一块地址空间区域并在需要的时候提交页面。不同之处在于，内存映射文件的物理存储器来自磁盘上已有的文件，而不是系统的页面交换文件，实质上并没有省略什么环节，但是程序的结构将会从中受益，缓冲区边界等问题将不复存在。另外，内存映射文件会将硬盘上的文件不做修改地装载到内存中，内存中的文件和硬盘上的文件一样按字节顺序排列。但是，硬盘上的文件不一定按文件内容排列在一起，因为文件存储以簇为单位，整个文件内容可能会存储在不相邻的各个簇中;而通过内存映射文件读取到内存中的文件按线性排列，访问相对简单,访问速度得到了提升。
+除此之外，以下两方面也用到了内存映射文件技术。
+Windows操作系统加载、执行.exe和.dIl等可执行文件时也用到了内存映射文件技术，运行一个可执行文件时系统并不会把整个文件全部载入虚拟内存（页面交换文件和物理内存)中，这就节省了页面交换文件的空间以及应用程序后动所需的时间。使用内存映射文件还可以在同一台计算机上运行的多个进程之间共享数据,当一个进程改变了共享数据页的内容时，通过分页映射机制，其他进程的共享数据区的内容就会同时改变，因为它们实际上存储在同一个地方。许多进程间通信、同步机制在底层都是通过内存映射文件技术实现的。 使用内存映射文件的步骤通常如下。
+调用CreateFile函数创建或打开一个文件内核对象，返回一个文件对象句柄hFile，该对象标识了我们想要用作内存映射文件的磁盘文件。调用CreateFileMapping函数为hFile文件对象创建或打开一个文件映射内核对象，返回一个文件映射对象句柄hFileMap调用MapViewOfFile函数把文件映射对象hFileMap的部分或全部映射到进程的虚拟地址空间中，返回一个内存指针lpMemory，即可通过该指针来读写文件，这一步操作是映射文件映射对象的一个视图到虚拟地址空间中。 当不再需要内存映射文件时，应该执行以下清理工作。
+调用UnmapViewOfFile酗数取消对文件映射内核对象的映射，传入参数为lpMemory调用CloseHandle函数关闭文件映射内核对象，传入参数为hFileMap调用CloseHandle函数关闭文件内核对象，传入参数为hFile 内存映射文件相关函数 使用内存映射文件的第一步是调用CreateFile函数创建或打开一个文件内核对象，返回一个文件对象句柄hFile，该对象标识了我们想要用作内存映射文件的磁盘文件。然后，调用CreateFileMapping函数为hFile文件对象创建或打开一个文件映射内核对象，返回一个文件映射对象句柄hFileMap CreateFileMapping函数原型如下∶
+HANDLE WINAPI CreateFileMapping ( _ln_ HANDLE hFile,	//文件对象句柄 _ln_opt_ LPSECURITY_ATTRIBUTES lpAttributes,//含义同其他内核对象的安全属性结构 _ln_ DWORD flProtect,//文件映射对象的页面保护属性 _ln_ DWORD dwMaximumSizeHigh, //文件映射对象大小的高32位，以字节为单位 _ln_ DWORD dwMaximumSizeLow,//文件映射对象大小的低32位，以字节为单位 _ln_opt_ LPCTSTR lpName //文件映射对象的名称,可为NULL ); flProtect参数指定文件映射对象的页面保护属性，可以是下表所示的值之一，以下页面保护属性都包含一个写时复制属性,后面会介绍写时复制。
+页面保护属性值页面保护属性含义PAGE_READONLY Ox02完成对文件映射对象的映射时，文件具有可读和写时复制属性，必须使用GENERIC_READ访问权限创建hFile参数指定的文件PAGE_READWRITE Ox04完成对文件映射对象的映射时，文件具有可读可写和写时复制属性，必须使用GENERIC_READ|GENERIC_WRITE访问权限创建hFile参数指定的文件PAGE_EXECUTE_READ Ox20完成对文件映射对象的映射时，文件具有可读、可执行和写时复制属性,必须使用GENERIC_READ|GENERIC_EXECUTE访问权限创建hFile参数指定的文件PAGE_EXECUTE_READWRITE Ox40完成对文件映射对象的映射时，文件具有可读可写、可执行和写时复制属性，必须使用GENERIC_READ|GENERIC_WRITE|GENERIC_EXECUTE访问权限创建hFile参数指定的文件PAGE_WRITECOPY Ox08等效于PAGE_READONLYPAGE_EXECUTE_WRITECOPYO×80等效于 PAGE_EXECUTE_READ 接下来实现一个示例程序MemoryMappingFile，单击“打开文件&#34;按钮，程序创建一个内存映射文件并将文件内容显示到多行编辑控件中;单击“追加数据&#34;按钮，程序把单行编辑控件中的内容追加到文件中，并把新文件内容显示到多行编辑控件中，如图3.15所示。特别注意memcpy() 追加的时候，利用了内存地址的偏移来拷贝到文件的末尾处，这里需要注意一下，其他理解难度不大。
+MemoryMappingFile.rc resource.h //{{NO_DEPENDENCIES}} // Microsoft Visual C&#43;&#43; 生成的包含文件。 // 供 MemoryMappingFile.rc 使用 // #define IDD_MAIN 101 #define IDC_EDIT_PATH 1001 #define IDC_EDIT_APPEND 1002 #define IDC_BTN_OPEN 1003 #define IDC_BTN_APPEND 1004 #define IDC_EDIT_TEXT 1005 // Next default values for new objects // #ifdef APSTUDIO_INVOKED #ifndef APSTUDIO_READONLY_SYMBOLS #define _APS_NEXT_RESOURCE_VALUE 103 #define _APS_NEXT_COMMAND_VALUE 40001 #define _APS_NEXT_CONTROL_VALUE 1006 #define _APS_NEXT_SYMED_VALUE 101 #endif #endif MemoryMappingFile." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/7feeda5341e824f9ac9e354223eafdf9/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-11T21:27:52+08:00" />
+<meta property="article:modified_time" content="2024-01-11T21:27:52+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">32_Win32 共享内存</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="Win32__0"></a>Win32 共享内存</h2> 
+<h3><a id="_2"></a>内存映射文件</h3> 
+<p>很多文本编辑软件都提供了一个剪裁行尾空格的功能，例如<code>EditPlus软件</code>的编辑菜单项→格式→剪裁行尾空格。在调用<code>ReadFile()</code>函数读取文件时，每次读取一定大小的字节数例如64字节，这涉及一个缓冲区边界的问题。如果缓冲区的未尾有一个或多个空格，那么如何判断这些空格是单词之间的空格还是行尾的空格呢.因为缓冲区的末尾不一定正好是换行<code>"\r\n"</code>，所以类似这样的问题并不能很好解决。我们可以一次读入整个文件，但是在Win32程序中可以使用的内存空间只有2GB大小(实际上无法申请这么大的内存)，如果文件大小超过2GB怎么办呢?</p> 
+<p>内存映射文件提供了一组独立的函数，通过内存映射文件函数可以将磁盘上一个文件的全部或部分映射到进程虚拟地址空间的某个位置，完成映射后，程序就能够通过内存指针像访问内存一样对磁盘上的文件进行读写操作。</p> 
+<p>具体机制是，对磁盘文件所映射的内存的读写操作会通过系统底层自动实现对磁盘文件的读写。实际上还是需要把相关数据读入物理内存，类似于虚拟内存管理函数，内存映射文件会预订一块地址空间区域并在需要的时候提交页面。不同之处在于，内存映射文件的物理存储器来自磁盘上已有的文件，而不是系统的页面交换文件，实质上并没有省略什么环节，但是程序的结构将会从中受益，缓冲区边界等问题将不复存在。另外，内存映射文件会将硬盘上的文件不做修改地装载到内存中，内存中的文件和硬盘上的文件一样按字节顺序排列。但是，硬盘上的文件不一定按文件内容排列在一起，因为文件存储以簇为单位，整个文件内容可能会存储在不相邻的各个簇中;而通过内存映射文件读取到内存中的文件按线性排列，访问相对简单,访问速度得到了提升。</p> 
+<p>除此之外，以下两方面也用到了内存映射文件技术。</p> 
+<ul><li>Windows操作系统加载、执行.exe和.dIl等可执行文件时也用到了内存映射文件技术，运行一个可执行文件时系统并不会把整个文件全部载入虚拟内存（页面交换文件和物理内存)中，这就节省了页面交换文件的空间以及应用程序后动所需的时间。</li><li>使用内存映射文件还可以在同一台计算机上运行的多个进程之间共享数据,当一个进程改变了共享数据页的内容时，通过分页映射机制，其他进程的共享数据区的内容就会同时改变，因为它们实际上存储在同一个地方。许多进程间通信、同步机制在底层都是通过内存映射文件技术实现的。</li></ul> 
+<p>使用内存映射文件的步骤通常如下。</p> 
+<ul><li>调用CreateFile函数创建或打开一个文件内核对象，返回一个文件对象句柄hFile，该对象标识了我们想要用作内存映射文件的磁盘文件。</li><li>调用CreateFileMapping函数为hFile文件对象创建或打开一个文件映射内核对象，返回一个文件映射对象句柄hFileMap</li><li>调用MapViewOfFile函数把文件映射对象hFileMap的部分或全部映射到进程的虚拟地址空间中，返回一个内存指针lpMemory，即可通过该指针来读写文件，这一步操作是映射文件映射对象的一个视图到虚拟地址空间中。</li></ul> 
+<p>当不再需要内存映射文件时，应该执行以下清理工作。</p> 
+<ul><li>调用UnmapViewOfFile酗数取消对文件映射内核对象的映射，传入参数为lpMemory</li><li>调用CloseHandle函数关闭文件映射内核对象，传入参数为hFileMap</li><li>调用CloseHandle函数关闭文件内核对象，传入参数为hFile</li></ul> 
+<h3><a id="_36"></a>内存映射文件相关函数</h3> 
+<p>使用内存映射文件的第一步是调用CreateFile函数创建或打开一个文件内核对象，返回一个文件对象句柄hFile，该对象标识了我们想要用作内存映射文件的磁盘文件。然后，调用CreateFileMapping函数为hFile文件对象创建或打开一个文件映射内核对象，返回一个文件映射对象句柄hFileMap CreateFileMapping函数原型如下∶</p> 
+<pre><code class="prism language-c">HANDLE WINAPI <span class="token function">CreateFileMapping</span>
+ <span class="token punctuation">(</span>
+	_ln_ HANDLE hFile<span class="token punctuation">,</span>	<span class="token comment">//文件对象句柄</span>
+	_ln_opt_ LPSECURITY_ATTRIBUTES lpAttributes<span class="token punctuation">,</span><span class="token comment">//含义同其他内核对象的安全属性结构</span>
+	_ln_ DWORD flProtect<span class="token punctuation">,</span><span class="token comment">//文件映射对象的页面保护属性</span>
+	_ln_ DWORD dwMaximumSizeHigh<span class="token punctuation">,</span> <span class="token comment">//文件映射对象大小的高32位，以字节为单位</span>
+	_ln_ DWORD dwMaximumSizeLow<span class="token punctuation">,</span><span class="token comment">//文件映射对象大小的低32位，以字节为单位</span>
+	_ln_opt_ LPCTSTR lpName <span class="token comment">//文件映射对象的名称,可为NULL</span>
+<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>flProtect参数指定文件映射对象的页面保护属性，可以是下表所示的值之一，以下页面保护属性都包含一个写时复制属性,后面会介绍写时复制。</p> 
+<table><thead><tr><th align="center">页面保护属性值</th><th align="center">页面保护属性含义</th></tr></thead><tbody><tr><td align="center">PAGE_READONLY Ox02</td><td align="center">完成对文件映射对象的映射时，文件具有可读和写时复制属性，必须使用GENERIC_READ访问权限创建hFile参数指定的文件</td></tr><tr><td align="center">PAGE_READWRITE Ox04</td><td align="center">完成对文件映射对象的映射时，文件具有可读可写和写时复制属性，必须使用GENERIC_READ|GENERIC_WRITE访问权限创建hFile参数指定的文件</td></tr><tr><td align="center">PAGE_EXECUTE_READ Ox20</td><td align="center">完成对文件映射对象的映射时，文件具有可读、可执行和写时复制属性,必须使用GENERIC_READ|GENERIC_EXECUTE访问权限创建hFile参数指定的文件</td></tr><tr><td align="center">PAGE_EXECUTE_READWRITE Ox40</td><td align="center">完成对文件映射对象的映射时，文件具有可读可写、可执行和写时复制属性，必须使用GENERIC_READ|GENERIC_WRITE|GENERIC_EXECUTE访问权限创建hFile参数指定的文件</td></tr><tr><td align="center">PAGE_WRITECOPY Ox08</td><td align="center">等效于PAGE_READONLYPAGE_EXECUTE_WRITECOPYO×80等效于 PAGE_EXECUTE_READ</td></tr></tbody></table> 
+<p>接下来实现一个示例程序<code>MemoryMappingFile</code>，单击“打开文件"按钮，程序创建一个内存映射文件并将文件内容显示到多行编辑控件中;单击“追加数据"按钮，程序把单行编辑控件中的内容追加到文件中，并把新文件内容显示到多行编辑控件中，如图3.15所示。特别注意<code>memcpy()</code> 追加的时候，利用了内存地址的偏移来拷贝到文件的末尾处，这里需要注意一下，其他理解难度不大。</p> 
+<ul><li>MemoryMappingFile.rc</li></ul> 
+<p><img src="https://images2.imgbox.com/10/6b/jwnLuO0X_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>resource.h</li></ul> 
+<pre><code class="prism language-c"><span class="token comment">//{<!-- -->{NO_DEPENDENCIES}}</span>
+<span class="token comment">// Microsoft Visual C++ 生成的包含文件。</span>
+<span class="token comment">// 供 MemoryMappingFile.rc 使用</span>
+<span class="token comment">//</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">IDD_MAIN</span>                        <span class="token expression"><span class="token number">101</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">IDC_EDIT_PATH</span>                   <span class="token expression"><span class="token number">1001</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">IDC_EDIT_APPEND</span>                 <span class="token expression"><span class="token number">1002</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">IDC_BTN_OPEN</span>                    <span class="token expression"><span class="token number">1003</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">IDC_BTN_APPEND</span>                  <span class="token expression"><span class="token number">1004</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">IDC_EDIT_TEXT</span>                   <span class="token expression"><span class="token number">1005</span></span></span>
+
+<span class="token comment">// Next default values for new objects</span>
+<span class="token comment">// </span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">APSTUDIO_INVOKED</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifndef</span> <span class="token expression">APSTUDIO_READONLY_SYMBOLS</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">_APS_NEXT_RESOURCE_VALUE</span>        <span class="token expression"><span class="token number">103</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">_APS_NEXT_COMMAND_VALUE</span>         <span class="token expression"><span class="token number">40001</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">_APS_NEXT_CONTROL_VALUE</span>         <span class="token expression"><span class="token number">1006</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">_APS_NEXT_SYMED_VALUE</span>           <span class="token expression"><span class="token number">101</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+</code></pre> 
+<ul><li>MemoryMappingFile.cpp</li></ul> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;windows.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;tchar.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"resource.h"</span></span>
+
+<span class="token comment">// 函数声明</span>
+INT_PTR CALLBACK <span class="token function">DialogProc</span><span class="token punctuation">(</span>HWND hwndDlg<span class="token punctuation">,</span> UINT uMsg<span class="token punctuation">,</span> WPARAM wParam<span class="token punctuation">,</span> LPARAM lParam<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token keyword">int</span> WINAPI <span class="token function">WinMain</span><span class="token punctuation">(</span>HINSTANCE hInstance<span class="token punctuation">,</span> HINSTANCE hPrevInstance<span class="token punctuation">,</span> LPSTR lpCmdLine<span class="token punctuation">,</span> <span class="token keyword">int</span> nCmdShow<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token function">DialogBoxParam</span><span class="token punctuation">(</span>hInstance<span class="token punctuation">,</span> <span class="token function">MAKEINTRESOURCE</span><span class="token punctuation">(</span>IDD_MAIN<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> DialogProc<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+INT_PTR CALLBACK <span class="token function">DialogProc</span><span class="token punctuation">(</span>HWND hwndDlg<span class="token punctuation">,</span> UINT uMsg<span class="token punctuation">,</span> WPARAM wParam<span class="token punctuation">,</span> LPARAM lParam<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	TCHAR szPath<span class="token punctuation">[</span>MAX_PATH<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span> <span class="token number">0</span> <span class="token punctuation">}</span><span class="token punctuation">;</span> <span class="token comment">// 文件路径</span>
+	TCHAR szBuf<span class="token punctuation">[</span><span class="token number">512</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span> <span class="token number">0</span> <span class="token punctuation">}</span><span class="token punctuation">;</span>       <span class="token comment">// 追加数据</span>
+	LARGE_INTEGER liFileSize<span class="token punctuation">;</span>
+	HANDLE hFile<span class="token punctuation">;</span>
+	HANDLE hFileMap<span class="token punctuation">;</span>
+	LPVOID lpMemory<span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>uMsg <span class="token operator">==</span> WM_INITDIALOG<span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token comment">//</span>
+		<span class="token operator">::</span><span class="token function">SetDlgItemText</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> IDC_EDIT_PATH<span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"D:\\Test.txt"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">return</span> TRUE<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>uMsg <span class="token operator">==</span> WM_COMMAND<span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+
+		<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">LOWORD</span><span class="token punctuation">(</span>wParam<span class="token punctuation">)</span> <span class="token operator">==</span> IDC_BTN_OPEN<span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>  
+
+			<span class="token comment">//查输入框注入的文件路径</span>
+			<span class="token operator">::</span><span class="token function">GetDlgItemText</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> IDC_EDIT_PATH<span class="token punctuation">,</span> szPath<span class="token punctuation">,</span> <span class="token function">_countof</span><span class="token punctuation">(</span>szPath<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+			<span class="token comment">//基于此路径，打开文件，得到文件句柄</span>
+			hFile <span class="token operator">=</span> <span class="token operator">::</span><span class="token function">CreateFile</span><span class="token punctuation">(</span>
+				szPath<span class="token punctuation">,</span>
+				GENERIC_READ <span class="token operator">|</span> GENERIC_WRITE<span class="token punctuation">,</span>
+				FILE_SHARE_READ<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span>
+				OPEN_EXISTING<span class="token punctuation">,</span> FILE_ATTRIBUTE_NORMAL<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+			<span class="token keyword">if</span> <span class="token punctuation">(</span>hFile <span class="token operator">==</span> INVALID_HANDLE_VALUE<span class="token punctuation">)</span>
+			<span class="token punctuation">{<!-- --></span>
+				<span class="token operator">::</span><span class="token function">MessageBox</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"CreateFile函数调用失败"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"提示"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> MB_OK<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token keyword">return</span> TRUE<span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+			<span class="token keyword">else</span>
+			<span class="token punctuation">{<!-- --></span>
+				<span class="token comment">//根据文件句柄查文件大小，如果说文件没有内容则终止流程</span>
+				<span class="token operator">::</span><span class="token function">GetFileSizeEx</span><span class="token punctuation">(</span>hFile<span class="token punctuation">,</span> <span class="token operator">&amp;</span>liFileSize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token keyword">if</span> <span class="token punctuation">(</span>liFileSize<span class="token punctuation">.</span>QuadPart <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span>
+				<span class="token punctuation">{<!-- --></span>
+					<span class="token operator">::</span><span class="token function">MessageBox</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"文件大小为0"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"提示"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> MB_OK<span class="token punctuation">)</span><span class="token punctuation">;</span>
+					<span class="token operator">::</span><span class="token function">CloseHandle</span><span class="token punctuation">(</span>hFile<span class="token punctuation">)</span><span class="token punctuation">;</span>
+					<span class="token keyword">return</span> TRUE<span class="token punctuation">;</span>
+				<span class="token punctuation">}</span>
+			<span class="token punctuation">}</span>
+
+			<span class="token comment">// 为hFile文件对象创建一个文件映射内核对象</span>
+			hFileMap <span class="token operator">=</span> <span class="token operator">::</span><span class="token function">CreateFileMapping</span><span class="token punctuation">(</span>hFile<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> PAGE_READWRITE<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>hFileMap<span class="token punctuation">)</span>
+			<span class="token punctuation">{<!-- --></span>
+				<span class="token function">MessageBox</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"CreateFileMapping调用失败"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"提示"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> MB_OK<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token keyword">return</span> TRUE<span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+
+			<span class="token comment">// 把文件映射对象hFileMap的全部映射到进程的虚拟地址空间中</span>
+			lpMemory <span class="token operator">=</span> <span class="token operator">::</span><span class="token function">MapViewOfFile</span><span class="token punctuation">(</span>hFileMap<span class="token punctuation">,</span> FILE_MAP_READ <span class="token operator">|</span> FILE_MAP_WRITE<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>lpMemory<span class="token punctuation">)</span>
+			<span class="token punctuation">{<!-- --></span>
+				<span class="token operator">::</span><span class="token function">MessageBox</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"MapViewOfFile调用失败"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"提示"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> MB_OK<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token keyword">return</span> TRUE<span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+
+			<span class="token comment">// 返回指向文件内容内存的指针，随机将把文件内容显示到编辑控件中</span>
+			<span class="token function">SetDlgItemText</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> IDC_EDIT_TEXT<span class="token punctuation">,</span> <span class="token punctuation">(</span>LPTSTR<span class="token punctuation">)</span>lpMemory<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+			<span class="token comment">// 清理工作</span>
+			<span class="token operator">::</span><span class="token function">UnmapViewOfFile</span><span class="token punctuation">(</span>lpMemory<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token operator">::</span><span class="token function">CloseHandle</span><span class="token punctuation">(</span>hFileMap<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token operator">::</span><span class="token function">CloseHandle</span><span class="token punctuation">(</span>hFile<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+		<span class="token punctuation">}</span>
+		<span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">LOWORD</span><span class="token punctuation">(</span>wParam<span class="token punctuation">)</span> <span class="token operator">==</span> IDC_BTN_APPEND<span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token comment">//查用户追加内容</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">GetDlgItemText</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> IDC_EDIT_APPEND<span class="token punctuation">,</span> szBuf<span class="token punctuation">,</span> <span class="token function">_countof</span><span class="token punctuation">(</span>szBuf<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+			<span class="token punctuation">{<!-- --></span>
+				<span class="token operator">::</span><span class="token function">MessageBox</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"请输入追加内容"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"提示"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> MB_OK<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token keyword">return</span> FALSE<span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+
+			<span class="token comment">//查输入框注入的文件路径</span>
+			<span class="token function">GetDlgItemText</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> IDC_EDIT_PATH<span class="token punctuation">,</span> szPath<span class="token punctuation">,</span> <span class="token function">_countof</span><span class="token punctuation">(</span>szPath<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+			<span class="token comment">//基于此路径，打开文件，得到文件句柄</span>
+			hFile <span class="token operator">=</span> <span class="token operator">::</span><span class="token function">CreateFile</span><span class="token punctuation">(</span>szPath<span class="token punctuation">,</span> GENERIC_READ <span class="token operator">|</span> GENERIC_WRITE<span class="token punctuation">,</span>
+				FILE_SHARE_READ<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> OPEN_EXISTING<span class="token punctuation">,</span> FILE_ATTRIBUTE_NORMAL<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span>hFile <span class="token operator">==</span> INVALID_HANDLE_VALUE<span class="token punctuation">)</span>
+			<span class="token punctuation">{<!-- --></span>
+				<span class="token operator">::</span><span class="token function">MessageBox</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"CreateFile函数调用失败"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"提示"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> MB_OK<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token keyword">return</span> TRUE<span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+
+			<span class="token comment">// 为hFile文件对象创建一个文件映射内核对象</span>
+			<span class="token comment">// 查文件大小， 扩展文件到指定的大小</span>
+			<span class="token operator">::</span><span class="token function">GetFileSizeEx</span><span class="token punctuation">(</span>hFile<span class="token punctuation">,</span> <span class="token operator">&amp;</span>liFileSize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			hFileMap <span class="token operator">=</span> <span class="token operator">::</span><span class="token function">CreateFileMapping</span><span class="token punctuation">(</span>hFile<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> PAGE_READWRITE<span class="token punctuation">,</span> liFileSize<span class="token punctuation">.</span>HighPart<span class="token punctuation">,</span>
+				liFileSize<span class="token punctuation">.</span>LowPart <span class="token operator">+</span> <span class="token function">_tcslen</span><span class="token punctuation">(</span>szBuf<span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>TCHAR<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>hFileMap<span class="token punctuation">)</span>
+			<span class="token punctuation">{<!-- --></span>
+				<span class="token operator">::</span><span class="token function">MessageBox</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"CreateFileMapping调用失败"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"提示"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> MB_OK<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token keyword">return</span> TRUE<span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+
+			<span class="token comment">// 把文件映射对象hFileMap的全部映射到进程的虚拟地址空间中</span>
+			lpMemory <span class="token operator">=</span> <span class="token operator">::</span><span class="token function">MapViewOfFile</span><span class="token punctuation">(</span>hFileMap<span class="token punctuation">,</span> FILE_MAP_READ <span class="token operator">|</span> FILE_MAP_WRITE<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>lpMemory<span class="token punctuation">)</span>
+			<span class="token punctuation">{<!-- --></span>
+				<span class="token operator">::</span><span class="token function">MessageBox</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"MapViewOfFile调用失败"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"提示"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> MB_OK<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token keyword">return</span> TRUE<span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+
+			<span class="token comment">// 写入追加数据</span>
+			<span class="token function">memcpy_s</span><span class="token punctuation">(</span><span class="token punctuation">(</span>LPBYTE<span class="token punctuation">)</span>lpMemory <span class="token operator">+</span> liFileSize<span class="token punctuation">.</span>QuadPart<span class="token punctuation">,</span> <span class="token function">_tcslen</span><span class="token punctuation">(</span>szBuf<span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>TCHAR<span class="token punctuation">)</span><span class="token punctuation">,</span>
+				szBuf<span class="token punctuation">,</span> <span class="token function">_tcslen</span><span class="token punctuation">(</span>szBuf<span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>TCHAR<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+			<span class="token comment">//刷新的虚拟地址空间中存的文件内容缓冲刷新到本地文件中</span>
+			<span class="token operator">::</span><span class="token function">FlushViewOfFile</span><span class="token punctuation">(</span>lpMemory<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			
+			
+			<span class="token comment">// 把新文件内容显示到编辑控件中</span>
+			<span class="token operator">::</span><span class="token function">SetDlgItemText</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> IDC_EDIT_TEXT<span class="token punctuation">,</span> <span class="token punctuation">(</span>LPTSTR<span class="token punctuation">)</span>lpMemory<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+			<span class="token comment">// 清理工作</span>
+			<span class="token operator">::</span><span class="token function">UnmapViewOfFile</span><span class="token punctuation">(</span>lpMemory<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token operator">::</span><span class="token function">CloseHandle</span><span class="token punctuation">(</span>hFileMap<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token operator">::</span><span class="token function">CloseHandle</span><span class="token punctuation">(</span>hFile<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">LOWORD</span><span class="token punctuation">(</span>wParam<span class="token punctuation">)</span> <span class="token operator">==</span> IDCANCEL<span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token operator">::</span><span class="token function">EndDialog</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">return</span> TRUE<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">return</span> FALSE<span class="token punctuation">;</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/0f/18/fjt7PE1C_o.gif" alt="在这里插入图片描述"></p> 
+<h3><a id="_257"></a>写时复制</h3> 
+<p>后动一个应用程序时，系统会调用CreateFile函数来打开磁盘上的.exe文件，然后调用CreateFileMapping函数来创建文件映射对象，并以新创建的进程的名义调用<br> MapViewOfFileEx (传入SEC_IMAGE标志)函数，这样就把.exe文件映射到了进程的地址空间中。之所以调用<br> MapViewOfFileEx而不是MapViewOfFile，是为了把文件映射到指定的基地址处，这个基地址保存在.exe文件的PE文件头中，然后系统创建进程的主线程，在映射得到的视图中取得可执行代码的起始地址，把该地址放到线程的指合指针中，最后由CPU开始执行其中的代码。如果用户后动同一个应用程序的第二个实例，则系统会发现该.exe文件已经有一个文件映射对象，因此不会再创建一个新的文件对象或文件映射对象，取而代之的是，系统会映射.exe文件的另一个视图，但这次是在新创建的进程的地址空间中，至此，系统已经把同一个.exe文件同时映射到了两个地址空间中。显然，由于物理内存中包含.exe文件可执行代码的那些页面为两个进程所共享，因此内存的利用率更高。</p> 
+<p>大概就是说，启动应用程序，CPU跑这些程序二进制代码的时候，会构建本地文件和虚拟地址空间做一次映射，这种启动多个应用程序的时候，可以通过映射，来复用这些二进制代码。从而节省内存的浪费。大概是以前没有这种机制的时候，启用一次exe文件，就把数据和代码载入内存，又启动又做一次一样的事情，很慢。所以，思考出来的一种解决方案。</p> 
+<p>从Windows Vista开始PE文件(可执行文件)支持动态基地址，在VS中通过鼠标右键单击项目名称，选择属性→配置属性→链接器→高级→随机基址和固定基址，可以看到默认情况下已经设置了随机基址，如果把随机基址设置为否，当运行可执行文件时，系统会把可执行文件默认映射到进程虚拟地址空间中Ox00400000的位置(即4MB，这是Windows 98系统中可执行文件能加载到的最低地址)，如果不想使用这个地址，还可以指定其他固定基址。WinMain函数的hInstance参数的值表示的是这个基地址，系统会将可执行文件加载到虚拟地址空间的相应位置。</p> 
+<p>运行一个程序的多个实例，系统不会真正加载多份程序实例到内存中，每个程序实例只是可执行文件的一个内存映射视图，系统会共享一份程序的只读页面（程序可执行代码、只读数据)，以及可写页面（例如全局变量、静态变量)，但是采用了写时复制技术。Windows允许多个进程共享同一块内存，例如如果有10个记事本程序正在同时运行，所有的进程会共享程序的代码和数据，同一个程序的多个实例共享相同的内存页极大地提升了系统性能，但另一方面，这也要求所有的程序实例只能读取其中的数据或执行其中的代码，如果有一个程序实例修改并写入一个内存页，那么其他程序实例正在使用的内存页也会改变，这将导致混乱。因此，系统会给共享的可写内存页指定写时复制属性，当系统把一个.exe或.dII映射到进程地址空间时，系统会统计有多少页面是可写的，然后从页面交换文件中分配内存空间来容纳这些可写页面，除非有一个程序实例真的更改了可写页面，否则不会用到页面交换文件中的内存页。</p> 
+<p>当线程试图与人一个共享页面时，系统会从最初将模块映射到进程的地址空间时分配的页面交换文件页面中找到一个闲置页面，并为该闲置页面指定PAGE_READWRITE或<br> PAGE_EXECUTE_READWRITE保护属性，然后把线程想要修改的页面内容复制到闲置页面中，系统不会对原始页面的保护属性和数据做任何修改。然后，系统更新该进程的页面表，原来的虚拟内存地址即对应到内存中一个新的页面，系统在执行这些步骤后，这个进程即可访问它自己的副本。<br> 内存映射文件同样用到了写时复制技术，因为文件映射对象是内核对象，可能有多个进程或线程同时使用同一个文件映射对象。写时复制是一种系统特性，各种场合都可能会用到该技术。比如，有一个大型数组，有一个自定义函数需要这个数组指针作为参数，除非函数要修改该数组的内容，否则没必要为酗数复制一份新数组。</p> 
+<h3><a id="_293"></a>通过内存映射文件在多个进程间共享数据</h3> 
+<p>Windows提供了多种机制，使应用程序之间能够快速、方便地共享数据和信息，这些机制包括Windows消息、RPC、剪贴板、邮件槽(Mailslot)、管道(Pipe)、套接字(socket)等。在同一台机器上共享数据的最底层机制是内存映射文件，如果在同一台机器上的多个进程间进行通信，所有机制归根结底都会用到内存映射文件，如果要求低开销和高性能，内存映射文件无疑是最好的选择。这种数据共享机制通过两个或多个进程映射同一个文件映射对象的视图来实现，这意味着在进程间共享相同的内存页面，当一个进程在文件映射对象的视图中写入数据时，其他进程会在它们的视图中立刻看到变化。</p> 
+<p>在调用CreateFileMapping函数时，如果把hFile参数设置为INVALID_HANDLE_VALUE，系统会使用页面交换文件创建一个文件映射对象，基于页面交换文件的文件映射对象通常用于进程间共享数据。下面实现一个通过内存映射文件在进程间共享数据的示例MemoryMappingFile_Process，我们可以后动本程序的多个实例，在任何一个程序实例的编辑框中输入内容时，当前程序实例编辑控件中的内容会立即显示到所有程序实例的静态控件中，程序运行效果如图下所示</p> 
+<ul><li>MemoryMappingFile_Process.rc</li></ul> 
+<p><img src="https://images2.imgbox.com/50/8a/CGpZq4Be_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>resource.h</li></ul> 
+<pre><code class="prism language-c"><span class="token comment">//{<!-- -->{NO_DEPENDENCIES}}</span>
+<span class="token comment">// Microsoft Visual C++ 生成的包含文件。</span>
+<span class="token comment">// 供 MemoryMappingFile_Process.rc 使用</span>
+<span class="token comment">//</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">IDD_MAIN</span>                        <span class="token expression"><span class="token number">101</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">IDC_EDIT_SHARE</span>                  <span class="token expression"><span class="token number">1001</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">IDC_STATIC_SHARE</span>                <span class="token expression"><span class="token number">1002</span></span></span>
+
+<span class="token comment">// Next default values for new objects</span>
+<span class="token comment">// </span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">APSTUDIO_INVOKED</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifndef</span> <span class="token expression">APSTUDIO_READONLY_SYMBOLS</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">_APS_NEXT_RESOURCE_VALUE</span>        <span class="token expression"><span class="token number">103</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">_APS_NEXT_COMMAND_VALUE</span>         <span class="token expression"><span class="token number">40001</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">_APS_NEXT_CONTROL_VALUE</span>         <span class="token expression"><span class="token number">1003</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">_APS_NEXT_SYMED_VALUE</span>           <span class="token expression"><span class="token number">101</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+</code></pre> 
+<ul><li>MemoryMappingFile_Process.cpp</li></ul> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;windows.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"resource.h"</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">BUF_SIZE</span> <span class="token expression"><span class="token number">4096</span></span></span>
+
+<span class="token comment">// 函数声明</span>
+INT_PTR CALLBACK <span class="token function">DialogProc</span><span class="token punctuation">(</span>HWND hwndDlg<span class="token punctuation">,</span> UINT uMsg<span class="token punctuation">,</span> WPARAM wParam<span class="token punctuation">,</span> LPARAM lParam<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token keyword">int</span> WINAPI <span class="token function">WinMain</span><span class="token punctuation">(</span>HINSTANCE hInstance<span class="token punctuation">,</span> HINSTANCE hPrevInstance<span class="token punctuation">,</span> LPSTR lpCmdLine<span class="token punctuation">,</span> <span class="token keyword">int</span> nCmdShow<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token operator">::</span><span class="token function">DialogBoxParam</span><span class="token punctuation">(</span>hInstance<span class="token punctuation">,</span> <span class="token function">MAKEINTRESOURCE</span><span class="token punctuation">(</span>IDD_MAIN<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> DialogProc<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+INT_PTR CALLBACK <span class="token function">DialogProc</span><span class="token punctuation">(</span>HWND hwndDlg<span class="token punctuation">,</span> UINT uMsg<span class="token punctuation">,</span> WPARAM wParam<span class="token punctuation">,</span> LPARAM lParam<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">static</span> HANDLE hFileMap<span class="token punctuation">;</span> <span class="token comment">//静态全局</span>
+    <span class="token keyword">static</span> LPVOID lpMemory<span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>uMsg <span class="token operator">==</span> WM_INITDIALOG<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// 创建或打开一个 命名文件映射内核对象，BUF_SIZE字节</span>
+        hFileMap <span class="token operator">=</span> <span class="token operator">::</span><span class="token function">CreateFileMapping</span><span class="token punctuation">(</span>
+            INVALID_HANDLE_VALUE<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> PAGE_READWRITE<span class="token punctuation">,</span>
+            <span class="token number">0</span><span class="token punctuation">,</span> BUF_SIZE<span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"2F4368E6-09A1-4D5E-ACC9-C1BDBB041BF7"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>hFileMap<span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token operator">::</span><span class="token function">MessageBox</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"CreateFileMapping调用失败"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"提示"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> MB_OK<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span> TRUE<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">// 创建一个计时器，每一秒钟在静态控件中刷新显示一次共享数据</span>
+        <span class="token operator">::</span><span class="token function">SetTimer</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1000</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> TRUE<span class="token punctuation">;</span>
+
+    <span class="token punctuation">}</span>
+    <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>uMsg <span class="token operator">==</span> WM_COMMAND<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">LOWORD</span><span class="token punctuation">(</span>wParam<span class="token punctuation">)</span> <span class="token operator">==</span> IDC_EDIT_SHARE<span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// 如果，编辑控件中的内容改变</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">HIWORD</span><span class="token punctuation">(</span>wParam<span class="token punctuation">)</span> <span class="token operator">==</span> EN_UPDATE<span class="token punctuation">)</span>
+            <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//查编剧框内容 存到缓冲空间 </span>
+               <span class="token operator">::</span><span class="token function">GetDlgItemText</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> IDC_EDIT_SHARE<span class="token punctuation">,</span> <span class="token punctuation">(</span>LPTSTR<span class="token punctuation">)</span>lpMemory<span class="token punctuation">,</span> BUF_SIZE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">LOWORD</span><span class="token punctuation">(</span>wParam<span class="token punctuation">)</span> <span class="token operator">==</span> IDCANCEL<span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>  
+            
+            <span class="token comment">// 清理工作</span>
+            <span class="token function">KillTimer</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token function">UnmapViewOfFile</span><span class="token punctuation">(</span>lpMemory<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token function">CloseHandle</span><span class="token punctuation">(</span>hFileMap<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token function">EndDialog</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token punctuation">}</span>
+        <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">LOWORD</span><span class="token punctuation">(</span>wParam<span class="token punctuation">)</span> <span class="token operator">==</span> WM_TIMER<span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//定时器，把内容显示给静态控件</span>
+            <span class="token operator">::</span><span class="token function">SetDlgItemText</span><span class="token punctuation">(</span>hwndDlg<span class="token punctuation">,</span> IDC_STATIC_SHARE<span class="token punctuation">,</span> <span class="token punctuation">(</span>LPTSTR<span class="token punctuation">)</span>lpMemory<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">return</span> FALSE<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">/*
+GUID guid;
+TCHAR szGUID[64] = { 0 };
+
+// 生成一个GUID
+CoCreateGuid(&amp;guid);
+// 转换为字符串
+wsprintf(szGUID, TEXT("%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X"),
+    guid.Data1, guid.Data2, guid.Data3,
+    guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3],
+    guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7]);
+*/</span>
+</code></pre> 
+<p>在WM_INITDIALOG消息中，程序调用CreateFileMapping酗数创建或打开一个4096字节大小的命名文件映射对象，并调用MapViewOfFile函数把文件映射对象hFileMap的全部映射到进程的虚拟地址空间中，得到一个共享内存指针<br> lpMemory，然后创建一个计时器，每一秒钟在静态控件中刷新显示一次共享内存的数据。读者可以运行本程序的多个实例进行测试。每当编辑控件中的内容改变时，程序读取编辑控件中的内容到共享内存lpMemory中，在WM_TIMER消息中，程序把共享内存的内容显示到静态控件中。</p> 
+<p>关闭对话框时，程序调用UnmapViewOfFile函数撤销内存映射，调用CloseHandle函数关闭文件映射对象句柄，一个程序实例关闭文件映射对象句柄并不会影响其他实例继续使用文件映射对象。如前所述，所有内核对象的数据结构中通常都包含安全描述符和引用计数字段，创建或打开一个文件映射对象都会导致引用计数加1，而调用CloseHandle函数则会导致引用计数减1，只要引用计数不为0，系统就不会销毁它。</p> 
+<p>如果要创建一个命名文件映射对象，而系统中已经存在一个相同名称的其他内核对象，例如互斥量(Mutex)对象、信号量(Semaphore)对象等,那么调用CreateFileMapping函数创建该名称的文件映射对象会失败，返回值为NULL，调用GetLastError函数返回ERROR_INVALID_HANDLE，因此创建命名文件映射对象时应该保证名称在系统中唯一。本程序的文件映射对象名称使用了一个GUID字符串。如果需要生成一个GUID，可以在VS中单击工具菜单→创建GUID(G)命合。如果需要在程序中动态生成一个GUID，可以调用<br> CoCreateGuid函数，例如下面的代码∶</p> 
+<pre><code class="prism language-c">GuID guid<span class="token punctuation">;</span>
+TCHAR SzGUID<span class="token punctuation">[</span><span class="token number">64</span><span class="token punctuation">]</span><span class="token operator">=</span> <span class="token punctuation">{<!-- --></span> <span class="token number">0</span> <span class="token punctuation">}</span><span class="token punctuation">;</span>生成一个GUID
+<span class="token function">CoCreateGuid</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>guid<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//转换为字符串</span>
+<span class="token function">wsprintf</span><span class="token punctuation">(</span>szGUID<span class="token punctuation">,</span><span class="token function">TEXT</span><span class="token punctuation">(</span><span class="token string">"%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X"</span><span class="token punctuation">)</span>，
+guid<span class="token punctuation">.</span>Datal<span class="token punctuation">,</span> guid<span class="token punctuation">.</span>Data2<span class="token punctuation">,</span> guid<span class="token punctuation">.</span>Data3<span class="token punctuation">,</span>
+guid<span class="token punctuation">.</span>Data4<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span> guid<span class="token punctuation">.</span>Data4<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">,</span> guid<span class="token punctuation">.</span>Data4<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">,</span> guid<span class="token punctuation">.</span>Data4<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+guid<span class="token punctuation">.</span>Data4<span class="token punctuation">[</span><span class="token number">4</span><span class="token punctuation">]</span><span class="token punctuation">,</span> guid<span class="token punctuation">.</span>Data4<span class="token punctuation">[</span><span class="token number">5</span><span class="token punctuation">]</span><span class="token punctuation">,</span> guid<span class="token punctuation">.</span>Data4<span class="token punctuation">[</span><span class="token number">6</span><span class="token punctuation">]</span><span class="token punctuation">,</span> guid<span class="token punctuation">.</span>Data4<span class="token punctuation">[</span><span class="token number">7</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<h3><a id="_451"></a>使用内存映射文件来处理大型文件</h3> 
+<p>使用内存映射文件的第3步为∶调用MapViewOfFile函数把文件映射对象hFileMap的部分或全部映射到进程的虚拟地址空间中，返回一个内存指针lpMemory，即可通过该指针来读写文件，这一步操作是映射文件映射对象的一个视图到虚拟地址空间中。但是对32位进程来说，可用的用户模式地址空间只有2G，超过2G的内存映射文件无法一次性全部映射到进程的虚拟地址空间中。对于大型文件，可以采取多次映射的方法，在调用CreateFileMapping函数为hFile文件对象创建或打开一个文件映射内核对象后，每次调用MapViewOfFile函数只映射一部分文件映射对象，完成对已映射部分的访问后，我们可以撤销对这一部分的映射，然后把文件映射对象的另一部分映射到视图中，一直重复这个过程，直到完成对整个文件映射对象的访问。需要注意的是，MapViewOfFile函数的文件映射对象偏移量参数必须指定为内存分配粒度的整数倍。下面的自定义函数CopyLargeFile实现了对大型文件的复制操作︰</p> 
+<pre><code class="prism language-c"><span class="token comment">//拷贝大型文件 </span>
+BOOL <span class="token function">CopyLargeFile</span><span class="token punctuation">(</span>LPCTSTR srcFilePath <span class="token comment">/*源文件*/</span><span class="token punctuation">,</span> LPCTSTR destFilePath <span class="token comment">/*目标文件*/</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    HANDLE hFile1<span class="token punctuation">,</span> hFile2<span class="token punctuation">,</span> hFileMap<span class="token punctuation">;</span>
+    LPVOID lpMemory<span class="token punctuation">;</span>
+
+    <span class="token comment">//打开文件1</span>
+    hFile1 <span class="token operator">=</span> <span class="token operator">::</span><span class="token function">CreateFile</span><span class="token punctuation">(</span>
+        srcFilePath<span class="token punctuation">,</span>
+        GENERIC_READ<span class="token punctuation">,</span> FILE_SHARE_READ<span class="token punctuation">,</span>
+        <span class="token constant">NULL</span><span class="token punctuation">,</span> OPEN_EXISTING<span class="token punctuation">,</span> FILE_ATTRIBUTE_NORMAL<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>hFile1 <span class="token operator">==</span> INVALID_HANDLE_VALUE<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+
+        <span class="token keyword">return</span> FALSE<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">//创建文件2</span>
+    hFile2 <span class="token operator">=</span> <span class="token operator">::</span><span class="token function">CreateFile</span><span class="token punctuation">(</span>
+        destFilePath<span class="token punctuation">,</span>
+        GENERIC_READ <span class="token operator">|</span> GENERIC_WRITE<span class="token punctuation">,</span> FILE_SHARE_READ<span class="token punctuation">,</span>
+        <span class="token constant">NULL</span><span class="token punctuation">,</span> CREATE_ALWAYS<span class="token punctuation">,</span> FILE_ATTRIBUTE_NORMAL<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>hFile2 <span class="token operator">==</span> INVALID_HANDLE_VALUE<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> FALSE<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">//为hFile1文件对象创建一个文件映射内核对象</span>
+    hFileMap <span class="token operator">=</span> <span class="token operator">::</span><span class="token function">CreateFileMapping</span><span class="token punctuation">(</span>hFile1<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> PAGE_READONLY<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>hFileMap<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> FALSE<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">//获取文件大小，内存分配粒度</span>
+    _int64 qwFileSize<span class="token punctuation">;</span>
+    DWORD dwFileSizeHigh<span class="token punctuation">;</span>
+    SYSTEM_INFO si <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token number">0</span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+    qwFileSize <span class="token operator">=</span> <span class="token operator">::</span><span class="token function">GetFileSize</span><span class="token punctuation">(</span>hFile1<span class="token punctuation">,</span> <span class="token operator">&amp;</span>dwFileSizeHigh<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    qwFileSize <span class="token operator">+=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span>_int64<span class="token punctuation">)</span>dwFileSizeHigh<span class="token punctuation">)</span> <span class="token operator">&lt;&lt;</span> <span class="token number">32</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token operator">::</span><span class="token function">GetSystemInfo</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>si<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">//把文件映射对象hFileMap不断映射到进程的虚拟地址空间中</span>
+    _int64 qwFileOffset <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> <span class="token comment">//文件映射对象偏移量</span>
+    DWORD dwBytesInBlock<span class="token punctuation">;</span> <span class="token comment">//本次映射大小</span>
+    <span class="token keyword">while</span> <span class="token punctuation">(</span>qwFileSize <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+
+        dwBytesInBlock <span class="token operator">=</span> si<span class="token punctuation">.</span>dwAllocationGranularity<span class="token punctuation">;</span> <span class="token comment">//可以分配虚拟内存的起始地址的粒度</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>qwFileSize <span class="token operator">&lt;</span> dwBytesInBlock<span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            dwBytesInBlock <span class="token operator">=</span> <span class="token punctuation">(</span>DWORD<span class="token punctuation">)</span>qwFileSize<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        lpMemory <span class="token operator">=</span> <span class="token operator">::</span><span class="token function">MapViewOfFile</span><span class="token punctuation">(</span>hFileMap<span class="token punctuation">,</span> FILE_MAP_READ<span class="token punctuation">,</span>
+            <span class="token punctuation">(</span>DWORD<span class="token punctuation">)</span><span class="token punctuation">(</span>qwFileOffset <span class="token operator">&gt;&gt;</span> <span class="token number">32</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">(</span>DWORD<span class="token punctuation">)</span>
+            <span class="token punctuation">(</span>qwFileOffset <span class="token operator">&amp;</span> <span class="token number">0xFFFFFFFF</span><span class="token punctuation">)</span><span class="token punctuation">,</span> dwBytesInBlock<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>lpMemory<span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span> FALSE<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//对已映射部分进行操作</span>
+        <span class="token operator">::</span><span class="token function">WriteFile</span><span class="token punctuation">(</span>hFile2<span class="token punctuation">,</span> lpMemory<span class="token punctuation">,</span> dwBytesInBlock<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">//取消本次映射,进行下一轮映射</span>
+        <span class="token function">UnmapViewOfFile</span><span class="token punctuation">(</span>lpMemory<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        qwFileOffset <span class="token operator">+=</span> dwBytesInBlock<span class="token punctuation">;</span>
+        qwFileSize <span class="token operator">-=</span> dwBytesInBlock<span class="token punctuation">;</span>
+
+    <span class="token punctuation">}</span>
+
+
+    <span class="token comment">//清理工作</span>
+    <span class="token operator">::</span><span class="token function">CloseHandle</span><span class="token punctuation">(</span>hFileMap<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token operator">::</span><span class="token function">CloseHandle</span><span class="token punctuation">(</span>hFile1<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token operator">::</span><span class="token function">CloseHandle</span><span class="token punctuation">(</span>hFile2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> TRUE<span class="token punctuation">;</span>
+
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>在上面的示例中，每次只映射内存分配粒度大小，除文件复制操作外，读者可以根据需要对大型文件进行各种操作。</p> 
+<h3><a id="CFileMappingHelper_546"></a>CFileMappingHelper封装</h3> 
+<ul><li>CFileMappingHelper.hpp</li></ul> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">pragma</span> <span class="token expression">once</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;wtypesbase.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;vector&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;string&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;map&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;tchar.h&gt;</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">pragma</span> <span class="token expression"><span class="token function">warning</span><span class="token punctuation">(</span>disable<span class="token operator">:</span><span class="token number">4200</span><span class="token punctuation">)</span></span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">_UNICODE</span></span>
+using _tstring <span class="token operator">=</span> std<span class="token operator">::</span>wstring<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+using _tstring <span class="token operator">=</span> std<span class="token operator">::</span>string<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+
+class CFileMappingHelper
+<span class="token punctuation">{<!-- --></span>
+public<span class="token operator">:</span>
+    <span class="token function">CFileMappingHelper</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token operator">~</span><span class="token function">CFileMappingHelper</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">CFileMappingHelper</span><span class="token punctuation">(</span><span class="token keyword">const</span> CFileMappingHelper<span class="token operator">&amp;</span><span class="token punctuation">)</span> <span class="token operator">=</span> delete<span class="token punctuation">;</span>
+    CFileMappingHelper<span class="token operator">&amp;</span> operator <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">const</span> CFileMappingHelper<span class="token operator">&amp;</span><span class="token punctuation">)</span> <span class="token operator">=</span> delete<span class="token punctuation">;</span>    <span class="token comment">//删除拷贝构造与赋值重载</span>
+
+    <span class="token comment">//</span>
+    <span class="token comment">// @brief: 创建文件映射</span>
+    <span class="token comment">// @param: strName    文件映射名</span>
+    <span class="token comment">// @param: strMutex   互斥锁名</span>
+    <span class="token comment">// @param: dwSize     缓冲大小</span>
+    <span class="token comment">// @ret: bool</span>
+    bool <span class="token function">Create</span><span class="token punctuation">(</span>
+        LPCTSTR strName <span class="token operator">=</span> nullptr<span class="token punctuation">,</span>
+        LPCTSTR strMutex <span class="token operator">=</span> nullptr<span class="token punctuation">,</span>
+        DWORD dwSize <span class="token operator">=</span> <span class="token number">4096</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">//</span>
+    <span class="token comment">// @brief: 销毁释放资源</span>
+    <span class="token comment">// @param: 无</span>
+    <span class="token comment">// @ret: void</span>
+    <span class="token keyword">void</span> <span class="token function">Clear</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">//</span>
+    <span class="token comment">// @brief: 是否已创建</span>
+    <span class="token comment">// @param: 无</span>
+    <span class="token comment">// @ret: bool           初始化与否</span>
+    bool <span class="token function">IsCreate</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span><span class="token punctuation">;</span>
+
+    <span class="token comment">//</span>
+    <span class="token comment">// @brief: 获取文件映射容量</span>
+    <span class="token comment">// @ret: DWORD          文件映射容量</span>
+    DWORD <span class="token function">GetCapacity</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span><span class="token punctuation">;</span>
+
+    <span class="token comment">//</span>
+    <span class="token comment">// @brief: 写入文件映射</span>
+    <span class="token comment">// @param: lpData       要写入数据</span>
+    <span class="token comment">// @param: dwSize       写入长度</span>
+    <span class="token comment">// @ret: bool           操作成功与否</span>
+    bool <span class="token function">Write</span><span class="token punctuation">(</span>LPCVOID lpData<span class="token punctuation">,</span> DWORD dwSize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">//</span>
+    <span class="token comment">// @brief: 读取文件映射</span>
+    <span class="token comment">// @param: lpData       读入的缓冲</span>
+    <span class="token comment">// @param: dwSize       缓冲长度</span>
+    <span class="token comment">// @param: lpBytesRead  成功读取的长度</span>
+    <span class="token comment">// @ret: bool           操作成功与否</span>
+    bool <span class="token function">Read</span><span class="token punctuation">(</span>LPVOID lpData<span class="token punctuation">,</span> DWORD dwSize<span class="token punctuation">,</span> LPDWORD lpBytesRead <span class="token operator">=</span> nullptr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+private<span class="token operator">:</span>
+
+    HANDLE m_hFileMapping<span class="token punctuation">;</span> <span class="token comment">//文件映射对象句柄</span>
+    LPTSTR m_hData<span class="token punctuation">;</span><span class="token comment">//指向共享内存的指针</span>
+    HANDLE m_hMutex<span class="token punctuation">;</span> <span class="token comment">//互斥锁对象句柄</span>
+    bool m_bInit<span class="token punctuation">;</span> <span class="token comment">//记录是不是首次初始化</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+</code></pre> 
+<ul><li>CFileMappingHelper.cpp</li></ul> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"CFileMappingHelper.hpp"</span></span>
+
+<span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token class-name">_FILE_MAPPING_DATA</span>
+<span class="token punctuation">{<!-- --></span>
+
+	DWORD dwCapacity <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>       <span class="token comment">//最大容量</span>
+	DWORD dwPid <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>            <span class="token comment">//进程ID</span>
+	DWORD dwSize <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>           <span class="token comment">//数据大小</span>
+	BYTE Data<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">;</span>               <span class="token comment">//数据内容</span>
+
+
+<span class="token punctuation">}</span>FILE_MAPPING_DATA<span class="token punctuation">,</span> <span class="token operator">*</span> PFILE_MAPPING_DATA<span class="token punctuation">;</span>
+
+CFileMappingHelper<span class="token operator">::</span><span class="token function">CFileMappingHelper</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+	<span class="token operator">:</span><span class="token function">m_hFileMapping</span><span class="token punctuation">(</span>nullptr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+	<span class="token function">m_hData</span><span class="token punctuation">(</span>nullptr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+	<span class="token function">m_hMutex</span><span class="token punctuation">(</span>nullptr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+	<span class="token function">m_bInit</span><span class="token punctuation">(</span>false<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+
+<span class="token punctuation">}</span>
+
+CFileMappingHelper<span class="token operator">::</span><span class="token operator">~</span><span class="token function">CFileMappingHelper</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token function">Clear</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+bool CFileMappingHelper<span class="token operator">::</span><span class="token function">Create</span><span class="token punctuation">(</span>LPCTSTR strName<span class="token punctuation">,</span> LPCTSTR strMutex<span class="token punctuation">,</span> DWORD dwSize<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	SECURITY_ATTRIBUTES sa <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span> <span class="token number">0</span> <span class="token punctuation">}</span><span class="token punctuation">;</span>
+	SECURITY_DESCRIPTOR sd <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span> <span class="token number">0</span> <span class="token punctuation">}</span><span class="token punctuation">;</span>
+	bool bIsSuccess <span class="token operator">=</span> false<span class="token punctuation">;</span>
+	bool bIsFirstCreate <span class="token operator">=</span> false<span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>m_bInit<span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> true<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	sa<span class="token punctuation">.</span>nLength <span class="token operator">=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>sa<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	sa<span class="token punctuation">.</span>bInheritHandle <span class="token operator">=</span> FALSE<span class="token punctuation">;</span>
+	sa<span class="token punctuation">.</span>lpSecurityDescriptor <span class="token operator">=</span> <span class="token operator">&amp;</span>sd<span class="token punctuation">;</span>
+
+	<span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span><span class="token operator">::</span><span class="token function">InitializeSecurityDescriptor</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>sd<span class="token punctuation">,</span> SECURITY_DESCRIPTOR_REVISION<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span><span class="token operator">::</span><span class="token function">SetSecurityDescriptorDacl</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>sd<span class="token punctuation">,</span> TRUE<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> FALSE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">do</span>
+	<span class="token punctuation">{<!-- --></span>
+		m_hMutex <span class="token operator">=</span> <span class="token operator">::</span><span class="token function">CreateMutex</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>sa<span class="token punctuation">,</span>FALSE<span class="token punctuation">,</span>strMutex<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>nullptr <span class="token operator">==</span> m_hMutex<span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">break</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token comment">//打开一个文件映射内核对象,得到文件映射对象句柄</span>
+		m_hFileMapping <span class="token operator">=</span> <span class="token operator">::</span><span class="token function">CreateFileMapping</span><span class="token punctuation">(</span>INVALID_HANDLE_VALUE<span class="token punctuation">,</span><span class="token operator">&amp;</span>sa<span class="token punctuation">,</span>
+			PAGE_READWRITE<span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">,</span>dwSize <span class="token operator">+</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>FILE_MAPPING_DATA<span class="token punctuation">)</span><span class="token punctuation">,</span>strName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>nullptr <span class="token operator">==</span> m_hFileMapping<span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">break</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token comment">//查是不是第一次创建的文件映射内核对象</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>nullptr <span class="token operator">!=</span> m_hFileMapping<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> <span class="token punctuation">(</span>ERROR_ALREADY_EXISTS <span class="token operator">!=</span> <span class="token operator">::</span><span class="token function">GetLastError</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			bIsFirstCreate <span class="token operator">=</span> true<span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+
+		<span class="token comment">//将文件映射对象映射到进程的虚拟地址空间中</span>
+		m_hData <span class="token operator">=</span> <span class="token punctuation">(</span>LPTSTR<span class="token punctuation">)</span><span class="token operator">::</span><span class="token function">MapViewOfFile</span><span class="token punctuation">(</span>
+			m_hFileMapping<span class="token punctuation">,</span> 
+			FILE_MAP_READ <span class="token operator">|</span> FILE_MAP_WRITE<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>nullptr <span class="token operator">==</span> m_hData<span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">break</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+
+		<span class="token comment">//首次创建 设置信息</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>bIsFirstCreate<span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			PFILE_MAPPING_DATA pData <span class="token operator">=</span> reinterpret_cast<span class="token operator">&lt;</span>PFILE_MAPPING_DATA<span class="token operator">&gt;</span><span class="token punctuation">(</span>m_hData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			pData<span class="token operator">-&gt;</span>dwCapacity <span class="token operator">=</span> dwSize<span class="token punctuation">;</span>
+			pData<span class="token operator">-&gt;</span>dwPid <span class="token operator">=</span> <span class="token operator">::</span><span class="token function">GetCurrentProcessId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+
+		bIsSuccess <span class="token operator">=</span> true<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span> <span class="token keyword">while</span> <span class="token punctuation">(</span>false<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>bIsSuccess<span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token function">Clear</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	m_bInit <span class="token operator">=</span> bIsSuccess<span class="token punctuation">;</span>
+	<span class="token keyword">return</span> bIsSuccess<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">void</span> CFileMappingHelper<span class="token operator">::</span><span class="token function">Clear</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>false <span class="token operator">==</span> m_bInit<span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>m_hData<span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token operator">::</span><span class="token function">UnmapViewOfFile</span><span class="token punctuation">(</span>m_hData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		m_hData <span class="token operator">=</span> nullptr<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>m_hFileMapping<span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token operator">::</span><span class="token function">CloseHandle</span><span class="token punctuation">(</span>m_hFileMapping<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		m_hFileMapping <span class="token operator">=</span> nullptr<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>m_hMutex<span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token operator">::</span><span class="token function">CloseHandle</span><span class="token punctuation">(</span>m_hMutex<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		m_hMutex <span class="token operator">=</span> nullptr<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+
+	m_bInit <span class="token operator">=</span> false<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+bool CFileMappingHelper<span class="token operator">::</span><span class="token function">IsCreate</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">return</span> m_bInit<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+DWORD CFileMappingHelper<span class="token operator">::</span><span class="token function">GetCapacity</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>nullptr <span class="token operator">==</span> m_hMutex<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token punctuation">(</span>nullptr <span class="token operator">==</span> m_hData<span class="token punctuation">)</span><span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+
+	PFILE_MAPPING_DATA pData <span class="token operator">=</span> reinterpret_cast<span class="token operator">&lt;</span>PFILE_MAPPING_DATA<span class="token operator">&gt;</span><span class="token punctuation">(</span>m_hData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">return</span> pData<span class="token operator">-&gt;</span>dwCapacity<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+bool CFileMappingHelper<span class="token operator">::</span><span class="token function">Write</span><span class="token punctuation">(</span>LPCVOID lpData<span class="token punctuation">,</span> DWORD dwSize<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	bool bIsSuccess <span class="token operator">=</span> false<span class="token punctuation">;</span>
+	DWORD dwWait <span class="token operator">=</span> WAIT_OBJECT_0<span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>nullptr <span class="token operator">==</span> m_hMutex<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token punctuation">(</span>nullptr <span class="token operator">==</span> m_hData<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token punctuation">(</span>nullptr <span class="token operator">==</span> lpData<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token punctuation">(</span><span class="token number">0</span> <span class="token operator">==</span> dwSize<span class="token punctuation">)</span><span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> false<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	PFILE_MAPPING_DATA pData <span class="token operator">=</span>  reinterpret_cast<span class="token operator">&lt;</span>PFILE_MAPPING_DATA<span class="token operator">&gt;</span><span class="token punctuation">(</span>m_hData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">do</span>
+	<span class="token punctuation">{<!-- --></span>
+
+		dwWait <span class="token operator">=</span> <span class="token operator">::</span><span class="token function">WaitForSingleObject</span><span class="token punctuation">(</span>m_hMutex<span class="token punctuation">,</span> INFINITE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>dwWait <span class="token operator">!=</span> WAIT_OBJECT_0<span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">break</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>dwSize <span class="token operator">&lt;=</span> pData<span class="token operator">-&gt;</span>dwCapacity<span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			
+			<span class="token operator">::</span><span class="token function">memcpy_s</span><span class="token punctuation">(</span>pData<span class="token operator">-&gt;</span>Data<span class="token punctuation">,</span> pData<span class="token operator">-&gt;</span>dwCapacity<span class="token punctuation">,</span> lpData<span class="token punctuation">,</span> dwSize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			pData<span class="token operator">-&gt;</span>dwSize <span class="token operator">=</span> dwSize<span class="token punctuation">;</span>
+			bIsSuccess <span class="token operator">=</span> true<span class="token punctuation">;</span>
+			
+		<span class="token punctuation">}</span>
+
+	<span class="token punctuation">}</span> <span class="token keyword">while</span> <span class="token punctuation">(</span>false<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token operator">::</span><span class="token function">ReleaseMutex</span><span class="token punctuation">(</span>m_hMutex<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">return</span> bIsSuccess<span class="token punctuation">;</span>
+
+<span class="token punctuation">}</span>
+
+bool CFileMappingHelper<span class="token operator">::</span><span class="token function">Read</span><span class="token punctuation">(</span>LPVOID lpData<span class="token punctuation">,</span> DWORD dwSize<span class="token punctuation">,</span> LPDWORD lpBytesRead<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	bool bIsSuccess <span class="token operator">=</span> false<span class="token punctuation">;</span>
+	DWORD dwWait <span class="token operator">=</span> WAIT_OBJECT_0<span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>nullptr <span class="token operator">==</span> m_hMutex<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token punctuation">(</span>nullptr <span class="token operator">==</span> m_hData<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token punctuation">(</span>nullptr <span class="token operator">==</span> lpData<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token punctuation">(</span><span class="token number">0</span> <span class="token operator">==</span> dwSize<span class="token punctuation">)</span><span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> false<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	PFILE_MAPPING_DATA pData <span class="token operator">=</span> reinterpret_cast<span class="token operator">&lt;</span>PFILE_MAPPING_DATA<span class="token operator">&gt;</span><span class="token punctuation">(</span>m_hData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">do</span>
+	<span class="token punctuation">{<!-- --></span>
+		dwWait <span class="token operator">=</span> <span class="token operator">::</span><span class="token function">WaitForSingleObject</span><span class="token punctuation">(</span>m_hMutex<span class="token punctuation">,</span> INFINITE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>dwWait <span class="token operator">!=</span> WAIT_OBJECT_0<span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">break</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>dwSize <span class="token operator">&lt;=</span> <span class="token punctuation">(</span>pData<span class="token operator">-&gt;</span>dwCapacity<span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token operator">::</span><span class="token function">memcpy_s</span><span class="token punctuation">(</span>lpData<span class="token punctuation">,</span>dwSize<span class="token punctuation">,</span>pData<span class="token operator">-&gt;</span>Data<span class="token punctuation">,</span>pData<span class="token operator">-&gt;</span>dwSize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span>nullptr <span class="token operator">!=</span> lpBytesRead<span class="token punctuation">)</span>
+			<span class="token punctuation">{<!-- --></span>
+				<span class="token operator">*</span>lpBytesRead <span class="token operator">=</span> pData<span class="token operator">-&gt;</span>dwSize<span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+			bIsSuccess <span class="token operator">=</span> true<span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span> <span class="token keyword">while</span> <span class="token punctuation">(</span>false<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token operator">::</span><span class="token function">ReleaseMutex</span><span class="token punctuation">(</span>m_hMutex<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">return</span> bIsSuccess<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/f487e6c7a22b157f7cad05f3668f062f/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">STM32——电容触摸按键充电时间测量实验</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/99e81d4639c8e0b36d2da72bc52e7868/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">基于Flask的高并发部署方案</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

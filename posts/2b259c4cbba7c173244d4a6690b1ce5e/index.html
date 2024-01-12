@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>EFCore查缺补漏（一）：依赖注入 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="EFCore查缺补漏（一）：依赖注入" />
+<meta property="og:description" content="前段时间，在群里潜水的时候，看见有个群友的报错日志是这样的：
+An unhandled exception was thrown by the application. System.OutOfMemoryException: Exception of type &#39;System.OutOfMemoryException&#39; was thrown. at System.Threading.Thread.StartInternal() at Microsoft.Extensions.Logging.Console.ConsoleLoggerProvider..ctor(IOptionsMonitor`1 options) at … at Microsoft.Extensions.DependencyInjection.ServiceLookup.CallSiteRuntimeResolver.VisitCache(ServiceCallSite callSite, RuntimeResolverContext context, ServiceProviderEngineScope serviceProviderEngine, RuntimeResolverLock lockType) at … at Microsoft.Extensions.DependencyInjection.ServiceProviderServiceExtensions.GetService[T](IServiceProvider provider) at Microsoft.Extensions.Logging.LoggerFactory.Create(Action`1 configure) at xxxxxxx. &lt;&gt;c__DisplayClass2_0.&lt;AddXxxDbContext&gt;b__0(DbContextOptionsBuilder builder) at Microsoft.Extensions.DependencyInjection.EntityFrameworkServiceCollectionExtensions.CreateDbContextOptions[TContext](IServiceProvider applicationServiceProvider, Action`2 optionsAction) at … 嗯……内存满了？是在构建 ConsoleLoggerProvider 的时候报的异常？是由依赖注入容器产生的？再上层是 AddXxxDbContext？
+好吧，看来一定是位没研究过 EFCore 源码也没看过与本文类似内容的仁兄……我甚至能反推出他写的代码：
+public class Startup { public void ConfigureServices(IServiceCollection services) { services.AddDbContext&lt;MyDbContext&gt;(options =&gt; { // ." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/2b259c4cbba7c173244d4a6690b1ce5e/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-02-06T08:54:15+08:00" />
+<meta property="article:modified_time" content="2021-02-06T08:54:15+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">EFCore查缺补漏（一）：依赖注入</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div id="js_content"> 
+ <p>前段时间，在群里潜水的时候，看见有个群友的报错日志是这样的：</p> 
+ <pre class="has"><code class="language-go">An unhandled exception was thrown by the application. System.OutOfMemoryException: Exception of type 'System.OutOfMemoryException' was thrown.
+   at System.Threading.Thread.StartInternal()
+   at Microsoft.Extensions.Logging.Console.ConsoleLoggerProvider..ctor(IOptionsMonitor`1 options)
+   at …
+   at Microsoft.Extensions.DependencyInjection.ServiceLookup.CallSiteRuntimeResolver.VisitCache(ServiceCallSite callSite, RuntimeResolverContext context, ServiceProviderEngineScope serviceProviderEngine, RuntimeResolverLock lockType)
+   at …
+   at Microsoft.Extensions.DependencyInjection.ServiceProviderServiceExtensions.GetService[T](IServiceProvider provider)
+   at Microsoft.Extensions.Logging.LoggerFactory.Create(Action`1 configure)
+   at xxxxxxx. &lt;&gt;c__DisplayClass2_0.&lt;AddXxxDbContext&gt;b__0(DbContextOptionsBuilder builder)
+   at Microsoft.Extensions.DependencyInjection.EntityFrameworkServiceCollectionExtensions.CreateDbContextOptions[TContext](IServiceProvider applicationServiceProvider, Action`2 optionsAction)
+   at …
+</code></pre> 
+ <p>嗯……内存满了？是在构建 ConsoleLoggerProvider 的时候报的异常？是由依赖注入容器产生的？再上层是 AddXxxDbContext？</p> 
+ <p>好吧，看来一定是位没研究过 EFCore 源码也没看过与本文类似内容的仁兄……我甚至能反推出他写的代码：</p> 
+ <pre class="has"><code class="language-go">public class Startup
+{
+    public void ConfigureServices(IServiceCollection services)
+    {
+        services.AddDbContext&lt;MyDbContext&gt;(options =&gt;
+        {
+            // ...
+            options.UseLoggerFactory(LoggerFactory.Create(b =&gt; b.AddConsole().AddDebug()));
+        });
+
+        // ...
+    }
+
+    // ...
+}
+</code></pre> 
+ <p>C#</p> 
+ <p>看，这个调用堆栈是不是对上味儿了。</p> 
+ <p>接下来我将介绍这个bug产生的原因，并带各位看官一窥 DbContext、DbContextOptions、EFCore内部类的大致生命周期。</p> 
+ <p>本文所有知识均基于 EFCore 3.1 版本，EFCore 5.0 对这部分几乎没有改动。</p> 
+ <p>另外，如果有兴趣调试 EFCore 的源码，可以 clone 下来某个 release 版本，然后保留 EFCore/Abstractions/Analyzers/Relational/SqlServer 这几个项目，然后开一个自己的命令行或者单元测试项目，就可以尽情遨游 EFCore 的源码了。</p> 
+ <p>读代码前，请储备一定量的英文知识和自信。很多代码的意思都写在变量名和函数名上了，大部分源代码读起来并不是什么很难的事情：）</p> 
+ <h5>谁实例化了 DbContext？</h5> 
+ <p>常见有两种方式来构建 DbContext，一种是直接拿来 new 一个，构造函数传入 DbContextOptions 或者什么都不传入；一种是在 ASP.NET Core 中常用的 <code>services.AddDbContext&lt;...&gt;(...)</code>，然后通过某个服务的构造函数或者 <code>IServiceProvider</code> 取得该 DbContext 实例。后者要求该 DbContext 只实现一个构造函数，该构造函数只接受一个参数 <code>DbContextOptions&lt;MyDbContext&gt;</code>。</p> 
+ <p>关于后一种构造方式，我们将父依赖注入容器称为 Application ServiceProvider。</p> 
+ <p>首先需要明确的一点是，DbContext 的构造是由父依赖注入容器实现的。而构造函数要求检测仅仅是 EFCore 那个拓展函数进行的检查。</p> 
+ <p>我们先来看各个 <code>AddDbContext</code> 的核心操作函数吧。</p> 
+ <pre class="has"><code class="language-go">public static IServiceCollection AddDbContext&lt;TContextService, TContextImplementation&gt;(
+    [NotNull] this IServiceCollection serviceCollection,
+    [CanBeNull] Action&lt;IServiceProvider, DbContextOptionsBuilder&gt; optionsAction,
+    ServiceLifetime contextLifetime = ServiceLifetime.Scoped,
+    ServiceLifetime optionsLifetime = ServiceLifetime.Scoped)
+    where TContextImplementation : DbContext, TContextService
+{
+    Check.NotNull(serviceCollection, nameof(serviceCollection));
+
+    if (contextLifetime == ServiceLifetime.Singleton)
+    {
+        optionsLifetime = ServiceLifetime.Singleton;
+    }
+
+    if (optionsAction != null)
+    {
+        CheckContextConstructors&lt;TContextImplementation&gt;();
+    }
+
+    AddCoreServices&lt;TContextImplementation&gt;(serviceCollection, optionsAction, optionsLifetime);
+
+    serviceCollection.TryAdd(new ServiceDescriptor(typeof(TContextService), typeof(TContextImplementation), contextLifetime));
+
+    return serviceCollection;
+}
+</code></pre> 
+ <p>C#</p> 
+ <p>Copy</p> 
+ <p>在这里可以看到：</p> 
+ <ul><li><p>我们可以修改 <code>DbContextOptions</code> 和 <code>DbContext</code> 的生命周期为 Singleton 或者 Transient，而不是默认的 Scoped</p></li><li><p>当检测到对 <code>DbContextOptionsBuilder</code> 的调用时，会检查构造函数是否符合要求</p></li><li><p><code>TContextImplementation</code> 是被构造的 DbContext 实例类型，直接由该依赖注入容器构造</p></li></ul> 
+ <p>而 <code>AddCoreServices</code> 函数则是将 <code>DbContextOptions</code> 实例注入容器。</p> 
+ <pre class="has"><code class="language-go">private static void AddCoreServices&lt;TContextImplementation&gt;(
+    IServiceCollection serviceCollection,
+    Action&lt;IServiceProvider, DbContextOptionsBuilder&gt; optionsAction,
+    ServiceLifetime optionsLifetime)
+    where TContextImplementation : DbContext
+{
+    serviceCollection.TryAdd(
+        new ServiceDescriptor(
+            typeof(DbContextOptions&lt;TContextImplementation&gt;),
+            p =&gt; CreateDbContextOptions&lt;TContextImplementation&gt;(p, optionsAction),
+            optionsLifetime));
+
+    serviceCollection.Add(
+        new ServiceDescriptor(
+            typeof(DbContextOptions),
+            p =&gt; p.GetRequiredService&lt;DbContextOptions&lt;TContextImplementation&gt;&gt;(),
+            optionsLifetime));
+}
+</code></pre> 
+ <p>C#</p> 
+ <p>Copy</p> 
+ <p>在这里可以看到：</p> 
+ <ul><li><p>容器中可能具有很多个 <code>DbContextOptions</code> 实例，可以通过 <code>IEnumerable&lt;DbContextOptions&gt;</code> 拿到全部；这一设计是由于一个依赖注入容器中可以加入多个 <code>DbContext</code> 类型</p></li><li><p>对于每一个特性类型的 DbContext （以下写为 MyDbContext），都会有一个 <code>DbContextOptions&lt;MyDbContext&gt;</code> 与之对应</p></li><li><p>我们在构造函数处用到的 <code>DbContextOptionsBuilder</code> 和 <code>Microsoft.Extensions.Options</code> 其实没什么关系，不能用 <code>IOptions&lt;TOptions&gt;</code> 拿到，只是恰巧都叫 <code>XxxxxxOptions</code> 而已</p></li><li><p>每次新构造 DbContextOptions 实例时，都会使用传入的 <code>Action&lt;IServiceProvider, DbContextOptionsBuilder&gt;</code> 函数；此时第一个参数显然是当前的依赖注入容器，例如发生 HTTP 请求时 <code>HttpContext.RequestService</code> 的容器 Scope；或者 DbContextOptions 单例注入时， <code>IHost.Services</code> 这种容器根</p></li><li><p>实际构建结果是由 <code>CreateDbContextOptions</code> 函数创造的</p></li></ul> 
+ <p>那么再来看看 <code>CreateDbContextOptions</code> 的实现。</p> 
+ <pre class="has"><code class="language-go">private static DbContextOptions&lt;TContext&gt; CreateDbContextOptions&lt;TContext&gt;(
+    [NotNull] IServiceProvider applicationServiceProvider,
+    [CanBeNull] Action&lt;IServiceProvider, DbContextOptionsBuilder&gt; optionsAction)
+    where TContext : DbContext
+{
+    var builder = new DbContextOptionsBuilder&lt;TContext&gt;(
+        new DbContextOptions&lt;TContext&gt;(new Dictionary&lt;Type, IDbContextOptionsExtension&gt;()));
+
+    builder.UseApplicationServiceProvider(applicationServiceProvider);
+
+    optionsAction?.Invoke(applicationServiceProvider, builder);
+
+    return builder.Options;
+}
+</code></pre> 
+ <p>C#</p> 
+ <p>Copy</p> 
+ <p>可以看到，<code>DbContextOptionsBuilder.UseApplicationServiceProvider</code> 实际上是被执行过的，并且恰好指向父依赖注入容器。</p> 
+ <p>此时会发现，我们在单元测试时，不创建依赖注入容器而直接实例化 DbContext 的时候，是没有这一步的。这就是为什么两者有时表现不同，例如直接实例化 Builder 拿到 Options，并且没有 <code>UseLoggerFactory</code> 和 <code>UseApplicationServiceProvider</code> 时，它不会有日志输出。至于日志那部分是怎么构建的呢，暂且按下不表。</p> 
+ <p>而我们会看到网上有些文章说，因为某某原因，选择 <code>services.AddEntityFrameworkSqlServer()</code> 然后 <code>options.UseInternalServiceProvider(..)</code> 的，其实是将两个依赖注入容器合二为一了。具体好坏，还是使用者自行定夺。</p> 
+ <p><img src="https://images2.imgbox.com/56/30/bvgn2UId_o.png"></p> 
+ <h5>DbContext 实例化时做了些什么？</h5> 
+ <p>看到上面那个图了吗。我们会发现，原来 EFCore 的内部容器也是分 Singleton 和 Scoped 的。</p> 
+ <p>先来看看 DbContext 的这样一个 private 成员属性 InternalServiceProvider。</p> 
+ <pre class="has"><code class="language-go">private IServiceProvider InternalServiceProvider
+{
+    get
+    {
+        CheckDisposed();
+
+        if (_contextServices != null)
+        {
+            return _contextServices.InternalServiceProvider;
+        }
+
+        if (_initializing)
+        {
+            throw new InvalidOperationException(CoreStrings.RecursiveOnConfiguring);
+        }
+
+        try
+        {
+            _initializing = true;
+
+            var optionsBuilder = new DbContextOptionsBuilder(_options);
+
+            OnConfiguring(optionsBuilder);
+
+            if (_options.IsFrozen
+                &amp;&amp; !ReferenceEquals(_options, optionsBuilder.Options))
+            {
+                throw new InvalidOperationException(CoreStrings.PoolingOptionsModified);
+            }
+
+            var options = optionsBuilder.Options;
+
+            _serviceScope = ServiceProviderCache.Instance.GetOrAdd(options, providerRequired: true)
+                .GetRequiredService&lt;IServiceScopeFactory&gt;()
+                .CreateScope();
+
+            var scopedServiceProvider = _serviceScope.ServiceProvider;
+
+            var contextServices = scopedServiceProvider.GetService&lt;IDbContextServices&gt;();
+
+            contextServices.Initialize(scopedServiceProvider, options, this);
+
+            _contextServices = contextServices;
+
+            DbContextDependencies.InfrastructureLogger.ContextInitialized(this, options);
+        }
+        finally
+        {
+            _initializing = false;
+        }
+
+        return _contextServices.InternalServiceProvider;
+    }
+}
+</code></pre> 
+ <p>C#</p> 
+ <p>Copy</p> 
+ <p>可以观察到如下事实：</p> 
+ <ul><li><p>除了外部的 <code>DbContextOptions</code> 实例，内部可能也会用 <code>OnConfiguring</code> 函数修改这个 Options，这样保证了两者的配置都会被应用；当使用 <code>DbContextPool</code> 时，内部函数是不能修改配置的</p></li><li><p>DbContext 的每个执行指令都是在内部容器的一个 Service Scope 中执行</p></li><li><p>每次创建 Service Scope 之后，会取出其中 Scoped 服务 <code>IDbContextServices</code>，并将这个 DbContext 实例和 DbContextOptions 保存进这个 Service Scope</p></li><li><p>内部容器的获取是由 <code>ServiceProviderCache.Instance.GetOrAdd(options, providerRequired: true)</code> 操作的；此时拿到的一般都是内部容器的根容器</p></li></ul> 
+ <p>这个 <code>ServiceProviderCache</code> 的源码处于 <code>src\EFCore\Internal\ServiceProviderCache.cs</code>。</p> 
+ <p>在解析 <code>GetOrAdd</code> 函数之前，我们需要了解这样一个结构：<code>IDbContextOptionsExtension</code>。这个结构具有几个基本功能：</p> 
+ <ul><li><p>向依赖注入容器注册依赖服务</p></li><li><p>验证当前 <code>IDbContextOptions</code> 是否正确配置，是否具有冲突</p></li><li><p>告诉 EFCore 该拓展是否提供数据库底层功能（即 Database Provider，例如提供 SQL Server 相关依赖、数据库连接信息等）</p></li><li><p>提供调试信息、日志片段（就是初始化 DbContext 时出现的类似 <code>initialized 'MyDbContext' using provider 'Microsoft.EntityFrameworkCore.SqlServer' with options:...</code> 的地方添加的）</p></li><li><p>实现函数 <code>long GetServiceProviderHashCode()</code>，当这个 EFCore 插件包括某些不太方便通过 Scoped 服务修改的 Singleton 信息时（例如 SensitiveDataLoggingEnabled），这里应该返回一个与这些配置有关的值，同时保证：对于相同的配置，返回相同的值；对于不同的配置，返回不同的值。</p></li></ul> 
+ <p>例如 DbContextOptionsBuilder 中很多函数都是修改 <code>CoreOptionsExtension</code> 完成的。</p> 
+ <p>再看看 EFCore 的内部容器中有哪些类，其对应生命周期是什么样的。此处建议参考 <code>src/EFCore/Infrastructure/EntityFrameworkServicesBuilder.cs</code>。这个代码文件中规定了每个类的生命周期，以及是否可以注册多个。</p> 
+ <p>可以注意到，有这样一些类有着对应的生命周期：</p> 
+ <pre class="has"><code class="language-go">Singleton:
+- IDatabaseProvider
+- IDbSetFinder
+- IModelCustomizer
+- ILoggingOptions
+- IMemoryCache
+
+Scoped:
+- IInterceptors
+- ILoggerFactory
+- IModel
+- IDbContextServices
+- IChangeTrackerFactory
+- IDiagnosticsLogger&lt;&gt;
+- IQueryCompiler
+- IQueryContextFactory
+- IAsyncQueryProvider
+- ICurrentDbContext
+- IDbContextOptions
+</code></pre> 
+ <p>接下来看拿到内部容器的逻辑。</p> 
+ <pre class="has"><code class="language-go">public virtual IServiceProvider GetOrAdd([NotNull] IDbContextOptions options, bool providerRequired)
+{
+    var coreOptionsExtension = options.FindExtension&lt;CoreOptionsExtension&gt;();
+    var internalServiceProvider = coreOptionsExtension?.InternalServiceProvider;
+    if (internalServiceProvider != null)
+    {
+        ValidateOptions(options);
+
+        var optionsInitializer = internalServiceProvider.GetService&lt;ISingletonOptionsInitializer&gt;();
+        if (optionsInitializer == null)
+        {
+            throw new InvalidOperationException(CoreStrings.NoEfServices);
+        }
+
+        if (providerRequired)
+        {
+            optionsInitializer.EnsureInitialized(internalServiceProvider, options);
+        }
+
+        return internalServiceProvider;
+    }
+
+    if (coreOptionsExtension?.ServiceProviderCachingEnabled == false)
+    {
+        return BuildServiceProvider().ServiceProvider;
+    }
+
+    var key = options.Extensions
+        .OrderBy(e =&gt; e.GetType().Name)
+        .Aggregate(0L, (t, e) =&gt; (t * 397) ^ ((long)e.GetType().GetHashCode() * 397) ^ e.Info.GetServiceProviderHashCode());
+
+    return _configurations.GetOrAdd(key, k =&gt; BuildServiceProvider()).ServiceProvider;
+
+    (IServiceProvider ServiceProvider, IDictionary&lt;string, string&gt; DebugInfo) BuildServiceProvider()
+    {
+        ... 此处省略
+    }
+}
+</code></pre> 
+ <p>C#</p> 
+ <p>Copy</p> 
+ <p>嗯，这个逻辑很好盘，而且 99.99% 的情况下大家都只使用了默认配置，即：通过 <code>GetServiceProviderHashCode</code> 函数来计算哈希值，然后从 <code>ServiceProviderCache</code> 内部的一个缓存表中取得之前创建的容器，或者构建一个新的容器。</p> 
+ <p>我们可能会发现，第一次使用 DbContext 的时候，加载时间很长；经过两三秒才能实例化完成；第二次使用的时候，基本上就是瞬间实例化成功了。但我们通过在上层依赖注入容器的 <code>AddDbContext</code> 处做手脚，或者通过重写 <code>OnConfiguring</code> 函数，更改了 <code>DbContextOptions</code> 之后，或者实例化另一个不同类型的 DbContext，又会花很久时间才能实例化成功。应证了上面的说法。</p> 
+ <p>如果每次构建 DbContext 实例时都创建一个全新的内部容器，这样会有大量的性能浪费。</p> 
+ <p>那么我们再来观察一下 <code>DbContextOptionsBuilder</code> 有哪些方法。</p> 
+ <pre class="has"><code class="language-go">- UseSqlServer / UseNpgSql / UseInMemoryDatabase
+- Use第三方插件1/2/3
+- EnableDetailedErrors
+- UseInternalServiceProvider
+- EnableSensitiveDataLogging
+- EnableServiceProviderCaching
+- ConfigureWarnings
+- UseMemoryCache
+- ReplaceService
+--- 一条朴实无华的分割线 ---
+- UseModel
+- UseLoggerFactory
+- UseApplicationServiceProvider
+- UseQueryTrackingBehavior
+- AddInterceptors
+</code></pre> 
+ <p><code>CoreOptionsExtension</code> 的 <code>long GetServiceProviderHashCode()</code> 会包括 <code>IMemoryCache</code>、<code>SensitiveDataLoggingEnabled</code>、<code>DetailedErrorsEnabled</code>、<code>WarningsConfiguration</code>、通过 <code>ReplaceService</code> 修改的那些服务。</p> 
+ <p>可以注意到，其中有些控制的是 Singleton 服务或者决定了实例化的结果，例如 <code>UseMemoryCache</code>、<code>UseSqlServer</code>、<code>ReplaceService</code>，如果每次拿到的 <code>DbContextOptions</code> 实例中的 <code>IMemoryCache</code> 或者数据库类型不一样，那么此时肯定需要构建一个新的依赖注入容器。而有些东西控制的是 Scoped 服务，例如 <code>UseLoggerFactory</code>、<code>UseModel</code>、数据库连接字符串，在一般场景下是不需要重新构建容器的。</p> 
+ <p>也就是说，如果不动态改变分割线上方的那些状态，并且你使用的第三方插件编写很科学，是不会每次都构建新的内部容器的。</p> 
+ <h5>内部容器如何取得 ILoggerFactory？</h5> 
+ <p>内部的服务当然是从内部容器构建的了。</p> 
+ <p>先以 <code>ILoggerFactory</code> 为例，看看为什么 EFCore 能拿到父容器的 <code>ILoggerFactory</code>。</p> 
+ <p>回到上面 <code>EntityFrameworkServicesBuilder</code>，我们可以看到一行</p> 
+ <pre class="has"><code class="language-go">TryAdd&lt;ILoggerFactory&gt;(p =&gt; ScopedLoggerFactory.Create(p, null));
+</code></pre> 
+ <p>C#</p> 
+ <p>Copy</p> 
+ <p>转到这个函数，我们可以看到</p> 
+ <pre class="has"><code class="language-go">public static ScopedLoggerFactory Create(
+    [NotNull] IServiceProvider internalServiceProvider,
+    [CanBeNull] IDbContextOptions contextOptions)
+{
+    var coreOptions
+        = (contextOptions ?? internalServiceProvider.GetService&lt;IDbContextOptions&gt;())
+        ?.FindExtension&lt;CoreOptionsExtension&gt;();
+
+    if (coreOptions != null)
+    {
+        if (coreOptions.LoggerFactory != null)
+        {
+            return new ScopedLoggerFactory(coreOptions.LoggerFactory, dispose: false);
+        }
+
+        var applicationServiceProvider = coreOptions.ApplicationServiceProvider;
+        if (applicationServiceProvider != null
+            &amp;&amp; applicationServiceProvider != internalServiceProvider)
+        {
+            var loggerFactory = applicationServiceProvider.GetService&lt;ILoggerFactory&gt;();
+            if (loggerFactory != null)
+            {
+                return new ScopedLoggerFactory(loggerFactory, dispose: false);
+            }
+        }
+    }
+
+    return new ScopedLoggerFactory(new LoggerFactory(), dispose: true);
+}
+</code></pre> 
+ <p>C#</p> 
+ <p>Copy</p> 
+ <p>即：先看 <code>CoreOptionsExtension</code> 中是否有之前 <code>optionsBuilder.UseLoggerFactory</code> 指定的；如果没有，再到 <code>ApplicationServiceProvider</code> 中找一个 <code>ILoggerFactory</code>；再如果真的没有，就不用了。</p> 
+ <p>回顾开头的内存溢出问题：为什么呢？</p> 
+ <p><code>DbContextOptions</code> 未经修改的默认生命周期是 Scoped，也就是在父容器中每次实例化一个 <code>DbContextOptions</code>，就会调用一次 <code>LoggerFactory.Create(b =&gt; b.AddConsole())</code>，并且并没有照顾到它的 Dispose。而 <code>ConsoleLoggerProvider</code> 每次会建立一个新的线程去输出日志，没有被回收，于是……内存就在一次又一次请求中消耗殆尽了。</p> 
+ <p>再回过来想想，既然能调用到父容器的 <code>ILoggerFactory</code>，他又为什么会用 <code>LoggerFactory.Create</code> 呢？……一定是 <code>Microsoft.EntityFrameworkCore</code> 开头的日志被父容器的设置禁用了，所以没有输出。</p> 
+ <h5>如何把玩其他内部服务？</h5> 
+ <p>观察到 <code>DbContext</code> 实现了 <code>IInfrastructure&lt;IServiceProvider&gt;</code> 这一接口，这个接口要求保存一个 <code>IServiceProvider</code> 的实例，而其实现直接指向了 <code>InternalServiceProvider</code> 这一私有属性。</p> 
+ <p>那先谈谈这个 <code>IInfrastructure&lt;IServiceProvider&gt;</code> 接口的作用吧。这个接口同时在 <code>DbSet&lt;T&gt;</code> 和 <code>DatabaseFacade</code> 中也有实现。在 <code>Microsoft.EntityFrameworkCore.Infrastructure.AccessorExtensions</code> 中，我们有一个针对这个接口的拓展函数 <code>TService GetService&lt;TService&gt;([NotNull] this IInfrastructure&lt;IServiceProvider&gt; accessor)</code>。</p> 
+ <p>也就是说，我们在引入 <code>Microsoft.EntityFrameworkCore.Infrastructure</code> 命名空间之后，可以通过 <code>DbContext.GetService&lt;T&gt;()</code> 来拿到一部分服务。</p> 
+ <p>其进一步的查找逻辑为：先在 EFCore 内部直接使用的依赖注入容器（即 <code>InternalServiceProvider</code>）中查找，再去上一层依赖注入容器中查找。</p> 
+ <p>这个函数在 EFCore 中用的很少，基本上只用于静态函数，或者非静态函数中传入 DbContext 实例时需要拿到某个服务时才会用到。</p> 
+ <p>例如，如果是在写某个 EFCore 的拓展函数，传入只有 <code>DbSet&lt;T&gt;</code> 的实例，但我们想拿到这个 <code>DbContext</code>，不用反射之类的奇怪功能，要如何拿到呢？通常可以用 <code>dbSetInstance.GetService&lt;ICurrentDbContext&gt;().Context</code> 拿到实例。</p> 
+ <p>好了，容器都拿到了，该咋玩咋玩吧……</p> 
+ <h5>课后习题</h5> 
+ <p>已知数据库模型是通过 <code>IModelCustomizer</code> 进行构建的，需要达到这样的效果：</p> 
+ <ul><li><p>一个模块化的应用</p></li><li><p>每个模块可以向父容器注册很多个功能类似于 <code>Action&lt;ModelBuilder&gt;</code> 的东西</p></li><li><p>希望在构建数据库的 <code>IModel</code> 时，对着 <code>ModelBuilder</code> 执行这些操作</p></li></ul> 
+ <p>这样可以不修改 DbContext 本身的代码，而将所需的实体信息加载到 DbContext 的 Model 里。</p> 
+ <p>参考答案：IDbModelSupplier设计 + AddDbContext部分</p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/1226fd34985b87dc51fc39736da06d61/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">SpringBoot @Async加在实现接口类的非接口方法上获取Bean异常</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/33a5cdbf7813c8260cc2f8660f3eef22/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">C/C&#43;&#43;学习路线图--从C小白到C界精英  #CSDN博文精选# #IT技术# #学习路线# #系统化学习#</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Kafka源码简要分析 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Kafka源码简要分析" />
+<meta property="og:description" content=" 目录
+一、生产者的初始化流程
+二、生产者到缓冲队列的流程
+三、Sender拉取数据到Kafka流程
+四、消费者初始化
+五、主题订阅原理
+六、消费者抓取数据原理
+七、消费者组初始化
+八、消费者组消费流程
+九、提交offset原理
+一、生产者的初始化流程 首先获取事务id和客户端id（用到事物必须要事物id不然报错，每个生产者都需要唯一标识客户端id）监控kafka相关情况的JmxReporter配置然后获取分区器，如果用户有自定义的就读取配置的，如果没有配置就用默认分区器然后key和value进行序列化然后就读取自定义拦截器，可以定义多个拦截器，组成拦截器链然后初始化控制单条日志的大小，默认是1m；缓冲区大小，默认32m；创建内存池，缓存队列，初始化批次大小默认16k，压缩相关处理，默认是none，重试间隔时间默认100ms连接kafka集群，获取元数据，才能知道要发送到哪个分区创建sender线程，会有个创建sender的方法，sender线程负责拉取缓冲队列消息到Kafka，在方法里面会定义缓存请求的个数默认5个，然后请求超时的时间，然后创建一个网络请求客户端对象，会传入刚刚的参数还有客户端id，重试时间，发送缓冲区的大小128和接受缓冲区的大小32，还有acks等配置。sender继承了Runnbale接口，然后会new个sender线程出来用上面这些参数，然后返回。sender放到后台，启动sender线程 二、生产者到缓冲队列的流程 在执行到拦截器的时候就要调用一个onSend方法，如果有多个拦截器，每个拦截器都会走一次这个方法，这个方法就是拦截器对数据加工的然后获取元数据，要根据主题的分区放到对应的缓存队列序列化相关操作key和value的序列化和压缩分区操作，如果指定了分区，直接分配到指定分区；没有指定就会根据分区器进行分配，没有指定key就会粘性分区处理（如果批次大小和活着时间到了不然就一直是那个，满足才能创建新队列用），如果指定key就根据key到hashcode进分区数取模，保证（序列化和压缩后）数据大小能够传输，他去读取配置的消息最大值和缓冲区大小，如果有超过的抛异常向缓存队列里面追加数据，获取或者创建一个队列按照分区，然后尝试添加数据（一般不成功，因为还没申请内存），然后根据16k和现在压缩后的总大小取最大值，申请内存就申请这个大小，内存池分配内存，然后sender线程拿走就了会释放内存。如果批次大小满了或者有了新的批次需要创建，就唤醒sender线程把缓冲队列的数据拉取过去。 三、Sender拉取数据到Kafka流程 事务相关操作获取元数据信息，为了知道发到哪个分区判断32m缓存是否准备好，先获取队列的信息，先判断内存队列有没有数据判断leader是不是空如果没有目标那还是会抛出异常，如果批次大小或时间满足一个条件，就会发送。把所有请求按照节点为单位来发送请求，这样一台机器只需要建立一次连接封装了个request然后通过网络客户端把数据发送过去然后服务端还是通过网络客户端获取结果 四、消费者初始化 消费者组平衡获取消费者组id和客户端id设置请求服务端等待时间，默认30秒；重试时间，默认100毫秒拦截器链相关处理key和value的反序列化判断offset从什么位置开始消费获取消费者元数据（重试时间、是否允许访问系统主题默认false，是否允许自动创建topic主题默认true）连接Kafka集群创建网络客户端对象（连接重试时间默认50ms，最大重试时间1s，发送缓冲区128kb和接受缓冲区64kb大小）指定消费者分区分配策略创建coordinator对象设置自动提交offset时间，默认5s，配置抓取数据的参数（最少抓取多少最大一次抓取多少等） 五、主题订阅原理 传入要订阅的主题，如果为null直接抛出异常注册负载均衡监听器，如果消费者组中有节点挂了，要通知其他消费者按照主题自动订阅进行分配 六、消费者抓取数据原理 他首先先初始化消费者组和队列然后回调消息会到缓冲队列，然后去队列抓取数据，最多一次500条然后抓取后拦截器开始处理数据 七、消费者组初始化 先判断coordinator不为null那就说明为消费者组如果没有指定分区分配策略会抛出异常判断coordinator是否准备好，他会循环创建查找coordinator的请求并发送，并获取服务器返回到结果 他这整个消费者组初始化就是判断coordinator有没有准备好
+八、消费者组消费流程 他会用判断coordinator是不是空，是的话就等待他上来先去队列拉取数据，一般是拉取不到的他先构造请求的入参（最少一次抓多少，最多抓多少，超时时间等待）然后调用send他送后返回future，通过回调获取数据的他会循环遍历数据获取分区，获取分区的数据，如果有数据就放到消息队列里面然后就调用从队列拉取数据的方法拉取，然后他有大小限制最大500，他会循环一波一波拉取过去然后放到拦截器走加工操作 九、提交offset原理 同步提交：找到coordinator然后调用commitOffset进行发送，然后不停dowhile循环，调用发送提交请求，然后等待回调获取结果，一直循环到成功为止。异步提交：他还是用coordinator去提交但是他不等待结果，他new了个监听等待结果。 " />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/cc42c9c212bb942a88b97b8e5b0c2391/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-10-04T17:41:47+08:00" />
+<meta property="article:modified_time" content="2023-10-04T17:41:47+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Kafka源码简要分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p id="main-toc"><strong>目录</strong></p> 
+<p id="%E4%B8%80%E3%80%81%E7%94%9F%E4%BA%A7%E8%80%85%E7%9A%84%E5%88%9D%E5%A7%8B%E5%8C%96%E6%B5%81%E7%A8%8B-toc" style="margin-left:0px;"><a href="#%E4%B8%80%E3%80%81%E7%94%9F%E4%BA%A7%E8%80%85%E7%9A%84%E5%88%9D%E5%A7%8B%E5%8C%96%E6%B5%81%E7%A8%8B" rel="nofollow">一、生产者的初始化流程</a></p> 
+<p id="%E4%BA%8C%E3%80%81%E7%94%9F%E4%BA%A7%E8%80%85%E5%88%B0%E7%BC%93%E5%86%B2%E9%98%9F%E5%88%97%E7%9A%84%E6%B5%81%E7%A8%8B-toc" style="margin-left:0px;"><a href="#%E4%BA%8C%E3%80%81%E7%94%9F%E4%BA%A7%E8%80%85%E5%88%B0%E7%BC%93%E5%86%B2%E9%98%9F%E5%88%97%E7%9A%84%E6%B5%81%E7%A8%8B" rel="nofollow">二、生产者到缓冲队列的流程</a></p> 
+<p id="%E4%B8%89%E3%80%81Sender%E6%8B%89%E5%8F%96%E6%95%B0%E6%8D%AE%E5%88%B0Kafka%E6%B5%81%E7%A8%8B-toc" style="margin-left:0px;"><a href="#%E4%B8%89%E3%80%81Sender%E6%8B%89%E5%8F%96%E6%95%B0%E6%8D%AE%E5%88%B0Kafka%E6%B5%81%E7%A8%8B" rel="nofollow">三、Sender拉取数据到Kafka流程</a></p> 
+<p id="%E5%9B%9B%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E5%88%9D%E5%A7%8B%E5%8C%96-toc" style="margin-left:0px;"><a href="#%E5%9B%9B%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E5%88%9D%E5%A7%8B%E5%8C%96" rel="nofollow">四、消费者初始化</a></p> 
+<p id="%E4%BA%94%E3%80%81%E4%B8%BB%E9%A2%98%E8%AE%A2%E9%98%85%E5%8E%9F%E7%90%86-toc" style="margin-left:0px;"><a href="#%E4%BA%94%E3%80%81%E4%B8%BB%E9%A2%98%E8%AE%A2%E9%98%85%E5%8E%9F%E7%90%86" rel="nofollow">五、主题订阅原理</a></p> 
+<p id="%E5%85%AD%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E6%8A%93%E5%8F%96%E6%95%B0%E6%8D%AE%E5%8E%9F%E7%90%86-toc" style="margin-left:0px;"><a href="#%E5%85%AD%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E6%8A%93%E5%8F%96%E6%95%B0%E6%8D%AE%E5%8E%9F%E7%90%86" rel="nofollow">六、消费者抓取数据原理</a></p> 
+<p id="%E4%B8%83%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E7%BB%84%E5%88%9D%E5%A7%8B%E5%8C%96-toc" style="margin-left:0px;"><a href="#%E4%B8%83%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E7%BB%84%E5%88%9D%E5%A7%8B%E5%8C%96" rel="nofollow">七、消费者组初始化</a></p> 
+<p id="%E5%85%AB%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E7%BB%84%E6%B6%88%E8%B4%B9%E6%B5%81%E7%A8%8B-toc" style="margin-left:0px;"><a href="#%E5%85%AB%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E7%BB%84%E6%B6%88%E8%B4%B9%E6%B5%81%E7%A8%8B" rel="nofollow">八、消费者组消费流程</a></p> 
+<p id="%E4%B9%9D%E3%80%81%E6%8F%90%E4%BA%A4offset%E5%8E%9F%E7%90%86-toc" style="margin-left:0px;"><a href="#%E4%B9%9D%E3%80%81%E6%8F%90%E4%BA%A4offset%E5%8E%9F%E7%90%86" rel="nofollow">九、提交offset原理</a></p> 
+<hr id="hr-toc"> 
+<h2>一、生产者的初始化流程</h2> 
+<ol><li>首先获取事务id和客户端id（用到事物必须要事物id不然报错，每个生产者都需要唯一标识客户端id）</li><li>监控kafka相关情况的JmxReporter配置</li><li>然后获取分区器，如果用户有自定义的就读取配置的，如果没有配置就用默认分区器</li><li>然后key和value进行序列化</li><li>然后就读取自定义拦截器，可以定义多个拦截器，组成拦截器链</li><li>然后初始化控制单条日志的大小，默认是1m；缓冲区大小，默认32m；</li><li>创建内存池，缓存队列，初始化批次大小默认16k，压缩相关处理，默认是none，重试间隔时间默认100ms</li><li>连接kafka集群，获取元数据，才能知道要发送到哪个分区</li><li>创建sender线程，会有个创建sender的方法，sender线程负责拉取缓冲队列消息到Kafka，在方法里面会定义缓存请求的个数默认5个，然后请求超时的时间，然后创建一个网络请求客户端对象，会传入刚刚的参数还有客户端id，重试时间，发送缓冲区的大小128和接受缓冲区的大小32，还有acks等配置。sender继承了Runnbale接口，然后会new个sender线程出来用上面这些参数，然后返回。</li><li>sender放到后台，启动sender线程</li></ol> 
+<h2 id="%E4%BA%8C%E3%80%81%E7%94%9F%E4%BA%A7%E8%80%85%E5%88%B0%E7%BC%93%E5%86%B2%E9%98%9F%E5%88%97%E7%9A%84%E6%B5%81%E7%A8%8B">二、生产者到缓冲队列的流程</h2> 
+<ol><li>在执行到拦截器的时候就要调用一个onSend方法，如果有多个拦截器，每个拦截器都会走一次这个方法，这个方法就是拦截器对数据加工的</li><li>然后获取元数据，要根据主题的分区放到对应的缓存队列</li><li>序列化相关操作key和value的序列化和压缩</li><li>分区操作，如果指定了分区，直接分配到指定分区；没有指定就会根据分区器进行分配，没有指定key就会粘性分区处理（如果批次大小和活着时间到了不然就一直是那个，满足才能创建新队列用），如果指定key就根据key到hashcode进分区数取模，</li><li>保证（序列化和压缩后）数据大小能够传输，他去读取配置的消息最大值和缓冲区大小，如果有超过的抛异常</li><li>向缓存队列里面追加数据，获取或者创建一个队列按照分区，然后尝试添加数据（一般不成功，因为还没申请内存），然后根据16k和现在压缩后的总大小取最大值，申请内存就申请这个大小，内存池分配内存，然后sender线程拿走就了会释放内存。</li><li>如果批次大小满了或者有了新的批次需要创建，就唤醒sender线程把缓冲队列的数据拉取过去。</li></ol> 
+<h2 id="%E4%B8%89%E3%80%81Sender%E6%8B%89%E5%8F%96%E6%95%B0%E6%8D%AE%E5%88%B0Kafka%E6%B5%81%E7%A8%8B">三、Sender拉取数据到Kafka流程</h2> 
+<ol><li>事务相关操作</li><li>获取元数据信息，为了知道发到哪个分区</li><li>判断32m缓存是否准备好，先获取队列的信息，先判断内存队列有没有数据</li><li>判断leader是不是空如果没有目标那还是会抛出异常，如果批次大小或时间满足一个条件，就会发送。</li><li>把所有请求按照节点为单位来发送请求，这样一台机器只需要建立一次连接</li><li>封装了个request然后通过网络客户端把数据发送过去</li><li>然后服务端还是通过网络客户端获取结果</li></ol> 
+<h2 id="%E5%9B%9B%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E5%88%9D%E5%A7%8B%E5%8C%96">四、消费者初始化</h2> 
+<ol><li>消费者组平衡</li><li>获取消费者组id和客户端id</li><li>设置请求服务端等待时间，默认30秒；重试时间，默认100毫秒</li><li>拦截器链相关处理</li><li>key和value的反序列化</li><li>判断offset从什么位置开始消费</li><li>获取消费者元数据（重试时间、是否允许访问系统主题默认false，是否允许自动创建topic主题默认true）</li><li>连接Kafka集群</li><li>创建网络客户端对象（连接重试时间默认50ms，最大重试时间1s，发送缓冲区128kb和接受缓冲区64kb大小）</li><li>指定消费者分区分配策略</li><li>创建coordinator对象</li><li>设置自动提交offset时间，默认5s，配置抓取数据的参数（最少抓取多少最大一次抓取多少等）</li></ol> 
+<h2 id="%E4%BA%94%E3%80%81%E4%B8%BB%E9%A2%98%E8%AE%A2%E9%98%85%E5%8E%9F%E7%90%86">五、主题订阅原理</h2> 
+<ol><li>传入要订阅的主题，如果为null直接抛出异常</li><li>注册负载均衡监听器，如果消费者组中有节点挂了，要通知其他消费者</li><li>按照主题自动订阅进行分配</li></ol> 
+<h2 id="%E5%85%AD%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E6%8A%93%E5%8F%96%E6%95%B0%E6%8D%AE%E5%8E%9F%E7%90%86">六、消费者抓取数据原理</h2> 
+<ol><li>他首先先初始化消费者组和队列</li><li>然后回调消息会到缓冲队列，然后去队列抓取数据，最多一次500条</li><li>然后抓取后拦截器开始处理数据</li></ol> 
+<h2 id="%E4%B8%83%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E7%BB%84%E5%88%9D%E5%A7%8B%E5%8C%96">七、消费者组初始化</h2> 
+<ol><li>先判断coordinator不为null那就说明为消费者组</li><li>如果没有指定分区分配策略会抛出异常</li><li>判断coordinator是否准备好，他会循环创建查找coordinator的请求并发送，并获取服务器返回到结果</li></ol> 
+<p>他这整个消费者组初始化就是判断coordinator有没有准备好</p> 
+<h2 id="%E5%85%AB%E3%80%81%E6%B6%88%E8%B4%B9%E8%80%85%E7%BB%84%E6%B6%88%E8%B4%B9%E6%B5%81%E7%A8%8B">八、消费者组消费流程</h2> 
+<ol><li>他会用判断coordinator是不是空，是的话就等待</li><li>他上来先去队列拉取数据，一般是拉取不到的</li><li>他先构造请求的入参（最少一次抓多少，最多抓多少，超时时间等待）然后调用send</li><li>他送后返回future，通过回调获取数据的</li><li>他会循环遍历数据获取分区，获取分区的数据，如果有数据就放到消息队列里面</li><li>然后就调用从队列拉取数据的方法拉取，然后他有大小限制最大500，他会循环一波一波拉取过去</li><li>然后放到拦截器走加工操作</li></ol> 
+<h2 id="%E4%B9%9D%E3%80%81%E6%8F%90%E4%BA%A4offset%E5%8E%9F%E7%90%86">九、提交offset原理</h2> 
+<ul><li>同步提交：找到coordinator然后调用commitOffset进行发送，然后不停dowhile循环，调用发送提交请求，然后等待回调获取结果，一直循环到成功为止。</li><li>异步提交：他还是用coordinator去提交但是他不等待结果，他new了个监听等待结果。</li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/9b22ef752253a10c21c8b5f615570d25/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">OpenCV读取摄像头视频流</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/b52b20fe3231e48ea68bff3093c0ef96/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Makefile输出调试信息print(第二节)</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

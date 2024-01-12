@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>go 的内存布局和分配原理 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="go 的内存布局和分配原理" />
+<meta property="og:description" content="go 之所以在高并发环境下表现优异，除了咱们都知道的 GMP 模型，其实 go 的内存布局和分配机制也起到了不少作用。
+1. 分配内存三大组件 go 分配内存的过程，主要由三大组件所管理，级别从上到下分别是：
+mheap go 在程序启动时，首先会向操作系统申请一大块内存，并交由mheap结构全局管理。
+具体怎么管理呢？mheap 会将这一大块内存，切分成不同规格的小内存块，我们称之为 mspan，根据规格大小不同，mspan 大概有 70类左右，划分得可谓是非常的精细，足以满足各种对象内存的分配。
+那么这些 mspan 大大小小的规格，杂乱在一起，肯定很难管理对吧？
+因此就有了 mcentral 这下一级组件
+mcentral 启动一个 go 程序，会初始化很多的 mcentral ，每个 mcentral 只负责管理一种特定规格的 mspan。
+相当于 mcentral 实现了在 mheap 的基础上对 mspan 的精细化管理。
+但是 mcentral 在 go 程序中是全局可见的，因此如果每次协程来 mcentral 申请内存的时候，都需要加锁。
+可以预想，如果每个协程都来 mcentral 申请内存，那频繁的加锁释放锁开销是非常大的。
+因此需要有一个 mcentral 的二级代理来缓冲这种压力
+mcache 在一个 go 程序里，每个线程M会绑定给一个处理器P，在单一粒度的时间里只能做多处理运行一个goroutine，每个P都会绑定一个叫 mcache 的本地缓存。
+当需要进行内存分配时，当前运行的goroutine会从mcache中查找可用的mspan。从本地mcache里分配内存时不需要加锁，这种分配策略效率更高。
+mspan 供应链 mcache 的 mspan 数量并不总是充足的，当供不应求的时候，mcache 会从 mcentral 再次申请更多的 mspan，同样的，如果 mcentral 的 mspan 数量也不够的话，mcentral 也会向它的上级 mheap 申请 mspan。再极端一点，如果 mheap 里的 mspan 也无法满足程序的内存申请，那该怎么办？" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/cd831c90c5dcbc75a39d758ed257d698/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-09T12:54:52+08:00" />
+<meta property="article:modified_time" content="2024-01-09T12:54:52+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">go 的内存布局和分配原理</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>go 之所以在高并发环境下表现优异，除了咱们都知道的 GMP 模型，其实 go 的内存布局和分配机制也起到了不少作用。</p> 
+<h2><a id="1__1"></a>1. 分配内存三大组件</h2> 
+<p>go 分配内存的过程，主要由三大组件所管理，级别从上到下分别是：</p> 
+<h3><a id="mheap_3"></a>mheap</h3> 
+<p>go 在程序启动时，首先会向操作系统申请一大块内存，并交由mheap结构全局管理。<br> 具体怎么管理呢？mheap 会将这一大块内存，切分成不同规格的小内存块，我们称之为 mspan，根据规格大小不同，mspan 大概有 70类左右，划分得可谓是非常的精细，足以满足各种对象内存的分配。<br> 那么这些 mspan 大大小小的规格，杂乱在一起，肯定很难管理对吧？<br> 因此就有了 mcentral 这下一级组件</p> 
+<h3><a id="mcentral_8"></a>mcentral</h3> 
+<p>启动一个 go 程序，会初始化很多的 mcentral ，每个 mcentral 只负责管理一种特定规格的 mspan。<br> 相当于 mcentral 实现了在 mheap 的基础上对 mspan 的精细化管理。<br> 但是 mcentral 在 go 程序中是全局可见的，因此如果每次协程来 mcentral 申请内存的时候，都需要加锁。<br> 可以预想，如果每个协程都来 mcentral 申请内存，那频繁的加锁释放锁开销是非常大的。<br> 因此需要有一个 mcentral 的二级代理来缓冲这种压力</p> 
+<h3><a id="mcache_14"></a>mcache</h3> 
+<p>在一个 go 程序里，每个线程M会绑定给一个处理器P，在单一粒度的时间里只能做多处理运行一个goroutine，每个P都会绑定一个叫 mcache 的本地缓存。<br> 当需要进行内存分配时，当前运行的goroutine会从mcache中查找可用的mspan。从本地mcache里分配内存时不需要加锁，这种分配策略效率更高。</p> 
+<h3><a id="mspan__17"></a>mspan 供应链</h3> 
+<p>mcache 的 mspan 数量并不总是充足的，当供不应求的时候，mcache 会从 mcentral 再次申请更多的 mspan，同样的，如果 mcentral 的 mspan 数量也不够的话，mcentral 也会向它的上级 mheap 申请 mspan。再极端一点，如果 mheap 里的 mspan 也无法满足程序的内存申请，那该怎么办？<br> 那就没办法啦，mheap 只能厚着脸皮跟操作系统这个老大哥申请了。<br> 以上的供应流程，只适用于内存块小于 64KB 的场景，原因在于 go 没法使用工作线程的本地缓存mcache和全局中心缓存 mcentral 上管理超过 64KB 的内存分配，所以对于那些超过 64KB 的内存申请，会直接从堆上(mheap)上分配对应的数量的内存页（每页大小是 8KB）给程序。</p> 
+<h2><a id="2__21"></a>2. 什么是堆内存和栈内存？</h2> 
+<p>根据内存管理（分配和回收）方式的不同，可以将内存分为 堆内存 和 栈内存。<br> 那么他们有什么区别呢？<br> <strong>堆内存</strong>：由内存分配器和垃圾收集器负责回收<br> <strong>栈内存</strong>：由编译器自动进行分配和释放</p> 
+<p>一个程序运行过程中，也许会有多个栈内存，但肯定只会有一个堆内存。<br> 每个栈内存都是由线程或者协程独立占有，因此从栈中分配内存不需要加锁，并且栈内存在函数结束后会自动回收，性能相对堆内存要好。</p> 
+<p>而堆内存呢？由于多个线程或者协程都有可能同时从堆中申请内存，因此在堆中申请内存需要加锁，避免造成冲突，并且堆内存在函数结束后，需要 GC （垃圾回收）的介入参与，如果有大量的 GC 操作，将会使程序性能下降得历害（stop the world）。</p> 
+<h2><a id="3__31"></a>3. 逃逸分析的必要性</h2> 
+<p>由此可以看出，为了提高程序的性能，应当尽量减少内存在堆上分配，这样就能减少 GC 的压力。<br> 在判断一个变量是在堆上分配内存还是在栈上分配内存，虽然已经有前人已经总结了一些规律，但依靠程序员能够在编码的时候时刻去注意这个问题，对程序员的要求相当之高。<br> 好在 Go 的编译器，也开放了逃逸分析的功能，使用逃逸分析，可以直接检测出你程序员所有分配在堆上的变量（这种现象，即是逃逸）。<br> 方法是执行如下命令</p> 
+<pre><code class="prism language-go"><span class="token keyword">go</span> build <span class="token operator">-</span>gcflags <span class="token char">'-m -l'</span> demo<span class="token punctuation">.</span><span class="token keyword">go</span> 
+</code></pre> 
+<h2><a id="4__40"></a>4. 内存分配位置的规律</h2> 
+<p>如果逃逸分析工具，其实人工也可以判断到底有哪些变量是分配在堆上的。<br> 那么这些规律是什么呢？<br> 经过总结，主要有如下四种情况</p> 
+<ol><li>根据变量的使用范围</li><li>根据变量类型是否确定</li><li>根据变量的占用大小</li><li>根据变量长度是否确定</li></ol> 
+<p>接下来我们一个一个分析验证</p> 
+<h3><a id="_51"></a>根据变量的使用范围</h3> 
+<p>当你进行编译的时候，编译器会做逃逸分析(escape analysis)，当发现一个变量的使用范围仅在函数中，那么可以在栈上为它分配内存。<br> 比如下边这个例子</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">foo</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token builtin">int</span> <span class="token punctuation">{<!-- --></span>
+    v <span class="token operator">:=</span> <span class="token number">1024</span>
+    <span class="token keyword">return</span> v
+<span class="token punctuation">}</span>
+
+<span class="token keyword">func</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    m <span class="token operator">:=</span> <span class="token function">foo</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    fmt<span class="token punctuation">.</span><span class="token function">Println</span><span class="token punctuation">(</span>m<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>我们可以通过 go build -gcflags ‘-m -l’ demo.go 来查看逃逸分析的结果，其中 -m 是打印逃逸分析的信息，-l 则是禁止内联优化。<br> 从分析的结果我们并没有看到任何关于 v 变量的逃逸说明，说明其并没有逃逸，它是分配在栈上的。</p> 
+<pre><code class="prism language-go">$ <span class="token keyword">go</span> build <span class="token operator">-</span>gcflags <span class="token char">'-m -l'</span> demo<span class="token punctuation">.</span><span class="token keyword">go</span> 
+# command<span class="token operator">-</span>line<span class="token operator">-</span>arguments
+<span class="token punctuation">.</span><span class="token operator">/</span>demo<span class="token punctuation">.</span><span class="token keyword">go</span><span class="token punctuation">:</span><span class="token number">12</span><span class="token punctuation">:</span><span class="token number">13</span><span class="token punctuation">:</span> <span class="token operator">...</span> argument does not escape
+<span class="token punctuation">.</span><span class="token operator">/</span>demo<span class="token punctuation">.</span><span class="token keyword">go</span><span class="token punctuation">:</span><span class="token number">12</span><span class="token punctuation">:</span><span class="token number">13</span><span class="token punctuation">:</span> m escapes to heap
+</code></pre> 
+<p>而如果该变量还需要在函数范围之外使用，如果还在栈上分配，那么当函数返回的时候，该变量指向的内存空间就会被回收，程序势必会报错，因此对于这种变量只能在堆上分配。</p> 
+<p>比如下边这个例子，返回的是指针</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">foo</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">*</span><span class="token builtin">int</span> <span class="token punctuation">{<!-- --></span>
+    v <span class="token operator">:=</span> <span class="token number">1024</span>
+    <span class="token keyword">return</span> <span class="token operator">&amp;</span>v
+<span class="token punctuation">}</span>
+
+<span class="token keyword">func</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    m <span class="token operator">:=</span> <span class="token function">foo</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    fmt<span class="token punctuation">.</span><span class="token function">Println</span><span class="token punctuation">(</span><span class="token operator">*</span>m<span class="token punctuation">)</span> <span class="token comment">// 1024</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>从逃逸分析的结果中可以看到 moved to heap: v ，v 变量是从堆上分配的内存，和上面的场景有着明显的区别。</p> 
+<pre><code class="prism language-go">$ <span class="token keyword">go</span> build <span class="token operator">-</span>gcflags <span class="token char">'-m -l'</span> demo<span class="token punctuation">.</span><span class="token keyword">go</span> 
+# command<span class="token operator">-</span>line<span class="token operator">-</span>arguments
+<span class="token punctuation">.</span><span class="token operator">/</span>demo<span class="token punctuation">.</span><span class="token keyword">go</span><span class="token punctuation">:</span><span class="token number">6</span><span class="token punctuation">:</span><span class="token number">2</span><span class="token punctuation">:</span> moved to heap<span class="token punctuation">:</span> v
+<span class="token punctuation">.</span><span class="token operator">/</span>demo<span class="token punctuation">.</span><span class="token keyword">go</span><span class="token punctuation">:</span><span class="token number">12</span><span class="token punctuation">:</span><span class="token number">13</span><span class="token punctuation">:</span> <span class="token operator">...</span> argument does not escape
+<span class="token punctuation">.</span><span class="token operator">/</span>demo<span class="token punctuation">.</span><span class="token keyword">go</span><span class="token punctuation">:</span><span class="token number">12</span><span class="token punctuation">:</span><span class="token number">14</span><span class="token punctuation">:</span> <span class="token operator">*</span>m escapes to heap
+</code></pre> 
+<p>除了返回指针之外，还有其他的几种情况也可归为一类：</p> 
+<p><strong>第一种情况：返回任意引用型的变量：Slice 和 Map</strong></p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">foo</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">int</span> <span class="token punctuation">{<!-- --></span>
+    a <span class="token operator">:=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">int</span><span class="token punctuation">{<!-- --></span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">,</span><span class="token number">3</span><span class="token punctuation">}</span>
+    <span class="token keyword">return</span> a
+<span class="token punctuation">}</span>
+
+<span class="token keyword">func</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    b <span class="token operator">:=</span> <span class="token function">foo</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    fmt<span class="token punctuation">.</span><span class="token function">Println</span><span class="token punctuation">(</span>b<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">foo</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">int</span> <span class="token punctuation">{<!-- --></span>
+    a <span class="token operator">:=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">int</span><span class="token punctuation">{<!-- --></span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">,</span><span class="token number">3</span><span class="token punctuation">}</span>
+    <span class="token keyword">return</span> a
+<span class="token punctuation">}</span>
+
+<span class="token keyword">func</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    b <span class="token operator">:=</span> <span class="token function">foo</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    fmt<span class="token punctuation">.</span><span class="token function">Println</span><span class="token punctuation">(</span>b<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>逃逸分析结果</p> 
+<pre><code class="prism language-go">$ <span class="token keyword">go</span> build <span class="token operator">-</span>gcflags <span class="token char">'-m -l'</span> demo<span class="token punctuation">.</span><span class="token keyword">go</span>
+# command<span class="token operator">-</span>line<span class="token operator">-</span>arguments
+<span class="token punctuation">.</span><span class="token operator">/</span>demo<span class="token punctuation">.</span><span class="token keyword">go</span><span class="token punctuation">:</span><span class="token number">6</span><span class="token punctuation">:</span><span class="token number">12</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">int</span> literal escapes to heap
+<span class="token punctuation">.</span><span class="token operator">/</span>demo<span class="token punctuation">.</span><span class="token keyword">go</span><span class="token punctuation">:</span><span class="token number">12</span><span class="token punctuation">:</span><span class="token number">13</span><span class="token punctuation">:</span> <span class="token operator">...</span> argument does not escape
+<span class="token punctuation">.</span><span class="token operator">/</span>demo<span class="token punctuation">.</span><span class="token keyword">go</span><span class="token punctuation">:</span><span class="token number">12</span><span class="token punctuation">:</span><span class="token number">13</span><span class="token punctuation">:</span> b escapes to heap
+</code></pre> 
+<p><strong>第二种情况：在闭包函数中使用外部变量</strong></p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">Increase</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">func</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token builtin">int</span> <span class="token punctuation">{<!-- --></span>
+    n <span class="token operator">:=</span> <span class="token number">0</span>
+    <span class="token keyword">return</span> <span class="token keyword">func</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token builtin">int</span> <span class="token punctuation">{<!-- --></span>
+        n<span class="token operator">++</span>
+        <span class="token keyword">return</span> n
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">func</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    in <span class="token operator">:=</span> <span class="token function">Increase</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    fmt<span class="token punctuation">.</span><span class="token function">Println</span><span class="token punctuation">(</span><span class="token function">in</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token comment">// 1</span>
+    fmt<span class="token punctuation">.</span><span class="token function">Println</span><span class="token punctuation">(</span><span class="token function">in</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token comment">// 2</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>逃逸分析结果</p> 
+<pre><code class="prism language-go">$ <span class="token keyword">go</span> build <span class="token operator">-</span>gcflags <span class="token char">'-m -l'</span> demo<span class="token punctuation">.</span><span class="token keyword">go</span>
+# command<span class="token operator">-</span>line<span class="token operator">-</span>arguments
+<span class="token punctuation">.</span><span class="token operator">/</span>demo<span class="token punctuation">.</span><span class="token keyword">go</span><span class="token punctuation">:</span><span class="token number">6</span><span class="token punctuation">:</span><span class="token number">2</span><span class="token punctuation">:</span> moved to heap<span class="token punctuation">:</span> n
+<span class="token punctuation">.</span><span class="token operator">/</span>demo<span class="token punctuation">.</span><span class="token keyword">go</span><span class="token punctuation">:</span><span class="token number">7</span><span class="token punctuation">:</span><span class="token number">9</span><span class="token punctuation">:</span> <span class="token keyword">func</span> literal escapes to heap
+<span class="token punctuation">.</span><span class="token operator">/</span>demo<span class="token punctuation">.</span><span class="token keyword">go</span><span class="token punctuation">:</span><span class="token number">15</span><span class="token punctuation">:</span><span class="token number">13</span><span class="token punctuation">:</span> <span class="token operator">...</span> argument does not escape
+<span class="token punctuation">.</span><span class="token operator">/</span>demo<span class="token punctuation">.</span><span class="token keyword">go</span><span class="token punctuation">:</span><span class="token number">15</span><span class="token punctuation">:</span><span class="token number">16</span><span class="token punctuation">:</span> <span class="token function">in</span><span class="token punctuation">(</span><span class="token punctuation">)</span> escapes to heap
+
+</code></pre> 
+<h3><a id="_164"></a>根据变量类型是否确定</h3> 
+<p>在上边例子中，也许你发现了，所有编译输出的最后一行中都是 m escapes to heap 。</p> 
+<p>奇怪了，为什么 m 会逃逸到堆上？</p> 
+<p>其实就是因为我们调用了 fmt.Println() 函数，它的定义如下</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">Println</span><span class="token punctuation">(</span>a <span class="token operator">...</span><span class="token keyword">interface</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>n <span class="token builtin">int</span><span class="token punctuation">,</span> err <span class="token builtin">error</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> <span class="token function">Fprintln</span><span class="token punctuation">(</span>os<span class="token punctuation">.</span>Stdout<span class="token punctuation">,</span> a<span class="token operator">...</span><span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>可见其接收的参数类型是 interface{} ，对于这种编译期不能确定其参数的具体类型，编译器会将其分配于堆上。</p> 
+<h3><a id="_177"></a>根据变量的占用大小</h3> 
+<p>最开始的时候，就介绍到，以 64KB 为分界线，我们将内存块分为 小内存块 和 大内存块。<br> 小内存块走常规的 mspan 供应链申请，而大内存块则需要直接向 mheap，在堆区申请。<br> 以下的例子来说明</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">foo</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    nums1 <span class="token operator">:=</span> <span class="token function">make</span><span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">int</span><span class="token punctuation">,</span> <span class="token number">8191</span><span class="token punctuation">)</span> <span class="token comment">// &lt; 64KB</span>
+    <span class="token keyword">for</span> i <span class="token operator">:=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> <span class="token number">8191</span><span class="token punctuation">;</span> i<span class="token operator">++</span> <span class="token punctuation">{<!-- --></span>
+        nums1<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> i
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">func</span> <span class="token function">bar</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    nums2 <span class="token operator">:=</span> <span class="token function">make</span><span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">int</span><span class="token punctuation">,</span> <span class="token number">8192</span><span class="token punctuation">)</span> <span class="token comment">// = 64KB</span>
+    <span class="token keyword">for</span> i <span class="token operator">:=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> <span class="token number">8192</span><span class="token punctuation">;</span> i<span class="token operator">++</span> <span class="token punctuation">{<!-- --></span>
+        nums2<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> i
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>给 -gcflags 多加个 -m 可以看到更详细的逃逸分析的结果</p> 
+<pre><code class="prism language-go">$ <span class="token keyword">go</span> build <span class="token operator">-</span>gcflags <span class="token char">'-m -l'</span> demo<span class="token punctuation">.</span><span class="token keyword">go</span>
+# command<span class="token operator">-</span>line<span class="token operator">-</span>arguments
+<span class="token punctuation">.</span><span class="token operator">/</span>demo<span class="token punctuation">.</span><span class="token keyword">go</span><span class="token punctuation">:</span><span class="token number">5</span><span class="token punctuation">:</span><span class="token number">15</span><span class="token punctuation">:</span> <span class="token function">make</span><span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">int</span><span class="token punctuation">,</span> <span class="token number">8191</span><span class="token punctuation">)</span> does not escape
+<span class="token punctuation">.</span><span class="token operator">/</span>demo<span class="token punctuation">.</span><span class="token keyword">go</span><span class="token punctuation">:</span><span class="token number">12</span><span class="token punctuation">:</span><span class="token number">15</span><span class="token punctuation">:</span> <span class="token function">make</span><span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">int</span><span class="token punctuation">,</span> <span class="token number">8192</span><span class="token punctuation">)</span> escapes to heap
+</code></pre> 
+<p>那为什么是 64 KB 呢？</p> 
+<p>我只能说是试出来的 （8191刚好不逃逸，8192刚好逃逸），网上有很多文章千篇一律的说和 ulimit -a 中的 stack size 有关，但经过了解这个值表示的是系统栈的最大限制是 8192 KB，刚好是 8M。</p> 
+<pre><code class="prism language-go">$ ulimit <span class="token operator">-</span>a
+<span class="token operator">-</span>t<span class="token punctuation">:</span> cpu time <span class="token punctuation">(</span>seconds<span class="token punctuation">)</span>              unlimited
+<span class="token operator">-</span>f<span class="token punctuation">:</span> file size <span class="token punctuation">(</span>blocks<span class="token punctuation">)</span>              unlimited
+<span class="token operator">-</span>d<span class="token punctuation">:</span> data seg size <span class="token punctuation">(</span>kbytes<span class="token punctuation">)</span>          unlimited
+<span class="token operator">-</span>s<span class="token punctuation">:</span> stack size <span class="token punctuation">(</span>kbytes<span class="token punctuation">)</span>             <span class="token number">8192</span>
+
+</code></pre> 
+<p>我个人实在无法理解这个 8192 （8M） 和 64 KB 是如何对应上的，如果有朋友知道，还请指教一下。</p> 
+<h3><a id="_218"></a>根据变量长度是否确定</h3> 
+<p>由于逃逸分析是在编译期就运行的，而不是在运行时运行的。因此避免有一些不定长的变量可能会很大，而在栈上分配内存失败，Go 会选择把这些变量统一在堆上申请内存，这是一种可以理解的保险的做法。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/0905f6cf9c21ad572c111c7dccf9a6a9/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">go 中的 fmt 占位符</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/748933c902fde311ce0af3465768f0a2/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">基于STM32的水质在线监测系统(论文&#43;源码)</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

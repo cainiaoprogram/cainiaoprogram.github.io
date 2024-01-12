@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>CUDA编程：tensorrt plugin实战 中 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="CUDA编程：tensorrt plugin实战 中" />
+<meta property="og:description" content="嘿，这篇文章是不是发布很快，没想到吧。
+承接上文，本节文章对代码进行分析。
+先对Tensorrt的流程进行一些简要的介绍，后续如果有必要会单开一节进行详细说明。
+Tensorrt的加速步骤可分为三步：
+1、tensorrt api定义一个网络或者pytorch–&gt;onnx导出模型
+2、制定一个容器builder用于生成engine。builder负责指定engine所需内存大小等。
+3、使用builder生成engine。engine可用于tensorrt的推理模式。
+注：无论是tensorrt直接编写model还是onnx转换的model都需要构建一个builder，然后从builder中生成.engine文件。仔细观察.onnx—&gt;.engine这部分转换代码其实就是一个读取onnx的参数，构建builder，并生成engine。
+备：.onnx—&gt;.engine有多种方式，例如NVIDIA官方提供的trtexec脚本，或者使用代码编写相关步骤，如https://github.com/noahmr/yolov5-tensorrt/tree/main/examples/builder noahmr大佬所写代码，大家有兴趣可以去看一看。（有没有哪位同学想了解下，俺也可以写篇文章分析下onnx—&gt;builder—&gt;engine中的步骤及各个参数的意义。嘿嘿）
+builder用于生成engine的步骤被称为序列化（serialize），engine可用于tensorrt的推理模式时的操作被称为反序列化（deserialize）,序列化的目的主要起到转换模型使其适用于Tensorrt的框架，并可以将转换后engine保存，用于后续推理。（序列化常常会花费一段时间大约几分钟，所以在真正使用时我们常常先生成engine保存文件，以后在推理时可以直接调用。不同的机器通常需要在本地生成相应的engine文件，毕竟调用的硬件或者库文件位置可能不同，相关优化也就不一样）
+首先我们先对结构进行分析，建立一个YoloLayerPlugin类。直接两大件先上手。
+class API YoloLayerPlugin : public IPluginV2IOExt { public: YoloLayerPlugin(int classCount, int netWidth, int netHeight, int maxOut, const std::vector&lt;Yolo::YoloKernel&gt;&amp; vYoloKernel); //YoloLayerPlugin(const void* data, size_t length); ~YoloLayerPlugin(); /*...*/ } 然后一步步复写IPluginV2IOExt这类，我们需要对这个类中的所有virtual函数复写。从上到下
+IPluginV2IOExt–&gt;IPluginV2Ext–&gt;IPluginV2一点点分析。下面是我们必须要复写的函数
+getPluginType：获取Plugin的名字
+getPluginVersion：获取Plugin的版本
+getNbOutputs：获取layer的输出个数
+getOutputDimensions：获取layer的输出维度
+initialize：在执行时初始化layer，当engine生成时调用
+terminate：释放初始化layer时的系统资源。当engine销毁时调用
+getWorkspaceSize：获取layer所需空间大小。这个函数与getSerializationSize不同，它是指除数据和参数外分配给layer的额外空间。
+enqueue：执行layer的一系列操作。返回值0，1代表执行是否成功。（layer数据操作都包含在这个函数内）
+getSerializationSize：返回序列化反冲区的大小，即分配给model的空间大小，后续会有空间计算的详细说明与示例。
+serialize：序列化一个layer
+destroy：销毁plugin的资源。
+clone：复制plugin或layer。在项目我们常常会多次使用一个plugin，例如conv等模块。
+setPluginNamespace：设置plugin的命名空间。
+getPluginNamespace：获取plugin的命名空间。
+getOutputDataType：获得输出数据类型。
+isOutputBroadcastAcrossBatch：如果输出张量在批次中广播，则返回 true。
+canBroadcastInputAcrossBatch：如果plugin可以使用跨批次广播而无需复制的输入，则返回 true。
+attachToContext：将plugin附加到执行上下文并授予plugin对某些上下文资源的访问权限。
+detachFromContext：将插件对象从其执行上下文中分离出来。
+configurePlugin：配置layer。传达输入和输出的数量、所有输入和输出的维度和数据类型、所有输入和输出的广播信息、选择的插件格式和最大批量大小。此时，插件设置其内部状态并为给定配置选择最合适的算法和数据结构。
+supportsFormatCombination：判断plugin是否支持输出的数据类型。
+class IPluginV2 virtual AsciiChar const* getPluginType() const noexcept = 0; virtual AsciiChar const* getPluginVersion() const noexcept = 0; virtual int32_t getNbOutputs() const noexcept = 0; virtual Dims getOutputDimensions(int32_t index, Dims const* inputs, int32_t nbInputDims) noexcept = 0; virtual bool supportsFormat(DataType type, PluginFormat format) const noexcept = 0; virtual int32_t initialize() noexcept = 0; virtual void terminate() noexcept = 0; virtual size_t getWorkspaceSize(int32_t maxBatchSize) const noexcept = 0; virtual int32_t enqueue(int32_t batchSize, void const* const* inputs, void* const* outputs, void* workspace, cudaStream_t stream) noexcept = 0; virtual size_t getSerializationSize() const noexcept = 0; virtual void serialize(void* buffer) const noexcept = 0; virtual void destroy() noexcept = 0; virtual IPluginV2* clone() const noexcept = 0; virtual void setPluginNamespace(AsciiChar const* pluginNamespace) noexcept = 0; virtual AsciiChar const* getPluginNamespace() const noexcept = 0; class IPluginV2Ext : public IPluginV2 virtual nvinfer1::DataType getOutputDataType( int32_t index, nvinfer1::DataType const* inputTypes, int32_t nbInputs) const noexcept = 0; virtual bool isOutputBroadcastAcrossBatch( int32_t outputIndex, bool const* inputIsBroadcasted, int32_t nbInputs) const noexcept = 0; virtual bool canBroadcastInputAcrossBatch(int32_t inputIndex) const noexcept = 0; virtual void attachToContext(cudnnContext* /*cudnn*/, cublasContext* /*cublas*/, IGpuAllocator* /*allocator*/) noexcept {} virtual void detachFromContext() noexcept {} class IPluginV2IOExt : public IPluginV2Ext virtual void configurePlugin( PluginTensorDesc const* in, int32_t nbInput, PluginTensorDesc const* out, int32_t nbOutput) noexcept = 0; virtual bool supportsFormatCombination( int32_t pos, PluginTensorDesc const* inOut, int32_t nbInputs, int32_t nbOutputs) const noexcept = 0; ok，也不是很多嘛（/(ㄒoㄒ)/~~），其中有些类函数只是起到一些查询功能，在现阶段，我们可以直接最简化一个括弧即可。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/4d0dce7b682d22bed60cb08e7665e911/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-03-01T12:21:56+08:00" />
+<meta property="article:modified_time" content="2023-03-01T12:21:56+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">CUDA编程：tensorrt plugin实战 中</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>嘿，这篇文章是不是发布很快，没想到吧。</p> 
+<p>承接上文，本节文章对代码进行分析。</p> 
+<p>先对Tensorrt的流程进行一些简要的介绍，后续如果有必要会单开一节进行详细说明。</p> 
+<p>Tensorrt的加速步骤可分为三步：</p> 
+<p>1、tensorrt api定义一个网络或者pytorch–&gt;onnx导出模型</p> 
+<p>2、制定一个容器builder用于生成engine。builder负责指定engine所需内存大小等。</p> 
+<p>3、使用builder生成engine。engine可用于tensorrt的推理模式。</p> 
+<p>注：无论是tensorrt直接编写model还是onnx转换的model都需要构建一个builder，然后从builder中生成.engine文件。仔细观察.onnx—&gt;.engine这部分转换代码其实就是一个读取onnx的参数，构建builder，并生成engine。</p> 
+<p>备：.onnx—&gt;.engine有多种方式，例如NVIDIA官方提供的trtexec脚本，或者使用代码编写相关步骤，如https://github.com/noahmr/yolov5-tensorrt/tree/main/examples/builder noahmr大佬所写代码，大家有兴趣可以去看一看。（有没有哪位同学想了解下，俺也可以写篇文章分析下onnx—&gt;builder—&gt;engine中的步骤及各个参数的意义。嘿嘿）</p> 
+<p>builder用于生成engine的步骤被称为序列化（serialize），engine可用于tensorrt的推理模式时的操作被称为反序列化（deserialize）,序列化的目的主要起到转换模型使其适用于Tensorrt的框架，并可以将转换后engine保存，用于后续推理。（序列化常常会花费一段时间大约几分钟，所以在真正使用时我们常常先生成engine保存文件，以后在推理时可以直接调用。不同的机器通常需要在本地生成相应的engine文件，毕竟调用的硬件或者库文件位置可能不同，相关优化也就不一样）</p> 
+<p>首先我们先对结构进行分析，建立一个YoloLayerPlugin类。直接两大件先上手。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">class</span> <span class="token class-name">API</span> YoloLayerPlugin <span class="token operator">:</span> <span class="token keyword">public</span> IPluginV2IOExt
+<span class="token punctuation">{<!-- --></span>
+<span class="token keyword">public</span><span class="token operator">:</span>
+    <span class="token function">YoloLayerPlugin</span><span class="token punctuation">(</span><span class="token keyword">int</span> classCount<span class="token punctuation">,</span> <span class="token keyword">int</span> netWidth<span class="token punctuation">,</span> <span class="token keyword">int</span> netHeight<span class="token punctuation">,</span> <span class="token keyword">int</span> maxOut<span class="token punctuation">,</span> <span class="token keyword">const</span> std<span class="token double-colon punctuation">::</span>vector<span class="token operator">&lt;</span>Yolo<span class="token double-colon punctuation">::</span>YoloKernel<span class="token operator">&gt;</span><span class="token operator">&amp;</span> vYoloKernel<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//YoloLayerPlugin(const void* data, size_t length);</span>
+    <span class="token operator">~</span><span class="token function">YoloLayerPlugin</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">/*...*/</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>然后一步步复写IPluginV2IOExt这类，我们需要对这个类中的所有virtual函数复写。从上到下</p> 
+<p>IPluginV2IOExt–&gt;IPluginV2Ext–&gt;IPluginV2一点点分析。下面是我们必须要复写的函数</p> 
+<p>getPluginType：获取Plugin的名字</p> 
+<p>getPluginVersion：获取Plugin的版本</p> 
+<p>getNbOutputs：获取layer的输出个数</p> 
+<p>getOutputDimensions：获取layer的输出维度</p> 
+<p>initialize：在执行时初始化layer，当engine生成时调用</p> 
+<p>terminate：释放初始化layer时的系统资源。当engine销毁时调用</p> 
+<p>getWorkspaceSize：获取layer所需空间大小。这个函数与getSerializationSize不同，它是指除数据和参数外分配给layer的额外空间。</p> 
+<p>enqueue：执行layer的一系列操作。返回值0，1代表执行是否成功。（layer数据操作都包含在这个函数内）</p> 
+<p>getSerializationSize：返回序列化反冲区的大小，即分配给model的空间大小，后续会有空间计算的详细说明与示例。</p> 
+<p>serialize：序列化一个layer</p> 
+<p>destroy：销毁plugin的资源。</p> 
+<p>clone：复制plugin或layer。在项目我们常常会多次使用一个plugin，例如conv等模块。</p> 
+<p>setPluginNamespace：设置plugin的命名空间。</p> 
+<p>getPluginNamespace：获取plugin的命名空间。</p> 
+<p>getOutputDataType：获得输出数据类型。</p> 
+<p>isOutputBroadcastAcrossBatch：如果输出张量在批次中广播，则返回 true。</p> 
+<p>canBroadcastInputAcrossBatch：如果plugin可以使用跨批次广播而无需复制的输入，则返回 true。</p> 
+<p>attachToContext：将plugin附加到执行上下文并授予plugin对某些上下文资源的访问权限。</p> 
+<p>detachFromContext：将插件对象从其执行上下文中分离出来。</p> 
+<p>configurePlugin：配置layer。传达输入和输出的数量、所有输入和输出的维度和数据类型、所有输入和输出的广播信息、选择的插件格式和最大批量大小。此时，插件设置其内部状态并为给定配置选择最合适的算法和数据结构。</p> 
+<p>supportsFormatCombination：判断plugin是否支持输出的数据类型。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">class</span> <span class="token class-name">IPluginV2</span>
+
+    <span class="token keyword">virtual</span> AsciiChar <span class="token keyword">const</span><span class="token operator">*</span> <span class="token function">getPluginType</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">virtual</span> AsciiChar <span class="token keyword">const</span><span class="token operator">*</span> <span class="token function">getPluginVersion</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">virtual</span> <span class="token keyword">int32_t</span> <span class="token function">getNbOutputs</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">virtual</span> Dims <span class="token function">getOutputDimensions</span><span class="token punctuation">(</span><span class="token keyword">int32_t</span> index<span class="token punctuation">,</span> Dims <span class="token keyword">const</span><span class="token operator">*</span> inputs<span class="token punctuation">,</span> <span class="token keyword">int32_t</span> nbInputDims<span class="token punctuation">)</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">virtual</span> <span class="token keyword">bool</span> <span class="token function">supportsFormat</span><span class="token punctuation">(</span>DataType type<span class="token punctuation">,</span> PluginFormat format<span class="token punctuation">)</span> <span class="token keyword">const</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">virtual</span> <span class="token keyword">int32_t</span> <span class="token function">initialize</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">virtual</span> <span class="token keyword">void</span> <span class="token function">terminate</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">virtual</span> size_t <span class="token function">getWorkspaceSize</span><span class="token punctuation">(</span><span class="token keyword">int32_t</span> maxBatchSize<span class="token punctuation">)</span> <span class="token keyword">const</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">virtual</span> <span class="token keyword">int32_t</span> <span class="token function">enqueue</span><span class="token punctuation">(</span><span class="token keyword">int32_t</span> batchSize<span class="token punctuation">,</span> <span class="token keyword">void</span> <span class="token keyword">const</span><span class="token operator">*</span> <span class="token keyword">const</span><span class="token operator">*</span> inputs<span class="token punctuation">,</span> <span class="token keyword">void</span><span class="token operator">*</span> <span class="token keyword">const</span><span class="token operator">*</span> outputs<span class="token punctuation">,</span> <span class="token keyword">void</span><span class="token operator">*</span> workspace<span class="token punctuation">,</span>
+        cudaStream_t stream<span class="token punctuation">)</span> <span class="token keyword">noexcept</span>
+        <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">virtual</span> size_t <span class="token function">getSerializationSize</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">virtual</span> <span class="token keyword">void</span> <span class="token function">serialize</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token operator">*</span> buffer<span class="token punctuation">)</span> <span class="token keyword">const</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">virtual</span> <span class="token keyword">void</span> <span class="token function">destroy</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">virtual</span> IPluginV2<span class="token operator">*</span> <span class="token function">clone</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">virtual</span> <span class="token keyword">void</span> <span class="token function">setPluginNamespace</span><span class="token punctuation">(</span>AsciiChar <span class="token keyword">const</span><span class="token operator">*</span> pluginNamespace<span class="token punctuation">)</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">virtual</span> AsciiChar <span class="token keyword">const</span><span class="token operator">*</span> <span class="token function">getPluginNamespace</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+
+<span class="token keyword">class</span> <span class="token class-name">IPluginV2Ext</span> <span class="token operator">:</span> <span class="token base-clause"><span class="token keyword">public</span> <span class="token class-name">IPluginV2</span>
+
+    <span class="token keyword">virtual</span> nvinfer1<span class="token double-colon punctuation">::</span><span class="token class-name">DataType</span> <span class="token function">getOutputDataType</span><span class="token punctuation">(</span>
+        <span class="token keyword">int32_t</span> <span class="token class-name">index</span><span class="token punctuation">,</span> nvinfer1<span class="token double-colon punctuation">::</span><span class="token class-name">DataType</span> <span class="token keyword">const</span><span class="token operator">*</span> <span class="token class-name">inputTypes</span><span class="token punctuation">,</span> <span class="token keyword">int32_t</span> <span class="token class-name">nbInputs</span><span class="token punctuation">)</span> <span class="token keyword">const</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span></span><span class="token punctuation">;</span>
+    <span class="token keyword">virtual</span> <span class="token keyword">bool</span> <span class="token function">isOutputBroadcastAcrossBatch</span><span class="token punctuation">(</span>
+        <span class="token keyword">int32_t</span> outputIndex<span class="token punctuation">,</span> <span class="token keyword">bool</span> <span class="token keyword">const</span><span class="token operator">*</span> inputIsBroadcasted<span class="token punctuation">,</span> <span class="token keyword">int32_t</span> nbInputs<span class="token punctuation">)</span> <span class="token keyword">const</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">virtual</span> <span class="token keyword">bool</span> <span class="token function">canBroadcastInputAcrossBatch</span><span class="token punctuation">(</span><span class="token keyword">int32_t</span> inputIndex<span class="token punctuation">)</span> <span class="token keyword">const</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">virtual</span> <span class="token keyword">void</span> <span class="token function">attachToContext</span><span class="token punctuation">(</span>cudnnContext<span class="token operator">*</span> <span class="token comment">/*cudnn*/</span><span class="token punctuation">,</span> cublasContext<span class="token operator">*</span> <span class="token comment">/*cublas*/</span><span class="token punctuation">,</span> IGpuAllocator<span class="token operator">*</span> <span class="token comment">/*allocator*/</span><span class="token punctuation">)</span> <span class="token keyword">noexcept</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+    <span class="token keyword">virtual</span> <span class="token keyword">void</span> <span class="token function">detachFromContext</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">noexcept</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+
+<span class="token keyword">class</span> <span class="token class-name">IPluginV2IOExt</span> <span class="token operator">:</span> <span class="token base-clause"><span class="token keyword">public</span> <span class="token class-name">IPluginV2Ext</span>
+    <span class="token keyword">virtual</span> <span class="token keyword">void</span> <span class="token function">configurePlugin</span><span class="token punctuation">(</span>
+        <span class="token class-name">PluginTensorDesc</span> <span class="token keyword">const</span><span class="token operator">*</span> <span class="token class-name">in</span><span class="token punctuation">,</span> <span class="token keyword">int32_t</span> <span class="token class-name">nbInput</span><span class="token punctuation">,</span> <span class="token class-name">PluginTensorDesc</span> <span class="token keyword">const</span><span class="token operator">*</span> <span class="token class-name">out</span><span class="token punctuation">,</span> <span class="token keyword">int32_t</span> <span class="token class-name">nbOutput</span><span class="token punctuation">)</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span></span><span class="token punctuation">;</span>
+    <span class="token keyword">virtual</span> <span class="token keyword">bool</span> <span class="token function">supportsFormatCombination</span><span class="token punctuation">(</span>
+        <span class="token keyword">int32_t</span> pos<span class="token punctuation">,</span> PluginTensorDesc <span class="token keyword">const</span><span class="token operator">*</span> inOut<span class="token punctuation">,</span> <span class="token keyword">int32_t</span> nbInputs<span class="token punctuation">,</span> <span class="token keyword">int32_t</span> nbOutputs<span class="token punctuation">)</span> <span class="token keyword">const</span> <span class="token keyword">noexcept</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>ok，也不是很多嘛（/(ㄒoㄒ)/~~），其中有些类函数只是起到一些查询功能，在现阶段，我们可以直接最简化一个括弧即可。</p> 
+<p>我们来看下https://github.com/wang-xinyu/tensorrtx中yolov5的layer的复写。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">class</span> <span class="token class-name">API</span> YoloLayerPlugin <span class="token operator">:</span> <span class="token keyword">public</span> IPluginV2IOExt
+
+    <span class="token function">YoloLayerPlugin</span><span class="token punctuation">(</span><span class="token keyword">int</span> classCount<span class="token punctuation">,</span> <span class="token keyword">int</span> netWidth<span class="token punctuation">,</span> <span class="token keyword">int</span> netHeight<span class="token punctuation">,</span> <span class="token keyword">int</span> maxOut<span class="token punctuation">,</span> <span class="token keyword">const</span> std<span class="token double-colon punctuation">::</span>vector<span class="token operator">&lt;</span>Yolo<span class="token double-colon punctuation">::</span>YoloKernel<span class="token operator">&gt;</span><span class="token operator">&amp;</span> vYoloKernel<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">YoloLayerPlugin</span><span class="token punctuation">(</span><span class="token keyword">const</span> <span class="token keyword">void</span><span class="token operator">*</span> data<span class="token punctuation">,</span> size_t length<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token operator">~</span><span class="token function">YoloLayerPlugin</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">int</span> <span class="token function">getNbOutputs</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT <span class="token keyword">override</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    Dims <span class="token function">getOutputDimensions</span><span class="token punctuation">(</span><span class="token keyword">int</span> index<span class="token punctuation">,</span> <span class="token keyword">const</span> Dims<span class="token operator">*</span> inputs<span class="token punctuation">,</span> <span class="token keyword">int</span> nbInputDims<span class="token punctuation">)</span> TRT_NOEXCEPT <span class="token keyword">override</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">int</span> <span class="token function">initialize</span><span class="token punctuation">(</span><span class="token punctuation">)</span> TRT_NOEXCEPT <span class="token keyword">override</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">virtual</span> <span class="token keyword">void</span> <span class="token function">terminate</span><span class="token punctuation">(</span><span class="token punctuation">)</span> TRT_NOEXCEPT <span class="token keyword">override</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">virtual</span> size_t <span class="token function">getWorkspaceSize</span><span class="token punctuation">(</span><span class="token keyword">int</span> maxBatchSize<span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT <span class="token keyword">override</span> <span class="token punctuation">{<!-- --></span> <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span> <span class="token punctuation">}</span>
+
+    <span class="token keyword">virtual</span> <span class="token keyword">int</span> <span class="token function">enqueue</span><span class="token punctuation">(</span><span class="token keyword">int</span> batchSize<span class="token punctuation">,</span> <span class="token keyword">const</span> <span class="token keyword">void</span><span class="token operator">*</span> <span class="token keyword">const</span><span class="token operator">*</span> inputs<span class="token punctuation">,</span> <span class="token keyword">void</span><span class="token operator">*</span>TRT_CONST_ENQUEUE<span class="token operator">*</span> outputs<span class="token punctuation">,</span> <span class="token keyword">void</span><span class="token operator">*</span> workspace<span class="token punctuation">,</span> cudaStream_t stream<span class="token punctuation">)</span> TRT_NOEXCEPT <span class="token keyword">override</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">virtual</span> size_t <span class="token function">getSerializationSize</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT <span class="token keyword">override</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">virtual</span> <span class="token keyword">void</span> <span class="token function">serialize</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token operator">*</span> buffer<span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT <span class="token keyword">override</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">bool</span> <span class="token function">supportsFormatCombination</span><span class="token punctuation">(</span><span class="token keyword">int</span> pos<span class="token punctuation">,</span> <span class="token keyword">const</span> PluginTensorDesc<span class="token operator">*</span> inOut<span class="token punctuation">,</span> <span class="token keyword">int</span> nbInputs<span class="token punctuation">,</span> <span class="token keyword">int</span> nbOutputs<span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT <span class="token keyword">override</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> inOut<span class="token punctuation">[</span>pos<span class="token punctuation">]</span><span class="token punctuation">.</span>format <span class="token operator">==</span> TensorFormat<span class="token double-colon punctuation">::</span>kLINEAR <span class="token operator">&amp;&amp;</span> inOut<span class="token punctuation">[</span>pos<span class="token punctuation">]</span><span class="token punctuation">.</span>type <span class="token operator">==</span> DataType<span class="token double-colon punctuation">::</span>kFLOAT<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">const</span> <span class="token keyword">char</span><span class="token operator">*</span> <span class="token function">getPluginType</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT <span class="token keyword">override</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">const</span> <span class="token keyword">char</span><span class="token operator">*</span> <span class="token function">getPluginVersion</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT <span class="token keyword">override</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">void</span> <span class="token function">destroy</span><span class="token punctuation">(</span><span class="token punctuation">)</span> TRT_NOEXCEPT <span class="token keyword">override</span><span class="token punctuation">;</span>
+
+    IPluginV2IOExt<span class="token operator">*</span> <span class="token function">clone</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT <span class="token keyword">override</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">void</span> <span class="token function">setPluginNamespace</span><span class="token punctuation">(</span><span class="token keyword">const</span> <span class="token keyword">char</span><span class="token operator">*</span> pluginNamespace<span class="token punctuation">)</span> TRT_NOEXCEPT <span class="token keyword">override</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">const</span> <span class="token keyword">char</span><span class="token operator">*</span> <span class="token function">getPluginNamespace</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT <span class="token keyword">override</span><span class="token punctuation">;</span>
+
+    DataType <span class="token function">getOutputDataType</span><span class="token punctuation">(</span><span class="token keyword">int</span> index<span class="token punctuation">,</span> <span class="token keyword">const</span> nvinfer1<span class="token double-colon punctuation">::</span>DataType<span class="token operator">*</span> inputTypes<span class="token punctuation">,</span> <span class="token keyword">int</span> nbInputs<span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT <span class="token keyword">override</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">bool</span> <span class="token function">isOutputBroadcastAcrossBatch</span><span class="token punctuation">(</span><span class="token keyword">int</span> outputIndex<span class="token punctuation">,</span> <span class="token keyword">const</span> <span class="token keyword">bool</span><span class="token operator">*</span> inputIsBroadcasted<span class="token punctuation">,</span> <span class="token keyword">int</span> nbInputs<span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT <span class="token keyword">override</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">bool</span> <span class="token function">canBroadcastInputAcrossBatch</span><span class="token punctuation">(</span><span class="token keyword">int</span> inputIndex<span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT <span class="token keyword">override</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">void</span> <span class="token function">attachToContext</span><span class="token punctuation">(</span>
+        cudnnContext<span class="token operator">*</span> cudnnContext<span class="token punctuation">,</span> cublasContext<span class="token operator">*</span> cublasContext<span class="token punctuation">,</span> IGpuAllocator<span class="token operator">*</span> gpuAllocator<span class="token punctuation">)</span> TRT_NOEXCEPT <span class="token keyword">override</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">void</span> <span class="token function">configurePlugin</span><span class="token punctuation">(</span><span class="token keyword">const</span> PluginTensorDesc<span class="token operator">*</span> in<span class="token punctuation">,</span> <span class="token keyword">int</span> nbInput<span class="token punctuation">,</span> <span class="token keyword">const</span> PluginTensorDesc<span class="token operator">*</span> out<span class="token punctuation">,</span> <span class="token keyword">int</span> nbOutput<span class="token punctuation">)</span> TRT_NOEXCEPT <span class="token keyword">override</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">void</span> <span class="token function">detachFromContext</span><span class="token punctuation">(</span><span class="token punctuation">)</span> TRT_NOEXCEPT <span class="token keyword">override</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>密密麻麻的代码好多，其实真正主要实现的部分就一个enqueue，我们来对比着yololayer.cu文件看看各个函数的实现。</p> 
+<p>这里先查一段YoloKernel类的代码，该代码是设置关于anchor的一些属性，如对应的图像尺寸，anchor尺寸，便于YoloLayerPlugin类的调用</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">struct</span> <span class="token class-name">YoloKernel</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> width<span class="token punctuation">;</span>
+    <span class="token keyword">int</span> height<span class="token punctuation">;</span>
+    <span class="token keyword">float</span> anchors<span class="token punctuation">[</span>CHECK_COUNT <span class="token operator">*</span> <span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>YoloLayerPlugin（int …）：用于设置detect中的识别的类classCount，图像大小netWidth，netHeight，最大输出检测的个数maxOut，vYoloKernel代表三种FPN对应的YoloKernel信息，即特征图大小，对应的anchor尺寸。</p> 
+<p>cudaMallocHost((void**)(void*)ptr, size, flags)：申请不可分页内存。该步骤主要对应于后两行代码中的cudaMalloc。使用cudaMallocHost在主机中申请相应的buffer，然后利用buffer指向在device中开辟相应的空间。</p> 
+<pre><code class="prism language-cpp">    <span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">YoloLayerPlugin</span><span class="token punctuation">(</span><span class="token keyword">int</span> classCount<span class="token punctuation">,</span> <span class="token keyword">int</span> netWidth<span class="token punctuation">,</span> <span class="token keyword">int</span> netHeight<span class="token punctuation">,</span> <span class="token keyword">int</span> maxOut<span class="token punctuation">,</span>
+                                     <span class="token keyword">const</span> std<span class="token double-colon punctuation">::</span>vector<span class="token operator">&lt;</span>Yolo<span class="token double-colon punctuation">::</span>YoloKernel<span class="token operator">&gt;</span> <span class="token operator">&amp;</span>vYoloKernel<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        mClassCount <span class="token operator">=</span> classCount<span class="token punctuation">;</span>
+        mYoloV5NetWidth <span class="token operator">=</span> netWidth<span class="token punctuation">;</span>
+        mYoloV5NetHeight <span class="token operator">=</span> netHeight<span class="token punctuation">;</span>
+        mMaxOutObject <span class="token operator">=</span> maxOut<span class="token punctuation">;</span>
+        mYoloKernel <span class="token operator">=</span> vYoloKernel<span class="token punctuation">;</span>
+        mKernelCount <span class="token operator">=</span> vYoloKernel<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        
+        <span class="token comment">//在device中申请YoloKernel的相关空间</span>
+        <span class="token function">CUDA_CHECK</span><span class="token punctuation">(</span><span class="token function">cudaMallocHost</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>mAnchor<span class="token punctuation">,</span> mKernelCount <span class="token operator">*</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        size_t AnchorLen <span class="token operator">=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">float</span><span class="token punctuation">)</span> <span class="token operator">*</span> CHECK_COUNT <span class="token operator">*</span> <span class="token number">2</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> ii <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> ii <span class="token operator">&lt;</span> mKernelCount<span class="token punctuation">;</span> ii<span class="token operator">++</span><span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token function">CUDA_CHECK</span><span class="token punctuation">(</span><span class="token function">cudaMalloc</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>mAnchor<span class="token punctuation">[</span>ii<span class="token punctuation">]</span><span class="token punctuation">,</span> AnchorLen<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">const</span> <span class="token keyword">auto</span> <span class="token operator">&amp;</span>yolo <span class="token operator">=</span> mYoloKernel<span class="token punctuation">[</span>ii<span class="token punctuation">]</span><span class="token punctuation">;</span>
+            <span class="token function">CUDA_CHECK</span><span class="token punctuation">(</span><span class="token function">cudaMemcpy</span><span class="token punctuation">(</span>mAnchor<span class="token punctuation">[</span>ii<span class="token punctuation">]</span><span class="token punctuation">,</span> yolo<span class="token punctuation">.</span>anchors<span class="token punctuation">,</span> AnchorLen<span class="token punctuation">,</span> cudaMemcpyHostToDevice<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token operator">~</span><span class="token function">YoloLayerPlugin</span><span class="token punctuation">(</span><span class="token punctuation">)</span>：释放对应的YoloKernel的device和锁页空间。
+
+    <span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token operator">~</span><span class="token function">YoloLayerPlugin</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> ii <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> ii <span class="token operator">&lt;</span> mKernelCount<span class="token punctuation">;</span> ii<span class="token operator">++</span><span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token function">CUDA_CHECK</span><span class="token punctuation">(</span><span class="token function">cudaFree</span><span class="token punctuation">(</span>mAnchor<span class="token punctuation">[</span>ii<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token function">CUDA_CHECK</span><span class="token punctuation">(</span><span class="token function">cudaFreeHost</span><span class="token punctuation">(</span>mAnchor<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>YoloLayerPlugin::YoloLayerPlugin(const void* data, size_t length)：从序列化文件中读取相关参数。一样的原理，先申请锁页内存，然后分配并指向device空间。（下面我们会对序列化的格式进行分析，以便解释read(d,…)）</p> 
+<pre><code class="prism language-cpp"> <span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">YoloLayerPlugin</span><span class="token punctuation">(</span><span class="token keyword">const</span> <span class="token keyword">void</span><span class="token operator">*</span> data<span class="token punctuation">,</span> size_t length<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">using</span> <span class="token keyword">namespace</span> Tn<span class="token punctuation">;</span>
+        <span class="token keyword">const</span> <span class="token keyword">char</span> <span class="token operator">*</span>d <span class="token operator">=</span> <span class="token generic-function"><span class="token function">reinterpret_cast</span><span class="token generic class-name"><span class="token operator">&lt;</span><span class="token keyword">const</span> <span class="token keyword">char</span> <span class="token operator">*</span><span class="token operator">&gt;</span></span></span><span class="token punctuation">(</span>data<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token operator">*</span>a <span class="token operator">=</span> d<span class="token punctuation">;</span>
+        <span class="token function">read</span><span class="token punctuation">(</span>d<span class="token punctuation">,</span> mClassCount<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">read</span><span class="token punctuation">(</span>d<span class="token punctuation">,</span> mThreadCount<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">read</span><span class="token punctuation">(</span>d<span class="token punctuation">,</span> mKernelCount<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">read</span><span class="token punctuation">(</span>d<span class="token punctuation">,</span> mYoloV5NetWidth<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">read</span><span class="token punctuation">(</span>d<span class="token punctuation">,</span> mYoloV5NetHeight<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">read</span><span class="token punctuation">(</span>d<span class="token punctuation">,</span> mMaxOutObject<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        mYoloKernel<span class="token punctuation">.</span><span class="token function">resize</span><span class="token punctuation">(</span>mKernelCount<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">auto</span> kernelSize <span class="token operator">=</span> mKernelCount <span class="token operator">*</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>YoloKernel<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">memcpy</span><span class="token punctuation">(</span>mYoloKernel<span class="token punctuation">.</span><span class="token function">data</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> d<span class="token punctuation">,</span> kernelSize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        d <span class="token operator">+=</span> kernelSize<span class="token punctuation">;</span>
+        <span class="token function">CUDA_CHECK</span><span class="token punctuation">(</span><span class="token function">cudaMallocHost</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>mAnchor<span class="token punctuation">,</span> mKernelCount <span class="token operator">*</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        size_t AnchorLen <span class="token operator">=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">float</span><span class="token punctuation">)</span><span class="token operator">*</span> CHECK_COUNT <span class="token operator">*</span> <span class="token number">2</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> ii <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> ii <span class="token operator">&lt;</span> mKernelCount<span class="token punctuation">;</span> ii<span class="token operator">++</span><span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token function">CUDA_CHECK</span><span class="token punctuation">(</span><span class="token function">cudaMalloc</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>mAnchor<span class="token punctuation">[</span>ii<span class="token punctuation">]</span><span class="token punctuation">,</span> AnchorLen<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">const</span> <span class="token keyword">auto</span><span class="token operator">&amp;</span> yolo <span class="token operator">=</span> mYoloKernel<span class="token punctuation">[</span>ii<span class="token punctuation">]</span><span class="token punctuation">;</span>
+            <span class="token function">CUDA_CHECK</span><span class="token punctuation">(</span><span class="token function">cudaMemcpy</span><span class="token punctuation">(</span>mAnchor<span class="token punctuation">[</span>ii<span class="token punctuation">]</span><span class="token punctuation">,</span> yolo<span class="token punctuation">.</span>anchors<span class="token punctuation">,</span> AnchorLen<span class="token punctuation">,</span> cudaMemcpyHostToDevice<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token function">assert</span><span class="token punctuation">(</span>d <span class="token operator">==</span> a <span class="token operator">+</span> length<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>void YoloLayerPlugin::serialize(void* buffer) const TRT_NOEXCEPT：序列化模型文件。这段代码的作用是以某种格式存储yololayer相关的信息。</p> 
+<p>通常在Tensorrt代码中，你都会看到这样一句话engine-&gt;serialize()，其实这个api的背后就是调用plugin中的serialize的函数。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">void</span> <span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">serialize</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token operator">*</span> buffer<span class="token punctuation">)</span> <span class="token keyword">const</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">using</span> <span class="token keyword">namespace</span> Tn<span class="token punctuation">;</span>
+    <span class="token keyword">char</span><span class="token operator">*</span> d <span class="token operator">=</span> <span class="token generic-function"><span class="token function">static_cast</span><span class="token generic class-name"><span class="token operator">&lt;</span><span class="token keyword">char</span><span class="token operator">*</span><span class="token operator">&gt;</span></span></span><span class="token punctuation">(</span>buffer<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token operator">*</span>a <span class="token operator">=</span> d<span class="token punctuation">;</span>
+    <span class="token function">write</span><span class="token punctuation">(</span>d<span class="token punctuation">,</span> mClassCount<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">write</span><span class="token punctuation">(</span>d<span class="token punctuation">,</span> mThreadCount<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">write</span><span class="token punctuation">(</span>d<span class="token punctuation">,</span> mKernelCount<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">auto</span> kernelSize <span class="token operator">=</span> mKernelCount<span class="token operator">*</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span>YoloKernel<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">memcpy</span><span class="token punctuation">(</span>d<span class="token punctuation">,</span>mYoloKernel<span class="token punctuation">.</span><span class="token function">data</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>kernelSize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    d <span class="token operator">+=</span> kernelSize<span class="token punctuation">;</span>
+
+    <span class="token function">assert</span><span class="token punctuation">(</span>d <span class="token operator">==</span> a <span class="token operator">+</span> <span class="token function">getSerializationSize</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>这里有人可能会有疑问啊？不对啊，yolov5的detect中是包含conv，为何这里序列化没有看到相关模型参数的改变。下图为yolov5原代码：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">class</span> <span class="token class-name">Detect</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token operator">:</span>
+    stride <span class="token operator">=</span> None  # strides computed during build
+    onnx_dynamic <span class="token operator">=</span> False  # ONNX <span class="token keyword">export</span> parameter
+
+    def <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> nc<span class="token operator">=</span><span class="token number">80</span><span class="token punctuation">,</span> anchors<span class="token operator">=</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> ch<span class="token operator">=</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> inplace<span class="token operator">=</span>True<span class="token punctuation">)</span><span class="token operator">:</span>  # detection layer
+        <span class="token function">super</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">__init__</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+        self<span class="token punctuation">.</span>m <span class="token operator">=</span> nn<span class="token punctuation">.</span><span class="token function">ModuleList</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span><span class="token function">Conv2d</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span> self<span class="token punctuation">.</span>no <span class="token operator">*</span> self<span class="token punctuation">.</span>na<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token keyword">for</span> x in ch<span class="token punctuation">)</span>  # output conv
+        self<span class="token punctuation">.</span>inplace <span class="token operator">=</span> inplace  # use in<span class="token operator">-</span>place <span class="token function">ops</span> <span class="token punctuation">(</span>e<span class="token punctuation">.</span>g<span class="token punctuation">.</span> slice assignment<span class="token punctuation">)</span>
+
+    def <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> x<span class="token punctuation">)</span><span class="token operator">:</span>
+        z <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>  # inference output
+        <span class="token keyword">for</span> i in <span class="token function">range</span><span class="token punctuation">(</span>self<span class="token punctuation">.</span>nl<span class="token punctuation">)</span><span class="token operator">:</span>
+            x<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> self<span class="token punctuation">.</span>m<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">(</span>x<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">)</span>  # conv
+            bs<span class="token punctuation">,</span> _<span class="token punctuation">,</span> ny<span class="token punctuation">,</span> nx <span class="token operator">=</span> x<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>shape  # <span class="token function">x</span><span class="token punctuation">(</span>bs<span class="token punctuation">,</span><span class="token number">255</span><span class="token punctuation">,</span><span class="token number">20</span><span class="token punctuation">,</span><span class="token number">20</span><span class="token punctuation">)</span> to <span class="token function">x</span><span class="token punctuation">(</span>bs<span class="token punctuation">,</span><span class="token number">3</span><span class="token punctuation">,</span><span class="token number">20</span><span class="token punctuation">,</span><span class="token number">20</span><span class="token punctuation">,</span><span class="token number">85</span><span class="token punctuation">)</span>
+            <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+
+        <span class="token keyword">return</span> x <span class="token keyword">if</span> self<span class="token punctuation">.</span>training <span class="token keyword">else</span> <span class="token punctuation">(</span>torch<span class="token punctuation">.</span><span class="token function">cat</span><span class="token punctuation">(</span>z<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">,</span> x<span class="token punctuation">)</span>
+</code></pre> 
+<p>在Tensorrtx中作者将detect实际分为两种部分：</p> 
+<p>1、负责特征图卷积层IConvolutionLayer* det对应原yolov5代码中三个尺度下self.m—&gt;conv</p> 
+<p>2、其余操作由YoloLayerPlugin完成。</p> 
+<p>实际代码如下图：</p> 
+<pre><code class="prism language-cpp">IConvolutionLayer<span class="token operator">*</span> det0 <span class="token operator">=</span> network<span class="token operator">-&gt;</span><span class="token function">addConvolutionNd</span><span class="token punctuation">(</span><span class="token operator">*</span>bottleneck_csp17<span class="token operator">-&gt;</span><span class="token function">getOutput</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">3</span> <span class="token operator">*</span> <span class="token punctuation">(</span>Yolo<span class="token double-colon punctuation">::</span>CLASS_NUM <span class="token operator">+</span> <span class="token number">5</span><span class="token punctuation">)</span><span class="token punctuation">,</span> DimsHW<span class="token punctuation">{<!-- --></span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span> <span class="token punctuation">}</span><span class="token punctuation">,</span> weightMap<span class="token punctuation">[</span><span class="token string">"model.24.m.0.weight"</span><span class="token punctuation">]</span><span class="token punctuation">,</span> weightMap<span class="token punctuation">[</span><span class="token string">"model.24.m.0.bias"</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+IConvolutionLayer<span class="token operator">*</span> det1 <span class="token operator">=</span> network<span class="token operator">-&gt;</span><span class="token function">addConvolutionNd</span><span class="token punctuation">(</span><span class="token operator">*</span>bottleneck_csp20<span class="token operator">-&gt;</span><span class="token function">getOutput</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">3</span> <span class="token operator">*</span> <span class="token punctuation">(</span>Yolo<span class="token double-colon punctuation">::</span>CLASS_NUM <span class="token operator">+</span> <span class="token number">5</span><span class="token punctuation">)</span><span class="token punctuation">,</span> DimsHW<span class="token punctuation">{<!-- --></span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span> <span class="token punctuation">}</span><span class="token punctuation">,</span> weightMap<span class="token punctuation">[</span><span class="token string">"model.24.m.1.weight"</span><span class="token punctuation">]</span><span class="token punctuation">,</span> weightMap<span class="token punctuation">[</span><span class="token string">"model.24.m.1.bias"</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+IConvolutionLayer<span class="token operator">*</span> det2 <span class="token operator">=</span> network<span class="token operator">-&gt;</span><span class="token function">addConvolutionNd</span><span class="token punctuation">(</span><span class="token operator">*</span>bottleneck_csp23<span class="token operator">-&gt;</span><span class="token function">getOutput</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">3</span> <span class="token operator">*</span> <span class="token punctuation">(</span>Yolo<span class="token double-colon punctuation">::</span>CLASS_NUM <span class="token operator">+</span> <span class="token number">5</span><span class="token punctuation">)</span><span class="token punctuation">,</span> DimsHW<span class="token punctuation">{<!-- --></span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span> <span class="token punctuation">}</span><span class="token punctuation">,</span> weightMap<span class="token punctuation">[</span><span class="token string">"model.24.m.2.weight"</span><span class="token punctuation">]</span><span class="token punctuation">,</span> weightMap<span class="token punctuation">[</span><span class="token string">"model.24.m.2.bias"</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<pre><code>auto yolo = addYoLoLayer(network, weightMap, "model.24", std::vector&lt;IConvolutionLayer*&gt;{det0, det1, det2});
+</code></pre> 
+<p>那么，既然这样接下来的函数就好理解的</p> 
+<p>这里插段代码：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">struct</span> <span class="token keyword">alignas</span><span class="token punctuation">(</span><span class="token keyword">float</span><span class="token punctuation">)</span> Detection <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//center_x center_y w h</span>
+    <span class="token keyword">float</span> bbox<span class="token punctuation">[</span>LOCATIONS<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token keyword">float</span> conf<span class="token punctuation">;</span>  <span class="token comment">// bbox_conf * cls_conf</span>
+    <span class="token keyword">float</span> class_id<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>Detection表示检测结果的属性。</p> 
+<pre><code class="prism language-cpp">size_t <span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">getSerializationSize</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>mClassCount<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>mThreadCount<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>mKernelCount<span class="token punctuation">)</span> <span class="token operator">+</span>
+           <span class="token keyword">sizeof</span><span class="token punctuation">(</span>Yolo<span class="token double-colon punctuation">::</span>YoloKernel<span class="token punctuation">)</span> <span class="token operator">*</span> mYoloKernel<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>mYoloV5NetWidth<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>mYoloV5NetHeight<span class="token punctuation">)</span> <span class="token operator">+</span>
+           <span class="token keyword">sizeof</span><span class="token punctuation">(</span>mMaxOutObject<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">int</span> <span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">initialize</span><span class="token punctuation">(</span><span class="token punctuation">)</span> TRT_NOEXCEPT
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+Dims <span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">getOutputDimensions</span><span class="token punctuation">(</span><span class="token keyword">int</span> index<span class="token punctuation">,</span> <span class="token keyword">const</span> Dims <span class="token operator">*</span>inputs<span class="token punctuation">,</span> <span class="token keyword">int</span> nbInputDims<span class="token punctuation">)</span> TRT_NOEXCEPT
+<span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//output the result to channel</span>
+    <span class="token keyword">int</span> totalsize <span class="token operator">=</span> mMaxOutObject <span class="token operator">*</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>Detection<span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">float</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token function">Dims3</span><span class="token punctuation">(</span>totalsize <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">// Set plugin namespace</span>
+<span class="token keyword">void</span> <span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">setPluginNamespace</span><span class="token punctuation">(</span><span class="token keyword">const</span> <span class="token keyword">char</span> <span class="token operator">*</span>pluginNamespace<span class="token punctuation">)</span> TRT_NOEXCEPT
+<span class="token punctuation">{<!-- --></span>
+    mPluginNamespace <span class="token operator">=</span> pluginNamespace<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">const</span> <span class="token keyword">char</span> <span class="token operator">*</span><span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">getPluginNamespace</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> mPluginNamespace<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">// Return the DataType of the plugin output at the requested index</span>
+DataType
+<span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">getOutputDataType</span><span class="token punctuation">(</span><span class="token keyword">int</span> index<span class="token punctuation">,</span> <span class="token keyword">const</span> nvinfer1<span class="token double-colon punctuation">::</span>DataType <span class="token operator">*</span>inputTypes<span class="token punctuation">,</span> <span class="token keyword">int</span> nbInputs<span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> DataType<span class="token double-colon punctuation">::</span>kFLOAT<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">// Return true if output tensor is broadcast across a batch.</span>
+<span class="token keyword">bool</span> <span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">isOutputBroadcastAcrossBatch</span><span class="token punctuation">(</span><span class="token keyword">int</span> outputIndex<span class="token punctuation">,</span> <span class="token keyword">const</span> <span class="token keyword">bool</span> <span class="token operator">*</span>inputIsBroadcasted<span class="token punctuation">,</span>
+                                                   <span class="token keyword">int</span> nbInputs<span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">// Return true if plugin can use input that is broadcast across batch without replication.</span>
+<span class="token keyword">bool</span> <span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">canBroadcastInputAcrossBatch</span><span class="token punctuation">(</span><span class="token keyword">int</span> inputIndex<span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">void</span> <span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">configurePlugin</span><span class="token punctuation">(</span><span class="token keyword">const</span> PluginTensorDesc <span class="token operator">*</span>in<span class="token punctuation">,</span> <span class="token keyword">int</span> nbInput<span class="token punctuation">,</span> <span class="token keyword">const</span> PluginTensorDesc <span class="token operator">*</span>out<span class="token punctuation">,</span>
+                                      <span class="token keyword">int</span> nbOutput<span class="token punctuation">)</span> TRT_NOEXCEPT
+<span class="token punctuation">{<!-- --></span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">// Attach the plugin object to an execution context and grant the plugin the access to some context resource.</span>
+<span class="token keyword">void</span> <span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">attachToContext</span><span class="token punctuation">(</span>cudnnContext <span class="token operator">*</span>cudnnContext<span class="token punctuation">,</span> cublasContext <span class="token operator">*</span>cublasContext<span class="token punctuation">,</span>
+                                      IGpuAllocator <span class="token operator">*</span>gpuAllocator<span class="token punctuation">)</span> TRT_NOEXCEPT
+<span class="token punctuation">{<!-- --></span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">// Detach the plugin object from its execution context.</span>
+<span class="token keyword">void</span> <span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">detachFromContext</span><span class="token punctuation">(</span><span class="token punctuation">)</span> TRT_NOEXCEPT
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+
+<span class="token keyword">const</span> <span class="token keyword">char</span> <span class="token operator">*</span><span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">getPluginType</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> <span class="token string">"YoloLayer_TRT"</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">const</span> <span class="token keyword">char</span> <span class="token operator">*</span><span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">getPluginVersion</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> <span class="token string">"1"</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">void</span> <span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">destroy</span><span class="token punctuation">(</span><span class="token punctuation">)</span> TRT_NOEXCEPT
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">delete</span> <span class="token keyword">this</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">// Clone the plugin</span>
+IPluginV2IOExt <span class="token operator">*</span><span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">clone</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">const</span> TRT_NOEXCEPT
+<span class="token punctuation">{<!-- --></span>
+    YoloLayerPlugin <span class="token operator">*</span>p <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token function">YoloLayerPlugin</span><span class="token punctuation">(</span>mClassCount<span class="token punctuation">,</span> mYoloV5NetWidth<span class="token punctuation">,</span> mYoloV5NetHeight<span class="token punctuation">,</span> mMaxOutObject<span class="token punctuation">,</span>
+                                             mYoloKernel<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    p<span class="token operator">-&gt;</span><span class="token function">setPluginNamespace</span><span class="token punctuation">(</span>mPluginNamespace<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> p<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>ok，我们可以看到以上大部分函数只需要简单复写虚函数即可。真正的操作其实主要放在enqueue</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">int</span> <span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">enqueue</span><span class="token punctuation">(</span><span class="token keyword">int</span> batchSize<span class="token punctuation">,</span> <span class="token keyword">const</span> <span class="token keyword">void</span> <span class="token operator">*</span><span class="token keyword">const</span> <span class="token operator">*</span>inputs<span class="token punctuation">,</span> <span class="token keyword">void</span> <span class="token operator">*</span>TRT_CONST_ENQUEUE <span class="token operator">*</span>outputs<span class="token punctuation">,</span>
+                             <span class="token keyword">void</span> <span class="token operator">*</span>workspace<span class="token punctuation">,</span> cudaStream_t stream<span class="token punctuation">)</span> TRT_NOEXCEPT
+<span class="token punctuation">{<!-- --></span>
+    <span class="token function">forwardGpu</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">const</span> <span class="token keyword">float</span> <span class="token operator">*</span><span class="token keyword">const</span> <span class="token operator">*</span><span class="token punctuation">)</span> inputs<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">float</span> <span class="token operator">*</span><span class="token punctuation">)</span> outputs<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span> stream<span class="token punctuation">,</span> batchSize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>说了这么多，终于进入了主体，下面来看看如何使用咱们前几节学的cuda基础知识去编写相关操作。在华丽的音乐也无非可以分解成宫商角徽羽嘛。</p> 
+<pre><code class="prism language-cpp">forwardGpu：
+
+    <span class="token keyword">void</span> <span class="token class-name">YoloLayerPlugin</span><span class="token double-colon punctuation">::</span><span class="token function">forwardGpu</span><span class="token punctuation">(</span><span class="token keyword">const</span> <span class="token keyword">float</span> <span class="token operator">*</span><span class="token keyword">const</span> <span class="token operator">*</span>inputs<span class="token punctuation">,</span> <span class="token keyword">float</span> <span class="token operator">*</span>output<span class="token punctuation">,</span> cudaStream_t stream<span class="token punctuation">,</span> <span class="token keyword">int</span> batchSize<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">int</span> outputElem <span class="token operator">=</span> <span class="token number">1</span> <span class="token operator">+</span> mMaxOutObject <span class="token operator">*</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>Detection<span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">float</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> idx <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> idx <span class="token operator">&lt;</span> batchSize<span class="token punctuation">;</span> <span class="token operator">++</span>idx<span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token function">CUDA_CHECK</span><span class="token punctuation">(</span><span class="token function">cudaMemsetAsync</span><span class="token punctuation">(</span>output <span class="token operator">+</span> idx <span class="token operator">*</span> outputElem<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">float</span><span class="token punctuation">)</span><span class="token punctuation">,</span> stream<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">int</span> numElem <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> mYoloKernel<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">const</span> <span class="token keyword">auto</span> <span class="token operator">&amp;</span>yolo <span class="token operator">=</span> mYoloKernel<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">;</span>
+            numElem <span class="token operator">=</span> yolo<span class="token punctuation">.</span>width <span class="token operator">*</span> yolo<span class="token punctuation">.</span>height <span class="token operator">*</span> batchSize<span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>numElem <span class="token operator">&lt;</span> mThreadCount<span class="token punctuation">)</span> mThreadCount <span class="token operator">=</span> numElem<span class="token punctuation">;</span>
+
+            <span class="token comment">//printf("Net: %d  %d \n", mYoloV5NetWidth, mYoloV5NetHeight);</span>
+            CalDetection <span class="token operator">&lt;&lt;</span><span class="token operator">&lt;</span> <span class="token punctuation">(</span>numElem <span class="token operator">+</span> mThreadCount <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token operator">/</span> mThreadCount<span class="token punctuation">,</span> mThreadCount<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> stream <span class="token operator">&gt;&gt;</span><span class="token operator">&gt;</span>
+            <span class="token punctuation">(</span>inputs<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">,</span> output<span class="token punctuation">,</span> numElem<span class="token punctuation">,</span> mYoloV5NetWidth<span class="token punctuation">,</span> mYoloV5NetHeight<span class="token punctuation">,</span> mMaxOutObject<span class="token punctuation">,</span> yolo<span class="token punctuation">.</span>width<span class="token punctuation">,</span> yolo<span class="token punctuation">.</span>height<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">float</span> <span class="token operator">*</span><span class="token punctuation">)</span> mAnchor<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">,</span> mClassCount<span class="token punctuation">,</span> outputElem<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>1、先使用cudaMemsetAsync异步操作申请device空间，并且为了防止异步操作的缺点，使用stream进行控制。</p> 
+<p>2、申请空间后使用CalDetection对每个fpn生成的feature进行计算。</p> 
+<p>在这里我们由调用CalDetection的形式&lt;&lt;&lt;&gt;&gt;&gt;可以看出它是一个kernel函数。首先根据</p> 
+<pre><code>        numElem = yolo.width * yolo.height * batchSize;
+</code></pre> 
+<p>计算所有的元素，在代码中mThreadCount=256（人为设置，只要是32的倍数即可），然后根据我们初始前几章所讲的cuda函数计算分配第一维的大小。</p> 
+<p>ok，在复习下相关概念，因为CalDetection是由cpu调用，并在device使用，所以使用__global__关键字。</p> 
+<pre><code class="prism language-cpp"> __global__ <span class="token keyword">void</span> <span class="token function">CalDetection</span><span class="token punctuation">(</span><span class="token keyword">const</span> <span class="token keyword">float</span> <span class="token operator">*</span>input<span class="token punctuation">,</span> <span class="token keyword">float</span> <span class="token operator">*</span>output<span class="token punctuation">,</span> <span class="token keyword">int</span> noElements<span class="token punctuation">,</span>
+                                 <span class="token keyword">const</span> <span class="token keyword">int</span> netwidth<span class="token punctuation">,</span> <span class="token keyword">const</span> <span class="token keyword">int</span> netheight<span class="token punctuation">,</span> <span class="token keyword">int</span> maxoutobject<span class="token punctuation">,</span> <span class="token keyword">int</span> yoloWidth<span class="token punctuation">,</span>
+                                 <span class="token keyword">int</span> yoloHeight<span class="token punctuation">,</span> <span class="token keyword">const</span> <span class="token keyword">float</span> anchors<span class="token punctuation">[</span>CHECK_COUNT <span class="token operator">*</span> <span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token keyword">int</span> classes<span class="token punctuation">,</span> <span class="token keyword">int</span> outputElem<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+
+        <span class="token keyword">int</span> idx <span class="token operator">=</span> threadIdx<span class="token punctuation">.</span>x <span class="token operator">+</span> blockDim<span class="token punctuation">.</span>x <span class="token operator">*</span> blockIdx<span class="token punctuation">.</span>x<span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>idx <span class="token operator">&gt;=</span> noElements<span class="token punctuation">)</span> <span class="token keyword">return</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">int</span> total_grid <span class="token operator">=</span> yoloWidth <span class="token operator">*</span> yoloHeight<span class="token punctuation">;</span>
+        <span class="token keyword">int</span> bnIdx <span class="token operator">=</span> idx <span class="token operator">/</span> total_grid<span class="token punctuation">;</span>
+        idx <span class="token operator">=</span> idx <span class="token operator">-</span> total_grid <span class="token operator">*</span> bnIdx<span class="token punctuation">;</span>
+        <span class="token keyword">int</span> info_len_i <span class="token operator">=</span> <span class="token number">5</span> <span class="token operator">+</span> classes<span class="token punctuation">;</span>
+        <span class="token keyword">const</span> <span class="token keyword">float</span> <span class="token operator">*</span>curInput <span class="token operator">=</span> input <span class="token operator">+</span> bnIdx <span class="token operator">*</span> <span class="token punctuation">(</span>info_len_i <span class="token operator">*</span> total_grid <span class="token operator">*</span> CHECK_COUNT<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> k <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> k <span class="token operator">&lt;</span> CHECK_COUNT<span class="token punctuation">;</span> <span class="token operator">++</span>k<span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">float</span> box_prob <span class="token operator">=</span> <span class="token function">Logist</span><span class="token punctuation">(</span>curInput<span class="token punctuation">[</span>idx <span class="token operator">+</span> k <span class="token operator">*</span> info_len_i <span class="token operator">*</span> total_grid <span class="token operator">+</span> <span class="token number">4</span> <span class="token operator">*</span> total_grid<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>box_prob <span class="token operator">&lt;</span> IGNORE_THRESH<span class="token punctuation">)</span> <span class="token keyword">continue</span><span class="token punctuation">;</span>
+            <span class="token keyword">int</span> class_id <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+            <span class="token keyword">float</span> max_cls_prob <span class="token operator">=</span> <span class="token number">0.0</span><span class="token punctuation">;</span>
+            <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">5</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> info_len_i<span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span>
+            <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">float</span> p <span class="token operator">=</span> <span class="token function">Logist</span><span class="token punctuation">(</span>curInput<span class="token punctuation">[</span>idx <span class="token operator">+</span> k <span class="token operator">*</span> info_len_i <span class="token operator">*</span> total_grid <span class="token operator">+</span> i <span class="token operator">*</span> total_grid<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>p <span class="token operator">&gt;</span> max_cls_prob<span class="token punctuation">)</span>
+                <span class="token punctuation">{<!-- --></span>
+                    max_cls_prob <span class="token operator">=</span> p<span class="token punctuation">;</span>
+                    class_id <span class="token operator">=</span> i <span class="token operator">-</span> <span class="token number">5</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+            <span class="token keyword">float</span> <span class="token operator">*</span>res_count <span class="token operator">=</span> output <span class="token operator">+</span> bnIdx <span class="token operator">*</span> outputElem<span class="token punctuation">;</span>
+            <span class="token keyword">int</span> count <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">int</span><span class="token punctuation">)</span> <span class="token function">atomicAdd</span><span class="token punctuation">(</span>res_count<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>count <span class="token operator">&gt;=</span> maxoutobject<span class="token punctuation">)</span> <span class="token keyword">return</span><span class="token punctuation">;</span>
+            <span class="token keyword">char</span> <span class="token operator">*</span>data <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span> res_count <span class="token operator">+</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">float</span><span class="token punctuation">)</span> <span class="token operator">+</span> count <span class="token operator">*</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>Detection<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            Detection <span class="token operator">*</span>det <span class="token operator">=</span> <span class="token punctuation">(</span>Detection <span class="token operator">*</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>data<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token keyword">int</span> row <span class="token operator">=</span> idx <span class="token operator">/</span> yoloWidth<span class="token punctuation">;</span>
+            <span class="token keyword">int</span> col <span class="token operator">=</span> idx <span class="token operator">%</span> yoloWidth<span class="token punctuation">;</span>
+
+            <span class="token comment">//Location</span>
+            <span class="token comment">// pytorch:</span>
+            <span class="token comment">//  y = x[i].sigmoid()</span>
+            <span class="token comment">//  y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i].to(x[i].device)) * self.stride[i]  # xy</span>
+            <span class="token comment">//  y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh</span>
+            <span class="token comment">//  X: (sigmoid(tx) + cx)/FeaturemapW *  netwidth</span>
+            det<span class="token operator">-&gt;</span>bbox<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">(</span>col <span class="token operator">-</span> <span class="token number">0.5f</span> <span class="token operator">+</span> <span class="token number">2.0f</span> <span class="token operator">*</span> <span class="token function">Logist</span><span class="token punctuation">(</span>curInput<span class="token punctuation">[</span>idx <span class="token operator">+</span> k <span class="token operator">*</span> info_len_i <span class="token operator">*</span> total_grid <span class="token operator">+</span> <span class="token number">0</span> <span class="token operator">*</span> total_grid<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">*</span>
+                           netwidth <span class="token operator">/</span> yoloWidth<span class="token punctuation">;</span>
+            det<span class="token operator">-&gt;</span>bbox<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">(</span>row <span class="token operator">-</span> <span class="token number">0.5f</span> <span class="token operator">+</span> <span class="token number">2.0f</span> <span class="token operator">*</span> <span class="token function">Logist</span><span class="token punctuation">(</span>curInput<span class="token punctuation">[</span>idx <span class="token operator">+</span> k <span class="token operator">*</span> info_len_i <span class="token operator">*</span> total_grid <span class="token operator">+</span> <span class="token number">1</span> <span class="token operator">*</span> total_grid<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">*</span>
+                           netheight <span class="token operator">/</span> yoloHeight<span class="token punctuation">;</span>
+
+            <span class="token comment">// W: (Pw * e^tw) / FeaturemapW * netwidth</span>
+            <span class="token comment">// v5: https://github.com/ultralytics/yolov5/issues/471</span>
+            det<span class="token operator">-&gt;</span>bbox<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">2.0f</span> <span class="token operator">*</span> <span class="token function">Logist</span><span class="token punctuation">(</span>curInput<span class="token punctuation">[</span>idx <span class="token operator">+</span> k <span class="token operator">*</span> info_len_i <span class="token operator">*</span> total_grid <span class="token operator">+</span> <span class="token number">2</span> <span class="token operator">*</span> total_grid<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            det<span class="token operator">-&gt;</span>bbox<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span> <span class="token operator">=</span> det<span class="token operator">-&gt;</span>bbox<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span> <span class="token operator">*</span> det<span class="token operator">-&gt;</span>bbox<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span> <span class="token operator">*</span> anchors<span class="token punctuation">[</span><span class="token number">2</span> <span class="token operator">*</span> k<span class="token punctuation">]</span><span class="token punctuation">;</span>
+            det<span class="token operator">-&gt;</span>bbox<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">2.0f</span> <span class="token operator">*</span> <span class="token function">Logist</span><span class="token punctuation">(</span>curInput<span class="token punctuation">[</span>idx <span class="token operator">+</span> k <span class="token operator">*</span> info_len_i <span class="token operator">*</span> total_grid <span class="token operator">+</span> <span class="token number">3</span> <span class="token operator">*</span> total_grid<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            det<span class="token operator">-&gt;</span>bbox<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span> <span class="token operator">=</span> det<span class="token operator">-&gt;</span>bbox<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span> <span class="token operator">*</span> det<span class="token operator">-&gt;</span>bbox<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span> <span class="token operator">*</span> anchors<span class="token punctuation">[</span><span class="token number">2</span> <span class="token operator">*</span> k <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+            det<span class="token operator">-&gt;</span>conf <span class="token operator">=</span> box_prob <span class="token operator">*</span> max_cls_prob<span class="token punctuation">;</span>
+            det<span class="token operator">-&gt;</span>class_id <span class="token operator">=</span> class_id<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>1、先获取当前线程ID，然后定位元素位置。（在这里我们也可以看到Tensorrt的本质和我们开始几节介绍的简单的矩阵其实原理是一样的，只是操作和形式上稍微复杂亿点点。也是指定单个线程对相应的元素进行操作。）</p> 
+<p>2、执行x,y,w,h相关操作，具体可参照原有的yolov5中detect进行分析，这里不过多讲述。</p> 
+<pre><code>__device__ float Logist(float data)
+{ return 1.0f / (1.0f + expf(-data)); };
+</code></pre> 
+<p>整体一套流程下来，是不是感觉使用cuda编写也不是那么神秘嘛。</p> 
+<p>下一篇文章打算介绍下plugin的使用与创建，毕竟内容都写好了，咱们总得看看它是咋用的。（情人节刚过，创建几个“对象”）。</p> 
+<p>大佬们，还记得为嘛logist使用__device__嘛？（狗头）欢迎留言。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/677e7a66884d8b3283ca5a748afc38d2/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【FFMPEG源码分析】通过ffmpeg截图命令分析ffmpeg.c源码流程</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/cc36091d9185a8b86500d401a306960c/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">计网知识点3-数据链路层-4流量控制与可靠传输机制</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

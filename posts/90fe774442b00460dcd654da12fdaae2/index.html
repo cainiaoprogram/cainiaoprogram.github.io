@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>小猫爪：S32K3学习笔记11-S32K3之FCCU - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="小猫爪：S32K3学习笔记11-S32K3之FCCU" />
+<meta property="og:description" content="小猫爪：S32K3学习笔记11-S32K3之FCCU 1 前言2 FCCU的功能框图2.1 错误输入2.2 时钟输入2.3 FSM2.4 FOSU 3 FCCU的状态机4 MCAL配置5 SPD应用代码示例END 1 前言 这一节来学习一下safety中的一个核心模块，它就是FCCU（Fault Collection and Control Unit），看名字就知道这是一个错误收集模块，其他模块发生错误了，就会讲错误信号传递到FCCU中进行统一管理。
+2 FCCU的功能框图 这FCCU的功能框图如下：
+2.1 错误输入 这DCM可以理解成是K3里面的一个错误集合器，主要体现在6个寄存器中，分别是标志寄存器DCMROD3，DCMROD4和DCMROD5；以及相对应的使能寄存器DCMRWD3，DCMRWD4和DCMRWD5。每一个bit代表着一个DCM错误通道，所以理论上总共有3*32=96个DCM通道（实际上并没有96个，因为有几个通道是reserve状态，S32K3总共有86个错误），只有当标志寄存器位和其对应的使能寄存器位都等于1时，这个错误才能传送到FCCU中去被处理。
+这里可以提一下的就是ERM 20个通道所能报告的错误是DCM的一个子集，但是ERM通道和DCM通道并不是一一对应，这里很好理解，因为两者对错误的分类方式不同。ERM针对的是Memory ECC的错误，而DCM则涵盖了K3整个所有的错误。
+DCM的96个通道传送到FCCU后，FCCU又把DCM的错误按照错误类型又将其划分成8种通道组，分别对应NCF[7:0]这8个通道组，如下表所示：
+这8组通道几乎涵盖了S32K3所有的错误，这8种错误后续会一个一个介绍。除了8个NCF通道组外，FCCU还能通过EIN[1:0]接收来自芯片外部的错误信号，并做一些处理。
+2.2 时钟输入 FCCU的时钟源有三个，分别是Primary Clock，Safety Clock0和Safety Clock1，其中Primary Clock为FCCU的主时钟，其来源为AIPS_PLAT_CLK，而Safety Clock是给FCCU中的一些特殊模块使用的，至于到底给了谁，我也不是特别清楚，据我所知，会给EOUT和FOSU提供时钟（嘿嘿嘿，因为RM手册里面有个表格有标），其来源为FIRC_CLK。
+2.3 FSM FSM是FCCU的主体，它负责整个FCCU状态机的切换，其实就是接收错误信号，然后根据相关配置来决定触发几个特殊的信号给外部。首先它能触发三个中断，分别是timeout interrupt, alarm interrupt和NMI interrupt，还可以触发一个function reset信号给MC_RGM来让K3执行功能性复位（这里需要注意一点，Function Reset并不能复位FCCU模块），还可以触发两个外部信号EOUT[1:0]给外部SBC，让SBC执行一些操作，另外EOUT[1:0]的点平信号是互补相反的。
+2.4 FOSU 这个模块是用来监控FCCU的，是为了防止FCCU失效的。如果一个错误信号传送到了FCCU，而FCCU在短时间内并没有做出相应的反应，那么FOSU就认为FCCU挂了，那么它会触发一个Destructive Reset给MC_RGM来让K3执行破坏性复位（这里需要注意一点，Destructive Reset会复位FCCU模块）。
+3 FCCU的状态机 当一个错误传到了FCCU中，FCCU的处理分为几个阶段，即其状态机，每个阶段干不同的事情，FCCU的状态机切换如下图所示：
+从图中可以看出，FCCU包含四种状态，分别是CONFIG, NORMAL, ALARM，FAULT，这几种状态的切换也是非常的简单。
+CONFIG: K3启动后，默认是CONFIG，在这个状态中，你可以对FCCU的寄存器进行操作配置，等配置完后，再手动切换至NORMAL。在FCCU中有个config timer, 如果在一定时间没有切换至NORMAL而导致config timer超时（该超时时间可配置），那么FCCU会自动切换至NARMAL，而FCCU的配置则为默认配置，同时config timer超时也可触发一个超时中断信号。NORMAL: FCCU检测到NCF的8个通道任何一个及以上有错误时，这个时候FCCU就会从NORMAL切换到ALARM或者FAULT，至于切换到哪种状态取决于是否使能了NCF通道的ALARM中断。ALARM：如果当前NCF通道使能了ALARM中断，并且伴随着错误，那么FCCU就会从NORMAL切换到ALRAM，并且触发ALARM中断，用户可以在ALARM中断中对错误进行处理，如果经过处理后，让错误消失，那么FCCU就会重新切换至NORMAL状态。在FCCU中还有个alarm timer, 如果在一定时间内没有让错误消失而导致alarm timer超时（该超时时间可配置），那么FCCU就会进入FAULT状态。FAULT：如果当前NCF通道没有使能ALARM中断，并且伴随着错误，那么FCCU就会从NORMAL直接切换到FAULT，或者FCCU在ALARM状态中超时那么FCCU就会从ALARM切换到FAULT。一旦FCCU进入到FAULT，那么可以选择触发function reset或者触发NMI中断。如果通过function reset或者NMI中断处理程序消除了所有错误，那么FCCU就会从FAULT切换回NORMAL；如果错误没有清除掉的话，问题会很严重。如果错误连续触发Functional Reset多次都没有解决问题，那么这样Functional复位连续N次后（可配置，最大15次），会直接触发Dectructive Reset信号，而该破坏性复位源为MC_RGM_FRE，如果连破坏性复位都不能解决问题，导致连续破坏性复位超过N次（可配置，最大15次），则芯片会卡在复位状态，软件无法运行，直到重新上电（这其实就是MC_RGM的Escalation功能，具体详情请参考后面解释MC_RGM的文章）。 另外进入FAULT也可以选择是否输出EOUT信号给SBC，SBC接收到信号可以进行一些操作。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/90fe774442b00460dcd654da12fdaae2/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-05-16T10:24:39+08:00" />
+<meta property="article:modified_time" content="2022-05-16T10:24:39+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">小猫爪：S32K3学习笔记11-S32K3之FCCU</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>小猫爪：S32K3学习笔记11-S32K3之FCCU</h4> 
+ <ul><li><a href="#1__1" rel="nofollow">1 前言</a></li><li><a href="#2_FCCU_4" rel="nofollow">2 FCCU的功能框图</a></li><li><ul><li><a href="#21__7" rel="nofollow">2.1 错误输入</a></li><li><a href="#22__15" rel="nofollow">2.2 时钟输入</a></li><li><a href="#23_FSM_19" rel="nofollow">2.3 FSM</a></li><li><a href="#24_FOSU_22" rel="nofollow">2.4 FOSU</a></li></ul> 
+  </li><li><a href="#3_FCCU_24" rel="nofollow">3 FCCU的状态机</a></li><li><a href="#4_MCAL_35" rel="nofollow">4 MCAL配置</a></li><li><a href="#5_SPD_49" rel="nofollow">5 SPD应用代码示例</a></li><li><a href="#END_141" rel="nofollow">END</a></li></ul> 
+</div> 
+<p></p> 
+<h2><a id="1__1"></a>1 前言</h2> 
+<p>  这一节来学习一下safety中的一个核心模块，它就是FCCU（Fault Collection and Control Unit），看名字就知道这是一个错误收集模块，其他模块发生错误了，就会讲错误信号传递到FCCU中进行统一管理。</p> 
+<h2><a id="2_FCCU_4"></a>2 FCCU的功能框图</h2> 
+<p>  这FCCU的功能框图如下：<br> <img src="https://images2.imgbox.com/07/93/qPFU6n5n_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="21__7"></a>2.1 错误输入</h3> 
+<p>  这DCM可以理解成是K3里面的一个错误集合器，主要体现在6个寄存器中，分别是标志寄存器DCMROD3，DCMROD4和DCMROD5；以及相对应的使能寄存器DCMRWD3，DCMRWD4和DCMRWD5。每一个bit代表着一个DCM错误通道，所以理论上总共有3*32=96个DCM通道（实际上并没有96个，因为有几个通道是reserve状态，S32K3总共有86个错误），只有当标志寄存器位和其对应的使能寄存器位都等于1时，这个错误才能传送到FCCU中去被处理。</p> 
+<p>  这里可以提一下的就是ERM 20个通道所能报告的错误是DCM的一个子集，但是ERM通道和DCM通道并不是一一对应，这里很好理解，因为两者对错误的分类方式不同。ERM针对的是Memory ECC的错误，而DCM则涵盖了K3整个所有的错误。</p> 
+<p>  DCM的96个通道传送到FCCU后，FCCU又把DCM的错误按照错误类型又将其划分成8种通道组，分别对应NCF[7:0]这8个通道组，如下表所示：<br> <img src="https://images2.imgbox.com/6a/73/S8YmT0mp_o.png" alt="在这里插入图片描述"><br>   这8组通道几乎涵盖了S32K3所有的错误，这8种错误后续会一个一个介绍。除了8个NCF通道组外，FCCU还能通过EIN[1:0]接收来自芯片外部的错误信号，并做一些处理。</p> 
+<h3><a id="22__15"></a>2.2 时钟输入</h3> 
+<p>  FCCU的时钟源有三个，分别是Primary Clock，Safety Clock0和Safety Clock1，其中Primary Clock为FCCU的主时钟，其来源为AIPS_PLAT_CLK，而Safety Clock是给FCCU中的一些特殊模块使用的，至于到底给了谁，我也不是特别清楚，据我所知，会给EOUT和FOSU提供时钟（嘿嘿嘿，因为RM手册里面有个表格有标），其来源为FIRC_CLK。<br> <img src="https://images2.imgbox.com/ef/92/qLWCIfoj_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="23_FSM_19"></a>2.3 FSM</h3> 
+<p>  FSM是FCCU的主体，它负责整个FCCU状态机的切换，其实就是接收错误信号，然后根据相关配置来决定触发几个特殊的信号给外部。首先它能触发三个中断，分别是timeout interrupt, alarm interrupt和NMI interrupt，还可以触发一个function reset信号给MC_RGM来让K3执行功能性复位（这里需要注意一点，Function Reset并不能复位FCCU模块），还可以触发两个外部信号EOUT[1:0]给外部SBC，让SBC执行一些操作，另外EOUT[1:0]的点平信号是互补相反的。</p> 
+<h3><a id="24_FOSU_22"></a>2.4 FOSU</h3> 
+<p>  这个模块是用来监控FCCU的，是为了防止FCCU失效的。如果一个错误信号传送到了FCCU，而FCCU在短时间内并没有做出相应的反应，那么FOSU就认为FCCU挂了，那么它会触发一个Destructive Reset给MC_RGM来让K3执行破坏性复位（这里需要注意一点，Destructive Reset会复位FCCU模块）。</p> 
+<h2><a id="3_FCCU_24"></a>3 FCCU的状态机</h2> 
+<p>  当一个错误传到了FCCU中，FCCU的处理分为几个阶段，即其状态机，每个阶段干不同的事情，FCCU的状态机切换如下图所示：<br> <img src="https://images2.imgbox.com/b7/23/ReJ4c8tc_o.png" alt="在这里插入图片描述"><br>   从图中可以看出，FCCU包含四种状态，分别是CONFIG, NORMAL, ALARM，FAULT，这几种状态的切换也是非常的简单。</p> 
+<ol><li><strong>CONFIG</strong>: K3启动后，默认是CONFIG，在这个状态中，你可以对FCCU的寄存器进行操作配置，等配置完后，再手动切换至NORMAL。在FCCU中有个config timer, 如果在一定时间没有切换至NORMAL而导致config timer超时（该超时时间可配置），那么FCCU会自动切换至NARMAL，而FCCU的配置则为默认配置，同时config timer超时也可触发一个超时中断信号。</li><li><strong>NORMAL</strong>: FCCU检测到NCF的8个通道任何一个及以上有错误时，这个时候FCCU就会从NORMAL切换到ALARM或者FAULT，至于切换到哪种状态取决于是否使能了NCF通道的ALARM中断。</li><li><strong>ALARM</strong>：如果当前NCF通道使能了ALARM中断，并且伴随着错误，那么FCCU就会从NORMAL切换到ALRAM，并且触发ALARM中断，用户可以在ALARM中断中对错误进行处理，如果经过处理后，让错误消失，那么FCCU就会重新切换至NORMAL状态。在FCCU中还有个alarm timer, 如果在一定时间内没有让错误消失而导致alarm timer超时（该超时时间可配置），那么FCCU就会进入FAULT状态。</li><li><strong>FAULT</strong>：如果当前NCF通道没有使能ALARM中断，并且伴随着错误，那么FCCU就会从NORMAL直接切换到FAULT，或者FCCU在ALARM状态中超时那么FCCU就会从ALARM切换到FAULT。一旦FCCU进入到FAULT，那么可以选择触发function reset或者触发NMI中断。如果通过function reset或者NMI中断处理程序消除了所有错误，那么FCCU就会从FAULT切换回NORMAL；如果错误没有清除掉的话，问题会很严重。如果错误连续触发Functional Reset多次都没有解决问题，那么这样Functional复位连续N次后（可配置，最大15次），会直接触发Dectructive Reset信号，而该破坏性复位源为MC_RGM_FRE，如果连破坏性复位都不能解决问题，导致连续破坏性复位超过N次（可配置，最大15次），则芯片会卡在复位状态，软件无法运行，直到重新上电（这其实就是MC_RGM的Escalation功能，具体详情请参考后面解释MC_RGM的文章）。</li></ol> 
+<p>  另外进入FAULT也可以选择是否输出EOUT信号给SBC，SBC接收到信号可以进行一些操作。</p> 
+<h2><a id="4_MCAL_35"></a>4 MCAL配置</h2> 
+<p>  我们可以在MCAL中的eMcem中配置FCCU模块，如下可配置一些基本参数：<br> <img src="https://images2.imgbox.com/68/8c/ayVe47Vv_o.png" alt="在这里插入图片描述"><br>   在下面这个界面中可对8个NCF通道作配置，主要有是否产生ALARM中断，是否产生NMI中断，是否产生Function Reset等等，大家自行体会，不再多言。<br> <img src="https://images2.imgbox.com/85/8d/5ICz3Rkm_o.png" alt="在这里插入图片描述"><br>   然后在每个NCF通道里面，可以看到每个NCF对应得DCM通道，比如NCF0：<br> <img src="https://images2.imgbox.com/9e/c5/rHzIdsVN_o.png" alt="在这里插入图片描述"><br>   然后就可以对每个通道进行配置，如是否失/使能这个DCM错误，还有配置这个错误的alarm中断服务回调函数。这里为了方便，我把所有的错误的alarm中断服务回调函数都配置成为eMcemUserAlarmHandler，到时候再在函数里面细分。</p> 
+<p>  这里还有非常重要的一步，就是需要在Platfrom中使能FCCU的中断以及注册其对应的服务函数，其中两个中断服务函数函数名必须是FCCU_ALARM_ISR对应FCCU_0_IRQn和FCCU_TIMEOUT_ISR对应FCCU_1_IRQn，如下：<br> <img src="https://images2.imgbox.com/b4/4d/2sDIvDhv_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/7a/5b/C5Ak0Je7_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="5_SPD_49"></a>5 SPD应用代码示例</h2> 
+<p>  又到了紧张刺激的示例代码环节，在上节EIM和ERM中，就已经稍微提过了，具体流程就是使用EIM注入错误，然后FCCU收集错误并处理，然后ERM作为错误信息收集模块。</p> 
+<p>  首先使用EIM在在通道0，也就是SRAM1中注入ECC错误，如下：</p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token function">SRAM_EIM_FaultInjection</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+		<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"Inject fault %d.\r\n"</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">int</span><span class="token punctuation">)</span><span class="token punctuation">(</span>nInjectFault<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"Inject RAM0 ECC error.\r\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">eMcem_SetupInjectionChannel</span><span class="token punctuation">(</span>EMCEM_EIM_CH_0<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">eMcem_InjectFault</span><span class="token punctuation">(</span> EMCEM_EIM_CH_0 <span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">Cache_Ip_InvalidateByAddr</span><span class="token punctuation">(</span>CACHE_IP_DATA<span class="token punctuation">,</span> <span class="token number">0x20420000</span><span class="token punctuation">,</span> <span class="token number">32</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		ErrorTriggle <span class="token operator">=</span> <span class="token operator">*</span><span class="token punctuation">(</span><span class="token class-name">uint32_t</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token number">0x20420000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>  注入后，CPU再次访问SRAM1时候，就会触发ECC错误，这个时候就会报告到FCCU中去从而触发FCCU的alarm中断，这里需要注意的是这个ECC错误同时也会触发ARM核的BusFaultHandle，所以需要在BusFaultHandle里面需要加点小的处理：</p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token function">BusFault_Handler</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//..........</span>
+    <span class="token comment">//..........</span>
+	<span class="token comment">/* if FCCU Alarm interrupt is active, leave bus fault handler
+	 and let FCCU Alarm ISR to handle the fault */</span>
+	<span class="token keyword">if</span><span class="token punctuation">(</span>IP_FCCU<span class="token operator">-&gt;</span>IRQ_STAT <span class="token operator">&amp;</span> FCCU_IRQ_STAT_ALRM_STAT_MASK<span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token comment">//..........</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>  判断一下是否有FCCU的alarm中断产生，如果有的话，那就直接return，让FCCU的alarm中断服务函数去处理，如下：</p> 
+<pre><code class="prism language-c">eMcem_ErrRecoveryType <span class="token function">eMcemUserAlarmHandler</span><span class="token punctuation">(</span> eMcem_FaultType nFaultId <span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token class-name">uint32_t</span> u32FccuFaults <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	<span class="token class-name">uint32_t</span> u32FaultAddr <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+
+	<span class="token comment">/* read fault information */</span>
+	<span class="token function">eMcem_GetErrors</span><span class="token punctuation">(</span> <span class="token operator">&amp;</span>faultContainer <span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">eMcem_Fccu_GetErrors</span><span class="token punctuation">(</span> <span class="token operator">&amp;</span>u32FccuFaults<span class="token punctuation">,</span> <span class="token operator">&amp;</span>u32FccuFaults <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token comment">/* Must clear faults in time (within 10ms after fault detected), 
+	otherwise FCCU enters fault state and reset occurred. */</span>
+	<span class="token function">eMcem_ClearFaults</span><span class="token punctuation">(</span> nFaultId <span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">/* print message showing execution of FCCU Alarm Handler. */</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"FCCU alarm handler. FCCU_NCF=0x%X, Fault_ID=%d.\r\n"</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">int</span><span class="token punctuation">)</span>u32FccuFaults<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">int</span><span class="token punctuation">)</span>nFaultId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"faultContainer = 0x%08X, 0x%08X, 0x%08X. \r\n"</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">int</span><span class="token punctuation">)</span>faultContainer<span class="token punctuation">.</span>au32Faults<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">int</span><span class="token punctuation">)</span>faultContainer<span class="token punctuation">.</span>au32Faults<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">int</span><span class="token punctuation">)</span>faultContainer<span class="token punctuation">.</span>au32Faults<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">//...........</span>
+    <span class="token comment">//...........</span>
+   
+	<span class="token comment">/* if it's NCF2 fault - RAM ECC error */</span>
+	<span class="token keyword">if</span><span class="token punctuation">(</span>u32FccuFaults <span class="token operator">&amp;</span> FCCU_NCF_S_NCFS2_MASK<span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token function">eMcem_GetMemErrInfo</span><span class="token punctuation">(</span> EMCEM_ERM_SRAM0<span class="token punctuation">,</span> <span class="token operator">&amp;</span>memErrInfo <span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">eMcem_ClearFaults</span><span class="token punctuation">(</span> nFaultId <span class="token punctuation">)</span><span class="token punctuation">;</span>
+		u32FaultAddr <span class="token operator">=</span> memErrInfo<span class="token punctuation">.</span>Err_AddrRaw<span class="token punctuation">;</span>
+		u32FccuFaults <span class="token operator">&amp;=</span> <span class="token punctuation">(</span><span class="token operator">~</span>FCCU_NCF_S_NCFS2_MASK<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token comment">/* A reserved area without RAM ECC init can be placed at the following address for test purpose */</span>
+		<span class="token keyword">if</span><span class="token punctuation">(</span><span class="token punctuation">(</span>u32FaultAddr<span class="token operator">&gt;=</span><span class="token number">0x20427FF0</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> <span class="token punctuation">(</span>u32FaultAddr<span class="token operator">&lt;</span><span class="token number">0x20428000</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			u32FaultAddr <span class="token operator">&amp;=</span> <span class="token number">0xFFFFFFF8</span><span class="token punctuation">;</span>
+			<span class="token operator">*</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token class-name">uint64_t</span> <span class="token operator">*</span><span class="token punctuation">)</span>u32FaultAddr<span class="token punctuation">)</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">else</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">if</span><span class="token punctuation">(</span>u32FccuFaults <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span>
+			<span class="token punctuation">{<!-- --></span>
+				<span class="token keyword">while</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token function">Mcu_PerformReset</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+	
+	<span class="token comment">//...........</span>
+    <span class="token comment">//...........</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>  好了，我只能稍微写一点来示范一下EIM，ERM，FCCU三者的联动，重点在于帮助大家理解K3的错误处理机制（嘿嘿嘿，我是不会说，这个例子是我抄袭的）。</p> 
+<p>  在这里还需要注意一下，在调试状态下，可能会出现<strong>eMcem_Init</strong>初始化失败，查看DCM状态寄存器后发现了分别在RCCU1，RCCU2和ITCM处发生了错误，至于原因吗，可能是因为在调试状态下，有些访问顺序不符合K3功能安全检测条件的要求，具体我也不清楚，所以一开始需要修改两个地方：</p> 
+<ol><li>第一点就是在startup.s的启动代码处加上三句话，如下图：<br> <img src="https://images2.imgbox.com/70/7d/E1wwPD3D_o.png" alt="在这里插入图片描述"></li><li>第二点就是在MCAL配置中，将整个NCF0通道错误关闭，如下：<br> <img src="https://images2.imgbox.com/44/39/Je3P8OXk_o.png" alt="在这里插入图片描述"></li></ol> 
+<p>  <strong>FCCU是整个K3功能安全的核心，后面有很多的错误处理机制都是由FCCU来完成的，所以FCCU至关重要。</strong></p> 
+<h2><a id="END_141"></a>END</h2>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/f2268fce2a373c87e581e0ba819403fe/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">[图像处理]3×3中值滤波的verilog实现</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/3e894900fabc99a0401384637a5591a5/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">图像分割常用评价指标（mIoU,F1-score）_2022.05.15</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

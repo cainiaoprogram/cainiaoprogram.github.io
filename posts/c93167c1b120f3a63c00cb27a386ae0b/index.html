@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>大模型并行训练 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="大模型并行训练" />
+<meta property="og:description" content="大模型并行训练 1. 背景 大语言模型(Large Language Mode，缩写LLM)是一种人工智能模型，旨在理解和生成人类语言。通过在大量文本数据上进行训练，可执行广泛的任务(包括文本总结、翻译、情感分析等等)。其规模庞大，包含数十亿的参数，来学习复杂的模型结构。随着ChatGpt的兴起，大语言模型进入百花齐放的发展阶段，各行各业都将注意力集中到通用大模型和垂直领域大模型的研发当中。目前，典型的大模型代表如下：
+大模型名称
+所属公司
+chatgpt系列(gpt3.5/gpt4)
+OpenAI
+文心一言
+百度
+Baichuan7B/13B
+百川智能
+Qwen7B/14B
+阿里云
+LLaMA/LLaMA2
+Meta
+ChatGLM
+智谱AI
+以上大模型在通用领域(例如介绍下中国四大名著)有着不俗的效果，但在特定领域效果一般，好在可以通过搜集领域内数据对大模型进行微调(SFT)和训练预训练模型(PRE)来实现。主要目标是通过sft或pre得到的大模型效果上超过传统深度学习方法且超过开源通用大模型。本文基于此介绍下大模型训练所涉及的单机多卡、多机多卡等概念，以及并行训练的相关策略。
+2. 概念介绍 2.1 预训练模型(Pre)和大模型微调(Sft) 预训练模型（Pretrained Models）和大模型微调（SFT，Scaled Fine-Tuning）是两种常见的深度学习技术。
+预训练模型是指在大规模数据集上进行事先训练的深度神经网络模型。这些模型通常使用无监督学习方法，如自编码器、生成对抗网络或其他无监督学习方法来实现，并在大量未标记的数据上进行训练。预训练模型的目标是学习到数据的潜在表示，以捕捉数据中的统计特性和结构，从而使得在特定任务上的微调更加高效。它们能够学习到通用的特征表示，使得在特定任务上的微调更加高效。
+相比之下，大模型微调是指在预训练模型的基础上，使用特定任务的有标签数据进行进一步的微调。在微调过程中，预训练模型的权重会被调整以适应特定任务的要求。大模型微调通常需要较少的标注数据，因为预训练模型已经学习到了许多通用的特征和知识，可以在特定任务上进行迁移学习。
+两者的区别在于预训练模型是在大规模数据上进行无监督学习，目标是学习到通用的特征表示；而大模型微调是在预训练模型的基础上，使用有标签数据进行有监督学习，目标是在特定任务上进行优化和调整。预训练模型可以看作是一种通用的知识库，而大模型微调则是将这个知识库应用到具体任务中的过程。
+图1 pre和sft
+总体来说，如果目标是解决具体领域的某些具体的任务，且基模型已经具备了该领域的基础元知识，用SFT微调可以满足需求，SFT主要解决的问题是让基模型能够理解具体的任务指令。如果要解决的问题是泛领域的多目标任务，且基模型未具备目标领域的基础元知识，这时就需要先进行Pre-train预训练，让基模型充分吸收目标领域的基础语料，即丰富基模型的元知识后，再基于预训练后得到的新的基模型进行SFT，对齐想要解决问题的指令。
+2.2 并行计算 在大模型训练中，为了加快训练速度并处理大量数据，通常会使用并行计算技术。并行计算是指将计算任务(通常指模型和数据)分解成多个子任务，并分配给不同的计算设备进行处理。本章就并行计算中所涉及的数据并行、模型并行、分布式训练(例如DP，DDP，DeepSpeed等)进行介绍。
+2.2.1 数据并行 数据并行将大规模的大规模的数据集分成N份，每一份分别装在到N个GPU节点中。同时每个GPU节点持有一个完整的模型副本，分别基于每个GPU中的数据去进行梯度求导。最后，通过通信机制将梯度进行聚合，并更新模型参数。
+数据并行通常有三种方式：
+以参数服务器GPU0对每个GPU中的梯度进行累加。最后，再将GPU0聚合后的结果广播到其他GPU节点进行更新。以CPU作为参数服务器进行梯度的聚合和更新，但这种方式通常比较慢。通常情况下，GPU与CPU之间通信使用PCIe，而GPU与GPU之间通信使用Nvlink(前者更常用，后者速度更快)。将参数服务器分布在所有GPU节点上面，每个GPU只更新其中的一部分梯度。 值得注意的是，数据并行不仅仅指对训练的数据进行并行操作，还是对网络模型梯度、权重参数、优化器状态等数据进行并行。
+图2 数据并行
+2.2.2 模型并行 与数据并行相同的是，模型并行也是将一个大型模型拆解成多个子模型，并将这些子模型分配给不同的计算设备进行并行计算。每个计算设备负责计算模型的一部分，并将结果传递给其他设备进行进一步处理。
+图3 模型并行
+上图中，把模型拆成了Machine1~4，并可以看成两种切分方式：(1)水平切分(2)垂直切分。这里，也可以把模型的垂直切分看成Pipeline并行，因为垂直切分模型的时候，中间的某一层计算需要上一层所有的数据都计算完才能开始自己的计算，如果有数据未完成，整个计算都会延迟。所以，和数据并行不同的是，模型并行带来的通信开销和同步消耗会远超过数据并行，且消耗是完全不在一个数量级上。
+这里，可以回顾下最早提出模型并行的网络AlexNet:
+图4 AlexNet网络结构
+由于当时(2012年)的设备资源更不上神经网络的参数量，AlexNet不得不进行模型的并行计算(水平切分)。由上图，上下两部分的网络结构是一样的，采用两块GPU进行模型和数据的并行计算，并且GPU只在最后的全连接层进行通信。因为是单机，所以模型之间采用共享内存进行通信，如果分布在通过网络连接的多台机器上，那么就需要考虑延迟、带宽和消息速率，这也是分布式训练要着重要解决的问题。
+模型并行要解决的一个问题就是神经网络中的每一层都对它前面一层具有数据依赖性，也就是说，仅仅把一些层放在不同的设备中并不意味着它们可以并行计算，甚至还有可能会起到相反的效果，当设备2等待设备1的数据的时候，设备2就处于空闲状态。所以真正的模型并行，意味着把模型按照一种方式拆分之后，每个部分都可以同时进行计算，顺序无关紧要。
+当然，也有论文One weird trick for parallelizing convolutional neural networks提出优化方案：在卷积层上采用数据并行(计算量大，参数量少)，在全连接层上采用模型并行(计算量小，参数量大)，但考虑到模型并行的通信成本，并不建议用太多机器。
+通常在大模型训练任务中采用DeepSpeed中的3D并行技术(数据并行，流水线并行和张量切片模型并行)来实现万亿参数模型训练，提高了显存扩展性和吞吐量扩展效率。
+2.2.3 分布式训练（DP，DPP，DeepSpeed&#43;Zero） DP DP(torch.nn.DataParallel)作为pytorch中常用也是较为简单的API，其代码量少，原理也较为简单。但DP只支持单机多卡，计算过程如下：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/c93167c1b120f3a63c00cb27a386ae0b/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-11-24T08:53:26+08:00" />
+<meta property="article:modified_time" content="2023-11-24T08:53:26+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">大模型并行训练</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div></div> 
+<div> 
+ <div> 
+  <h2 style="margin-left:0pt;text-align:center;"><strong><span style="color:#1a1a1a;">大模型并行训练</span></strong></h2> 
+  <h2 style="text-align:left;"><strong><span style="color:#1a1a1a;">1. 背景</span></strong></h2> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">大语言模型(Large Language Mode，缩写LLM)是一种人工智能模型，旨在理解和生成人类语言。通过在大量文本数据上进行训练，可执行广泛的任务(包括文本总结、翻译、情感分析等等)。其规模庞大，包含数十亿的参数，来学习复杂的模型结构。随着ChatGpt的兴起，大语言模型进入百花齐放的发展阶段，各行各业都将注意力集中到通用大模型和垂直领域大模型的研发当中。目前，典型的大模型代表如下：</span></p> 
+  <table border="1" cellspacing="0"><tbody><tr><td colspan="1" rowspan="1" style="background-color:#d8d8d8;vertical-align:middle;width:301px;"> <p style="margin-left:0;text-align:center;"><strong><span style="color:#333333;">大模型名称</span></strong></p> </td><td colspan="1" rowspan="1" style="background-color:#d8d8d8;vertical-align:middle;width:301px;"> <p style="margin-left:0;text-align:center;"><strong><span style="color:#333333;">所属公司</span></strong></p> </td></tr><tr><td colspan="1" rowspan="1" style="vertical-align:middle;width:301px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">chatgpt系列(gpt3.5/gpt4)</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:301px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">OpenAI</span></p> </td></tr><tr><td colspan="1" rowspan="1" style="vertical-align:middle;width:301px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">文心一言</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:301px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">百度</span></p> </td></tr><tr><td colspan="1" rowspan="1" style="vertical-align:middle;width:301px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">Baichuan7B/13B</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:301px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">百川智能</span></p> </td></tr><tr><td colspan="1" rowspan="1" style="vertical-align:middle;width:301px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">Qwen7B/14B</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:301px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">阿里云</span></p> </td></tr><tr><td colspan="1" rowspan="1" style="vertical-align:middle;width:301px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">LLaMA/LLaMA2</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:301px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">Meta</span></p> </td></tr><tr><td colspan="1" rowspan="1" style="vertical-align:middle;width:301px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">ChatGLM</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:301px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">智谱AI</span></p> </td></tr></tbody></table> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">以上大模型在通用领域(例如介绍下中国四大名著)有着不俗的效果，但在特定领域</span><span style="color:#333333;">效果一般</span><span style="color:#333333;">，好在可以通过搜集领域内数据对大模型进行微调(SFT)和训练预训练模型(PRE)来实现。主要目标是通过sft或pre得到的大模型效果上超过传统深度学习方法且超过开源通用大模型。本文基于此介绍下大模型训练所涉及的单机多卡、多机多卡等概念，以及并行训练的相关策略。</span></p> 
+  <h2 style="text-align:left;"><strong><span style="color:#1a1a1a;">2. 概念介绍</span></strong></h2> 
+  <h3 style="margin-left:0pt;text-align:left;"><strong><span style="color:#1a1a1a;">2.1 预训练模型(Pre)和大模型微调(Sft)</span></strong></h3> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">预训练模型（Pretrained Models）和大模型微调（SFT，Scaled Fine-Tuning）是两种常见的深度学习技术。</span></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">预训练模型是指在大规模数据集上进行事先训练的深度神经网络模型。这些模型通常使用无监督学习方法，如自编码器、生成对抗网络或其他无监督学习方法来实现，并在大量未标记的数据上进行训练。预训练模型的目标是学习到数据的潜在表示，以捕捉数据中的统计特性和结构，从而使得在特定任务上的微调更加高效。它们能够学习到通用的特征表示，使得在特定任务上的微调更加高效。</span></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">相比之下，大模型微调是指在预训练模型的基础上，使用特定任务的有标签数据进行进一步的微调。在微调过程中，预训练模型的权重会被调整以适应特定任务的要求。大模型微调通常需要较少的标注数据，因为预训练模型已经学习到了许多通用的特征和知识，可以在特定任务上进行迁移学习。</span></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">两者的区别在于预训练模型是在大规模数据上进行无监督学习，目标是学习到通用的特征表示；而大模型微调是在预训练模型的基础上，使用有标签数据进行有监督学习，目标是在特定任务上进行优化和调整。预训练模型可以看作是一种通用的知识库，而大模型微调则是将这个知识库应用到具体任务中的过程。</span></p> 
+  <p style="margin-left:0;text-align:justify;"><img alt="" height="381" src="https://images2.imgbox.com/f9/2e/cF7AtYl0_o.png" width="507"></p> 
+  <p style="margin-left:0;text-align:center;"><span style="color:#333333;">图1 pre和sft</span></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">总体来说，如果目标是解决具体领域的某些具体的任务，且基模型已经具备了该领域的基础元知识，用SFT微调可以满足需求，SFT主要解决的问题是让基模型能够理解具体的任务指令。如果要解决的问题是泛领域的多目标任务，且基模型未具备目标领域的基础元知识，这时就需要先进行Pre-train预训练，让基模型充分吸收目标领域的基础语料，即丰富基模型的元知识后，再基于预训练后得到的新的基模型进行SFT，对齐想要解决问题的指令。</span></p> 
+  <h3 style="margin-left:0pt;text-align:left;"><strong><span style="color:#1a1a1a;">2.2 并行计算</span></strong></h3> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">在大模型训练中，为了加快训练速度并处理大量数据，通常会使用并行计算技术。并行计算是指将计算任务(通常指模型和数据)分解成多个子任务，并分配给不同的计算设备进行处理。本章就并行计算中所涉及的数据并行、模型并行、分布式训练(例如DP，DDP，DeepSpeed等)进行介绍。</span></p> 
+  <h4 style="margin-left:0pt;text-align:left;"><strong><span style="color:#1a1a1a;">2.2.1 数据并行</span></strong></h4> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">数据并行将大规模的大规模的数据集分成N份，每一份分别装在到N个GPU节点中。同时每个GPU节点持有一个完整的模型副本，分别基于每个GPU中的数据去进行梯度求导。最后，通过通信机制将梯度进行聚合，并更新模型参数。</span></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">数据并行通常有三种方式：</span></p> 
+  <ul><li style="text-align:left;"><span style="color:#333333;">以参数服务器GPU0对每个GPU中的梯度进行累加。最后，再将GPU0聚合后的结果广播到其他GPU节点进行更新。</span></li><li style="text-align:left;"><span style="color:#333333;">以CPU作为参数服务器进行梯度的聚合和更新，但这种方式通常比较慢。通常情况下，GPU与CPU之间通信使用PCIe，而GPU与GPU之间通信使用Nvlink(前者更常用，后者速度更快)。</span></li><li style="text-align:left;"><span style="color:#333333;">将参数服务器分布在所有GPU节点上面，每个GPU只更新其中的一部分梯度。</span></li></ul> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">值得注意的是，数据并行不仅仅指对训练的数据进行并行操作，还是对网络模型梯度、权重参数、优化器状态等数据进行并行。</span></p> 
+  <p style="margin-left:0;text-align:center;"><img alt="" height="712" src="https://images2.imgbox.com/f2/87/uvxsjSkA_o.png" width="1100"></p> 
+  <p style="margin-left:0;text-align:center;"><span style="color:#333333;">图2 数据并行</span></p> 
+  <h4 style="margin-left:0pt;text-align:left;"><strong><span style="color:#1a1a1a;">2.2.2 模型并行</span></strong></h4> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">与数据并行相同的是，模型并行也是将一个大型模型拆解成多个子模型，并将这些子模型分配给不同的计算设备进行并行计算。每个计算设备负责计算模型的一部分，并将结果传递给其他设备进行进一步处理。</span></p> 
+  <p style="margin-left:0;text-align:left;"></p> 
+  <p style="margin-left:0;text-align:center;"><span style="color:#333333;">图3 模型并行</span></p> 
+  <p style="margin-left:0;text-align:left;"></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">上图中，把模型拆成了Machine1~4，并可以看成两种切分方式：(1)水平切分(2)垂直切分。这里，也可以把模型的垂直切分看成Pipeline并行，因为垂直切分模型的时候，中间的某一层计算需要上一层所有的数据都计算完才能开始自己的计算，如果有数据未完成，整个计算都会延迟。所以，和数据并行不同的是，模型并行带来的通信开销和同步消耗会远超过数据并行，且消耗是完全不在一个数量级上。</span></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">这里，可以回顾下最早提出模型并行的网络AlexNet:</span></p> 
+  <p style="margin-left:0;text-align:justify;"><img alt="" height="318" src="https://images2.imgbox.com/10/b2/qmMeCRQQ_o.png" width="825"></p> 
+  <p style="margin-left:0;text-align:center;"><span style="color:#333333;">图4 AlexNet网络结构</span></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">由于当时(2012年)的设备资源更不上神经网络的参数量，AlexNet不得不进行模型的并行计算(水平切分)。由上图，上下两部分的网络结构是一样的，采用两块GPU进行模型和数据的并行计算，并且GPU只在最后的全连接层进行通信。因为是单机，所以模型之间采用共享内存进行通信，如果分布在通过网络连接的多台机器上，那么就需要考虑延迟、带宽和消息速率，这也是分布式训练要着重要解决的问题。</span></p> 
+  <p style="margin-left:0;text-align:left;"><span style="color:#333333;">模型并行要解决的一个问题就是神经网络中的每一层都对它前面一层具有数据依赖性，也就是说，仅仅把一些层放在不同的设备中并不意味着它们可以并行计算，甚至还有可能会起到相反的效果，当设备2等待设备1的数据的时候，设备2就处于空闲状态。所以真正的模型并行，意味着把模型按照一种方式拆分之后，每个部分都可以同时进行计算，顺序无关紧要。</span></p> 
+  <p style="margin-left:0;text-align:left;"><span style="color:#333333;">当然</span><span style="color:#333333;">，也有论文</span><a href="https://arxiv.org/abs/1404.5997" rel="nofollow" title="One weird trick for parallelizing convolutional neural networks">One weird trick for parallelizing convolutional neural networks</a><span style="color:#333333;">提出优化方案：</span><span style="color:#333333;">在卷积层上采用数据并行(计算量大，参数量少)，在全连接层上采用模型并行(计算量小，参数量大)，</span><span style="color:#333333;">但考虑到模型并行的通信成本，并不建议用太多机器。</span></p> 
+  <p style="margin-left:0;text-align:left;"><span style="color:#333333;">通常在大模型训练任务中采用DeepSpeed中的3D并行技术(数据并行，流水线并行和张量切片模型并行)来实现万亿参数模型训练，提高了显存扩展性和吞吐量扩展效率。</span></p> 
+  <h4 style="margin-left:0pt;text-align:left;"><strong><span style="color:#1a1a1a;">2.2.3 分布式训练（DP，DPP，DeepSpeed+Zero）</span></strong></h4> 
+  <ul><li style="text-align:left;"><strong><span style="color:#333333;">DP</span></strong></li></ul> 
+  <p style="margin-left:0;text-align:left;"><span style="color:#333333;">DP(torch.nn.DataParallel)作为pytorch中常用也是较为简单的API，其代码量少，原理也较为简单。但DP只支持单机多卡，计算过程如下：</span></p> 
+  <ol><li style="text-align:left;"><span style="color:#333333;">将 inputs 从主 GPU 分发到所有 GPU 上</span></li><li style="text-align:left;"><span style="color:#333333;">将 model 从主 GPU 分发到所有 GPU 上</span></li><li style="text-align:left;"><span style="color:#333333;">每个 GPU 分别独立进行前向传播，得到 outputs</span></li><li style="text-align:left;"><span style="color:#333333;">将每个 GPU 的 outputs 发回主 GPU</span></li><li style="text-align:left;"><span style="color:#333333;">在主 GPU 上，通过 loss function 计算出 loss，对 loss function 求导，求出损失梯度</span></li><li style="text-align:left;"><span style="color:#333333;">计算得到的梯度分发到所有 GPU 上</span></li><li style="text-align:left;"><span style="color:#333333;">反向传播计算参数梯度</span></li><li style="text-align:left;"><span style="color:#333333;">将所有梯度回传到主 GPU，通过梯度更新模型权重</span></li><li style="text-align:left;"><span style="color:#333333;">不断重复上面的过程</span></li></ol> 
+  <ul><li style="text-align:left;"><strong><span style="color:#333333;">DDP</span></strong></li></ul> 
+  <p style="margin-left:0;text-align:left;"><span style="color:#333333;">DDP(torch.nn.DistributedDataParallel)相比于DP支持多机多卡，训练速度更快，且负载相对要均衡些。</span></p> 
+  <p style="margin-left:0;text-align:left;"><span style="color:#333333;">与 DP的单进程控制多 GPU 不同，在 distributed 的帮助下，只需要编写一份代码，torch 就会自动将其分配给n个进程，分别在 n 个 GPU 上运行。不再有主 GPU，每个 GPU 执行相同的任务。对每个 GPU 的训练都是在自己的进程中进行的。每个进程都从磁盘加载其自己的数据。分布式数据采样器可确保加载的数据在各个进程之间不重叠。损失函数的前向传播和计算在每个 GPU 上独立执行。因此，不需要收集网络输出。在反向传播期间，梯度下降在所有GPU上均被执行，从而确保每个 GPU 在反向传播结束时最终得到平均梯度的相同副本。</span></p> 
+  <p style="margin-left:0;text-align:left;"><span style="color:#333333;">torch.distributed是PyTorch中的一个模块，用于支持分布式训练和数据并行处理。它提供了一组工具和API，帮助用户在多个机器或多个GPU上进行分布式训练，并提供了跨进程通信和同步的功能。它可以帮助用户将训练任务划分为多个子任务，并将这些子任务分配给不同的机器或GPU进行并行处理，从而加快训练速度。</span></p> 
+  <p style="margin-left:0;text-align:left;"><strong><span style="color:#333333;">DDP的代码演示</span></strong></p> 
+  <p style="margin-left:0;text-align:left;"><span style="color:#333333;">这里对使用到分布式的代码进行介绍</span></p> 
+  <ul><li style="text-align:left;"><strong><span style="color:#333333;">分布式参数的引入</span></strong></li></ul> 
+  <p style="margin-left:0;text-align:left;"></p> 
+  <pre><span style="background-color:#fafafa;"><code><span style="color:#000000;">rank </span><span style="color:#9a6e3a;">=</span> <span style="color:#669900;">int</span><span style="color:#999999;">(</span><span style="color:#000000;">os</span><span style="color:#999999;">.</span><span style="color:#000000;">environ</span><span style="color:#999999;">[</span><span style="color:#669900;">'RANK'</span><span style="color:#999999;">])</span>
+<span style="color:#000000;">local_rank </span><span style="color:#9a6e3a;">=</span> <span style="color:#669900;">int</span><span style="color:#999999;">(</span><span style="color:#000000;">os</span><span style="color:#999999;">.</span><span style="color:#000000;">environ</span><span style="color:#999999;">[</span><span style="color:#669900;">'LOCAL_RANK'</span><span style="color:#999999;">])</span>
+<span style="color:#000000;">world_size </span><span style="color:#9a6e3a;">=</span> <span style="color:#669900;">int</span><span style="color:#999999;">(</span><span style="color:#000000;">os</span><span style="color:#999999;">.</span><span style="color:#000000;">environ</span><span style="color:#999999;">[</span><span style="color:#669900;">'WORLD_SIZE'</span><span style="color:#999999;">])</span>
+<span style="color:#000000;">host </span><span style="color:#9a6e3a;">=</span><span style="color:#000000;"> os</span><span style="color:#999999;">.</span><span style="color:#000000;">environ</span><span style="color:#999999;">[</span><span style="color:#669900;">'MASTER_ADDR'</span><span style="color:#999999;">]</span>
+<span style="color:#000000;">port </span><span style="color:#9a6e3a;">=</span> <span style="color:#669900;">int</span><span style="color:#999999;">(</span><span style="color:#000000;">os</span><span style="color:#999999;">.</span><span style="color:#000000;">environ</span><span style="color:#999999;">[</span><span style="color:#669900;">'MASTER_PORT'</span><span style="color:#999999;">])</span>
+<span style="color:#000000;">dist</span><span style="color:#999999;">.</span><span style="color:#000000;">init_process_group</span><span style="color:#999999;">(</span><span style="color:#669900;">'nccl'</span><span style="color:#999999;">,</span><span style="color:#000000;"> init_method</span><span style="color:#9a6e3a;">=</span><span style="color:#000000;">f'tcp://[{host}]:{port}'</span><span style="color:#999999;">,</span><span style="color:#000000;"> world_size</span><span style="color:#9a6e3a;">=</span><span style="color:#000000;">world_size</span><span style="color:#999999;">,</span><span style="color:#000000;"> rank</span><span style="color:#9a6e3a;">=</span><span style="color:#000000;">rank</span><span style="color:#999999;">)</span> <span style="color:#708090;"># 初始化通信后端，一般GPU分布式训练使用NCLL</span>
+<span style="color:#000000;">torch</span><span style="color:#999999;">.</span><span style="color:#000000;">cuda</span><span style="color:#999999;">.</span><span style="color:#000000;">set_device</span><span style="color:#999999;">(</span><span style="color:#000000;">local_rank</span><span style="color:#999999;">)</span> <span style="color:#708090;"># 把模型和数据加载到对应的gpu上</span>
+</code></span></pre> 
+  <p></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">为方便理解，如果训练一个模型，使用8张GPU进行训练，则需要对训练集分成8等份，此时8也称作任务数，在分布式中叫world_size。</span></p> 
+  <p style="margin-left:0;text-align:justify;"><strong><span style="color:#333333;">world_size</span></strong><span style="color:#333333;">：表示划分多少个子进程</span></p> 
+  <p style="margin-left:0;text-align:justify;"><strong><span style="color:#333333;">rank</span></strong><span style="color:#333333;">：对每个子进程分配一个编号：0，1，2，3，4，5，6，7</span></p> 
+  <p style="margin-left:0;text-align:justify;"><strong><span style="color:#333333;">local_rank</span></strong><span style="color:#333333;">：在每个节点上进行编号：0，1等。rank是全居编号，local_rank是局部编号</span></p> 
+  <p style="margin-left:0;text-align:justify;"><strong><span style="color:#333333;">master_addr</span></strong><span style="color:#333333;">：首子进程的监听的IP地址；用来协商子进程</span></p> 
+  <p style="margin-left:0;text-align:justify;"><strong><span style="color:#333333;">master_port</span></strong><span style="color:#333333;">：首子进程的监听的端口；用来协商子进程</span></p> 
+  <table border="1" cellspacing="0"><tbody><tr><td colspan="1" rowspan="1" style="background-color:#d8d8d8;vertical-align:middle;width:120px;"> <p style="margin-left:0;text-align:center;"></p> </td><td colspan="2" rowspan="1" style="background-color:#d8d8d8;vertical-align:middle;width:120px;"> <p style="margin-left:0;text-align:center;"><strong><span style="color:#333333;">Node1</span></strong></p> </td><td colspan="2" rowspan="1" style="background-color:#d8d8d8;vertical-align:middle;width:120px;"> <p style="margin-left:0;text-align:center;"><strong><span style="color:#333333;">Node2</span></strong></p> </td><td colspan="2" rowspan="1" style="background-color:#d8d8d8;vertical-align:middle;width:120px;"> <p style="margin-left:0;text-align:center;"><strong><span style="color:#333333;">Node3</span></strong></p> </td><td colspan="2" rowspan="1" style="background-color:#d8d8d8;vertical-align:middle;width:120px;"> <p style="margin-left:0;text-align:center;"><strong><span style="color:#333333;">Node4</span></strong></p> </td></tr><tr><td colspan="1" rowspan="1" style="vertical-align:middle;width:120px;"> <p style="margin-left:0;text-align:center;"><strong><span style="color:#333333;">rank</span></strong></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:60px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">0</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:60px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">1</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:60px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">2</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:60px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">3</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:60px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">4</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:60px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">5</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:60px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">6</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:60px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">7</span></p> </td></tr><tr><td colspan="1" rowspan="1" style="vertical-align:middle;width:120px;"> <p style="margin-left:0;text-align:center;"><strong><span style="color:#333333;">local_rank</span></strong></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:60px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">0</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:60px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">1</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:60px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">0</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:60px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">1</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:60px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">0</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:60px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">1</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:60px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">0</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:60px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">1</span></p> </td></tr></tbody></table> 
+  <ul><li style="text-align:left;"><strong><span style="color:#333333;">数据的分布式采样</span></strong></li></ul> 
+  <p style="margin-left:0;text-align:justify;"></p> 
+  <pre><span style="background-color:#fafafa;"><code><span style="color:#000000;">train_sampler </span><span style="color:#9a6e3a;">=</span><span style="color:#000000;"> DistributedSampler</span><span style="color:#999999;">(</span><span style="color:#000000;">train_dataset</span><span style="color:#999999;">)</span> <span style="color:#708090;"># 训练集分配</span>
+<span style="color:#000000;">eval_sampler </span><span style="color:#9a6e3a;">=</span><span style="color:#000000;"> DistributedSampler</span><span style="color:#999999;">(</span><span style="color:#000000;">eval_dataset</span><span style="color:#999999;">)</span>  <span style="color:#708090;"># 测试集分配</span>
+<span style="color:#000000;">train_dataloader </span><span style="color:#9a6e3a;">=</span><span style="color:#000000;"> DataLoader</span><span style="color:#999999;">(</span><span style="color:#000000;">train_dataset</span><span style="color:#999999;">,</span><span style="color:#000000;"> shuffle</span><span style="color:#9a6e3a;">=</span><span style="color:#990055;">False</span><span style="color:#999999;">,</span><span style="color:#000000;"> collate_fn</span><span style="color:#9a6e3a;">=</span><span style="color:#000000;">collate_fn</span><span style="color:#999999;">,</span><span style="color:#000000;"> batch_size</span><span style="color:#9a6e3a;">=</span><span style="color:#669900;">int</span><span style="color:#999999;">(</span><span style="color:#000000;">args</span><span style="color:#999999;">[</span><span style="color:#669900;">'batch_size'</span><span style="color:#999999;">]),</span><span style="color:#000000;"> sampler</span><span style="color:#9a6e3a;">=</span><span style="color:#000000;">train_sampler</span><span style="color:#999999;">)</span> <span style="color:#708090;"># 读取数据</span>
+<span style="color:#000000;">eval_dataloader </span><span style="color:#9a6e3a;">=</span><span style="color:#000000;"> DataLoader</span><span style="color:#999999;">(</span><span style="color:#000000;">eval_dataset</span><span style="color:#999999;">,</span><span style="color:#000000;"> shuffle</span><span style="color:#9a6e3a;">=</span><span style="color:#990055;">False</span><span style="color:#999999;">,</span><span style="color:#000000;"> collate_fn</span><span style="color:#9a6e3a;">=</span><span style="color:#000000;">collate_fn</span><span style="color:#999999;">,</span><span style="color:#000000;"> batch_size</span><span style="color:#9a6e3a;">=</span><span style="color:#669900;">int</span><span style="color:#999999;">(</span><span style="color:#000000;">args</span><span style="color:#999999;">[</span><span style="color:#669900;">'batch_size'</span><span style="color:#999999;">]),</span><span style="color:#000000;"> sampler</span><span style="color:#9a6e3a;">=</span><span style="color:#000000;">eval_sampler</span><span style="color:#999999;">)</span>
+</code></span></pre> 
+  <p></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">DistributedSampler是PyTorch中的一个采样器，用于在分布式训练中对数据进行分布式采样并分配给不同的进程。确保每个进程都可以访问到不同的数据。同时，DistributedSampler还可以通过设置随机种子来确保每个进程的采样结果是一致的，从而保证了模型的可重复性。</span></p> 
+  <ul><li style="text-align:left;"><strong><span style="color:#333333;">模型的并行</span></strong></li></ul> 
+  <p style="margin-left:0;text-align:left;"></p> 
+  <pre><span style="background-color:#fafafa;"><code><span style="color:#000000;">model </span><span style="color:#9a6e3a;">=</span><span style="color:#000000;"> torch</span><span style="color:#999999;">.</span><span style="color:#000000;">nn</span><span style="color:#999999;">.</span><span style="color:#000000;">parallel</span><span style="color:#999999;">.</span><span style="color:#000000;">DistributedDataParallel</span><span style="color:#999999;">(</span><span style="color:#000000;">model</span><span style="color:#999999;">.</span><span style="color:#000000;">cuda</span><span style="color:#999999;">(),</span><span style="color:#000000;"> device_ids</span><span style="color:#9a6e3a;">=</span><span style="color:#999999;">[</span><span style="color:#000000;">rank</span><span style="color:#999999;">],</span><span style="color:#000000;"> output_device</span><span style="color:#9a6e3a;">=</span><span style="color:#000000;">rank</span><span style="color:#999999;">)</span>
+</code></span></pre> 
+  <p></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">使用分布式数据并行(DistributedDataParallel)来并行化模型</span></p> 
+  <p style="margin-left:0;text-align:justify;"><strong><span style="color:#333333;">device_ids=[rank]</span></strong></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;"> 指定要用于并行化的GPU设备列表</span></p> 
+  <p style="margin-left:0;text-align:justify;"><strong><span style="color:#333333;">output_device=rank </span></strong></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">指定模型输出的设备</span></p> 
+  <ul><li style="text-align:left;"><strong><span style="color:#333333;">终端启动</span></strong></li></ul> 
+  <p style="margin-left:0;text-align:justify;"></p> 
+  <pre><span style="background-color:#fafafa;"><code><span style="color:#708090;"># 单机多卡</span>
+<span style="color:#000000;">CUDA_VISIBLE_DEVICES</span><span style="color:#9a6e3a;">=</span><span style="color:#990055;">0</span><span style="color:#999999;">,</span><span style="color:#990055;">3</span><span style="color:#000000;"> torchrun </span><span style="color:#9a6e3a;">--</span><span style="color:#000000;">standalone </span><span style="color:#9a6e3a;">--</span><span style="color:#000000;">nproc_per_node</span><span style="color:#9a6e3a;">=</span><span style="color:#990055;">2</span><span style="color:#000000;"> sft</span><span style="color:#999999;">.</span><span style="color:#000000;">py</span>
+<span style="color:#708090;"># 多机多卡</span>
+<span style="color:#000000;">torchrun </span><span style="color:#9a6e3a;">--</span><span style="color:#000000;">nproc_per_node</span><span style="color:#9a6e3a;">=</span><span style="color:#990055;">2</span> <span style="color:#9a6e3a;">--</span><span style="color:#000000;">nnodes</span><span style="color:#9a6e3a;">=</span><span style="color:#990055;">2</span> <span style="color:#9a6e3a;">--</span><span style="color:#000000;">node_rank</span><span style="color:#9a6e3a;">=</span><span style="color:#990055;">0</span> <span style="color:#9a6e3a;">--</span><span style="color:#000000;">rdzv_id</span><span style="color:#9a6e3a;">=</span><span style="color:#990055;">456</span> <span style="color:#9a6e3a;">--</span><span style="color:#000000;">rdzv_backend</span><span style="color:#9a6e3a;">=</span><span style="color:#000000;">c10d </span><span style="color:#9a6e3a;">--</span><span style="color:#000000;">rdzv_endpoint</span><span style="color:#9a6e3a;">=</span><span style="color:#990055;">124.225.183.166</span><span style="color:#999999;">:</span><span style="color:#990055;">3334</span><span style="color:#000000;"> pre_ddp</span><span style="color:#999999;">.</span><span style="color:#000000;">py</span>
+</code></span></pre> 
+  <p></p> 
+  <p style="margin-left:0;text-align:left;"></p> 
+  <ul><li style="text-align:left;"><strong><span style="color:#333333;">DeepSpeed+ZeRO</span></strong></li></ul> 
+  <p style="margin-left:0;text-align:left;"><span style="color:#333333;">DeepSpeed是一个由微软开发的用于加速和扩展深度学习训练的开源库。在模型并行和数据并行、自动精度调节、内存优化、混合精度训练、分布式训练提供一系列优化技术和工具。使得在单个节点上实现更大的模型、更长的序列长度和更快的训练速度。大模型训练中通常将DeepSpeed和ZeRO相结合。</span></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">ZeRO是一种针对大规模分布式深度学习的新型内存优化技术。在DeepSpeed下，ZeRO训练支持了完整的ZeRO Stages1, 2和3，以及支持将优化器状态、梯度和模型参数从GPU显存下沉到CPU内存或者硬盘上，实现不同程度的显存节省，以便训练更大的模型。</span></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">不同Stage对应的做法：</span></p> 
+  <ol><li style="text-align:left;"><span style="color:#333333;">Stage 1: 把 优化器状态(optimizer states) 分片到每个数据并行的工作进程(每个GPU)下</span></li><li style="text-align:left;"><span style="color:#333333;">Stage 2: 把 优化器状态(optimizer states) + 梯度(gradients) 分片到每个数据并行的工作进程(每个GPU)下</span></li><li style="text-align:left;"><span style="color:#333333;">Stage 3: 把 优化器状态(optimizer states) + 梯度(gradients) + 模型参数(parameters) 分片到每个数据并行的工作进程(每个GPU)下</span></li></ol> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">Optimizer Offload: 在Stage2的基础上，把梯度和优化器状态下沉到CPU内存或硬盘上</span></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">Param Offload: 在Stage3的基础上，把模型参数下沉到CPU内存或硬盘上</span></p> 
+  <p style="margin-left:0;text-align:left;"></p> 
+  <p style="margin-left:0;text-align:center;"><span style="color:#333333;">图5 ZeRO中对stage的描述</span></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">在上述内存消耗公式中，Ψ表示模型大小（参数个数），K表示优化器状态的内存乘数，Nd表示数据并行度。</span></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">由上图可知：</span></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">如果不用ZeRO，需要占用120GB的显存，A100最大才80GB，因此是跑不动的</span></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">如果用ZeRO Stage1，则占用31.4GB，A100 40GB或者80GB卡都能跑，单机多卡或多机多卡训练的通信量不变</span></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">如果用ZeRO Stage2，则占用16.6GB，大部分卡都能跑了，比如V100 32GB，3090 24GB，通信量同样不变</span></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">如果用ZeRO Stage3，则占用1.9GB，啥卡都能跑了，但是通信量会变为1.5倍</span></p> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">所以根据实际硬件资源，选择适合Stage策略即可。如果遇到要跑更大的模型，比如想在3090 24GB下跑13B模型，可能Stage3也跑不起来，此时可以开启Optimizer Offload和Param Offload(可以加载到CPU上)即可跑起来，但相应的性能会受影响。</span></p> 
+  <p style="margin-left:0;text-align:left;"><span style="color:#333333;">deepspeed.json中zero示例代码如下：</span></p> 
+  <p style="margin-left:0;text-align:left;"></p> 
+  <pre><span style="background-color:#fafafa;"><code><span style="color:#990055;">"zero_optimization"</span><span style="color:#9a6e3a;">:</span> <span style="color:#999999;">{<!-- --></span>
+        <span style="color:#990055;">"stage"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">3</span><span style="color:#999999;">,</span><span style="color:#000000;"> # 选择stage3</span>
+        <span style="color:#990055;">"offload_param"</span><span style="color:#9a6e3a;">:</span> <span style="color:#999999;">{<!-- --></span>
+            <span style="color:#990055;">"device"</span><span style="color:#9a6e3a;">:</span> <span style="color:#669900;">"cpu"</span><span style="color:#999999;">,</span><span style="color:#000000;"> # 将参数加载到cpu上</span>
+            <span style="color:#990055;">"pin_memory"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">true</span>
+        <span style="color:#999999;">},</span>
+        <span style="color:#990055;">"offload_optimizer"</span><span style="color:#9a6e3a;">:</span> <span style="color:#999999;">{<!-- --></span>
+            <span style="color:#990055;">"device"</span><span style="color:#9a6e3a;">:</span> <span style="color:#669900;">"cpu"</span><span style="color:#999999;">,</span><span style="color:#000000;"> # 将优化器加载到cpu上</span>
+            <span style="color:#990055;">"pin_memory"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">true</span>
+        <span style="color:#999999;">},</span>
+        <span style="color:#990055;">"contiguous_gradients"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">true</span><span style="color:#999999;">,</span>
+        <span style="color:#990055;">"overlap_comm"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">true</span>
+    <span style="color:#999999;">}</span>
+</code></span></pre> 
+  <p></p> 
+  <p style="margin-left:0;text-align:justify;"><strong><span style="color:#333333;">contiguous_gradients</span></strong><span style="color:#333333;">：在梯度产生时将其复制到一个连续的缓冲区中。在反向传播过程中避免了内存碎片化问题，默认为true</span></p> 
+  <p style="margin-left:0;text-align:justify;"><strong><span style="color:#333333;">overlap_comm</span></strong><span style="color:#333333;">：控制是否使用通信与计算的重叠。当设置为True时，DeepSpeed将在梯度计算时尝试并行执行梯度通信。可以有效地减少通信时间，从而加速整个训练过程。</span></p> 
+  <p style="margin-left:0;text-align:left;"><strong><span style="color:#333333;">Q1：在训练大模型时，VRAM(显存)是如何分配的？</span></strong></p> 
+  <table border="1" cellspacing="0"><tbody><tr><td colspan="1" rowspan="1" style="background-color:#d8d8d8;vertical-align:middle;width:201px;"> <p style="margin-left:0;text-align:center;"><strong><span style="color:#333333;">名称</span></strong></p> </td><td colspan="1" rowspan="1" style="background-color:#d8d8d8;vertical-align:middle;width:201px;"> <p style="margin-left:0;text-align:center;"><strong><span style="color:#333333;">说明</span></strong></p> </td><td colspan="1" rowspan="1" style="background-color:#d8d8d8;vertical-align:middle;width:201px;"> <p style="margin-left:0;text-align:center;"><strong><span style="color:#333333;">参数量估计</span></strong></p> </td></tr><tr><td colspan="1" rowspan="1" style="vertical-align:middle;width:201px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">parameters</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:201px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">模型参数</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:201px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">模型参数量M</span></p> </td></tr><tr><td colspan="1" rowspan="1" style="vertical-align:middle;width:201px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">activation</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:201px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">forward时计算的每层Tensor</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:201px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">层数*input shape</span></p> </td></tr><tr><td colspan="1" rowspan="1" style="vertical-align:middle;width:201px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">gradient</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:201px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">backward时计算的梯度</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:201px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">模型参数量M</span></p> </td></tr><tr><td colspan="1" rowspan="1" style="vertical-align:middle;width:201px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">optimizer state</span></p> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">(占比最多)</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:201px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">Adam等优化器内部状态 ，包含parameters,gradient,momentum和variance of the gradients</span></p> </td><td colspan="1" rowspan="1" style="vertical-align:middle;width:201px;"> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">KM(模型参数量的K倍)</span></p> <p style="margin-left:0;text-align:center;"><span style="color:#333333;">Mixed-precision Adam has k=12</span></p> </td></tr></tbody></table> 
+  <p style="margin-left:0;text-align:left;"><strong><span style="color:#333333;">Q2：DeepSpeed/ZeRO的解决方法?</span></strong></p> 
+  <ol><li style="text-align:left;"><span style="color:#333333;">Partitioning(包括优化器状态、梯度、参数量的划分)：把Tensor均等分发到Nd张GPU卡上，每张GPU的显存为总显存/Nd</span></li></ol> 
+  <p style="margin-left:0;text-align:left;"><img alt="" height="449" src="https://images2.imgbox.com/e5/30/TO0XEPus_o.png" width="650"></p> 
+  <p style="margin-left:0;text-align:center;"><span style="color:#333333;">图6 划分技术显存占用</span></p> 
+  <ol><li style="text-align:left;"><span style="color:#333333;">CPU/NVRAM Offload：把暂时用不到的Tensor从VRAM搬到RAM/NVRAM上</span></li><li style="text-align:left;"><span style="color:#333333;">Model Parallelism(Pipeline)/模型并行：把模型按层切分，分发到不同的GPU上</span></li></ol> 
+  <p style="margin-left:0;text-align:left;"></p> 
+  <p style="margin-left:0;text-align:left;"><strong><span style="color:#333333;">Q3：DeepSpeed是如何在代码中使用的？</span></strong></p> 
+  <p style="margin-left:0;text-align:left;"></p> 
+  <pre><span style="background-color:#fafafa;"><code><span style="color:#000000;">args = parse_arguments() # 这里会初始化deepspeed所使用到的参数</span>
+
+<span style="color:#000000;"># init distributed</span>
+<span style="color:#000000;">deepspeed.init_distributed()</span>
+
+<span style="color:#000000;"># init model</span>
+<span style="color:#000000;">model = MyClassifier(</span><span style="color:#990055;">3</span><span style="color:#999999;">,</span> <span style="color:#990055;">100</span><span style="color:#999999;">,</span><span style="color:#000000;"> ch_multi=</span><span style="color:#990055;">128</span><span style="color:#000000;">)</span>
+
+<span style="color:#000000;"># init dataset</span>
+<span style="color:#000000;">ds = MyDataset((</span><span style="color:#990055;">3</span><span style="color:#999999;">,</span> <span style="color:#990055;">512</span><span style="color:#999999;">,</span> <span style="color:#990055;">512</span><span style="color:#000000;">)</span><span style="color:#999999;">,</span> <span style="color:#990055;">100</span><span style="color:#999999;">,</span><span style="color:#000000;"> sample_count=int(</span><span style="color:#990055;">1e6</span><span style="color:#000000;">))</span>
+
+<span style="color:#000000;"># init engine</span>
+<span style="color:#000000;">engine</span><span style="color:#999999;">,</span><span style="color:#000000;"> optimizer</span><span style="color:#999999;">,</span><span style="color:#000000;"> training_dataloader</span><span style="color:#999999;">,</span><span style="color:#000000;"> lr_scheduler = deepspeed.initialize(</span>
+<span style="color:#000000;">        args=args</span><span style="color:#999999;">,</span>
+<span style="color:#000000;">        model=model</span><span style="color:#999999;">,</span>
+<span style="color:#000000;">        model_parameters=model.parameters()</span><span style="color:#999999;">,</span>
+<span style="color:#000000;">        training_data=ds</span><span style="color:#999999;">,</span>
+<span style="color:#000000;">        config=deepspeed_config</span><span style="color:#999999;">,</span><span style="color:#000000;"> # 传入deepspeed的配置文件</span>
+<span style="color:#000000;">    )</span>
+
+<span style="color:#000000;"># load checkpoint</span>
+<span style="color:#000000;">engine.load_checkpoint(</span><span style="color:#669900;">""</span><span style="color:#000000;">)</span>
+
+<span style="color:#000000;"># train</span>
+<span style="color:#000000;">last_time = time.time()</span>
+<span style="color:#000000;">loss_list = </span><span style="color:#999999;">[]</span>
+<span style="color:#000000;">echo_interval = </span><span style="color:#990055;">10</span>
+
+<span style="color:#000000;">engine.train()</span>
+<span style="color:#000000;">for step</span><span style="color:#999999;">,</span><span style="color:#000000;"> (xx</span><span style="color:#999999;">,</span><span style="color:#000000;"> yy) in enumerate(training_dataloader)</span><span style="color:#9a6e3a;">:</span>
+<span style="color:#000000;">    step += </span><span style="color:#990055;">1</span>
+<span style="color:#000000;">    xx = xx.to(device=engine.device</span><span style="color:#999999;">,</span><span style="color:#000000;"> dtype=torch.float16)</span>
+<span style="color:#000000;">    yy = yy.to(device=engine.device</span><span style="color:#999999;">,</span><span style="color:#000000;"> dtype=torch.long).reshape(</span><span style="color:#990055;">-1</span><span style="color:#000000;">)</span>
+
+<span style="color:#000000;">    outputs = engine(xx)</span>
+<span style="color:#000000;">    loss = tnf.cross_entropy(outputs</span><span style="color:#999999;">,</span><span style="color:#000000;"> yy)</span>
+<span style="color:#000000;">    engine.backward(loss)</span>
+<span style="color:#000000;">    engine.step()</span>
+<span style="color:#000000;">    loss_list.append(loss.detach().cpu().numpy())</span>
+
+<span style="color:#000000;">    if step % echo_interval == </span><span style="color:#990055;">0</span><span style="color:#9a6e3a;">:</span>
+<span style="color:#000000;">        loss_avg = np.mean(loss_list</span><span style="color:#999999;">[</span><span style="color:#000000;">-echo_interval</span><span style="color:#9a6e3a;">:</span><span style="color:#999999;">]</span><span style="color:#000000;">)</span>
+<span style="color:#000000;">        used_time = time.time() - last_time</span>
+<span style="color:#000000;">        time_p_step = used_time / echo_interval</span>
+<span style="color:#000000;">        if args.local_rank == </span><span style="color:#990055;">0</span><span style="color:#9a6e3a;">:</span>
+<span style="color:#000000;">            logging.info(</span>
+                <span style="color:#669900;">"[Train Step] Step:{:10d}  Loss:{:8.4f} | Time/Batch: {:6.4f}s"</span><span style="color:#999999;">,</span>
+<span style="color:#000000;">                step</span><span style="color:#999999;">,</span><span style="color:#000000;"> loss_avg</span><span style="color:#999999;">,</span><span style="color:#000000;"> time_p_step</span><span style="color:#999999;">,</span>
+<span style="color:#000000;">            )</span>
+<span style="color:#000000;">        last_time = time.time()</span>
+<span style="color:#000000;"># save checkpoint</span>
+<span style="color:#000000;">engine.save_checkpoint(</span><span style="color:#669900;">" "</span><span style="color:#000000;">)</span>
+</code></span></pre> 
+  <p></p> 
+  <p style="margin-left:0;text-align:left;"><strong><span style="color:#333333;">Q4：deepspeed_config.json参数是怎样的？</span></strong></p> 
+  <p style="margin-left:0;text-align:left;"><span style="color:#333333;">这里对deepspeed中所使用的参数进行简单的描述</span></p> 
+  <p style="margin-left:0;text-align:left;"></p> 
+  <pre><span style="background-color:#fafafa;"><code><span style="color:#999999;">{<!-- --></span>
+    <span style="color:#990055;">"train_micro_batch_size_per_gpu"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">1</span><span style="color:#999999;">,</span><span style="color:#000000;"> # 每张卡使用的样本数</span>
+    <span style="color:#990055;">"gradient_accumulation_steps"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">1</span><span style="color:#999999;">,</span><span style="color:#000000;"> # 梯度累计</span>
+    <span style="color:#990055;">"optimizer"</span><span style="color:#9a6e3a;">:</span> <span style="color:#999999;">{<!-- --></span><span style="color:#000000;">   # 指定优化器</span>
+        <span style="color:#990055;">"type"</span><span style="color:#9a6e3a;">:</span> <span style="color:#669900;">"Adam"</span><span style="color:#999999;">,</span>
+        <span style="color:#990055;">"params"</span><span style="color:#9a6e3a;">:</span> <span style="color:#999999;">{<!-- --></span>
+            <span style="color:#990055;">"lr"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">0.001</span><span style="color:#999999;">,</span>
+            <span style="color:#990055;">"betas"</span><span style="color:#9a6e3a;">:</span> <span style="color:#999999;">[</span>
+                <span style="color:#990055;">0.8</span><span style="color:#999999;">,</span>
+                <span style="color:#990055;">0.999</span>
+            <span style="color:#999999;">],</span>
+            <span style="color:#990055;">"eps"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">1e-08</span><span style="color:#999999;">,</span>
+            <span style="color:#990055;">"weight_decay"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">3e-07</span>
+        <span style="color:#999999;">}</span>
+    <span style="color:#999999;">},</span>
+    <span style="color:#990055;">"scheduler"</span><span style="color:#9a6e3a;">:</span> <span style="color:#999999;">{<!-- --></span><span style="color:#000000;">   # 指定调度器</span>
+        <span style="color:#990055;">"type"</span><span style="color:#9a6e3a;">:</span> <span style="color:#669900;">"WarmupLR"</span><span style="color:#999999;">,</span>
+        <span style="color:#990055;">"params"</span><span style="color:#9a6e3a;">:</span> <span style="color:#999999;">{<!-- --></span>
+            <span style="color:#990055;">"warmup_min_lr"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">0</span><span style="color:#999999;">,</span>
+            <span style="color:#990055;">"warmup_max_lr"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">0.001</span><span style="color:#999999;">,</span>
+            <span style="color:#990055;">"warmup_num_steps"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">1000</span>
+        <span style="color:#999999;">}</span>
+    <span style="color:#999999;">},</span>
+    <span style="color:#990055;">"activation_checkpointing"</span><span style="color:#9a6e3a;">:</span> <span style="color:#999999;">{<!-- --></span><span style="color:#000000;">  # 对checkpoints进行划分，这部分用的比较少</span>
+        <span style="color:#990055;">"partition_activations"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">true</span><span style="color:#999999;">,</span>
+        <span style="color:#990055;">"cpu_checkpointing"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">true</span><span style="color:#999999;">,</span>
+        <span style="color:#990055;">"contiguous_memory_optimization"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">false</span><span style="color:#999999;">,</span>
+        <span style="color:#990055;">"number_checkpoints"</span><span style="color:#9a6e3a;">:</span> <span style="color:#000000;">null</span><span style="color:#999999;">,</span>
+        <span style="color:#990055;">"synchronize_checkpoint_boundary"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">false</span><span style="color:#999999;">,</span>
+        <span style="color:#990055;">"profile"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">true</span>
+    <span style="color:#999999;">},</span>
+    <span style="color:#990055;">"fp16"</span><span style="color:#9a6e3a;">:</span> <span style="color:#999999;">{<!-- --></span><span style="color:#000000;">        # 是否使用半精度</span>
+        <span style="color:#990055;">"enabled"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">true</span><span style="color:#999999;">,</span>
+        <span style="color:#990055;">"auto_cast"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">false</span><span style="color:#999999;">,</span>
+        <span style="color:#990055;">"loss_scale"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">0</span><span style="color:#999999;">,</span>
+        <span style="color:#990055;">"initial_scale_power"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">16</span><span style="color:#999999;">,</span>
+        <span style="color:#990055;">"loss_scale_window"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">1000</span><span style="color:#999999;">,</span>
+        <span style="color:#990055;">"hysteresis"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">2</span><span style="color:#999999;">,</span>
+        <span style="color:#990055;">"consecutive_hysteresis"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">false</span><span style="color:#999999;">,</span>
+        <span style="color:#990055;">"min_loss_scale"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">1</span>
+    <span style="color:#999999;">},</span>
+    <span style="color:#990055;">"zero_optimization"</span><span style="color:#9a6e3a;">:</span> <span style="color:#999999;">{<!-- --></span><span style="color:#000000;"> # zero优化器方法</span>
+        <span style="color:#990055;">"stage"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">3</span><span style="color:#999999;">,</span>
+        <span style="color:#990055;">"offload_param"</span><span style="color:#9a6e3a;">:</span> <span style="color:#999999;">{<!-- --></span>
+            <span style="color:#990055;">"device"</span><span style="color:#9a6e3a;">:</span> <span style="color:#669900;">"cpu"</span><span style="color:#999999;">,</span>
+            <span style="color:#990055;">"pin_memory"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">true</span>
+        <span style="color:#999999;">},</span>
+        <span style="color:#990055;">"offload_optimizer"</span><span style="color:#9a6e3a;">:</span> <span style="color:#999999;">{<!-- --></span>
+            <span style="color:#990055;">"device"</span><span style="color:#9a6e3a;">:</span> <span style="color:#669900;">"cpu"</span><span style="color:#999999;">,</span>
+            <span style="color:#990055;">"pin_memory"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">true</span>
+        <span style="color:#999999;">},</span>
+        <span style="color:#990055;">"contiguous_gradients"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">true</span><span style="color:#999999;">,</span>
+        <span style="color:#990055;">"overlap_comm"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">true</span><span style="color:#999999;">,</span>
+        <span style="color:#990055;">"stage3_gather_16bit_weights_on_model_save"</span><span style="color:#9a6e3a;">:</span> <span style="color:#990055;">true</span><span style="color:#000000;"> #训练完导出fp16模型</span>
+
+    <span style="color:#999999;">}</span>
+<span style="color:#999999;">}</span>
+</code></span></pre> 
+  <p></p> 
+  <p style="margin-left:0;text-align:left;"><span style="color:#333333;">在deepspeed_config.json中有很多参数可以用"auto"来替代，例如train_micro_batch_size_per_gpu、gradient_accumulation_steps等等，参数较多，具体用法可以参考官方文档</span></p> 
+  <p style="margin-left:0;text-align:left;"><a href="https://www.deepspeed.ai/docs/config-json/" rel="nofollow" title="deepspeed官方文档">deepspeed官方文档</a></p> 
+  <p style="margin-left:0;text-align:left;"></p> 
+  <h2 style="text-align:left;"><strong><span style="color:#1a1a1a;">3. 总结</span></strong></h2> 
+  <p style="margin-left:0;text-align:justify;"><span style="color:#333333;">本文对大模型训练所涉及的并行训练(单机多卡，多机多卡)的概念进行了初步介绍，包括数据切分、模型切分、分布式训练等，并给出了些简单的示例。其次基于此对项目真实数据进行了DDP和DeepSpeed的相关试验。大模型涉及的训练策略和参数种类较多，本文仅为初步探索，更深入的研究还需后期进一步学习。</span></p> 
+  <h2 style="margin-left:0px;text-align:justify;"><strong><span style="color:#1a1a1a;">4. 相关资料</span></strong></h2> 
+  <p style="margin-left:0;text-align:left;"><span style="color:#333333;">deepspeed简单应用项目参考：</span><a href="https://github.com/OvJat/DeepSpeedTutorial" title="https://github.com/OvJat/DeepSpeedTutorial">https://github.com/OvJat/DeepSpeedTutorial</a></p> 
+  <p style="margin-left:0;text-align:left;"><span style="color:#333333;">deepspeed官方文档：</span><a href="https://www.deepspeed.ai/docs/config-json/" rel="nofollow" title="DeepSpeed Configuration JSON - DeepSpeed">DeepSpeed Configuration JSON - DeepSpeed</a></p> 
+  <p style="margin-left:0;text-align:left;"><span style="color:#333333;">中科曙光使用指南：</span><a href="https://ac.sugon.com/doc/1.0.6/11250/general-handbook/compile/deep-learning.html?q=" rel="nofollow" title="深度学习框架使用简介 · 计算服务">深度学习框架使用简介 · 计算服务</a></p> 
+  <p style="margin-left:0;text-align:left;"><span style="color:#333333;">本文所使用的项目地址：</span></p> 
+  <p style="margin-left:0;text-align:left;"><a href="https://github.com/littepan/LLaMA-Efficient-Tuning/blob/main/README_zh.md" title="https://github.com/littepan/LLaMA-Efficient-Tuning/blob/main/README_zh.md">https://github.com/littepan/LLaMA-Efficient-Tuning/blob/main/README_zh.md</a></p> 
+  <h2 style="margin-left:0pt;text-align:left;"></h2> 
+  <p style="margin-left:0;text-align:left;"></p> 
+ </div> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/0b73b87ed630923e0f9e0cc52ec1bfd5/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">81基于matlab GUI的图像处理</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/8df3d17afa0e18ace5e1e223aea0c3f4/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">中科曙光使用记录</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

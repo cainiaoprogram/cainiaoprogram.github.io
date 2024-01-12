@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>关于对cpu的理解和kvm虚拟机到物理cpu的绑定 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="关于对cpu的理解和kvm虚拟机到物理cpu的绑定" />
+<meta property="og:description" content="这段时间一直在想，云计算除了虚拟化之外，还应该有其它的东西，那就是优化。因为我们虚拟出来资源之后怎么用，怎么划分，是并行也好，是租给用户使用也好，都要实现资源调度和使用的最优化。嗯，这是这段时间关于云计算的想法。 下面分享一下最近两天做的一些事。
+首先是对cpu的理解，这个大家应该都清楚，我这里只是进行记录，方便后面查询。
+在linux下的/proc/cpuinfo文件里，保存了cpu的详细的信息，有兴趣的可以打开看看，有一个误区就是大家看到有两个或四个cpu其实只是一个物理cpu，那四个只是逻辑的，也就是说我们一般的pc只有一个插槽（socket），这个可以看你的physical id来确定，如果只有一个cpu的话，这几个逻辑cpu的physicalid应该都是一样的。那么我们平时所说的几核几核怎么看呢？对，你应该看你的core id，我现在用的机器就有两个coreid，一个0，一个1，也就是说是两核的。那么你可能会问，逻辑cpu和核是什么关系呢？应该是这样的，你注意看你的 /proc/cpuinfo文件会发现，有两个或多个逻辑cpu的coreid相同，是的，也就是说，两个或多个逻辑cpu运行在一个核上。
+如果还不够理解，那么看下面的例子：
+从表中可以看到有两个物理cpu，八个逻辑cpu。
+此例说明有逻辑处理器0 和 4 驻留在物理封装 0 的内核 0 上。这就表示逻辑处理器 0 和 4 支持超线程（HT）技术。相同的工作可用于封装 0 内核1 上的逻辑处理器 2 和 6，封装 1 内核 2 上的逻辑处理器 1 和 5，以及封装 1 内核 3 上的逻辑处理器 3 和7。此系统支持超线程（HT）技术，因为两个逻辑处理器共享同一个内核。有两种方式可以确定是否支持多内核。由于内核 0 和 1 存在于封装0 上，而内核 2 和 3 存在于封装 1 上，所以这是一个多内核系统。此外，cpu cores 条目为2，也说明有两个内核驻留在物理封装中。这是一个多路系统，因为有两个封装。
+下面我们考虑，kvm虚拟出来的虚拟机（vm）是运行在单独的一个逻辑cpu还是可以分别在各个cpu之间运行？虚拟机cpu（vcpu）是什么概念？物理机（host）怎么看待kvm和vcpu?为了搞懂这个概念我们还是要回到命令行中看。举例说明：
+我这里有一个虚拟机叫core8，它含有8个虚拟cpu它的进程编号是20736.不知道怎么看虚拟机的进程编号？在host里使用top命令，嗯，这时你会发现所有的运行在host上面的进程及其使用cpu情况，那么找到这个core8虚拟机的进程编号呢？我们在core8上面执行任意一个死循环操作，这时你再看host上的top就会发现，基本上第一个进程就是这core8了，因为它占得cpu最多，我这里是20736。就是说core8在host看来就是一个进程而已，这个集成的编号是20736.那么现在提出一个问题，这个core8的8个vcpu是怎么个情况呢？在哪里运行呢？这时还是得借助命令行。我们在host里使用ps指令，但是不能单纯了用ps，还要借助于参数：ps -eL//e的意思是打印所有进程，L的意思是连县城也不放过。我这里只显示一下和我们的20736进程相关的信息：
+你会看到和20736相关的有九行，那么这九行是什么呢？
+首先第一列都是20736，第二列里只有第一行是20736，后面的都不是。那么我们这时就应该明白了，对于host来说，kvm虚拟机是一个进程（20736），虚拟机的vcpu都是这个进程衍生出来的线程。这就是为什么除了20736还有另外八行的原因。
+那么我们接着询问，这八个线程是跑在同一个逻辑cpu里吗？为了回答这个问题，我们接着做实验：
+还是借助于ps指令 ：ps -eLo ruser,pid,ppid,lwp,psr| awk ‘{if($5==1) print$0}’
+解释为：ps命令显示当前系统的进程信息的状态，它的“-e”参数用于显示所有的进程，“-L”参数用于将线程（LWP，light-weightprocess）也显示出来，“-o”参数表示以用户自定义的格式输出（其中“psr”这列表示当前分配给进程运行的处理器编号，“lwp”列表示线程的ID，“ruser”表示运行进程的用户，“pid”表示进程的ID，“ppid”表示父进程的ID，）。结合ps和awk工具的使用，是为了分别打印出来运行在不同的逻辑cpu上的进程线程情况。上面的指令就是打印出1号（从0开始编号）cpu的进行线程情况，我们这里只列出和我们相关的：
+这时你会看到，哦，20736号进程衍生出来的线程只有一部分运行在逻辑cpu1上，其它的线程在其它的cpu上了。
+这时就大概明白了，不同的vcpu只是不同的线程，而不同的线程是跑在不同的cpu上的。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/21eb78a1222dfef8f4b5559a08906749/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2016-07-28T09:42:21+08:00" />
+<meta property="article:modified_time" content="2016-07-28T09:42:21+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">关于对cpu的理解和kvm虚拟机到物理cpu的绑定</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">这段时间一直在想，云计算除了虚拟化之外，还应该有其它的东西，那就是优化。因为我们虚拟出来资源之后怎么用，怎么划分，是并行也好，是租给用户使用也好，都要实现资源调度和使用的最优化。嗯，这是这段时间关于云计算的想法。</span> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">下面分享一下最近两天做的一些事。</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">首先是对cpu的理解，这个大家应该都清楚，我这里只是进行记录，方便后面查询。</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">在linux下的/proc/cpuinfo文件里，保存了cpu的详细的信息，有兴趣的可以打开看看，有一个误区就是大家看到有两个或四个cpu其实只是一个物理cpu，那四个只是逻辑的，也就是说我们一般的pc只有一个插槽（socket），这个可以看你的physical id来确定，如果只有一个cpu的话，这几个逻辑cpu的physicalid应该都是一样的。那么我们平时所说的几核几核怎么看呢？对，你应该看你的core id，我现在用的机器就有两个coreid，一个0，一个1，也就是说是两核的。那么你可能会问，逻辑cpu和核是什么关系呢？应该是这样的，你注意看你的 <span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">/proc/cpuinfo文件会发现，有两个或多个逻辑cpu的coreid相同，是的，也就是说，两个或多个逻辑cpu运行在一个核上。</span></span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">如果还不够理解，那么看下面的例子：</span></span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"><span style="padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; white-space:pre; padding-top:0px"><img alt="" src="https://images2.imgbox.com/57/14/DnfH3vPd_o.jpg" title="" style="border-bottom:medium none; border-left:medium none; margin:auto; display:block; max-width:260px; vertical-align:middle; border-top:medium none; border-right:medium none"></span></span></span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"><span style="padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; white-space:pre; padding-top:0px">从</span>表中可以看到有两个物理cpu，八个逻辑cpu。</span></span></p> 
+<p style=""><span style="padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; font-size:24px; padding-top:0px"><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"><span style="padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; white-space:pre; padding-top:0px"><span style="padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; white-space:pre; padding-top:0px">此例说明</span>有<span style="padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; white-space:pre; padding-top:0px">逻辑处理器0 和 4 驻留在物理封装 0 的内核 0 上。这就表示逻辑处理器 0 和 4 支持超线程（HT）技术。相同的工作可用于封装 0 内核1 上的逻辑处理器 2 和 6，封装 1 内核 2 上的逻辑处理器 1 和 5，以及封装 1 内核 3 上的逻辑处理器 3 和7。此系统支持超线程（HT）技术，因为两个逻辑处理器共享同一个内核。有两种方式可以确定是否支持多内核。由于内核 0 和 1 存在于封装0 上，而内核 2 和 3 存在于封装 1 上，所以这是一个多内核系统。此外，cpu cores 条目为2，也说明有两个内核驻留在物理封装中。这是一个多路系统，因为有两个封装</span>。</span><br> </span></span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"><br> </span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">下面我们考虑，kvm虚拟出来的虚拟机（vm）是运行在单独的一个逻辑cpu还是可以分别在各个cpu之间运行？虚拟机cpu（vcpu）是什么概念？物理机（host）怎么看待kvm和vcpu?为了搞懂这个概念我们还是要回到命令行中看。举例说明：</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">我这里有一个虚拟机叫core8，它含有8个虚拟cpu它的进程编号是20736.不知道怎么看虚拟机的进程编号？在host里使用top命令，嗯，这时你会发现所有的运行在host上面的进程及其使用cpu情况，那么找到这个core8虚拟机的进程编号呢？我们在core8上面执行任意一个死循环操作，这时你再看host上的top就会发现，基本上第一个进程就是这core8了，因为它占得cpu最多，我这里是20736。就是说core8在host看来就是一个进程而已，这个集成的编号是20736.那么现在提出一个问题，这个core8的8个vcpu是怎么个情况呢？在哪里运行呢？这时还是得借助命令行。我们在host里使用ps指令，但是不能单纯了用ps，还要借助于参数：ps -eL//e的意思是打印所有进程，L的意思是连县城也不放过。我这里只显示一下和我们的20736进程相关的信息：</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"><img alt="" src="https://images2.imgbox.com/74/cb/wFg4sJgy_o.jpg" title="" style="border-bottom:medium none; border-left:medium none; margin:auto; display:block; max-width:260px; vertical-align:middle; border-top:medium none; border-right:medium none"><br> </span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">你会看到和20736相关的有九行，那么这九行是什么呢？</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">首先第一列都是20736，第二列里只有第一行是20736，后面的都不是。那么我们这时就应该明白了，对于host来说，kvm虚拟机是一个进程（20736），虚拟机的vcpu都是这个进程衍生出来的线程。这就是为什么除了20736还有另外八行的原因。</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">那么我们接着询问，这八个线程是跑在同一个逻辑cpu里吗？为了回答这个问题，我们接着做实验：</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">还是借助于ps指令 ：ps -eLo ruser,pid,ppid,lwp,psr| awk ‘{if($5==1) print$0}’</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">解释为：ps命令显示当前系统的进程信息的状态，它的“-e”参数用于显示所有的进程，“-L”参数用于将线程（LWP，light-weightprocess）也显示出来，“-o”参数表示以用户自定义的格式输出（其中“psr”这列表示当前分配给进程运行的处理器编号，“lwp”列表示线程的ID，“ruser”表示运行进程的用户，“pid”表示进程的ID，“ppid”表示父进程的ID，）。结合ps和awk工具的使用，是为了分别打印出来运行在不同的逻辑cpu上的进程线程情况。上面的指令就是打印出1号（从0开始编号）cpu的进行线程情况，我们这里只列出和我们相关的：</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"><img alt="" src="https://images2.imgbox.com/a2/26/uIL3RDpY_o.jpg" title="" style="border-bottom:medium none; border-left:medium none; margin:auto; display:block; max-width:260px; vertical-align:middle; border-top:medium none; border-right:medium none"><br> </span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">这时你会看到，哦，20736号进程衍生出来的线程只有一部分运行在逻辑cpu1上，其它的线程在其它的cpu上了。</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">这时就大概明白了，不同的vcpu只是不同的线程，而不同的线程是跑在不同的cpu上的。</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">这时就有需求了，某用户提出要一个八核的虚拟机，而且这八个核是单独占用cpu的，也就是说不要和其它的虚拟机共享，为了避免调度带来的时间或者考虑安全，反正他就是提出这么一个需求。这时我们就要用到进程线程的绑定功能了。</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">为了实现这个功能，你首先得会taskset命令，直观上来说，taskset就是设置任务，也就是制定任务运行的情况，是一个很好用的工具。</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"><span style="padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; white-space:pre; padding-top:0px">taskset绑定进程到某个CPU是很方便的：<br> #taskset -pc 0,1 1249<br> 这会绑定1249进程到1号跟1号cpu上。<br> #cat /proc/1249/status<br> Cpus_allowed: 3<br> Cpus_allowed_list: 0-1<br> 重新绑定下：<br> #taskset -pc 1 1249<br> #cat /proc/1249/status<br> Cpus_allowed: 2<br> Cpus_allowed_list: 1<br> 注意这里的Cpu_allowed用的是二进制掩码，3的二进制是11，2的二进制是10。前一个表示可在两个CPU上运行，第二个表示仅在第二个CPU上运行</span>。</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">那么我们这里就可以使用taskset了，只需把这九个线程都绑定在同一个cpu上即可。假设我们把这个虚拟机绑定到1号cpu上：</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">taskset -p 2 20736</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">taskset -p 20740</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">taskset -p 20741</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">......</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">taskset -p 20747</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"><br> </span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">ok,这时你再运行<span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">ps-eLo ruser,pid,ppid,lwp,psr| awk ‘{if($5==1) print$0}’，会看到形如下面的结果：</span></span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"><img alt="" src="https://images2.imgbox.com/9d/8e/utFuNx7V_o.jpg" title="" style="border-bottom:medium none; border-left:medium none; margin:auto; display:block; max-width:260px; vertical-align:middle; border-top:medium none; border-right:medium none"></span></span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">那么也就是完成了我们的虚拟机绑定任务，为了验证一下是否真正实现了绑定，我们在core8虚拟机里运行一个死循环，然后看host里的top指令的结果：</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"><img alt="" src="https://images2.imgbox.com/c9/07/OlO38hay_o.jpg" title="" style="border-bottom:medium none; border-left:medium none; margin:auto; display:block; max-width:260px; vertical-align:middle; border-top:medium none; border-right:medium none"><br> </span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px">我们可以清楚的看到1号cpu的利用率100%，而其它的cpu基本上没用到，这说明我们的绑定是成功的，完成了客户提出的需求。</span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"><br> </span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"><br> </span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"><br> </span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"><br> </span></p> 
+<p style=""><span style="font-size:24px; padding-bottom:0px; margin:0px; padding-left:0px; padding-right:0px; padding-top:0px"></span></p> 
+<p style='word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px; font-size:16px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> <span style="word-wrap:break-word; font-size:14px">通常情况下，在SMP系统中，Linux内核的进程调度器根据自有的调度策略将系统中的一个进程调度到某个CPU上执行。一个进程在前一个执行时间是在cpuM（M为系统中的某CPU的ID）上运行，而在后一个执行时间是在cpuN（N为系统中另一CPU的ID）上运行。这样的情况在Linux中是很可能发生的，因为Linux对进程执行的调度采用时间片法则（即进行用完自己的时间片即被暂停执行），而默认情况下，一个普通进程或线程的处理器亲和性是在所有可用的CPU上，有可能在它们之中的任何一个CPU（包括超线程）上执行。</span></p> 
+<p style='word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px; font-size:16px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> <span style="word-wrap:break-word; font-size:14px">进程的处理器亲和性（Processor Affinity），即是CPU的绑定设置，是指将进程绑定到特定的一个或多个CPU上去执行，而不允许调度到其他的CPU上。Linux内核对进程的调度算法也是遵守进程的处理器亲和性设置的。设置进程的处理器亲和性带来的好处是可以减少进程在多个CPU之间交换运行带来的缓存命中失效（cache missing），从该进程运行的角度来看，可能带来一定程度上的性能提升。换个角度来看，对进程亲和性的设置也可能带来一定的问题，如破坏了原有SMP系统中各个CPU的负载均衡（load balance），这可能会导致整个系统的进程调度变得低效。特别是在多处理器、多核、多线程技术使用的情况下，在NUMA（Non-Uniform Memory Access）</span><sup style="word-wrap:break-word; margin:0px; padding:0px"><span style="word-wrap:break-word; font-size:14px">[3]</span></sup><span style="word-wrap:break-word; font-size:14px">结构的系统中，如果不能基于对系统的CPU、内存等有深入的了解，对进程的处理器亲和性进行设置是可能导致系统的整体性能的下降而非提升。</span></p> 
+<p style='word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px; font-size:16px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> <span style="word-wrap:break-word; font-size:14px">每个vCPU都是宿主机中的一个普通的QEMU线程，可以使用taskset工具对其设置处理器亲和性，使其绑定到某一个或几个固定的CPU上去调度。尽管Linux内核的进程调度算法已经非常高效了，在多数情况下不需要对进程的调度进行干预，不过，在虚拟化环境中有时却有必要对客户机的QEMU进程或线程绑定到固定的逻辑CPU上。下面举一个云计算应用中需要绑定vCPU的实例。</span></p> 
+<p style='word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px; font-size:16px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> <span style="word-wrap:break-word; font-size:14px">作为IAAS（Infrastructure As A Service）类型的云计算提供商的A公司（如Amazon、Google、阿里云、盛大云等），为客户提供一个有2个逻辑CPU计算能力的一个客户机。要求CPU资源独立被占用，不受宿主机中其他客户机的负载水平的影响。为了满足这个需求，可以分为如下两个步骤来实现。</span></p> 
+<p style='word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px; font-size:16px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> <span id="more-1097" style="word-wrap:break-word; margin:0px; padding:0px"></span></p> 
+<p style='word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px; font-size:16px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> <span style="word-wrap:break-word; font-size:14px">第一步，启动宿主机时隔离出两个逻辑CPU专门供一个客户机使用。在Linux内核启动的命令行加上“isolcpus=”参数，可以实现CPU的隔离，让系统启动后普通进程默认都不会调度到被隔离的CPU上执行。例如，隔离了cpu2和cpu3的grub的配置文件如下：</span></p> 
+<div style='word-wrap:break-word; font-size:16px; margin:0px; padding:0px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">title Red Hat Enterprise Linux Server (3.5.0)</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root (hd0,0)</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">kernel /boot/vmlinuz-3.5.0 ro root=UUID=1a65b4bb-cd9b-4bbf-97ff-7e1f7698d3db </span><span style="word-wrap:break-word; margin:0px; padding:0px"><span style="word-wrap:break-word; font-size:14px">isolcpus=2,3</span></span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">initrd /boot/initramfs-3.5.0.img</span></p> 
+</div> 
+<p style='word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px; font-size:16px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> <span style="word-wrap:break-word; font-size:14px">系统启动后，在宿主机中检查是否隔离成功，命令行如下：</span></p> 
+<div style='word-wrap:break-word; font-size:16px; margin:0px; padding:0px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">[root@jay-linux ~]# ps -eLo psr | grep 0 | wc -l</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">106</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">[root@jay-linux ~]# ps -eLo psr | grep 1 | wc -l</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">107</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">[root@jay-linux ~]# ps -eLo psr | grep 2 | wc -l</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">4</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">[root@jay-linux ~]# ps -eLo psr | grep 3 | wc -l</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">4</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">[root@jay-linux ~]# ps -eLo ruser,pid,ppid,lwp,psr,args | awk ‘{if($5==2) print $0}’</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root        10     2    10   2 [migration/2]</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root        11     2    11   2 [kworker/2:0]</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root        12     2    12   2 [ksoftirqd/2]</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root       245     2   245   2 [kworker/2:1]</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">[root@jay-linux ~]# ps –eLo ruser,pid,ppid,lwp,psr,args | awk ‘{if($5==3) print $0}’</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root        13     2    13   3 [migration/3]</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root        14     2    14   3 [kworker/3:0]</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root        15     2    15   3 [ksoftirqd/3]</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root       246     2   246   3 [kworker/3:1]</span></p> 
+</div> 
+<p style='word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px; font-size:16px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> <span style="word-wrap:break-word; font-size:14px">从上面的命令行输出信息可知，cpu0和cpu1上分别有106和107个线程在运行，而cpu2和cpu3上都分别只有4个线程在运行。而且，根据输出信息中cpu2和cpu3上运行的线程信息（也包括进程在内），分别有migration进程（用于进程在不同CPU间迁移）、两个kworker进程（用于处理workqueues）、ksoftirqd进程（用于调度CPU软中断的进程），这些进程都是内核对各个CPU的一些守护进程，而没有其他的普通进程在cup2和cpu3上运行，说明对其的隔离是生效的。</span></p> 
+<p style='word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px; font-size:16px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> <span style="word-wrap:break-word; font-size:14px">另外，简单解释一下上面的一些命令行工具及其参数的意义。ps命令显示当前系统的进程信息的状态，它的“-e”参数用于显示所有的进程，“-L”参数用于将线程（LWP，light-weight process）也显示出来，“-o”参数表示以用户自定义的格式输出（其中“psr”这列表示当前分配给进程运行的处理器编号，“lwp”列表示线程的ID，“ruser”表示运行进程的用户，“pid”表示进程的ID，“ppid”表示父进程的ID，“args”表示运行的命令及其参数）。结合ps和awk工具的使用，是为了分别将在处理器cpu2和cpu3上运行的进程打印出来。</span></p> 
+<p style='word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px; font-size:16px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> <span style="word-wrap:break-word; font-size:14px">第二步，启动一个拥有2个vCPU的客户机并将其vCPU绑定到宿主机中两个CPU上。此操作过程的命令行如下：</span></p> 
+<div style='word-wrap:break-word; font-size:16px; margin:0px; padding:0px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">#（启动一个客户机）</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">[root@jay-linux kvm_demo]# qemu-system-x86_64 rhel6u3.img -smp 2 -m 512 -daemonize</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">VNC server running on ‘::1:5900’</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px"> </span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">#（查看代表vCPU的QEMU线程）</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">[root@jay-linux ~]# ps -eLo ruser,pid,ppid,lwp,psr,args | grep qemu | grep -v grep</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root      3963     1  3963   0 qemu-system-x86_64 rhel6u3.img -smp 2 -m 512 -daemonize</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root      3963     1  3967   0 qemu-system-x86_64 rhel6u3.img -smp 2 -m 512 -daemonize</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root      3963     1  3968   1 qemu-system-x86_64 rhel6u3.img -smp 2 -m 512 –daemonize</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px"> </span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">#（绑定代表整个客户机的QEMU进程，使其运行在cpu2上）</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">[root@jay-linux ~]# </span><span style="word-wrap:break-word; margin:0px; padding:0px"><span style="word-wrap:break-word; font-size:14px">taskset -p 0×4 3963</span></span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">pid 3963′s current affinity mask: 3</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">pid 3963′s new affinity mask: 4</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">#（绑定第一个vCPU的线程，使其运行在cpu2上）</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">[root@jay-linux ~]# </span><span style="word-wrap:break-word; margin:0px; padding:0px"><span style="word-wrap:break-word; font-size:14px">taskset -p 0×4 3967</span></span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">pid 3967′s current affinity mask: 3</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">pid 3967′s new affinity mask: 4</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">#（绑定第二个vCPU的线程，使其运行在cpu3上）</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">[root@jay-linux ~]# </span><span style="word-wrap:break-word; margin:0px; padding:0px"><span style="word-wrap:break-word; font-size:14px">taskset -p 0×8 3968</span></span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">pid 3968′s current affinity mask: 4</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">pid 3968′s new affinity mask: 8</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px"> </span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">#（查看QEMU线程的绑定是否生效，如下的第5列为处理器亲和性）</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">[root@jay-linux ~]# ps -eLo ruser,pid,ppid,lwp,psr,args | grep qemu | grep -v grep</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root      3963     1  3963   2 qemu-system-x86_64 rhel6u3.img -smp 2 -m 512 -daemonize</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root      3963     1  3967   2 qemu-system-x86_64 rhel6u3.img -smp 2 -m 512 -daemonize</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root      3963     1  3968   3 qemu-system-x86_64 rhel6u3.img -smp 2 -m 512 –daemonize</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">#（执行vCPU的绑定后，查看在cpu2上运行的线程）</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">[root@jay-linux ~]# ps -eLo ruser,pid,ppid,lwp,psr,args | awk ‘{if($5==2) print $0}’</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root        10     2    10   2 [migration/2]</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root        11     2    11   2 [kworker/2:0]</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root        12     2    12   2 [ksoftirqd/2]</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root       245     2   245   2 [kworker/2:1]</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root      3963     1  3963   2 qemu-system-x86_64 rhel6u3.img -smp 2 -m 512 -daemonize</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root      3963     1  3967   2 qemu-system-x86_64 rhel6u3.img -smp 2 -m 512 -daemonize</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">#（执行vCPU的绑定后，查看在cpu3上运行的线程）</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">[root@jay-linux ~]# ps –eLo ruser,pid,ppid,lwp,psr,args | awk ‘{if($5==3) print $0}’</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root        13     2    13   3 [migration/3]</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root        14     2    14   3 [kworker/3:0]</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root        15     2    15   3 [ksoftirqd/3]</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root       246     2   246   3 [kworker/3:1]</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">root      3963     1  3968   3 qemu-system-x86_64 rhel6u3.img -smp 2 -m 512 -daemonize</span></p> 
+</div> 
+<p style='word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px; font-size:16px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> <span style="word-wrap:break-word; font-size:14px">由上面的命令行及其输出信息可知，CPU绑定之前，代表这个客户机的QEMU进程和代表各个vCPU的QEMU线程分别被调度到cpu0和cpu1上。使用taskset命令将QEMU进程和第一个vCPU的线程绑定到cpu2，将第二个vCPU线程绑定到cpu3上。绑定之后，即可查看到绑定的结果是生效的，代表两个vCPU的QEMU线程分别运行在cpu2和cpu3上（即使再过一段时间后，它们也不会被调度到其他CPU上去）。</span></p> 
+<p style='word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px; font-size:16px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> <span style="word-wrap:break-word; font-size:14px">对taskset命令解释一下，此处使用的语法是：</span><span style="word-wrap:break-word; margin:0px; padding:0px"><span style="word-wrap:break-word; font-size:14px">taskset -p [mask] pid</span></span><span style="word-wrap:break-word; font-size:14px"> 。其中，mask是一个代表了处理器亲和性的掩码数字，转化为二进制表示后，它的值从最低位到最高位分别代表了第一个逻辑CPU到最后一个逻辑CPU，进程调度器可能将该进程调度到所有标为“1”的位代表的CPU上去运行。根据上面的输出，taskset运行之前，QEMU线程的处理器亲和性mask值是0×3（其二进制值为：0011），可知其可能会被调度到cpu0和cpu1上运行；而运行“taskset -p 0×4 3967”命令后，提示新的mask值被设为0×4（其二进制值为：0100），所以该进程就只能被调度到cpu2上去运行，即通过taskset工具实现了vCPU进程绑定到特定的CPU上。</span></p> 
+<p style='word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px; font-size:16px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> <span style="word-wrap:break-word; font-size:14px">上面命令行中，根据ps命令可以看到QEMU的线程和进程的关系，但如何查看vCPU与QEMU线程之间的关系呢？可以切换（“Ctrl+Alt+2”快捷键）到QEMU monitor中进行查看，运行“info cpus”命令即可（还记得3.6节中运行过的“info kvm”命令吧），其输出结果如下：</span></p> 
+<div style='word-wrap:break-word; font-size:16px; margin:0px; padding:0px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">(qemu) info cpus</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">* CPU #0: pc=0xffffffff810375ab thread_id=3967</span></p> 
+ <p style="word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px"> <span style="word-wrap:break-word; font-size:14px">CPU #1: pc=0xffffffff812b2594 thread_id=3968</span></p> 
+</div> 
+<p style='word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px; font-size:16px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> <span style="word-wrap:break-word; font-size:14px">从上面的输出信息可知，客户机中的cpu0对应的线程ID为3967，cpu1对应的线程ID为3968。另外，“CPU #0”前面有一个星号（*），是标识cpu0是BSP（Boot Strap Processor，系统最初启动时在SMP生效前使用的CPU）。</span></p> 
+<p style='word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px; font-size:16px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> <span style="word-wrap:break-word; font-size:14px">总的来说，在KVM环境中，一般并不推荐手动地人为设置QEMU进程的处理器亲和性来绑定vCPU，但是，在非常了解系统硬件架构的基础上，根据实际应用的需求，是可以将其绑定到特定的CPU上去从而提高客户机中的CPU执行效率或者实现CPU资源独享的隔离性。</span></p> 
+<p style='word-wrap:break-word; margin-top:0px; margin-bottom:8px; padding-top:0px; padding-bottom:0px; font-size:16px; color:rgb(51,51,51); font-family:Verdana,Tahoma,"BitStream vera Sans",Arial,Helvetica,sans-serif; line-height:17px; text-indent:2em'> <span style="word-wrap:break-word; font-size:14px">[2013.03.31] 添加几个关于CPU亲和性的小知识点：</span><br style="word-wrap:break-word; margin:0px; padding:0px"> <span style="word-wrap:break-word; font-size:14px">1. 限制CPU亲和性的原因一般有如下3个：</span><br style="word-wrap:break-word; margin:0px; padding:0px"> <span style="word-wrap:break-word; font-size:14px">1.1 任务中有大量计算存在；</span><br style="word-wrap:break-word; margin:0px; padding:0px"> <span style="word-wrap:break-word; font-size:14px">1.2 测试复杂的应用程序（随着CPU个数的正常，程序的处理能力可以线性地扩展）；</span><br style="word-wrap:break-word; margin:0px; padding:0px"> <span style="word-wrap:break-word; font-size:14px">1.3 运行时间敏感的进程（实时性要求很高）。</span><br style="word-wrap:break-word; margin:0px; padding:0px"> <span style="word-wrap:break-word; font-size:14px">2. 子进程会继承父进程的affinity属性（其实用taskset方式启动一个进程就是一次fork+exec）。</span><br style="word-wrap:break-word; margin:0px; padding:0px"> <span style="word-wrap:break-word; font-size:14px">3. 在进程的代码中，使用sched_setaffinity函数可以设置该进程的CPU亲和性。</span><br style="word-wrap:break-word; margin:0px; padding:0px"> <span style="word-wrap:break-word; font-size:14px">#include </span><br style="word-wrap:break-word; margin:0px; padding:0px"> <span style="word-wrap:break-word; font-size:14px">int sched_setaffinity(pid_t pid, unsigned int len, unsigned long *mask);</span><br style="word-wrap:break-word; margin:0px; padding:0px"> <span style="word-wrap:break-word; font-size:14px">int sched_getaffinity(pid_t pid, unsigned int len, unsigned long *mask);</span><br style="word-wrap:break-word; margin:0px; padding:0px"> <span style="word-wrap:break-word; font-size:14px">4. 使用Nginx时，其配置文件conf/nginx.conf中支持一个名为worker_cpu_affinity的配置项，也就是说，nginx可以为每个工作进程绑定CPU。</span><br style="word-wrap:break-word; margin:0px; padding:0px"> <span style="word-wrap:break-word; font-size:14px">如下配置：</span><br style="word-wrap:break-word; margin:0px; padding:0px"> <span style="word-wrap:break-word; font-size:14px">worker_processes 3;</span><br style="word-wrap:break-word; margin:0px; padding:0px"> <span style="word-wrap:break-word; font-size:14px">worker_cpu_affinity 0010 0100 1000;</span><br style="word-wrap:break-word; margin:0px; padding:0px"> <span style="word-wrap:break-word; font-size:14px">这里0010 0100 1000是掩码，分别代表第2、3、4颗CPU核心（或超线程）。</span><br style="word-wrap:break-word; margin:0px; padding:0px"> <span style="word-wrap:break-word; font-size:14px">重启nginx后，3个工作进程就可以各自用各自的CPU了。</span><br style="word-wrap:break-word; margin:0px; padding:0px"> <span style="word-wrap:break-word; font-size:14px">5. 在Windows系统中的“任务管理器”中，也可以对一个进程设置CPU亲和性“set affinity”。<br style="word-wrap:break-word"> <br style="word-wrap:break-word"> </span><span style="word-wrap:break-word; color:rgb(69,69,69); font-family:Tahoma,Helvetica,Arial,STHeiti; font-size:14px; line-height:1.5; text-indent:2em">逻辑CPU个数：</span><span style="word-wrap:break-word; font-size:14px"></span></p> 
+<div id="content" class="content mod-cs-content text-content clearfix" style="word-wrap:break-word; zoom:1; width:758px; overflow:hidden; font-size:14px; line-height:1.5; margin:7px 0px 10px; color:rgb(69,69,69); font-family:Tahoma,Helvetica,Arial,STHeiti">
+  逻辑CPU个数是指cat /proc/cpuinfo 所显示的processor的个数 
+ <br style="word-wrap:break-word"> # cat /proc/cpuinfo | grep "processor" | wc -l 
+ <br style="word-wrap:break-word"> 
+ <br style="word-wrap:break-word"> 
+ <span style="word-wrap:break-word">物理CPU个数</span>： 
+ <br style="word-wrap:break-word"> 物理CPU个数，是指physical id（的值）的数量 
+ <br style="word-wrap:break-word"> # cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l 
+ <br style="word-wrap:break-word"> 
+ <span style="word-wrap:break-word"><br style="word-wrap:break-word"> 每个物理CPU中Core的个数：</span> 
+ <br style="word-wrap:break-word"> 每个相同的physical id都有其对应的core id。如core id分别为1、2、3、4，则表示是Quad-Core CPU，若core id分别是1、2，则表示是Dual-Core。 
+ <br style="word-wrap:break-word"> # cat /proc/cpuinfo | grep "cpu cores" | wc -l 
+ <br style="word-wrap:break-word"> 
+ <br style="word-wrap:break-word"> 
+ <span style="word-wrap:break-word">是否为超线程？</span> 
+ <br style="word-wrap:break-word"> 如果有两个逻辑CPU具有相同的"core id"，那么超线程是打开的。 
+ <br style="word-wrap:break-word"> 
+ <br style="word-wrap:break-word"> 
+ <span style="word-wrap:break-word">每个物理CPU中逻辑CPU(可能是core, threads或both)的个数：</span> 
+ <br style="word-wrap:break-word"> # cat /proc/cpuinfo | grep "siblings" 
+ <br style="word-wrap:break-word"> 
+ <br style="word-wrap:break-word"> 逻辑cpu既可能是cores的个数，也可能是core的倍数。当它和core的个数相等时，表示每一个core就是一个逻辑CPU，若它时core的2倍时，表示每个core又enable了超线程（Hyper-Thread）。比如：一个双核的启用了超线程的物理cpu，其core id分别为1、2，但是sibling是4，也就是如果有两个逻辑CPU具有相同的"core id"，那么超线程是打开的。 
+</div> 
+<br>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/35ceb9bd5d93ce014774a0b0a70dc194/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">curl上传文件</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/d3272ca372693841baeaa6d90c66ccfe/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">RSA算法的简单实现</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

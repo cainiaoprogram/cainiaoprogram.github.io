@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>skynet设计原理 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="skynet设计原理" />
+<meta property="og:description" content="skynet设计原理 多核并发编程的模型skynetActor创建Actor运行Actor消息定时消息消息是如何推送到ActorActor的调度工作线程流程工作线程权重这个权重的作用是什么？ 第一个主要是skynet设计原理，skynet主要是一个actor模型的一个封装，详细的介绍actor是什么，actor之间的一个消息是怎样来进行通讯的以及如何来调度的
+第二个讲解一些lua原理，以及我们的这个网络封装相关
+第三节会讲解具体的实际应用，实际应用主要从这三个方面来讲解，第一个网关的封装，第二个实际项目当中的热更新到底怎么做，第三个会跟大家讲解比较常用的一个技术，就是我们的监听发布
+skynet它是属于一个多核并发编程的模型
+多核并发编程的模型 网络编程当中memcached是多线程，多线程的数量是跟我们的核心数是相同的，然后它的目标呢也是为了充分cpu，利用我们的核心数。
+nginx当中它是一种多进程的解决方案，多进程的工作进程的个数呢也跟我们的CPU的核心是一样的，然后这里面就涉及到一些加锁，那么多进程，它安全方面主要是通过我们的共享内存来共享数据进行worker进程之间的通讯的，它是共享内存来实现的。
+还有一种就是我们的CSP模型，CSP模型就是以go语言为代表，内核线程的数量呢也是跟我的CPU核心数是一样的，那么上一层就是我们用户态的并发型是我们的协程。
+Actor模型呢它也是一种多核并发编程的模型，那么它的内核线程就是实际运行的内核线程数呢也是跟我们的cpu的核心数是一样的，可以看出来我们多核并发编程呢都是为了充分利用我们多个核心数，然后呢尽量避免我们线程的一个切换。
+我们虽然上面都是有4种不同的多核并发编程的模型，但是呢它们有2种不同的分类，第一个是多线程与多进程，
+我们通常说的多线程，是指在一个进程当中开启多个线程。
+在一个进程当中多个线程他们共享的资源，就是我们这些线程之间的一些资源共享，那么它是利用到我们的一个进程当中的内存，那么在这里就涉及到一个共享资源问题，那么就会涉及到一个加锁问题？那么在这里面加锁呢我们就需要考虑了，像memcached加锁，因为它里面支持的数据类型非常简单，就是一个哈希结构，那么我们在他多线程加锁的时候呢，它的力度非常的小，那么通常呢我们也是采用一种粒度很小的锁，也就是我们的自旋锁或者是用我们的原子变量来实现自旋锁。
+那么在多进程当中大家思考一下，在nginx当中呢它是采用的一个共享内存，这个数据结构ngx_shmtx_t锁的类型，
+如果能够符合我们的原子操作的话，那么它采用的是一个自旋锁，那么如果原子操作不支持的话，它采用的是一个信号量,如果信号量也不支持，那么呢他就会用其中的一个文件锁。
+可以看出来多线程，多进程它里面的锁的锁的力度都是首选于自选锁，那么它们的目的呢也非常的明确，就是尽量减少这个多线程切换，进程的切换。
+多线程当中它是利用一个进程当中的内存，那么多进程当中，使用的一个共享内存来进行加索，我们使用一个slab技术，在共享内存当中可以使用红黑树，红黑树它里面加锁也是采用的这个锁。
+多线程多进程，他们都是通过共享内存来进行共享数据
+CSP和Actor是采用通信来共享内存，
+最好的方式是就是不要通过共享内存来通讯，而应该要通过通讯来共享内存，
+CSP它是GO语言，它里面的并发实体是协程，协程是轻量级的线程，那么我们开启线程它耗的资源比较高，协程的耗资源比较低，可以开启成千上万的协程，那么协程之间怎么共享数据？
+go语言采用channel来进行通讯，就相当于我们多线程采用pipe来通讯，它是一种管道，Actor也是通过也是这一档相同的哲学，它也是通过发送数据通信的方式来共享内存。
+我们有两个Actor它是一个轻量级的进程，注意它们两者的区别，CSP是轻量级的线程，
+它是以采用的协程，我们的Actor它是在我们的应用层把它封装出一个进程，抽象出一个进程，这个进程，抽象的进程之间是怎么通讯？
+它是通过我们发送消息的方式来进行通信，就比如说我们这个 A进程要跟B进程共享数据的话，我们是通过发送消息的方式来进行交换数据或者是共享数据。
+采用这种不要通过共享内存来通信，而应该通过通信来共享内存的编程哲学我们编写代码它的速度要快一些，为什么？因为我们通过通讯来共享数据呢其实是一种解耦的过程。
+如果我们两个功能是耦合在一起的话，那么我们去调试测试的时候要两者一起进行调试或者测试。那么现在我们解耦合把这两个功能模块，分成两个不同的模块当中处理，就是两个不同的进程，我们叫Actor，抽象成两个进程去处理，那么这个时候我们两个功能模块呢可以分别测试跟调试，进行优化，它是一种解解耦合的过程。
+同时呢它能够方便我们来快速的开发，它同时呢也符合我们开发的思路，我们开发是不是喜欢将一个大的问题把它拆分成若干个小问题，然后将这些小问题，单个的去调试优化，然后再把它组织在一起来完成这个任务，它非常符合我们去解决问题的思路，所以学习一下Actor的编程的思路，体会一下这种思想
+skynet skynet它就是一种Actor模型，它也是封装的一个轻量级的进程，GO语言是采用的轻量级的线程。
+skynet它是一个轻量级的游戏服务器框架，当然了它不仅仅用于游戏，那么轻量级主要体现在哪里呢？
+它既然是一个轻量级的游戏服务器框架，那么是不是都实现了跟游戏相关的所有服务器模块呢？它并没有因为它是个轻量级的，轻量级它主要体现在它仅实现了actor模型以及相关的
+脚手架，这个相关的是指actor模型当中通讯的这些原理以及调度，以及比如说我们actor之间的一个广播以及actor之间他们可以共享一些资源，那么在这里呢他已经把我们封装好了，脚手架是就是工具集的意思。
+第二个就是服务器框架的基础组件，它实现一些比如说它实现了一个
+我们Actor模型，它是一个抽象的进程，那么这个抽象的进程跟我们的内核进程有什么区别？
+我们的Actor模型它有一个实体，我们的进程跟进程之间他们里面的内存是不共通的，他们不能互相访问，属于一个隔离的环境。
+那么我们的Actor模型，它抽象的进程，那么自然我们的每一个Actor它都是一个独立的运行单元，并且Actor跟Actor之间他们的数据以及我们运行这些函数，比如说这些变量他们都是不一样的，他们都是独立的。
+所以我们的Actor它首先要有一个隔离的环境，那么在我们skynet中主要是采用lua虚拟机来进行。lua语言它也有个lua虚拟机，能用来实现我们这个隔离的环境。
+Actor模型它的实现，可以看到这里面呢都会有一个队列，这个队列呢是我们的一个消息队列，这里面存放的是我们具体的消息，这里面有4个Actor，那么4个actor有3个，他们互相之间有发送消息，那么这个消息呢会插入到对方的Actor模型当中，消息队列当中。这个有消息的Actor我们称之为活跃Actor，这个没有消息的，那么它是非活跃Actor,
+消息队列当中有消息叫做活跃Actor。
+Actor模型是如何来定义的？
+首先我们的Actor它是用于并行计算，什么叫并行计算？
+就是他们这几个Actor可以同时运行，我们会开启多个线程，比如说我们开启4个线程，每1个线程都去执行1个Actor，也就是说我们在Actor模型当中，这些Actor可以同时运行，是真正的并行，并行的运行，就跟我们的进程一样，我们同时开启多个进程他们是同时来运行的。
+Actor它是最基本的计算单元，也就是说Actor是我们最小的并发单元，我们前面讲的多核并发编程，多线程当中并发实体是我们的线程，多进程它的并发实体是我们的进程，有多少个核心数，那么核心数去运行进程，那么进程就是它的一个最基本的运算单元，
+CSP呢它的并发实体是我们的协程，我们的这里的Actor，就是轻量级的进程。
+它是基于消息计算这句话怎么来理解？
+Actor分为活跃的非活跃的，非活跃的Actor就是这个当中没有消息，没有消息我们这个Actor不会运行，我们Actor的运行依据就是它能够执行的依据就是它的消息队列当中有消息，Actor是基于消息来进行计算的。
+并且呢我们Actor是通过消息来进行沟通的，这个Actor需要通知，往这个Actor通知数据，那么我们通知他的方式，就是以消息的方式来通知。
+我们再来看组成第一个隔离的环境，就是我们的运行环境的隔离，跟我们进程一样，大家思考这个进程隔离就行了。
+我们运行的依据呢是这个消息队列，我们这里面会有消息队列一个一个的消息，当然呢这个消息呢是按照有序存放的，这个有序的是指我们有多个Actor跟他发消息，先到达的放在前面后到达的放在后面，这样的就是按先后到达的数据来进行存放，那么执行的时候也是一样的，
+就按照我们插入消息的先后顺序来进行，这主要是为了实现我们运行的一个时序。
+**那么我们怎么去消费这个消息？**我们的这个Actor如果没有回调函数，光有消息它也是不会运行的，消息队列当中有消息，并且还要有回调函数，回调函数就是去把这个消息取出来，作为我们回调函数的参数来进行执行。
+这个呢主要是告诉我们怎么去运行Actor。
+思考一下我们的进程是怎么运行的，有一个main函数？里面只要是个while死循环，它会一直执行到函数结束，进程的运行就是这么运行的。
+Actor它不一样，它是通过回调函数，回调函数呢要有消息，消息作为我们回调函数的参数来进行执行。
+区别这个进程跟我们Actor的运行方式，他们是不一样的，就是带有消息，并且要有回调函数把消息作为回调函数的参数去执行
+Actor创建 Actor是怎么来创建的？
+skynet.newserice，通过这种方式呢我们就启动调用了一个服务，那么我们现在呢直接走到这一步skynet_context_new，来看一下我们的Actor在我们的skynet当中是怎么体现的？
+我们去创建lua服务的时候，这里面都会生成一个动态库，我们采用这个get_api去获取这一个动态库，把它动态库加载，加载到我们里面，然后呢去取出它的函数地址，第一步加载我们的动态库，然后呢具有获取函数指针。
+通过这个 dlsym就是去获取它的函数指针，进行一个加载lua虚拟机的一个过程，
+它是通过这种这4个接口函数的对动态加载函数地址，
+然后呢来执行我们加载流程。
+我们query的时候是把这里面的内容取出来，内容取出来之后，我们就尝试把它给打开，打开之后我们把函数取出来，函数取出来之后呢
+接下来就开始去调动这个函数里面的内容了。
+struct skynet_context * skynet_context_new(const char * name, const char *param) { struct skynet_module * mod = skynet_module_query(name); if (mod == NULL) return NULL; void *inst = skynet_module_instance_create(mod); if (inst == NULL) return NULL; struct skynet_context * ctx = skynet_malloc(sizeof(*ctx)); CHECKCALLING_INIT(ctx) ctx-&gt;mod = mod; ctx-&gt;instance = inst; ATOM_INIT(&amp;ctx-&gt;ref , 2); ctx-&gt;cb = NULL; ctx-&gt;cb_ud = NULL; ctx-&gt;session_id = 0; ATOM_INIT(&amp;ctx-&gt;logfile, (uintptr_t)NULL); ctx-&gt;init = false; ctx-&gt;endless = false; ctx-&gt;cpu_cost = 0; ctx-&gt;cpu_start = 0; ctx-&gt;message_count = 0; ctx-&gt;profile = G_NODE." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/e39579c9e017c45c9f8fd4c4c164129d/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-07-11T10:10:41+08:00" />
+<meta property="article:modified_time" content="2022-07-11T10:10:41+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">skynet设计原理</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-github-gist">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>skynet设计原理</h4> 
+ <ul><li><a href="#_9" rel="nofollow">多核并发编程的模型</a></li><li><a href="#skynet_51" rel="nofollow">skynet</a></li><li><a href="#Actor_103" rel="nofollow">Actor创建</a></li><li><a href="#Actor_194" rel="nofollow">Actor运行</a></li><li><a href="#Actor_259" rel="nofollow">Actor消息</a></li><li><a href="#_334" rel="nofollow">定时消息</a></li><li><a href="#Actor_346" rel="nofollow">消息是如何推送到Actor</a></li><li><a href="#Actor_351" rel="nofollow">Actor的调度</a></li><li><a href="#_359" rel="nofollow">工作线程流程</a></li><li><a href="#_366" rel="nofollow">工作线程权重</a></li><li><a href="#_374" rel="nofollow">这个权重的作用是什么？</a></li></ul> 
+</div> 
+<p></p> 
+<p>第一个主要是skynet设计原理，skynet主要是一个actor模型的一个封装，详细的介绍actor是什么，actor之间的一个消息是怎样来进行通讯的以及如何来调度的<br> 第二个讲解一些lua原理，以及我们的这个网络封装相关<br> 第三节会讲解具体的实际应用，实际应用主要从这三个方面来讲解，第一个网关的封装，第二个实际项目当中的热更新到底怎么做，第三个会跟大家讲解比较常用的一个技术，就是我们的监听发布</p> 
+<p>skynet它是属于一个多核并发编程的模型</p> 
+<h2><a id="_9"></a>多核并发编程的模型</h2> 
+<p>网络编程当中memcached是多线程，多线程的数量是跟我们的核心数是相同的，然后它的目标呢也是为了充分cpu，利用我们的核心数。</p> 
+<p>nginx当中它是一种多进程的解决方案，多进程的工作进程的个数呢也跟我们的CPU的核心是一样的，然后这里面就涉及到一些加锁，那么多进程，它安全方面主要是通过我们的共享内存来共享数据进行worker进程之间的通讯的，它是共享内存来实现的。</p> 
+<p>还有一种就是我们的CSP模型，CSP模型就是以go语言为代表，内核线程的数量呢也是跟我的CPU核心数是一样的，那么上一层就是我们用户态的并发型是我们的协程。</p> 
+<p>Actor模型呢它也是一种多核并发编程的模型，那么它的内核线程就是实际运行的内核线程数呢也是跟我们的cpu的核心数是一样的，可以看出来我们多核并发编程呢都是为了充分利用我们多个核心数，然后呢尽量避免我们线程的一个切换。</p> 
+<p>我们虽然上面都是有4种不同的多核并发编程的模型，但是呢它们有2种不同的分类，第一个是多线程与多进程，<br> 我们通常说的多线程，是指在一个进程当中开启多个线程。</p> 
+<p>在一个进程当中多个线程他们共享的资源，就是我们这些线程之间的一些资源共享，那么它是利用到我们的一个进程当中的内存，那么在这里就涉及到一个共享资源问题，那么就会涉及到一个加锁问题？那么在这里面加锁呢我们就需要考虑了，像memcached加锁，因为它里面支持的数据类型非常简单，就是一个哈希结构，那么我们在他多线程加锁的时候呢，它的力度非常的小，那么通常呢我们也是采用一种粒度很小的锁，也就是我们的自旋锁或者是用我们的原子变量来实现自旋锁。</p> 
+<p>那么在多进程当中大家思考一下，在nginx当中呢它是采用的一个共享内存，这个数据结构ngx_shmtx_t锁的类型，<br> 如果能够符合我们的原子操作的话，那么它采用的是一个自旋锁，那么如果原子操作不支持的话，它采用的是一个信号量,如果信号量也不支持，那么呢他就会用其中的一个文件锁。</p> 
+<p>可以看出来多线程，多进程它里面的锁的锁的力度都是首选于自选锁，那么它们的目的呢也非常的明确，就是尽量减少这个多线程切换，进程的切换。</p> 
+<p>多线程当中它是利用一个进程当中的内存，那么多进程当中，使用的一个共享内存来进行加索，我们使用一个slab技术，在共享内存当中可以使用红黑树，红黑树它里面加锁也是采用的这个锁。</p> 
+<p><strong>多线程多进程，他们都是通过共享内存来进行共享数据</strong></p> 
+<p>CSP和Actor是采用通信来共享内存，</p> 
+<p><strong>最好的方式是就是不要通过共享内存来通讯，而应该要通过通讯来共享内存</strong>，</p> 
+<p>CSP它是GO语言，它里面的并发实体是协程，协程是轻量级的线程，那么我们开启线程它耗的资源比较高，协程的耗资源比较低，可以开启成千上万的协程，那么协程之间怎么共享数据？<br> go语言采用channel来进行通讯，就相当于我们多线程采用pipe来通讯，它是一种管道，Actor也是通过也是这一档相同的哲学，它也是通过发送数据通信的方式来共享内存。</p> 
+<p>我们有两个Actor它是一个轻量级的进程，注意它们两者的区别，CSP是轻量级的线程，<br> 它是以采用的协程，我们的Actor它是在我们的应用层把它封装出一个进程，抽象出一个进程，<strong>这个进程，抽象的进程之间是怎么通讯？</strong></p> 
+<p>它是通过我们发送消息的方式来进行通信，就比如说我们这个 A进程要跟B进程共享数据的话，我们是通过发送消息的方式来进行交换数据或者是共享数据。</p> 
+<p>采用这种不要通过共享内存来通信，而应该通过通信来共享内存的编程哲学我们编写代码它的速度要快一些，为什么？因为我们通过通讯来共享数据呢其实是一种解耦的过程。</p> 
+<p>如果我们两个功能是耦合在一起的话，那么我们去调试测试的时候要两者一起进行调试或者测试。那么现在我们解耦合把这两个功能模块，分成两个不同的模块当中处理，就是两个不同的进程，我们叫Actor，抽象成两个进程去处理，那么这个时候我们两个功能模块呢可以分别测试跟调试，进行优化，它是一种解解耦合的过程。</p> 
+<p>同时呢它能够方便我们来快速的开发，它同时呢也符合我们开发的思路，我们开发是不是喜欢将一个大的问题把它拆分成若干个小问题，然后将这些小问题，单个的去调试优化，然后再把它组织在一起来完成这个任务，它非常符合我们去解决问题的思路，所以学习一下Actor的编程的思路，体会一下这种思想</p> 
+<h2><a id="skynet_51"></a>skynet</h2> 
+<p>skynet它就是一种Actor模型，它也是封装的一个轻量级的进程，GO语言是采用的轻量级的线程。</p> 
+<p>skynet它是一个轻量级的游戏服务器框架，当然了它不仅仅用于游戏，<strong>那么轻量级主要体现在哪里呢？</strong><br> 它既然是一个轻量级的游戏服务器框架，那么是不是都实现了跟游戏相关的所有服务器模块呢？它并没有因为它是个轻量级的，轻量级它主要体现在它仅实现了actor模型以及相关的<br> 脚手架，这个相关的是指actor模型当中通讯的这些原理以及调度，以及比如说我们actor之间的一个广播以及actor之间他们可以共享一些资源，那么在这里呢他已经把我们封装好了，脚手架是就是工具集的意思。</p> 
+<p>第二个就是服务器框架的基础组件，它实现一些比如说它实现了一个</p> 
+<p>我们Actor模型，它是一个抽象的进程，<strong>那么这个抽象的进程跟我们的内核进程有什么区别？</strong></p> 
+<p>我们的Actor模型它有一个实体，我们的进程跟进程之间他们里面的内存是不共通的，他们不能互相访问，属于一个隔离的环境。</p> 
+<p>那么我们的Actor模型，它抽象的进程，那么自然我们的每一个Actor它都是一个独立的运行单元，并且Actor跟Actor之间他们的数据以及我们运行这些函数，比如说这些变量他们都是不一样的，他们都是独立的。</p> 
+<p>所以我们的Actor它首先要有一个隔离的环境，那么在我们skynet中主要是采用lua虚拟机来进行。lua语言它也有个lua虚拟机，能用来实现我们这个隔离的环境。</p> 
+<p><img src="https://images2.imgbox.com/16/25/nunV2nkk_o.png" alt="在这里插入图片描述"></p> 
+<p>Actor模型它的实现，可以看到这里面呢都会有一个队列，这个队列呢是我们的一个消息队列，这里面存放的是我们具体的消息，这里面有4个Actor，那么4个actor有3个，他们互相之间有发送消息，那么这个消息呢会插入到对方的Actor模型当中，消息队列当中。这个有消息的Actor我们称之为活跃Actor，这个没有消息的，那么它是非活跃Actor,<br> 消息队列当中有消息叫做活跃Actor。<br> <img src="https://images2.imgbox.com/c9/32/uFMUTKIN_o.png" alt="在这里插入图片描述"></p> 
+<p>Actor模型是如何来定义的？<br> <strong>首先我们的Actor它是用于并行计算，什么叫并行计算？</strong><br> 就是他们这几个Actor可以同时运行，我们会开启多个线程，比如说我们开启4个线程，每1个线程都去执行1个Actor，也就是说我们在Actor模型当中，这些Actor可以同时运行，是真正的并行，并行的运行，就跟我们的进程一样，我们同时开启多个进程他们是同时来运行的。</p> 
+<p>Actor它是最基本的计算单元，也就是说Actor是我们最小的并发单元，我们前面讲的多核并发编程，多线程当中并发实体是我们的线程，多进程它的并发实体是我们的进程，有多少个核心数，那么核心数去运行进程，那么进程就是它的一个最基本的运算单元，</p> 
+<p>CSP呢它的并发实体是我们的协程，我们的这里的Actor，就是轻量级的进程。</p> 
+<p><strong>它是基于消息计算这句话怎么来理解？</strong><br> Actor分为活跃的非活跃的，非活跃的Actor就是这个当中没有消息，没有消息我们这个Actor不会运行，我们Actor的运行依据就是它能够执行的依据就是它的消息队列当中有消息，Actor是基于消息来进行计算的。</p> 
+<p>并且呢我们Actor是通过消息来进行沟通的，这个Actor需要通知，往这个Actor通知数据，那么我们通知他的方式，就是以消息的方式来通知。</p> 
+<p>我们再来看组成第一个隔离的环境，就是我们的运行环境的隔离，跟我们进程一样，大家思考这个进程隔离就行了。</p> 
+<p>我们运行的依据呢是这个消息队列，我们这里面会有消息队列一个一个的消息，当然呢这个消息呢是按照有序存放的，这个有序的是指我们有多个Actor跟他发消息，先到达的放在前面后到达的放在后面，这样的就是按先后到达的数据来进行存放，那么执行的时候也是一样的，</p> 
+<p>就按照我们插入消息的先后顺序来进行，这主要是为了实现我们运行的一个时序。<br> **那么我们怎么去消费这个消息？**我们的这个Actor如果没有回调函数，光有消息它也是不会运行的，消息队列当中有消息，并且还要有回调函数，回调函数就是去把这个消息取出来，作为我们回调函数的参数来进行执行。</p> 
+<p>这个呢主要是告诉我们怎么去运行Actor。</p> 
+<p>思考一下我们的进程是怎么运行的，有一个main函数？里面只要是个while死循环，它会一直执行到函数结束，进程的运行就是这么运行的。</p> 
+<p>Actor它不一样，它是通过回调函数，回调函数呢要有消息，消息作为我们回调函数的参数来进行执行。<br> 区别这个进程跟我们Actor的运行方式，他们是不一样的，就是带有消息，并且要有回调函数把消息作为回调函数的参数去执行</p> 
+<h2><a id="Actor_103"></a>Actor创建</h2> 
+<p>Actor是怎么来创建的？<br> skynet.newserice，通过这种方式呢我们就启动调用了一个服务，那么我们现在呢直接走到这一步skynet_context_new，来看一下我们的Actor在我们的skynet当中是怎么体现的？</p> 
+<p>我们去创建lua服务的时候，这里面都会生成一个动态库，我们采用这个get_api去获取这一个动态库，把它动态库加载，加载到我们里面，然后呢去取出它的函数地址，<strong>第一步</strong>加载我们的动态库，然后呢具有获取函数指针。</p> 
+<p><img src="https://images2.imgbox.com/c2/bf/29treJDC_o.png" alt="在这里插入图片描述"><img src="https://images2.imgbox.com/01/e1/N1DeeSqQ_o.png" alt="在这里插入图片描述"></p> 
+<p>通过这个 dlsym就是去获取它的函数指针，进行一个加载lua虚拟机的一个过程，<br> 它是通过这种这4个接口函数的对动态加载函数地址，<br> <img src="https://images2.imgbox.com/ba/59/joFYQNOv_o.png" alt="在这里插入图片描述"></p> 
+<p>然后呢来执行我们加载流程。<br> 我们query的时候是把这里面的内容取出来，内容取出来之后，我们就尝试把它给打开，打开之后我们把函数取出来，函数取出来之后呢<br> <img src="https://images2.imgbox.com/5e/17/dXQbU6X5_o.png" alt="在这里插入图片描述"></p> 
+<p>接下来就开始去调动这个函数里面的内容了。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">struct</span> <span class="token class-name">skynet_context</span> <span class="token operator">*</span> 
+<span class="token function">skynet_context_new</span><span class="token punctuation">(</span><span class="token keyword">const</span> <span class="token keyword">char</span> <span class="token operator">*</span> name<span class="token punctuation">,</span> <span class="token keyword">const</span> <span class="token keyword">char</span> <span class="token operator">*</span>param<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">struct</span> <span class="token class-name">skynet_module</span> <span class="token operator">*</span> mod <span class="token operator">=</span> <span class="token function">skynet_module_query</span><span class="token punctuation">(</span>name<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>mod <span class="token operator">==</span> <span class="token constant">NULL</span><span class="token punctuation">)</span>
+		<span class="token keyword">return</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">void</span> <span class="token operator">*</span>inst <span class="token operator">=</span> <span class="token function">skynet_module_instance_create</span><span class="token punctuation">(</span>mod<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>inst <span class="token operator">==</span> <span class="token constant">NULL</span><span class="token punctuation">)</span>
+		<span class="token keyword">return</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">skynet_context</span> <span class="token operator">*</span> ctx <span class="token operator">=</span> <span class="token function">skynet_malloc</span><span class="token punctuation">(</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token operator">*</span>ctx<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">CHECKCALLING_INIT</span><span class="token punctuation">(</span>ctx<span class="token punctuation">)</span>
+
+	ctx<span class="token operator">-&gt;</span>mod <span class="token operator">=</span> mod<span class="token punctuation">;</span>
+	ctx<span class="token operator">-&gt;</span>instance <span class="token operator">=</span> inst<span class="token punctuation">;</span>
+	<span class="token function">ATOM_INIT</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>ctx<span class="token operator">-&gt;</span>ref <span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	ctx<span class="token operator">-&gt;</span>cb <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+	ctx<span class="token operator">-&gt;</span>cb_ud <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+	ctx<span class="token operator">-&gt;</span>session_id <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	<span class="token function">ATOM_INIT</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>ctx<span class="token operator">-&gt;</span>logfile<span class="token punctuation">,</span> <span class="token punctuation">(</span>uintptr_t<span class="token punctuation">)</span><span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	ctx<span class="token operator">-&gt;</span>init <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+	ctx<span class="token operator">-&gt;</span>endless <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+
+	ctx<span class="token operator">-&gt;</span>cpu_cost <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	ctx<span class="token operator">-&gt;</span>cpu_start <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	ctx<span class="token operator">-&gt;</span>message_count <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	ctx<span class="token operator">-&gt;</span>profile <span class="token operator">=</span> G_NODE<span class="token punctuation">.</span>profile<span class="token punctuation">;</span>
+	<span class="token comment">// Should set to 0 first to avoid skynet_handle_retireall get an uninitialized handle</span>
+	ctx<span class="token operator">-&gt;</span>handle <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>	
+	ctx<span class="token operator">-&gt;</span>handle <span class="token operator">=</span> <span class="token function">skynet_handle_register</span><span class="token punctuation">(</span>ctx<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">message_queue</span> <span class="token operator">*</span> queue <span class="token operator">=</span> ctx<span class="token operator">-&gt;</span>queue <span class="token operator">=</span> <span class="token function">skynet_mq_create</span><span class="token punctuation">(</span>ctx<span class="token operator">-&gt;</span>handle<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">// init function maybe use ctx-&gt;handle, so it must init at last</span>
+	<span class="token function">context_inc</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token function">CHECKCALLING_BEGIN</span><span class="token punctuation">(</span>ctx<span class="token punctuation">)</span>
+	<span class="token keyword">int</span> r <span class="token operator">=</span> <span class="token function">skynet_module_instance_init</span><span class="token punctuation">(</span>mod<span class="token punctuation">,</span> inst<span class="token punctuation">,</span> ctx<span class="token punctuation">,</span> param<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">CHECKCALLING_END</span><span class="token punctuation">(</span>ctx<span class="token punctuation">)</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>r <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">struct</span> <span class="token class-name">skynet_context</span> <span class="token operator">*</span> ret <span class="token operator">=</span> <span class="token function">skynet_context_release</span><span class="token punctuation">(</span>ctx<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>ret<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			ctx<span class="token operator">-&gt;</span>init <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token function">skynet_globalmq_push</span><span class="token punctuation">(</span>queue<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>ret<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token function">skynet_error</span><span class="token punctuation">(</span>ret<span class="token punctuation">,</span> <span class="token string">"LAUNCH %s %s"</span><span class="token punctuation">,</span> name<span class="token punctuation">,</span> param <span class="token operator">?</span> param <span class="token operator">:</span> <span class="token string">""</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token function">skynet_error</span><span class="token punctuation">(</span>ctx<span class="token punctuation">,</span> <span class="token string">"FAILED launch %s"</span><span class="token punctuation">,</span> name<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">uint32_t</span> handle <span class="token operator">=</span> ctx<span class="token operator">-&gt;</span>handle<span class="token punctuation">;</span>
+		<span class="token function">skynet_context_release</span><span class="token punctuation">(</span>ctx<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">skynet_handle_retire</span><span class="token punctuation">(</span>handle<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">struct</span> <span class="token class-name">drop_t</span> d <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span> handle <span class="token punctuation">}</span><span class="token punctuation">;</span>
+		<span class="token function">skynet_mq_release</span><span class="token punctuation">(</span>queue<span class="token punctuation">,</span> drop_message<span class="token punctuation">,</span> <span class="token operator">&amp;</span>d<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">return</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>好，大家可以带大家看一下这个消息内容，好，</p> 
+<p>这个创建应该很简单，就是怎么做呢，我们都是采用lua虚拟机，都是采用snlua去创建，加载它的动态库，然后呢取出函数地址，然后来加载创建我们具体的lua虚拟机，创建lua虚拟机以及创建消息队列并设置回调函数，</p> 
+<h2><a id="Actor_194"></a>Actor运行</h2> 
+<p>Actor的运行我们首先要有一个整体的思想，就是我们的消息队列当中要有消息，消息队列当中要有消息，那么呢我们运行就是把这个消息取出来，放在我们的回调函数当中</p> 
+<p>运行Actor就是在我们的这个工作线程当中运行的，</p> 
+<p><img src="https://images2.imgbox.com/74/0c/aIJj2yIx_o.png" alt="在这里插入图片描述"></p> 
+<p>那么我们的运行的关键是在这个回调函数执行,<strong>那么这个回调函数是怎么一步一步设置的呢?</strong></p> 
+<p>那么就是通过最开始我们这里设置的回调函数，<br> <img src="https://images2.imgbox.com/34/c9/Hssey2uo_o.png" alt="在这里插入图片描述"></p> 
+<p>我们来看一下怎么来执行我们的设置消息队列。</p> 
+<p>我们去new一个master的轻量级进程，<br> <img src="https://images2.imgbox.com/60/db/prkfQsTB_o.png" alt="在这里插入图片描述"></p> 
+<p>也就是我们actor，我们调用一个skynet.call()，它是通过消息来进行沟通的。那么我们去执行这个master。<br> <img src="https://images2.imgbox.com/29/c7/bSdb5dtU_o.png" alt="在这里插入图片描述"></p> 
+<p>skynet.start()就是设置我们的回调函数。<br> <img src="https://images2.imgbox.com/2d/04/iwZLGRUv_o.png" alt="在这里插入图片描述"></p> 
+<p>设置回调函数的时候注意了，这里面会有一个raw_dispatch_message()<br> <img src="https://images2.imgbox.com/ab/dc/w0bkrlZ6_o.png" alt="在这里插入图片描述"></p> 
+<p>这个 dispatch当中呢,我们可以看到它里面采用的是协程，<br> <img src="https://images2.imgbox.com/6f/66/G3MMtX64_o.png" alt="在这里插入图片描述"></p> 
+<p>就是我们会创建一个协程，也就是说我们来了一个消息之后，我们的Actor当中进行执行的时候，从我们消息队列取出一个消息，要用这个回调函数，这个回调函数会生成一个协程，</p> 
+<p>因为我们的Actor它是一个轻量级的进程，那么轻量级进程当中会有多个协程，这个协程就是我们取出一个消息，用一个Actor服务当中的一个协程去执行这个消息，</p> 
+<p>我们skynet.start()当中会设置回调函数，回调函数就是执行我们Actor当中的一个关键的接口，那么设置回调函数的时候呢就是来了一个消息，一个消息到达，会获取一个协程去执行。</p> 
+<p>Actor它是一个轻量级的进程，在一个进程当中我们可以开启多个线程，那么我们Actor当中呢因为它采用的是我们的lua虚拟机，lua虚拟机它里面也有携程，我们可以创建多个协程，我们为每一个消息用一个新的协程去执行它。</p> 
+<p>actor当中是采用多协程的运行方式，多协程的运行方式跟我们其他的方式不太一样，那么这个多协程，因为我们的lua虚拟机它有一个限制，同时只有一个协程在运行。</p> 
+<p><strong>我们在这里面编程当中会不会有一个资源竞争的问题？</strong><br> 没有，因为这里面它只有一个协程在运行，虽然里面有多个协程，但是同时只有一个协程在运行，所以呢在这里面我们写代码里头还是以单线程的思路，就是我们以单线程编码思路来进行编程。</p> 
+<p>开启一个协程池，一个消息从消息队列当中取出一个消息，我们会用一个协程去执行它，那么执行什么内容？</p> 
+<p>就是这个dispatch，我们运行线程的时候，<br> <img src="https://images2.imgbox.com/3c/73/Wtkohi1T_o.png" alt="在这里插入图片描述"></p> 
+<p>我们创建线程的时候，要指定一个方法，我们创建协程也是一样的，协程运行的方法，<br> <img src="https://images2.imgbox.com/be/88/9nxo0Xq0_o.png" alt="在这里插入图片描述"></p> 
+<p>这一个方法就是我们协程的入口函数，每一个消息过来都会去用这个协程去调用它，把我们消息的参数放在我们这个入口函数的参数当中来进行执行。</p> 
+<p>内核线程取出消息队列，找到lua虚拟机，从协程池中取出一个协程来执行消息运行</p> 
+<h2><a id="Actor_259"></a>Actor消息</h2> 
+<p>这个消息队列里面会有那几种消息呢？首先会有一个Actor之间的消息，<br> <img src="https://images2.imgbox.com/f0/f2/r6TssYAd_o.png" alt="在这里插入图片描述"></p> 
+<p>还有一类呢就是我们的网络消息，网络当中来的数据会到达我们的Actor消息队列当中。</p> 
+<p>那么还有一个呢就是我们的定时消息，我们的Actor是消息队列当中有消息他才会执行<br> **那么我们这个定时消息是什么意思？**比如说Actor要执行一个延时任务，我们首先会把这个延时任务告诉一个定时线程，<br> 那么定时线程啊比如说延时4秒钟，那么4秒钟之后我们这个定时线程它会给它发送一个消息，</p> 
+<p>Actor之间的消息呢我们在这里面有几种调用方式，</p> 
+<p>异步通知，就是调用skynet.send()，发送消息是百分之百能够到达的，socket是我们进程之间发送消息，那么这里面是涉及到一个网络，这个数据可能会不到达，</p> 
+<p>在一个进程当中有成千上万个Actor，这些Actor发送消息其实就是一个数据指针的移动，分配一个内存块，这里面的指针把它插到他们的消息队列当中去就行了</p> 
+<p>还有一个就是skynet.call()，就是我们的a发送消息给b然后b回一条消息给a那么通常这个就涉及到我们的远程调用，也就是我们的请求回应，</p> 
+<p><strong>这个远程调用它是如何来做的？</strong><br> 调用skynet.call()的时候，此时的环境是一个协程，此时正在运行的这个协程它会被挂起来，<br> 把消息发送到b，他回一个消息的时候，他就会把当前的这个协程唤醒，还可以接受他的返回值</p> 
+<p>Actort的运行它是并行的，但是对于线程来说它会是一个切换执行的，它会有一个切换执行。<br> 那么通常呢我们把它叫做一个并发，<strong>为什么叫并发？</strong><br> 我们的角度是出自于我们的这个线程，它针对的是不同的队列，如果我们把这个视角放在Actor的上面，那么它是并行，如果我们把它放在这个线程上面，那么呢它是并发的</p> 
+<p>网络消息，在这里面我们主要解决的是一个fd跟Actor之间的一个绑定问题，<br> 我们网络当中来消息了，这个消息怎么知道发送到哪一个Actor。</p> 
+<p>Skynet它是采用只有一个socket线程来处理网络消息，skynet它是基于reactor网络模型</p> 
+<p>linux是采用epoll来管理网络事件，<br> 这三个接口：<br> <img src="https://images2.imgbox.com/19/ad/yHEuYstr_o.png" alt="在这里插入图片描述"></p> 
+<p>如果我们想要有一个网络事件，交由我们的epoll进行管理的时候，我们要调用epoll_ctl，希望就是epoll去管理事件，epollin,epollout,epollerr,epollhup；</p> 
+<p>epoll_ctl就是注册事件，就是比如说我们接收到客户端的一条连接，那么我们把这个连接交由epoll来进行管理，以后这一条连接的事件就会放在我们的红黑树的一个节点当中。</p> 
+<p>epoll_ctl的时候它还会跟我们的网卡驱动进行一个绑定，网卡驱动检测到这一个fd的事件之后，它会将这一个节点，我们注册的节点把它拷贝到我们的就绪队列当中，这个就绪队列，可以通过epoll_wait把这个就绪的事情把它取过来，从我们的内核空间把它取到用户中间当中来，epoll_create就是创建一个epoll对象，那么我们epoll_ctl还有epoll_wait都是操作我们这个对象</p> 
+<p><strong>那么现在我们关注的问题是怎么来绑定的，这个数据怎么绑定到我们这个消息队列当中去？</strong><br> 把epoll_event拷贝到我们这个就绪队列当中，它不是把这个 epitem把它拷过去。<br> <img src="https://images2.imgbox.com/cf/af/jFOtR72H_o.png" alt="在这里插入图片描述"></p> 
+<p>event就是代表着我们关心的事件，比如说读事件写事件，<br> 这个 epoll_data，它保存的是关联数据，就是我们需要进行一个绑定的核心数据结构。<br> epoll_data一个枚举类型，从这4个选择1个来作为我们进行绑定的1个关系</p> 
+<p>通常skynet采用的是这个 ptr*，这个ptr可以指向我们用户态的一个结构，那么等一下这个事件触发的时候，也就是我们的epoll_wait把这个就绪队列事件拷贝到我们用户数据当中来，就是我们用户态的数据当中来，那么这里面把epoll_event这整个结构把它也拷贝到我们的用户态来了，那么用户态又可以取出这个ptr出来。</p> 
+<p>epoll_wait()就是在我们的网络循环当中进行处理，事件循环就是把这个已经被触发的事件取出来，取到我们的用户态数据当中。</p> 
+<p>epfd还是epoll对象，events传入的是用户态数组，maxevents最多拷贝多少个事件出来，timeout就是最长阻塞多少时间</p> 
+<p>ptr就是我们用来绑定我们这个具体actor，那么怎么绑定呢？在我们skynet当中有一个slot这样的结构，它里面有65535个这样的socket结构体，预先分配的6535个对象</p> 
+<p>我们每一个fd都会对应一个数组槽位，也是对应的一个socket指针<br> <img src="https://images2.imgbox.com/b9/8b/EyIomZvN_o.png" alt="在这里插入图片描述"></p> 
+<p>opaque，这是操作的意思，操作Actor当中的消息队列ID，还有一个fd指带我们具体的fd，这个 Id是指我们索引池当中的索引ID</p> 
+<p>redis它是怎么进行绑定的？原码当中也有一个client指针，指我们每一条连接的一个数据结构，那么它是怎么绑定的？<br> 它是用fd，它不是用的这个ptr，它是用的这个fd那么fd呢它也有一个值，那么它的索引是我们的fd，它也是我们的这个数组的索引，</p> 
+<p>redis缺点，它创建了一个很大的cnnecttion结构的池子,这个池里面是通过fd的这个索引去索引这个 connect的一个对象，connect里面呢有一个client的元素，<br> 因为这个 fd它的取值范围特别的大，所以connect值也特别大，有很多的空间是浪费的，</p> 
+<p>用一个ID来进行绑定，就是我们6535，在里面找到一个空闲的位置把这个 ID付给他，里面也有fd信息，但是我们不是通过fd去索引，我们是通过这个Id去索引，啊这样呢我们就可以让这个slot值特别的小</p> 
+<h2><a id="_334"></a>定时消息</h2> 
+<p>定时消息在我们的skynet当中它会有一个定时器线程，也是有一个线程构成的，<br> <img src="https://images2.imgbox.com/38/da/pEqj1gEw_o.png" alt="在这里插入图片描述"></p> 
+<p>skynet就是采用多层级时间轮，<br> <img src="https://images2.imgbox.com/90/df/6yRjGWGN_o.png" alt="在这里插入图片描述"></p> 
+<p>好，那么我们来看一下添加计时器，<br> skynet 采用多层级时间轮来解决多线程环境下定时任务的管理；<br> 当定时任务被触发，将会向目标 Actor 发送定时消息，从而驱动 Actor 的运行；</p> 
+<h2><a id="Actor_346"></a>消息是如何推送到Actor</h2> 
+<p><img src="https://images2.imgbox.com/24/a4/5w9UCr4K_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="Actor_351"></a>Actor的调度</h2> 
+<p><img src="https://images2.imgbox.com/df/27/lpO05Q47_o.png" alt="在这里插入图片描述"></p> 
+<p>我们怎么去调度它？<br> 全局消息队列来组织这些活跃的Actor，</p> 
+<p><img src="https://images2.imgbox.com/fc/0d/tAE77EG3_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="_359"></a>工作线程流程</h2> 
+<p>工作线程从全局队列中 pop 出单个 Actor 消息队列；从 Actor 消息队列中按照规则 pop 出一定<br> 数量的消息进行执行；若 Actor 消息队列中仍有消息继续放入全局队列队尾；若 Actor 消息队列中没有消息则不放入全局队列中；全局队列只存活跃的 Actor 消息队列；</p> 
+<h2><a id="_366"></a>工作线程权重</h2> 
+<p>工作线程，它的权重不一样，我们给每一个工作线程全都不一样，让他们就是按照不同的步伐，有的只执行一条，就是每次只取其一条消息出来进行执行，有的取一半的消息进行出来，<br> 有的把全部的消息取过来进行执行，有的取1/4，有的取1/8，就是按照不同的步长去执行，就是有不同的执行策略。</p> 
+<p><img src="https://images2.imgbox.com/2a/8a/FoEkKRaI_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="_374"></a>这个权重的作用是什么？</h2> 
+<pre><code class="prism language-cpp"><span class="token keyword">int</span> i<span class="token punctuation">,</span>n<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">;</span>
+<span class="token keyword">for</span> <span class="token punctuation">(</span>i<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span> i<span class="token operator">&lt;</span>n<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> 
+ <span class="token comment">// 注意: skynet_mq_pop pop出消息则返回0，没有pop消息返回1</span>
+ 	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">skynet_mq_pop</span><span class="token punctuation">(</span>q<span class="token punctuation">,</span> <span class="token operator">&amp;</span>msg<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> 
+		<span class="token function">skynet_context_release</span><span class="token punctuation">(</span>ctx<span class="token punctuation">)</span><span class="token punctuation">;</span> 
+		 <span class="token keyword">return</span> <span class="token function">skynet_globalmq_pop</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> 
+ <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>i<span class="token operator">==</span><span class="token number">0</span> <span class="token operator">&amp;&amp;</span> weight <span class="token operator">&gt;=</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> 
+ 		n <span class="token operator">=</span> <span class="token function">skynet_mq_length</span><span class="token punctuation">(</span>q<span class="token punctuation">)</span><span class="token punctuation">;</span>
+   	n <span class="token operator">&gt;&gt;=</span> weight<span class="token punctuation">;</span> 
+ <span class="token punctuation">}</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span> <span class="token comment">// 调用 actor 回调函数消费消息 </span>
+   <span class="token function">dispatch_message</span><span class="token punctuation">(</span>ctx<span class="token punctuation">,</span> <span class="token operator">&amp;</span>msg<span class="token punctuation">)</span><span class="token punctuation">;</span> 
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>从上面逻辑可以看出，当工作线程的权重为 -1 时，该工作线程每次只 pop 一条消息；当工作线程的权重为 0 时，该工作线程每次消费完所有的消息；当工作线程的权重为 1 时，每次消费消息队列中 的消息；当工作线程的权重为 2 时，每次消费消息队列中 的消息；以此类推；通过这种方式，完成消息队列梯度消费，从而不至于让某些队列过长；这种消息调度的方式不是最优的调度方式（相较于 go 语言），云风也在尝试修改更优的方式来调度；但是目前从多年线上实践情况来看，skynet 运行良好；</p> 
+<p>这个性能怎么保证不差，可以共享很多的数据，对lua虚拟机进行一个改造，加载这么多占的内存并不高。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/0608dcfb590b4d2c40b2ee6d6f6161f1/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">python生成多维矩阵</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/40f30ce07b2984326df6c2e162b1755a/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Maven home directory不能修改</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

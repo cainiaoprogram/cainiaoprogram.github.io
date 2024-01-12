@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>linux tf 卡驱动理解 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="linux tf 卡驱动理解" />
+<meta property="og:description" content="mmc 驱动框架 梳理tf卡读取异常重启逻辑问题进展： a. 查找代码发现，在mmc_blk_issue_rw_rq函数中可以找到数据读取数据异常时的处理机制,其中部分代码如下： static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *rqc) ｛ ... mmc_start_req(card-&gt;host, areq, (int *) &amp;status);//读取数据 switch (status) { case MMC_BLK_DATA_ERR：//读取数据错误 case MMC_BLK_CMD_ERR：//执行命令错误 case MMC_BLK_ABORT：// 异常退出 mmc_blk_reset(); //执行复位函数 ｝ ... ｝ 执行复位函数的逻辑，其中部分代码 mmc_blk_reset |---&gt;mmc_hw_reset |---&gt;host-&gt;bus_ops-&gt;reset |---&gt;mmc_reset //复位函数 |---&gt;mmc_flush_cache(host-&gt;card); //清除cache |---&gt;mmc_power_cycle(host, card-&gt;ocr); //执行io断电复位操作 |---&gt;mmc_set_ios |---&gt; host-&gt;ops-&gt;set_ios |---&gt;_SetPower |---&gt;Hal_CARD_PowerOn/Hal_CARD_PowerOff |---&gt;mmc_init_card(host, card-&gt;ocr, card);//重新初始化tf卡 复位函数主要体现在mmc_reset 函数中。在文件sstar/sdmmc/ms_sdmmc_lnx.c 中st_mmc_ops，并未实现hw_reset函数，因此mmc_reset，主要内容为： 1、执行mmc_flush_cache，清除cache 2、mmc_power_cycle， 执行io断电复位操作，具体逻辑如下 void mmc_power_cycle(struct mmc_host *host, u32 ocr) { mmc_power_off(host); /* Wait at least 1 ms according to SD spec */ mmc_delay(1); mmc_power_up(host, ocr); } 3、执行mmc_init_card，重新初始化tf卡 b." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/d126fc6dfca8a9f531461442d3b22c80/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-02-28T09:23:41+08:00" />
+<meta property="article:modified_time" content="2022-02-28T09:23:41+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">linux tf 卡驱动理解</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h4><a id="mmc__0"></a>mmc 驱动框架</h4> 
+<p><img src="https://images2.imgbox.com/18/43/2E4LDuGP_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="tf_3"></a>梳理tf卡读取异常重启逻辑问题进展：</h4> 
+<pre><code>a. 查找代码发现，在mmc_blk_issue_rw_rq函数中可以找到数据读取数据异常时的处理机制,其中部分代码如下：
+    static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *rqc)
+    ｛
+            ...
+            mmc_start_req(card-&gt;host, areq, (int *) &amp;status);//读取数据
+            switch (status) {
+                	case MMC_BLK_DATA_ERR：//读取数据错误
+                    case MMC_BLK_CMD_ERR：//执行命令错误
+
+                        case MMC_BLK_ABORT：// 异常退出
+
+	                mmc_blk_reset(); //执行复位函数
+
+            ｝
+            ...
+      ｝
+    执行复位函数的逻辑，其中部分代码
+    mmc_blk_reset
+        |---&gt;mmc_hw_reset
+             |---&gt;host-&gt;bus_ops-&gt;reset
+                 |---&gt;mmc_reset  //复位函数
+                       |---&gt;mmc_flush_cache(host-&gt;card);  //清除cache                  
+                       |---&gt;mmc_power_cycle(host, card-&gt;ocr); //执行io断电复位操作
+                            |---&gt;mmc_set_ios 
+                                |---&gt; host-&gt;ops-&gt;set_ios
+                                     |---&gt;_SetPower
+                                         |---&gt;Hal_CARD_PowerOn/Hal_CARD_PowerOff
+                    |---&gt;mmc_init_card(host, card-&gt;ocr, card);//重新初始化tf卡
+
+
+      复位函数主要体现在mmc_reset  函数中。在文件sstar/sdmmc/ms_sdmmc_lnx.c 中st_mmc_ops，并未实现hw_reset函数，因此mmc_reset，主要内容为：
+      1、执行mmc_flush_cache，清除cache
+     2、mmc_power_cycle， 执行io断电复位操作，具体逻辑如下
+            void mmc_power_cycle(struct mmc_host *host, u32 ocr)                                                                                                              
+            {
+                mmc_power_off(host);
+                /* Wait at least 1 ms according to SD spec */
+                mmc_delay(1);
+                mmc_power_up(host, ocr);
+        }
+    3、执行mmc_init_card，重新初始化tf卡
+
+b. 目前分析代码，初步得出结果为：
+        1、tf卡io复位调用的时机：
+            操作tf卡读取数据或执行命令时，最终会调用函数mmc_blk_issue_rw_rq，返回值为MMC_BLK_DATA_ERR， MMC_BLK_CMD_ERR， MMC_BLK_ABORT，都会触发复位动作。
+        2、tf卡io复位主要做了些操作：
+             清除cache；执行io断电复位；重新初始化tf卡
+</code></pre> 
+<h4><a id="_51"></a>参考文章：</h4> 
+<p><a href="https://blog.csdn.net/u013836909/category_11430485.html">https://blog.csdn.net/u013836909/category_11430485.html</a><br> <a href="https://www.cnblogs.com/yanghong-hnu/p/4671343.html" rel="nofollow">https://www.cnblogs.com/yanghong-hnu/p/4671343.html</a><br> <a href="https://blog.csdn.net/u013836909/article/details/12282330">https://blog.csdn.net/u013836909/article/details/12282330</a><br> <a href="https://blog.csdn.net/h_8410435/article/details/105427499">https://blog.csdn.net/h_8410435/article/details/105427499</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/23bab5ceabe23715f4bd12ef1d2158ec/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">spring boot 一个极简单的 demo 示例</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/6eea7e2ff42ba5638b0618ca891b1e1b/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">CompletableFuture详解~runAsync</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

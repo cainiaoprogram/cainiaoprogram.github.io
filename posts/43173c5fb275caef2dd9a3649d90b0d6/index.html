@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>数据库垂直切分迁移实战 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="数据库垂直切分迁移实战" />
+<meta property="og:description" content="原文链接：https://github.com/Elin-Zhou/develop-doc/blob/master/%E6%95%B0%E6%8D%AE%E5%BA%93%E5%9E%82%E7%9B%B4%E5%88%87%E5%88%86%E8%BF%81%E7%A7%BB.md
+背景 原来的业务所有数据库都在一个实例上，配置为8C64G 1TB。由于业务快速增长，在业务高峰期时，数据库QPS大约12k&#43;，频繁出现数据库CPU使用率达到100%的情况。
+问题分析 短期问题可以通过升级数据库配置解决，但是单机配置有上限，且约往后越不划算，单机的瓶颈会越来越明显，所以需要考虑对数据库进行拆分。
+水平拆分OR垂直拆分 一般情况下，考虑数据拆分时，分为水平拆分和垂直拆分两个方向。根据经验，水平拆分适合数据量非常大的单表，而垂直拆分适合多个数据表按业务情况拆分到不同的数据库实例中，所以此处选择垂直拆分。
+实现 流程 整体流程参照下图，大致分为五个步骤
+数据同步 此处需要DBA配置，创建一个新的数据库实例，并且把需要迁移到新库中的业务表结构与数据进行同步，需要保证旧表与新表的数据是准实时的。一般来说两表的同步时延很短，最多不过几秒钟。
+上线/下线路由代码 由于业务逻辑比较简单，此处不引入第三方中间件，通过Sping自带的AbstractRoutingDataSource来实现数据的路由功能，具体实现下文会详细描述。
+因为切换的操作是单向的，所以路由功能只需要在操作时使用，如果确定业务正常，则可以下线动态路由功能，改为静态配置选择具体使用的数据源。
+路由开关 由于线上机器较多，路由代码上线后不能直接开启，需要有一个开关统一来开启，保证所有机器路由的一致性。
+关键点 数据源路由 上文提到，动态路由功能可以通过使用Spring提供的动态数据源来实现，即继承AbstractRoutingDataSource类，实现其determineCurrentLookupKey方法，简单看一下这个方法的签名及注释
+/** * Determine the current lookup key. This will typically be * implemented to check a thread-bound transaction context. * &lt;p&gt;Allows for arbitrary keys. The returned key needs * to match the stored lookup key type, as resolved by the * {@link #resolveSpecifiedLookupKey} method. */ protected abstract Object determineCurrentLookupKey(); 在AbstractRoutingDataSource中有一个Map类型的成员变量targetDataSources，其key可以进行自定义，value即为对应的数据源，需要在初始化实例的是往这个map中写入所有动态的数据源，每次有请求数据源的请求时，均会调用determineCurrentLookupKey，需要方法实现中根据情况返回key来选择对应的数据源。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/43173c5fb275caef2dd9a3649d90b0d6/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-03-13T18:03:59+08:00" />
+<meta property="article:modified_time" content="2020-03-13T18:03:59+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">数据库垂直切分迁移实战</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>原文链接：https://github.com/Elin-Zhou/develop-doc/blob/master/%E6%95%B0%E6%8D%AE%E5%BA%93%E5%9E%82%E7%9B%B4%E5%88%87%E5%88%86%E8%BF%81%E7%A7%BB.md</p> 
+<h3><a id="_3"></a>背景</h3> 
+<p>原来的业务所有数据库都在一个实例上，配置为8C64G 1TB。由于业务快速增长，在业务高峰期时，数据库QPS大约12k+，频繁出现数据库CPU使用率达到100%的情况。</p> 
+<h3><a id="_9"></a>问题分析</h3> 
+<p>短期问题可以通过升级数据库配置解决，但是单机配置有上限，且约往后越不划算，单机的瓶颈会越来越明显，所以需要考虑对数据库进行拆分。</p> 
+<h4><a id="OR_15"></a>水平拆分OR垂直拆分</h4> 
+<p>一般情况下，考虑数据拆分时，分为水平拆分和垂直拆分两个方向。根据经验，水平拆分适合数据量非常大的单表，而垂直拆分适合多个数据表按业务情况拆分到不同的数据库实例中，所以此处选择垂直拆分。</p> 
+<h3><a id="_21"></a>实现</h3> 
+<h4><a id="_23"></a>流程</h4> 
+<p>整体流程参照下图，大致分为五个步骤</p> 
+<p><img src="https://images2.imgbox.com/bf/27/2GNZasQG_o.png" alt=""></p> 
+<h5><a id="_31"></a>数据同步</h5> 
+<p>此处需要DBA配置，创建一个新的数据库实例，并且把需要迁移到新库中的业务表结构与数据进行同步，需要保证旧表与新表的数据是准实时的。一般来说两表的同步时延很短，最多不过几秒钟。</p> 
+<h5><a id="_37"></a>上线/下线路由代码</h5> 
+<p>由于业务逻辑比较简单，此处不引入第三方中间件，通过Sping自带的AbstractRoutingDataSource来实现数据的路由功能，具体实现下文会详细描述。</p> 
+<p>因为切换的操作是单向的，所以路由功能只需要在操作时使用，如果确定业务正常，则可以下线动态路由功能，改为静态配置选择具体使用的数据源。</p> 
+<h5><a id="_45"></a>路由开关</h5> 
+<p>由于线上机器较多，路由代码上线后不能直接开启，需要有一个开关统一来开启，保证所有机器路由的一致性。</p> 
+<h4><a id="_53"></a>关键点</h4> 
+<h5><a id="_57"></a>数据源路由</h5> 
+<p>上文提到，动态路由功能可以通过使用Spring提供的动态数据源来实现，即继承AbstractRoutingDataSource类，实现其determineCurrentLookupKey方法，简单看一下这个方法的签名及注释</p> 
+<pre><code class="prism language-java"><span class="token comment">/**
+ * Determine the current lookup key. This will typically be
+ * implemented to check a thread-bound transaction context.
+ * &lt;p&gt;Allows for arbitrary keys. The returned key needs
+ * to match the stored lookup key type, as resolved by the
+ * {@link #resolveSpecifiedLookupKey} method.
+ */</span>
+<span class="token keyword">protected</span> <span class="token keyword">abstract</span> Object <span class="token function">determineCurrentLookupKey</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>在AbstractRoutingDataSource中有一个Map类型的成员变量targetDataSources，其key可以进行自定义，value即为对应的数据源，需要在初始化实例的是往这个map中写入所有动态的数据源，每次有请求数据源的请求时，均会调用determineCurrentLookupKey，需要方法实现中根据情况返回key来选择对应的数据源。</p> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> Map<span class="token generics function"><span class="token punctuation">&lt;</span>Object<span class="token punctuation">,</span> Object<span class="token punctuation">&gt;</span></span> targetDataSources<span class="token punctuation">;</span>
+</code></pre> 
+<p>有了这个接口，我们需要在其中根据当前数据的请求情况，来判断是走旧库还是新库。而在原来使用数据源的地方，需要修改为这个数据源。</p> 
+<p>在MyBatis中，可以根据SqlSessionTemplate来隔离两个数据源，前面提到，只需要将一部分业务从原来的数据库中移到新的数据库，那么其中一部分表的访问路径是不变的。所以根据业务情况，将一个SqlSessionTemplate拆成两个。</p> 
+<p>我们将原来的业务库称为basic库，把新的业务库称为new库，那么SqlSessionTemplate也需要两个，一个是basicSqlSessionTemplate，固定请求原来的数据源；另一个是newSqlSessionTemplate，其请求的数据源需要动态切换的。** 下文我们只讨论需要切换的数据源，两个SqlSessionTemplate的拆分由读者自行实现，本文不再赘述。**</p> 
+<p>例如项目中使用MyBatis作为ORM，所以在配置SqlSessionTemplate中是这么配置的（本文中的所有代码与配置均为实例，只展示大致的逻辑，不一定是真实可用的）</p> 
+<pre><code class="prism language-xml"><span class="token comment">&lt;!--原数据库的数据源配置    --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>bean</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>basicDataSource<span class="token punctuation">"</span></span> <span class="token attr-name">class</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>org.apache.commons.dbcp2.BasicDataSource<span class="token punctuation">"</span></span> <span class="token attr-name">destroy-method</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>close<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>property</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>url<span class="token punctuation">"</span></span> <span class="token attr-name">value</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>${url}<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>property</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>username<span class="token punctuation">"</span></span> <span class="token attr-name">value</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>${username}<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>property</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>password<span class="token punctuation">"</span></span> <span class="token attr-name">value</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>${password}<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>bean</span><span class="token punctuation">&gt;</span></span>
+    
+<span class="token comment">&lt;!--需要迁移的业务走这个SqlSessionTemplate    --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>bean</span> <span class="token attr-name">id</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>newSqlSessionTemplate<span class="token punctuation">"</span></span> <span class="token attr-name">class</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>org.mybatis.spring.SqlSessionTemplate<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>constructor-arg</span><span class="token punctuation">&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>bean</span> <span class="token attr-name">class</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>org.mybatis.spring.SqlSessionFactoryBean<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+            <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>property</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>dataSource<span class="token punctuation">"</span></span> <span class="token attr-name">ref</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>basicDataSource<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+            <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>property</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>mapperLocations<span class="token punctuation">"</span></span> <span class="token attr-name">value</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>classpath:mybatis/new/*.xml<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+            <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>property</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>configLocation<span class="token punctuation">"</span></span> <span class="token attr-name">value</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>classpath:mybatis/sqlMapConfig.xml<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>bean</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>constructor-arg</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>bean</span><span class="token punctuation">&gt;</span></span>
+</code></pre> 
+<p>改造后的数据源配置大致是如下的情况其中com.xxelin.datasource.RoutingDataSource类为我们自己实现的动态数据源类，后文会提供代码。</p> 
+<pre><code class="prism language-xml"><span class="token comment">&lt;!--原数据库的数据源配置    --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>bean</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>basicDataSource<span class="token punctuation">"</span></span> <span class="token attr-name">class</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>org.apache.commons.dbcp2.BasicDataSource<span class="token punctuation">"</span></span> <span class="token attr-name">destroy-method</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>close<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>property</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>url<span class="token punctuation">"</span></span> <span class="token attr-name">value</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>${url}<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>property</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>username<span class="token punctuation">"</span></span> <span class="token attr-name">value</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>${username}<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>property</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>password<span class="token punctuation">"</span></span> <span class="token attr-name">value</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>${password}<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>bean</span><span class="token punctuation">&gt;</span></span>
+<span class="token comment">&lt;!--新数据库的数据源配置    --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>bean</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>newDataSource<span class="token punctuation">"</span></span> <span class="token attr-name">class</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>org.apache.commons.dbcp2.BasicDataSource<span class="token punctuation">"</span></span> <span class="token attr-name">destroy-method</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>close<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>property</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>url<span class="token punctuation">"</span></span> <span class="token attr-name">value</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>${url}<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>property</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>username<span class="token punctuation">"</span></span> <span class="token attr-name">value</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>${username}<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>property</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>password<span class="token punctuation">"</span></span> <span class="token attr-name">value</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>${password}<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>bean</span><span class="token punctuation">&gt;</span></span>
+<span class="token comment">&lt;!--动态数据源--&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>bean</span> <span class="token attr-name">id</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>routingDataSource<span class="token punctuation">"</span></span> <span class="token attr-name">class</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>cn.com.duiba.tuia.news.center.datasource.RoutingDataSource<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>property</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>targetDataSources<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>map</span> <span class="token attr-name">key-type</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>java.lang.String<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+            <span class="token comment">&lt;!-- 在此处配置需要动态切换的数据库--&gt;</span>
+            <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>entry</span> <span class="token attr-name">key</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>basic<span class="token punctuation">"</span></span> <span class="token attr-name">value-ref</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>basicDataSource<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span><span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>entry</span><span class="token punctuation">&gt;</span></span>
+            <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>entry</span> <span class="token attr-name">key</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>new<span class="token punctuation">"</span></span> <span class="token attr-name">value-ref</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>newDataSource<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span><span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>entry</span><span class="token punctuation">&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>map</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>property</span><span class="token punctuation">&gt;</span></span>
+    <span class="token comment">&lt;!--默认的数据源--&gt;</span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>property</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>defaultTargetDataSource<span class="token punctuation">"</span></span> <span class="token attr-name">ref</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>basicDataSource<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span><span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>property</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>bean</span><span class="token punctuation">&gt;</span></span>
+
+<span class="token comment">&lt;!--需要迁移的业务走这个SqlSessionTemplate    --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>bean</span> <span class="token attr-name">id</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>newSqlSessionTemplate<span class="token punctuation">"</span></span> <span class="token attr-name">class</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>org.mybatis.spring.SqlSessionTemplate<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>constructor-arg</span><span class="token punctuation">&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>bean</span> <span class="token attr-name">class</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>org.mybatis.spring.SqlSessionFactoryBean<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+            <span class="token comment">&lt;!--注意此处，需要配置成动态数据源routingDataSource--&gt;</span>
+            <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>property</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>dataSource<span class="token punctuation">"</span></span> <span class="token attr-name">ref</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>routingDataSource<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+            <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>property</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>mapperLocations<span class="token punctuation">"</span></span> <span class="token attr-name">value</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>classpath:mybatis/new/*.xml<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+            <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>property</span> <span class="token attr-name">name</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>configLocation<span class="token punctuation">"</span></span> <span class="token attr-name">value</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>classpath:mybatis/sqlMapConfig.xml<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>bean</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>constructor-arg</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>bean</span><span class="token punctuation">&gt;</span></span>
+</code></pre> 
+<p>这里补上RoutingDataSource类的代码，这里只作为演示，其中的dynamicSource固定为false，后面会提供动态读取的代码</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">RoutingDataSource</span> <span class="token keyword">extends</span> <span class="token class-name">AbstractRoutingDataSource</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> String DEFAULT_DATA_SOURCE <span class="token operator">=</span> <span class="token string">"basic"</span><span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> String NEW_DATA_SOURCE <span class="token operator">=</span> <span class="token string">"new"</span><span class="token punctuation">;</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">protected</span> Object <span class="token function">determineCurrentLookupKey</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+        <span class="token comment">//是否开启动态数据源</span>
+        <span class="token keyword">boolean</span> dynamicSource <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>dynamicSource<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//如果开启了，则走新的数据源</span>
+            <span class="token keyword">return</span> NEW_DATA_SOURCE<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//否则走旧的数据源</span>
+        <span class="token keyword">return</span> DEFAULT_DATA_SOURCE<span class="token punctuation">;</span>
+
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h5><a id="_192"></a>路由开关</h5> 
+<p>在动态选择数据源时，需要一个统一开关来开启或关闭路由的开关，在此处我选择了使用Redis来作为开关，即每次有请求时，均需要从Redis中读取开关的状态。</p> 
+<p>这样的优点是简单方便，不用考虑集群间的数据同步；缺点是每个请求都需要去Redis上查询，请求量大时对Redis的压力不小。</p> 
+<p>读者可以自行根据实际情况选择，例如zookeeper、Hazelcast等均可实现此功能。</p> 
+<p>实现时只需要在Redis（或其他中间件）中存一个开关，一开始默认为空或者默认为关闭状态，在需要切换时，通过系统中暴露一个http接口，手动调用这个http接口来实现开关的开启与关闭。有多种方法能实现类似的操作，请读者自由发挥。</p> 
+<h5><a id="_204"></a>同步时延</h5> 
+<p>前文提到在迁移前，需要DBA进行数据同步，即保持旧库与新库中的数据一致。但是，同步不可避免存在时延，这个时延可能只有几百毫秒，可能长达几秒。如果在这个时延期间，即部分数据写入（泛指一切修改数据的操作）旧库，但是没来得及写入新库前，数据源切换入新库，次数新库的读操作将无法读到部分数据，而写入操作可能会出现主键冲突之类的问题。</p> 
+<p>所以需要结合自身业务的重要性，考虑是否需要消除同步时延带来的问题。笔者经历过多次数据迁移，在一些非核心且请求量不大的业务中没有考虑这个情况，而一些关键业务需要处理。</p> 
+<p>解决同步时延方法有多种，这里介绍一下笔者的解决思路，该思路能解决写入操作导致的问题，没有解决延迟读的问题。</p> 
+<p>这里要处理的问题的原因是数据源已切换成功，但是旧数据可能还没来得及同步到新库，此时的写操作会导致问题写入的数据与稍后同步过来的数据有冲突。那么一个暴力的解决方案就是在切换前让数据库处于只读状态，切换完成一定时间内禁止所有的写操作直到数据同步完成。</p> 
+<p>这个方案当然也是有问题的，因为会导致线上的写操作出现类似闪断的现象，虽然方案不完美，但是考虑到类似ali云数据库升级时也同样会出现闪断的现象，而此时所有的读操作是没有影响的，选择在业务低峰期操作，应该是可以接受的。</p> 
+<p>实现方案可以结合上文路由开关，在开关中再保存一个只读状态，数据结构可以是这样：</p> 
+<pre><code class="prism language-json"><span class="token punctuation">{<!-- --></span><span class="token string">"dynamicSourceSwitch"</span><span class="token punctuation">:</span><span class="token boolean">true</span><span class="token punctuation">,</span><span class="token string">"readOnly"</span><span class="token punctuation">:</span><span class="token boolean">true</span><span class="token punctuation">}</span>
+</code></pre> 
+<p>整体开关的流程如下图</p> 
+<p><img src="https://images2.imgbox.com/ae/3f/YRGXQmkO_o.png" alt=""></p> 
+<h5><a id="_230"></a>读写状态的判断</h5> 
+<p>上文提供了一种解决同步时延问题的方案，那么就涉及到如何区分读写操作的问题。</p> 
+<p>这里提供一种实现方案：使用MyBatis拦截器</p> 
+<p>MyBatis给开发者提供了拦截器，可以拦截指定的操作，正好可以帮助我们拦截下来所有的写操作。在拦截成功后，可以在ThreadLocal中记录当前SQL操作为写操作，在动态数据源中区分处理。</p> 
+<p>实现逻辑比较简单，在此处不再赘述，直接贴代码。</p> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Intercepts</span><span class="token punctuation">(</span><span class="token punctuation">{<!-- --></span>
+        <span class="token annotation punctuation">@Signature</span><span class="token punctuation">(</span>type <span class="token operator">=</span> Executor<span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">,</span> method <span class="token operator">=</span> <span class="token string">"update"</span><span class="token punctuation">,</span> args <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>MappedStatement<span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">,</span> Object<span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">}</span><span class="token punctuation">)</span>
+<span class="token punctuation">}</span><span class="token punctuation">)</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">WriteInterceptor</span> <span class="token keyword">implements</span> <span class="token class-name">Interceptor</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">/**
+     * 记录当前操作是否为写操作
+     */</span>
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token keyword">final</span> ThreadLocal<span class="token generics function"><span class="token punctuation">&lt;</span>Boolean<span class="token punctuation">&gt;</span></span> WRITE_HOLDER <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ThreadLocal</span><span class="token operator">&lt;</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> Object <span class="token function">intercept</span><span class="token punctuation">(</span>Invocation invocation<span class="token punctuation">)</span> <span class="token keyword">throws</span> Throwable <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//标记当前操作为写操作</span>
+        WriteInterceptor<span class="token punctuation">.</span>WRITE_HOLDER<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> invocation<span class="token punctuation">.</span><span class="token function">proceed</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> Object <span class="token function">plugin</span><span class="token punctuation">(</span>Object target<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> Plugin<span class="token punctuation">.</span><span class="token function">wrap</span><span class="token punctuation">(</span>target<span class="token punctuation">,</span> <span class="token keyword">this</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">setProperties</span><span class="token punctuation">(</span>Properties properties<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token punctuation">}</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>记得在MyBatis配置中添加此拦截器</p> 
+<pre><code class="prism language-xml"><span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>plugin</span> <span class="token attr-name">interceptor</span><span class="token attr-value"><span class="token punctuation">=</span><span class="token punctuation">"</span>com.xxelin.interceptor.WriteInterceptor<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+</code></pre> 
+<h3><a id="_282"></a>结尾</h3> 
+<p>由于每次访问开关，会带来性能的损耗，如果像笔者一样使用Redis的话，对Redis也有不小的压力，所以在数据源切换完成后，将动态数据源部分代码全部下掉，换回原来固定数据源的方式。</p> 
+<p>最后贴上真的流程图和一些参考代码，感谢阅读。</p> 
+<h4><a id="_294"></a>流程图</h4> 
+<p><img src="https://images2.imgbox.com/4a/8a/7OCuBm6n_o.png" alt=""></p> 
+<h4><a id="_299"></a>其余代码</h4> 
+<p>代码仅供参考</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">RoutingDataSource</span> <span class="token keyword">extends</span> <span class="token class-name">AbstractRoutingDataSource</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">/**
+     * logger
+     */</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> Logger LOGGER <span class="token operator">=</span> LoggerFactory<span class="token punctuation">.</span><span class="token function">getLogger</span><span class="token punctuation">(</span>RoutingDataSource<span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+
+    <span class="token annotation punctuation">@Autowired</span>
+    <span class="token keyword">private</span> DynamicDataSourceService dynamicDataSourceService<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> String DEFAULT_DATA_SOURCE <span class="token operator">=</span> <span class="token string">"basic"</span><span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> String NEW_DATA_SOURCE <span class="token operator">=</span> <span class="token string">"new"</span><span class="token punctuation">;</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">protected</span> Object <span class="token function">determineCurrentLookupKey</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+        <span class="token comment">//是否为写操作</span>
+        Boolean isWrite <span class="token operator">=</span> WriteInterceptor<span class="token punctuation">.</span>WRITE_HOLDER<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>isWrite <span class="token operator">==</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            isWrite <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//配置数据源名称</span>
+        String sourceName <span class="token operator">=</span> DEFAULT_DATA_SOURCE<span class="token punctuation">;</span>
+
+        <span class="token comment">//是否只读</span>
+        <span class="token keyword">boolean</span> readOnly <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+        <span class="token comment">//是否开启动态数据源</span>
+        <span class="token keyword">boolean</span> dynamicSource <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+
+        Switch aSwitch <span class="token operator">=</span> dynamicDataSourceService<span class="token punctuation">.</span><span class="token function">getSwitch</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>aSwitch <span class="token operator">!=</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            readOnly <span class="token operator">=</span> aSwitch<span class="token punctuation">.</span><span class="token function">isReadOnly</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            dynamicSource <span class="token operator">=</span> aSwitch<span class="token punctuation">.</span><span class="token function">isDynamicSourceSwitch</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//进行切库操作</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>dynamicSource<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//如果是自读状态</span>
+            <span class="token keyword">if</span><span class="token punctuation">(</span>readOnly<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">if</span><span class="token punctuation">(</span>isWrite<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+                    <span class="token comment">//写操作时抛出只读异常</span>
+                    <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">ReadOnlyException</span><span class="token punctuation">(</span><span class="token string">"read only now!"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                <span class="token comment">//只读状态时继续走老库，此时写操作禁止一段时间</span>
+                sourceName <span class="token operator">=</span> DEFAULT_DATA_SOURCE<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span><span class="token keyword">else</span><span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//如果不是只读状态,则切到新库</span>
+                sourceName <span class="token operator">=</span> NEW_DATA_SOURCE<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+
+        LOGGER<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"调用{}库,是否为写操作:{},是否开启动态数据源:{},是否开启只读:{}"</span><span class="token punctuation">,</span> sourceName<span class="token punctuation">,</span> isWrite<span class="token punctuation">,</span> dynamicSource<span class="token punctuation">,</span> readOnly<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> sourceName<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Service</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">DynamicDataSourceService</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">/**
+     * logger
+     */</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> Logger LOGGER <span class="token operator">=</span> LoggerFactory<span class="token punctuation">.</span><span class="token function">getLogger</span><span class="token punctuation">(</span>DynamicDataSourceService<span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token annotation punctuation">@Autowired</span>
+    <span class="token keyword">private</span> StringRedisTemplate stringRedisTemplate<span class="token punctuation">;</span>
+
+    <span class="token keyword">public</span> Switch <span class="token function">getSwitch</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            String value <span class="token operator">=</span> stringRedisTemplate<span class="token punctuation">.</span><span class="token function">opsForValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>RedisKeyUtil<span class="token punctuation">.</span><span class="token function">dynamicSourceSwitch</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>StringUtils<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span>value<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">return</span> null<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token keyword">return</span> JSON<span class="token punctuation">.</span><span class="token function">parseObject</span><span class="token punctuation">(</span>value<span class="token punctuation">,</span> Switch<span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            LOGGER<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"读取数据源开关失败"</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span> null<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@RequestMapping</span><span class="token punctuation">(</span><span class="token string">"/dds"</span><span class="token punctuation">)</span>
+<span class="token annotation punctuation">@RestController</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">DynamicDataSourceController</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">/**
+     * logger
+     */</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> Logger LOGGER <span class="token operator">=</span> LoggerFactory<span class="token punctuation">.</span><span class="token function">getLogger</span><span class="token punctuation">(</span>DynamicDataSourceController<span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token annotation punctuation">@Autowired</span>
+    <span class="token keyword">private</span> StringRedisTemplate stringRedisTemplate<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> String KEY <span class="token operator">=</span> <span class="token string">"key"</span><span class="token punctuation">;</span>
+
+    <span class="token annotation punctuation">@RequestMapping</span><span class="token punctuation">(</span><span class="token string">"/open"</span><span class="token punctuation">)</span>
+    <span class="token keyword">public</span> <span class="token keyword">boolean</span> <span class="token function">open</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+        LOGGER<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"-------------------------开启数据源切换------------------------------"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        Switch aswitch <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Switch</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        aswitch<span class="token punctuation">.</span><span class="token function">setReadOnly</span><span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        aswitch<span class="token punctuation">.</span><span class="token function">setDynamicSourceSwitch</span><span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        stringRedisTemplate<span class="token punctuation">.</span><span class="token function">opsForValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>KEY<span class="token punctuation">,</span> JSON<span class="token punctuation">.</span><span class="token function">toJSONString</span><span class="token punctuation">(</span>aswitch<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            TimeUnit<span class="token punctuation">.</span>MILLISECONDS<span class="token punctuation">.</span><span class="token function">sleep</span><span class="token punctuation">(</span><span class="token number">500</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">InterruptedException</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            LOGGER<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"sleep被中断"</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token function">close</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        LOGGER<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"-------------------------实例只读------------------------------"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        aswitch<span class="token punctuation">.</span><span class="token function">setReadOnly</span><span class="token punctuation">(</span><span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        aswitch<span class="token punctuation">.</span><span class="token function">setDynamicSourceSwitch</span><span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        stringRedisTemplate<span class="token punctuation">.</span><span class="token function">opsForValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>KEY<span class="token punctuation">,</span> JSON<span class="token punctuation">.</span><span class="token function">toJSONString</span><span class="token punctuation">(</span>aswitch<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        LOGGER<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"-------------------------切换实例完毕------------------------------"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+
+    <span class="token annotation punctuation">@RequestMapping</span><span class="token punctuation">(</span><span class="token string">"/close"</span><span class="token punctuation">)</span>
+    <span class="token keyword">public</span> <span class="token keyword">boolean</span> <span class="token function">close</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        stringRedisTemplate<span class="token punctuation">.</span><span class="token function">delete</span><span class="token punctuation">(</span>KEY<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        LOGGER<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"-------------------------关闭数据源切换------------------------------"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+<span class="token punctuation">}</span>
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/4493ba55671896f18273b4ac41eb719a/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">mysql5.7 索引where和orderby排序问题</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/c9720ba1b56c2ea152de673c2d0e389d/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">CentOS|Ubuntu软件安装分类</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

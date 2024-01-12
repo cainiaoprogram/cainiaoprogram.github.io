@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>C&#43;&#43;编译知识笔记（二）——Linux ELF文件解析 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="C&#43;&#43;编译知识笔记（二）——Linux ELF文件解析" />
+<meta property="og:description" content="目录 一、ELF格式概述二、常见段及对应用途三、目标文件内容解析3.1 代码段.text3.2 只读数据段.rodata3.3 数据段.data3.4 .bss段3.5 重定位表（Reloacation Table）相关段.rela.xxx3.6 字符串表.strtab和.shstrtab3.7 符号表.symtab 编译器编译源代码后生成的文件叫做目标文件，也就是.o文件，里面包含了可执行的机器码和数据等，这里我们就以Linux平台为例来详细分析下目标文件里面存放的内容。目标文件从结构上讲，和可执行文件基本是一样的，主要区别仅仅是没有经过链接，从而可能有些符号或者地址还没有被调整，但整体是差不多的。这篇文章会以一个目标文件为实例来详细聊一下Linux下的目标文件里究竟有什么，以及它和可执行文件所用到的格式ELF（Executable Linkable Format）。 一、ELF格式概述 Linux下面的可执行文件格式是ELF，是COFF（Common Object File Format，早期的类UNIX系统使用）格式的变种，虽然名字就是可执行文件格式，但不光是可执行文件是这个格式，目标文件也是按这种文件类型来保存的，不光如此，Linux下面一共有四类文件是按照ELF的格式来保存的，如下：
+ELF文件类型说明示例可重定位文件（Relocatable）这类文件包含了代码和数据，可以被用来链接成可执行文件或共享目标文件，静态链接库可可以归为这一类Linux的.o目标文件可执行文件（Excutable File）这类文件包含了可直接执行的程序，比如ELF可执行文件，Linux下一般都没有扩展名/bin/bash文件共享目标文件（Shared Object File）.so文件，这类文件包含了代码和数据，链接器可以使用这种文件跟其他的目标文件和共享目标文件链接，产生新的目标文件。动态链接器则可以将这种共享文件目标文件与可执行文件结合，作为进程映像的一部分来运行/lib/glibc-2.5.so核心转储文件（Core Dump File）当进程意外终止时，系统可以将该进程的地址空间的内容及终止时的一些其他信息转储到核心转储文件core dump文件 对于一个熟练的linux平台的c/c&#43;&#43;开发人员，这些文件类型应该都不陌生。另外，前面提到过，.a的静态链接库可以理解为.o的打包，因此本质上也属于ELF类型。
+先不考虑具体的格式，我们已经知道目标文件里保存了我们执行程序所需要的内容，那么显然里面应该有执行所需要的指令和数据，这是最基本的，除此之外，还有链接时所需要的一些信息，比如符号表、调试信息、字符串等。一般目标文件将这些信息按不同的属性和类型，以“段”（section或segment）的形式存储，比如代码段、数据段等。
+下图用一个简单的示例直观的表示了程序编译后的ELF目标文件格式（省略了一些段）：
+首先会是一个文件头，它描述了这个ELF文件的属性，包括是否是可执行文件、大端还是小端、文件适应的目标硬件架构等。文件头内容如下：
+文件头中还有一个段表，包含了各个段的信息，段表如下：
+可以看到一共有13各个段，而后面要用到的ojbdump -h命令则会省略一些不关键的辅助性质的段。
+文件头后面就是各个段的具体内容。.开头的段都是系统保留段，应用程序也可以使用一些非保留名字来创建自定义段。图里的.text是代码段，保存了编译后的机器码，.data是数据段，保存已经初始化的全局静态变量和局部静态变量，而.bss段则是保存未初始化的全局变量和局部静态变量，这个比较令人困惑的bss的名字主要是因为历史原因。多提一句，这里说的静态变量指的是声明周期是整个程序的变量，在c/c&#43;&#43;程序里，所有的全局变量和static 修饰的局部变量属于这一类型，至于全局变量是否由static关键字修饰影响的只是这个全局变量的可见性，加了static的全局变量只在这个编译单元可见，各个编译单元可以有同名的static全局变量。不要把静态变量和static关键字搞混了。
+二、常见段及对应用途 除了上面提到的数据代码bss段等，这里贴一下《程序员的自我修养》一书中的一个ELF文件常见段和对应用途总结表：
+段名内容.text存放编译生成的机器码.rodata存放只读数据，一般是程序中的只读静态变量和字符串常量.data保存已经初始化的全局静态变量和局部静态变量.bss存储未初始化以及初始化为0的全局静态变量和局部静态变量.rodata1也是只读数据段，存放字符串常量，全局 const 变量，该段和 .rodata 类似。.comment存放编译器版本信息，比如 “GCC:GNU4.2.0”.debug调试信息.dynamic动态链接信息.hash符号哈希表.line调试时的行号表，即源代码行号与编译后指令的对应表.note额外的编译器信息，比如程序的公司名、发布版本号等.strtabString Table 字符串表，用于存储 ELF 文件中用到的各种字符串.symtabSymbol Table 符号表，从这里可以找到文件中的各个符号.shstrtab各个段的名称表，实际上是由各个段的名字组成的一个字符串数组.plt 和 .got动态链接的跳转表和全局入口表.init 和 .fini程序初始化和终结代码段 三、目标文件内容解析 下面以一个修改过的《程序员的自我修养》一书中的例子来实际看看目标文件的各个段的情况
+int printf(const char* format , ...); int global_init_var = 1; int global_uninit_var; void func1(int i){ printf(&#34;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/30ae95ee6428ac9026b01cfd6444db2e/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-05-02T21:05:27+08:00" />
+<meta property="article:modified_time" content="2022-05-02T21:05:27+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">C&#43;&#43;编译知识笔记（二）——Linux ELF文件解析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>目录</h4> 
+ <ul><li><a href="#ELF_3" rel="nofollow">一、ELF格式概述</a></li><li><a href="#_26" rel="nofollow">二、常见段及对应用途</a></li><li><a href="#_46" rel="nofollow">三、目标文件内容解析</a></li><li><ul><li><a href="#31_text_74" rel="nofollow">3.1 代码段.text</a></li><li><a href="#32_rodata_79" rel="nofollow">3.2 只读数据段.rodata</a></li><li><a href="#33_data_86" rel="nofollow">3.3 数据段.data</a></li><li><a href="#34_bss_89" rel="nofollow">3.4 .bss段</a></li><li><a href="#35_Reloacation_Tablerelaxxx_100" rel="nofollow">3.5 重定位表（Reloacation Table）相关段.rela.xxx</a></li><li><a href="#36_strtabshstrtab_104" rel="nofollow">3.6 字符串表.strtab和.shstrtab</a></li><li><a href="#37_symtab_114" rel="nofollow">3.7 符号表.symtab</a></li></ul> 
+ </li></ul> 
+</div> 
+<br> 编译器编译源代码后生成的文件叫做目标文件，也就是.o文件，里面包含了可执行的机器码和数据等，这里我们就以Linux平台为例来详细分析下目标文件里面存放的内容。目标文件从结构上讲，和可执行文件基本是一样的，主要区别仅仅是没有经过链接，从而可能有些符号或者地址还没有被调整，但整体是差不多的。这篇文章会以一个目标文件为实例来详细聊一下Linux下的目标文件里究竟有什么，以及它和可执行文件所用到的格式ELF（Executable Linkable Format）。 
+<p></p> 
+<h2><a id="ELF_3"></a>一、ELF格式概述</h2> 
+<p>Linux下面的可执行文件格式是ELF，是COFF（Common Object File Format，早期的类UNIX系统使用）格式的变种，虽然名字就是可执行文件格式，但不光是可执行文件是这个格式，目标文件也是按这种文件类型来保存的，不光如此，Linux下面一共有四类文件是按照ELF的格式来保存的，如下：</p> 
+<table><thead><tr><th>ELF文件类型</th><th>说明</th><th>示例</th></tr></thead><tbody><tr><td>可重定位文件（Relocatable）</td><td>这类文件包含了代码和数据，可以被用来链接成可执行文件或共享目标文件，静态链接库可可以归为这一类</td><td>Linux的.o目标文件</td></tr><tr><td>可执行文件（Excutable File）</td><td>这类文件包含了可直接执行的程序，比如ELF可执行文件，Linux下一般都没有扩展名</td><td>/bin/bash文件</td></tr><tr><td>共享目标文件（Shared Object File）</td><td>.so文件，这类文件包含了代码和数据，链接器可以使用这种文件跟其他的目标文件和共享目标文件链接，产生新的目标文件。动态链接器则可以将这种共享文件目标文件与可执行文件结合，作为进程映像的一部分来运行</td><td>/lib/glibc-2.5.so</td></tr><tr><td>核心转储文件（Core Dump File）</td><td>当进程意外终止时，系统可以将该进程的地址空间的内容及终止时的一些其他信息转储到核心转储文件</td><td>core dump文件</td></tr></tbody></table> 
+<p>对于一个熟练的linux平台的c/c++开发人员，这些文件类型应该都不陌生。另外，前面提到过，.a的静态链接库可以理解为.o的打包，因此本质上也属于ELF类型。</p> 
+<p>先不考虑具体的格式，我们已经知道目标文件里保存了我们执行程序所需要的内容，那么显然里面应该有执行所需要的指令和数据，这是最基本的，除此之外，还有链接时所需要的一些信息，比如符号表、调试信息、字符串等。一般目标文件将这些信息按不同的属性和类型，以“段”（section或segment）的形式存储，比如代码段、数据段等。</p> 
+<p>下图用一个简单的示例直观的表示了程序编译后的ELF目标文件格式（省略了一些段）：<br> <img src="https://images2.imgbox.com/ed/65/sqLkVhDu_o.png" alt="在这里插入图片描述"><br> 首先会是一个文件头，它描述了这个ELF文件的属性，包括是否是可执行文件、大端还是小端、文件适应的目标硬件架构等。文件头内容如下：<br> <img src="https://images2.imgbox.com/ba/db/spIiX3PP_o.png" alt="在这里插入图片描述"><br> 文件头中还有一个段表，包含了各个段的信息，段表如下：<br> <img src="https://images2.imgbox.com/b5/f3/puFCw5FQ_o.png" alt="在这里插入图片描述"><br> 可以看到一共有13各个段，而后面要用到的ojbdump -h命令则会省略一些不关键的辅助性质的段。</p> 
+<p>文件头后面就是各个段的具体内容。.开头的段都是系统保留段，应用程序也可以使用一些非保留名字来创建自定义段。图里的.text是代码段，保存了编译后的机器码，.data是数据段，保存<strong>已经初始化的全局静态变量和局部静态变量</strong>，而.bss段则是保存<strong>未初始化的全局变量和局部静态变量</strong>，这个比较令人困惑的bss的名字主要是因为历史原因。多提一句，这里说的静态变量指的是声明周期是整个程序的变量，在c/c++程序里，所有的全局变量和static 修饰的局部变量属于这一类型，至于<strong>全局变量是否由static关键字修饰影响的只是这个全局变量的可见性</strong>，加了static的全局变量只在这个编译单元可见，各个编译单元可以有同名的static全局变量。不要把静态变量和static关键字搞混了。</p> 
+<h2><a id="_26"></a>二、常见段及对应用途</h2> 
+<p>除了上面提到的数据代码bss段等，这里贴一下《程序员的自我修养》一书中的一个ELF文件常见段和对应用途总结表：</p> 
+<table><thead><tr><th>段名</th><th>内容</th></tr></thead><tbody><tr><td>.text</td><td>存放编译生成的机器码</td></tr><tr><td>.rodata</td><td>存放只读数据，一般是程序中的只读静态变量和字符串常量</td></tr><tr><td>.data</td><td>保存已经初始化的全局静态变量和局部静态变量</td></tr><tr><td>.bss</td><td>存储未初始化以及初始化为0的全局静态变量和局部静态变量</td></tr><tr><td>.rodata1</td><td>也是只读数据段，存放字符串常量，全局 const 变量，该段和 .rodata 类似。</td></tr><tr><td>.comment</td><td>存放编译器版本信息，比如 “GCC:GNU4.2.0”</td></tr><tr><td>.debug</td><td>调试信息</td></tr><tr><td>.dynamic</td><td>动态链接信息</td></tr><tr><td>.hash</td><td>符号哈希表</td></tr><tr><td>.line</td><td>调试时的行号表，即源代码行号与编译后指令的对应表</td></tr><tr><td>.note</td><td>额外的编译器信息，比如程序的公司名、发布版本号等</td></tr><tr><td>.strtab</td><td>String Table 字符串表，用于存储 ELF 文件中用到的各种字符串</td></tr><tr><td>.symtab</td><td>Symbol Table 符号表，从这里可以找到文件中的各个符号</td></tr><tr><td>.shstrtab</td><td>各个段的名称表，实际上是由各个段的名字组成的一个字符串数组</td></tr><tr><td>.plt 和 .got</td><td>动态链接的跳转表和全局入口表</td></tr><tr><td>.init 和 .fini</td><td>程序初始化和终结代码段</td></tr></tbody></table> 
+<h2><a id="_46"></a>三、目标文件内容解析</h2> 
+<p>下面以一个修改过的《程序员的自我修养》一书中的例子来实际看看目标文件的各个段的情况</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">int</span> <span class="token function">printf</span><span class="token punctuation">(</span><span class="token keyword">const</span> <span class="token keyword">char</span><span class="token operator">*</span> format <span class="token punctuation">,</span> <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token keyword">int</span> global_init_var <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+<span class="token keyword">int</span> global_uninit_var<span class="token punctuation">;</span>
+
+<span class="token keyword">void</span> <span class="token function">func1</span><span class="token punctuation">(</span><span class="token keyword">int</span> i<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"%d\n"</span><span class="token punctuation">,</span> i<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">static</span> <span class="token keyword">int</span> static_init_var <span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">;</span>
+	<span class="token keyword">static</span> <span class="token keyword">int</span> static_uninit_var<span class="token punctuation">;</span>
+    <span class="token keyword">static</span> <span class="token keyword">const</span> <span class="token keyword">int</span> static_const_init_var <span class="token operator">=</span> <span class="token number">3</span><span class="token punctuation">;</span>
+	<span class="token keyword">static</span> <span class="token keyword">const</span> <span class="token keyword">int</span> static_const_uninit_var<span class="token punctuation">;</span>
+	<span class="token keyword">const</span> <span class="token keyword">int</span> const_init_var <span class="token operator">=</span> <span class="token number">4</span><span class="token punctuation">;</span>
+	<span class="token keyword">int</span> init_var <span class="token operator">=</span> <span class="token number">5</span><span class="token punctuation">;</span>
+	<span class="token keyword">int</span> uninit_var<span class="token punctuation">;</span>
+	<span class="token function">func1</span><span class="token punctuation">(</span>static_init_var <span class="token operator">+</span> static_uninit_var <span class="token operator">+</span> static_const_uninit_var <span class="token operator">+</span> static_const_uninit_var <span class="token operator">+</span> init_var <span class="token operator">+</span> uninit_var<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">return</span> init_var<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>gcc -c test.c编译得到text.o，经objdump命令查看段情况如下：<br> <img src="https://images2.imgbox.com/6f/e7/xF9eXHif_o.png" alt="在这里插入图片描述"><br> 可以看到有id从0-5的6个段（省略了非关键的段），使用objdump -s -d test.o命令可以看到各段存放的内容按16进制展示如下:<br> <img src="https://images2.imgbox.com/0b/fb/w4utzhdm_o.png" alt="在这里插入图片描述"><br> 而3（.bss）因为没有实际内容所以不包含在里面，其中4、5、6是辅助功能用到的段，这里先不讨论，下面我们看下0 1 2 3三个段，也就是代码段.text，只读数据段.rodata，数据段.data，以及.bss段。</p> 
+<h3><a id="31_text_74"></a>3.1 代码段.text</h3> 
+<p>代码段里保存的都是机器码，用objdump -s -d test.o命令可以得到反汇编之后的汇编代码，内容如下：<br> <img src="https://images2.imgbox.com/34/33/NmqAIiMn_o.png" alt="在这里插入图片描述"><br> 这里不过多解释汇编语句，可以看到内容对应我们写的两个函数。</p> 
+<h3><a id="32_rodata_79"></a>3.2 只读数据段.rodata</h3> 
+<p>.rodata，根据字面意思就很好理解，read only data，和.data段类似，但是是保存只读的静态常量，<br> <img src="https://images2.imgbox.com/e4/37/2RlFW3oH_o.png" alt="在这里插入图片描述"><br> 可以看到有两个只读数据，因为字节序（大端小端）的关系字节的顺序和我们的习惯顺序是反着的，0x25640a00是"%d\n"对应的asc2妈加上一个结束的\0，而0x03000000则是对应的static const int static_const_init_var = 3;</p> 
+<p>只有静态变量或者常量才有必要提前定义在数据段里，所以可以看到const int const_init_var这种并不会保存在数据段里，而是直接在指令里写死临时分配在栈上，可以参考text段的汇编代码。</p> 
+<h3><a id="33_data_86"></a>3.3 数据段.data</h3> 
+<p>数据段保存已经初始化的全局静态变量和局部静态变量，0x01000000和0x02000000分别对应int global_init_var = 1;和static int static_init_var = 2;<br> <img src="https://images2.imgbox.com/66/d3/C1EWSvQw_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="34_bss_89"></a>3.4 .bss段</h3> 
+<p>.bss段（Block Started by Symbol）则保存未初始化的全局变量和局部静态变量，实际上只是place holder，不会保存实际内容，可以说是通过.bss段给变量预留空间，不需要占用ELF文件的空间，加载到内存里才会实际占用空间。上面的例子里我们也能看.bss段在列表里，但并没有.bss段的内容。需要注意的一种特殊情况是初始化为0也有可能被编译器当成未初始化放在.bss段里以节省空间。</p> 
+<p>可以总结为：</p> 
+<ul><li>Uninitialized global/static data</li><li>“Block Started by Symbol”</li><li>“Better Save Space”</li><li>Has section header but occupies no space</li></ul> 
+<p>这个名字不像其他段那么直观，有兴趣进一步深入了解的可以参照【参考4】和【参考5】。</p> 
+<h3><a id="35_Reloacation_Tablerelaxxx_100"></a>3.5 重定位表（Reloacation Table）相关段.rela.xxx</h3> 
+<p>重定位表是用于链接阶段的重定位的，在独立地生成每个编译单元的时候很多变量和函数的地址是没法确定的，需要在链接阶段进行修正，后续静态链接会详细说明这个过程，这里先看下重定位表的结构，每一个需要重定位操作的段都会对应一个重定位表段，比如.text对应了一个.rela.text，可以用objdump -r命令查看，可以看到上面的示例程序有两个重定位表段，分别是.text的和.eh_frame的。<br> <img src="https://images2.imgbox.com/61/09/goxdmjIf_o.png" alt="在这里插入图片描述"><br> 以printf的调用，也就是.text重定位表中的第2行为例，这行是说OFFSET为1b的地方需要后续链接阶段重定位，.text段的1b位置正是对printf的call指令的寻址部分，也就是printf的地址需要重定位，重定位类型为R_X86_64_PC32，这是一种相对寻址的重定位类型，后续聊静态链接的时候再展开讲。</p> 
+<h3><a id="36_strtabshstrtab_104"></a>3.6 字符串表.strtab和.shstrtab</h3> 
+<p>ELF文件中用到了很多字符串，比如段名、变量名等，通常由.strtab和.shstrtab两个段保存，分别为<strong>字符串表（string table）<strong>和</strong>段表字符串表（section header string table）</strong>，前者用来保存普通的字符串，比如符号的名字，后者用来保存段表中用到的字符串，比如段名。因为字符串是变长的，这里采取的是连续保存并用\0分割，通过offset来获取。</p> 
+<p>我们可以用readelf命令打出来：<br> <img src="https://images2.imgbox.com/b7/36/GJXfq1Wo_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/c3/4c/7aqj05TA_o.png" alt="在这里插入图片描述"><br> 这里贴个ascii码表方便对照着看：<br> <img src="https://images2.imgbox.com/fe/14/V1vdfILg_o.png" alt="在这里插入图片描述"><br> 比如.strtab这个字符串，2e7374 72746162就是对应内容，前后各有一个\0，因此有一个为9的offset就可以获取到。</p> 
+<h3><a id="37_symtab_114"></a>3.7 符号表.symtab</h3> 
+<p>要将多个目标文件链接在一起，本质上就是将各个目标文件的内容合并后并且能保证运行时互相的变量访问和函数调用正常，也就是对内外部函数和变量的访问都能找到正确的地址，在链接中将函数和变量统称为符号，函数名或变量名就是符号名，整个链接过程的核心就是根据符号来确定正确的地址。每一个目标文件都会有一个相应的符号表（Symbol Table，.symtab段），记录了目标文件所用到的所有符号，注意是所用到的所有，不管包含在内部的符号还是外部符号。每个定义的符号有一个对应的值，叫符号值，对于变量和函数来说，就是他们的地址。<br> <img src="https://images2.imgbox.com/af/91/dV9ME9yF_o.png" alt="在这里插入图片描述"><br> 符号有不同的类型，上图说明了：<br> （1）func1和main的类型是T，说明是在.text段，且全局可见。<br> （2）global_init_var的类型是D，表明是全局可见且在.data段的。<br> （3）global_uninit_var的类型是C，表明是全局可见的在common块的。<br> （4）printf的类型是U，说明是未定义的，该符号在编译单元外部。<br> （5）static_const_init_var的类型是r，说明在.rodata段。<br> （6）static_const_uninit_var和static_uninit_var的类型是b，说明在.bss段。<br> （7）static_init_var的类型是d，表明是局部可见且在.data段，大小写表明了可见性。</p> 
+<p>【参考】<br> 1.《程序员的自我修养—链接、装载与库》<br> 2.https://stackoverflow.com/questions/64626917/global-variables-and-the-data-section<br> 3.https://stackoverflow.com/questions/1856599/when-to-use-static-keyword-before-global-variables<br> 4.https://www.cnblogs.com/idorax/p/6400210.html<br> 5.https://en.wikipedia.org/wiki/.bss</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/f7996c6a270d12c2c936654ff3d2fcbb/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">一文读懂串口及各种电平信号含义</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/a51944d8de6be6780856525ff9535641/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">OpenCV中的图像处理 —— 傅里叶变换&#43;模板匹配</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

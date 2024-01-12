@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>什么是图形加速卡（二） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="什么是图形加速卡（二）" />
+<meta property="og:description" content="原文：http://www.azillionmonkeys.com/qed/accelerator.html
+作者：Paul Hsieh
+-潘宏 译
+-2013年1月
+-email: popyy@netease.com
+-weibo.com/panhong101
+（译注：本文写于2000年左右，很多内容稍显过时。但作为理解GPU发展的历史性、技术性材料，本文真是不可多得）
+主机和显卡的通信
+粗略来说，将图形操作从主机传送到显卡，会通过某种命令队列（或者FIFO）来完成。主机端的图形API（比如GDI，DirectDraw/3D/X，或者OpenGL）会被分解为显卡的特定命令。这些命令会被显卡执行，完后以先进先出的方式出队。对命令队列进行写入以及调度，经常会牵扯到对内存映射显卡寄存器，或IO端口的读写。此外，也可能会牵扯写系统内存，以及使用显卡DMA等策略（我相信nVidia和3DLabs，以及Matrox都会这么做）。
+早期显卡的瓶颈之一是命令队列经常过短（通常有16个位置，原始ATI Mach64即如此），以至于主机和显卡不能充分并行工作。为此，主机端驱动程序通常可能被阻塞，等待着队列给下一个操作腾出足够位置。现代显卡中，队列的位置都进行了大量扩充，通常都会超过512个。此外，尽管显卡寄存器窗口（译注：寄存器窗口（Register Window）技术用来改善因处理器寄存器有限而造成的公共操作性能问题）已预留了一个小型队列，但仍有一部分显存会被用来当作一个溢出队列（Spill Queue），这实质上是对寄存器窗口队列的一个扩展（我认为S3是这样的）。
+有些显卡使用另一个技巧来改善队列访问性能，就是把队列内存映射到连续的内存地址上，这样，显卡将有机会利用主机芯片组的PCI突发传送（Bursting Capabilities）能力（MPACT和3DFX都是这样）。
+三角形剔除（Culling）也是越来越重要的显卡特性。对此存在一个争议：剔除应该在主机端执行以减少PCI带宽，还是在显卡中执行以最小化计算开销。问题是很多软件都是自己做剔除（因此不需要显卡驱动或显卡本身帮着弄）。究其原因，是在这些软件中，被渲染的物体往往携带诸多复杂属性，因此提前进行裁剪有利于减少后面牵扯这些复杂属性的计算开销。这也有弊端，因为有些写得比较保守的图形库程序本身也会进行背面剔除，这会导致二次剔除开销。所以，提供某种“渲染前请不要剔除这些三角形”开关，可能非常有用（对！微软，就是在提醒你！）。
+对此，我认为nVidia的方案会是：利用AGP的更高吞吐量（这就不算个瓶颈了），把所有数据都丢给显卡，让它做剔除。
+通常情况下，显卡会配有一个快速的（在PCI总线情况下足以说快了）帧缓冲，所以若需要，CPU会代替显卡，或者同显卡一道，对显存进行更新。有些显卡，比如TSENG ET6000，实际上会维护一个帧缓冲和PCI总线之间的缓存，这种情况下来自主机的访问可能只需最小的延迟等待（这可能是图形系统中RAM仲裁器的一部分）。因为没有使用任何并行机制（这对于显卡的高性能来说是关键），大家也就不奇怪为何ET6000不是顶级显卡了。
+说到主机和显卡并发存取显存，这种技术鲜为使用，因为这需要一个先进的仲裁系统，用来隔离将被用于显卡操作的显存区域。Chromatic的MPACT媒体处理器实际上有这么个仲裁特性，它对于增强Windows DIB（桌面应用程序使用的2D位图数据结构）的性能特别有用。而对于3D性能提升，MPACT存在设计上的问题。但MPACT媒体处理器软件的并行性，可以说在它的时代是最好的。
+几乎所有的显卡都有个共性，就是当主机有读写显存之需求时，显卡都要先等待所有积压的图形操作完成，命令队列被清空，才继续进行。这样，也就造成了写显存的额外代价，就是在访问显存的间隔时间中，那些积压的图形操作所产生的总等待时间（Latency）的均值。大多数显卡厂商都认定，减少操作本身的等待延迟才是唯一的解决方案。我不同意此观点。
+当前方案有这样一个前提机制来保证：一个复杂的多存取显存仲裁机制并不需要同等复杂的硬件来支持。用个简单的“操作计数器”机制就能搞定了。基本思想是，每当一个图形操作完成，操作计数器（用内存映射寄存器，或者只是显存中的一个值来保存）就递增。实际工作时，显卡驱动程序会保存一个计数的拷贝（用一个主机端计数器影射图形端计数器），该计数就是针对相应内存对象（表面、前缓冲、后备缓冲、Windows位图等等）进行操作，最终完成时的累加值。有了这个值用于计数比较，也有了命令队列长度限制用于避免计数器越界回绕，你就能知道显卡针对某个内存对象，什么时候完成了所有操作（这需要很稳定的硬件和软件以避免显存崩溃而导致死机）。
+而我的方案是：减少主机等待延迟，从而提高显存带宽。该方法的一个典型应用情景是：有一些图形操作正在传输，还有一些被积压等待执行，此时主机突然通过PCI发送了一个操作请求过来，接着显卡马上挂起当前动作，并排空内部显存仲裁器（PCI事务必须比其它设备访问内存有更高的优先级）。所以实际上，从显卡角度看，这种方式会强烈冲击性能。然而从主机角度看，直接PCI显存访问在很大程度上，可以说用马上用，不用等了（不像过去，因为过度担心安全性，必须得等到所有积压的操作完成，才能访问显存），这也就减少了主机等待。换言之，在这种方案中，系统在每个周期可以干更多活。
+我这办法不错吧？过去我跟行业里的人说过这想法，他们都不以为然，很诧异地觉得我在忽悠。现在不管那些了，反正这些东西都做出来了，也看到它们确实提高性能了，我已经证明了自己。这办法确实有用。可编程显卡，比如MPACT媒体处理器和Rendition的Verite，甚至Matrox GXXX系列，都可以毫无压力地使用我这个方法。如果是通过纯硬件方法而没有用我的办法，那还是做个硬件的操作计数器吧。
+最后，我想对前面提到的那个DMA概念，再多说一点。拥有总线控制能力（BUS-mastering）的显卡，可以通过PCI或者AGP总线，在无需CPU插手的情况下，访问非cache的系统内存（需要通过DMA）。使用这种机制进行纹理交换，以及其他内存传输操作，可增强主机和显卡间的并行性。但还得注意，这仍存在一些协调性问题（试想主机怎么能知道当前DMA传输完成？）。关于这一点，我在前面已经讨论过了（最近经常被提到的Permedia 3显卡，就可以把系统内存当作其内存控制器中的L3缓存一样使用——这提高了纹理传输的透明性和效率。比如，如果只需要某张纹理的一部分，那么显卡就可以通过AGP总线以DMA的方式，直接从系统内存里拿走那部分纹理）。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/f9de7dd06f6326c4f488ebf1cfc6e4a3/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2013-01-26T19:47:13+08:00" />
+<meta property="article:modified_time" content="2013-01-26T19:47:13+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">什么是图形加速卡（二）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">原文：<a href="http://www.azillionmonkeys.com/qed/accelerator.html" rel="nofollow">http://www.azillionmonkeys.com/qed/accelerator.html</a></span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">作者：Paul Hsieh</span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; min-height: 14px; "><span style="letter-spacing: 0.0px"></span><br></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">-潘宏 译</span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">-2013年1月</span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; color: rgb(43, 0, 174); "><span style="letter-spacing: 0.0px; color: #000000">-email: <a href="mailto:popyy@netease.com" rel="nofollow"><span style="letter-spacing: 0px; ">popyy@netease.com</span></a></span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">-weibo.com/panhong101</span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; min-height: 14px; "><span style="letter-spacing: 0.0px"></span><br></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">（译注：本文写于2000年左右，很多内容稍显过时。但作为理解GPU发展的历史性、技术性材料，本文真是不可多得）</span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; min-height: 14px; "><span style="letter-spacing: 0.0px"></span><br></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-size: 18px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">主机和显卡的通信</span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; min-height: 14px; "><span style="letter-spacing: 0.0px"></span><br></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">粗略来说，将图形操作从主机传送到显卡，会通过某种命令队列（或者FIFO）来完成。主机端的图形API（比如GDI，DirectDraw/3D/X，或者OpenGL）会被分解为显卡的特定命令。这些命令会被显卡执行，完后以先进先出的方式出队。对命令队列进行写入以及调度，经常会牵扯到对内存映射显卡寄存器，或IO端口的读写。此外，也可能会牵扯写系统内存，以及使用显卡DMA等策略（我相信nVidia和3DLabs，以及Matrox都会这么做）。</span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; min-height: 14px; "><span style="letter-spacing: 0.0px"></span><br></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">早期显卡的瓶颈之一是命令队列经常过短（通常有16个位置，原始ATI Mach64即如此），以至于主机和显卡不能充分并行工作。为此，主机端驱动程序通常可能被阻塞，等待着队列给下一个操作腾出足够位置。现代显卡中，队列的位置都进行了大量扩充，通常都会超过512个。此外，尽管显卡寄存器窗口（译注：寄存器窗口（Register Window）技术用来改善因处理器寄存器有限而造成的公共操作性能问题）已预留了一个小型队列，但仍有一部分显存会被用来当作一个溢出队列（Spill Queue），这实质上是对寄存器窗口队列的一个扩展（我认为S3是这样的）。</span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; min-height: 14px; "><span style="letter-spacing: 0.0px"></span><br></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">有些显卡使用另一个技巧来改善队列访问性能，就是把队列内存映射到连续的内存地址上，这样，显卡将有机会利用主机芯片组的PCI突发传送（Bursting Capabilities）能力（MPACT和3DFX都是这样）。</span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; min-height: 14px; "><span style="letter-spacing: 0.0px"></span><br></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">三角形剔除（Culling）也是越来越重要的显卡特性。对此存在一个争议：剔除应该在主机端执行以减少PCI带宽，还是在显卡中执行以最小化计算开销。问题是很多软件都是自己做剔除（因此不需要显卡驱动或显卡本身帮着弄）。究其原因，是在这些软件中，被渲染的物体往往携带诸多复杂属性，因此提前进行裁剪有利于减少后面牵扯这些复杂属性的计算开销。这也有弊端，因为有些写得比较保守的图形库程序本身也会进行背面剔除，这会导致二次剔除开销。所以，提供某种“渲染前请不要剔除这些三角形”开关，可能非常有用（对！微软，就是在提醒你！）。</span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; min-height: 14px; "><span style="letter-spacing: 0.0px"></span><br></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">对此，我认为nVidia的方案会是：利用AGP的更高吞吐量（这就不算个瓶颈了），把所有数据都丢给显卡，让它做剔除。</span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; min-height: 14px; "><span style="letter-spacing: 0.0px"></span><br></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">通常情况下，显卡会配有一个快速的（在PCI总线情况下足以说快了）帧缓冲，所以若需要，CPU会代替显卡，或者同显卡一道，对显存进行更新。有些显卡，比如TSENG ET6000，实际上会维护一个帧缓冲和PCI总线之间的缓存，这种情况下来自主机的访问可能只需最小的延迟等待（这可能是图形系统中RAM仲裁器的一部分）。因为没有使用任何并行机制（这对于显卡的高性能来说是关键），大家也就不奇怪为何ET6000不是顶级显卡了。</span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; min-height: 14px; "><span style="letter-spacing: 0.0px"></span><br></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">说到主机和显卡并发存取显存，这种技术鲜为使用，因为这需要一个先进的仲裁系统，用来隔离将被用于显卡操作的显存区域。Chromatic的MPACT媒体处理器实际上有这么个仲裁特性，它对于增强Windows DIB（桌面应用程序使用的2D位图数据结构）的性能特别有用。而对于3D性能提升，MPACT存在设计上的问题。但MPACT媒体处理器软件的并行性，可以说在它的时代是最好的。</span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; min-height: 14px; "><span style="letter-spacing: 0.0px"></span><br></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">几乎所有的显卡都有个共性，就是当主机有读写显存之需求时，显卡都要先等待所有积压的图形操作完成，命令队列被清空，才继续进行。这样，也就造成了写显存的额外代价，就是在访问显存的间隔时间中，那些积压的图形操作所产生的总等待时间（Latency）的均值。大多数显卡厂商都认定，减少操作本身的等待延迟才是唯一的解决方案。我不同意此观点。</span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; min-height: 14px; "><span style="letter-spacing: 0.0px"></span><br></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">当前方案有这样一个前提机制来保证：一个复杂的多存取显存仲裁机制并不需要同等复杂的硬件来支持。用个简单的“操作计数器”机制就能搞定了。基本思想是，每当一个图形操作完成，操作计数器（用内存映射寄存器，或者只是显存中的一个值来保存）就递增。实际工作时，显卡驱动程序会保存一个计数的拷贝（用一个主机端计数器影射图形端计数器），该计数就是针对相应内存对象（表面、前缓冲、后备缓冲、Windows位图等等）进行操作，最终完成时的累加值。有了这个值用于计数比较，也有了命令队列长度限制用于避免计数器越界回绕，你就能知道显卡针对某个内存对象，什么时候完成了所有操作（这需要很稳定的硬件和软件以避免显存崩溃而导致死机）。</span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; min-height: 14px; "><span style="letter-spacing: 0.0px"></span><br></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">而我的方案是：减少主机等待延迟，从而提高显存带宽。该方法的一个典型应用情景是：有一些图形操作正在传输，还有一些被积压等待执行，此时主机突然通过PCI发送了一个操作请求过来，接着显卡马上挂起当前动作，并排空内部显存仲裁器（PCI事务必须比其它设备访问内存有更高的优先级）。所以实际上，从显卡角度看，这种方式会强烈冲击性能。然而从主机角度看，直接PCI显存访问在很大程度上，可以说用马上用，不用等了（不像过去，因为过度担心安全性，必须得等到所有积压的操作完成，才能访问显存），这也就减少了主机等待。换言之，在这种方案中，系统在每个周期可以干更多活。</span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; min-height: 14px; "><span style="letter-spacing: 0.0px"></span><br></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">我这办法不错吧？过去我跟行业里的人说过这想法，他们都不以为然，很诧异地觉得我在忽悠。现在不管那些了，反正这些东西都做出来了，也看到它们确实提高性能了，我已经证明了自己。这办法确实有用。可编程显卡，比如MPACT媒体处理器和Rendition的Verite，甚至Matrox GXXX系列，都可以毫无压力地使用我这个方法。如果是通过纯硬件方法而没有用我的办法，那还是做个硬件的操作计数器吧。</span></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; min-height: 14px; "><span style="letter-spacing: 0.0px"></span><br></p> 
+<p style="margin-top: 0px; margin-bottom: 0px; font-family: Helvetica; "><span style="letter-spacing: 0.0px">最后，我想对前面提到的那个DMA概念，再多说一点。拥有总线控制能力（BUS-mastering）的显卡，可以通过PCI或者AGP总线，在无需CPU插手的情况下，访问非cache的系统内存（需要通过DMA）。使用这种机制进行纹理交换，以及其他内存传输操作，可增强主机和显卡间的并行性。但还得注意，这仍存在一些协调性问题（试想主机怎么能知道当前DMA传输完成？）。关于这一点，我在前面已经讨论过了（最近经常被提到的Permedia 3显卡，就可以把系统内存当作其内存控制器中的L3缓存一样使用——这提高了纹理传输的透明性和效率。比如，如果只需要某张纹理的一部分，那么显卡就可以通过AGP总线以DMA的方式，直接从系统内存里拿走那部分纹理）。</span></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/3da472df17e0fea421ff9444c67722d2/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">python 内建排序 HOW TO</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/60f4a221d6bd9a4114f0fb23fcea3716/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">python修饰符</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

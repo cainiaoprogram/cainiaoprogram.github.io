@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>MySQL 基于GTID的半同步主从复制 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="MySQL 基于GTID的半同步主从复制" />
+<meta property="og:description" content="什么是GTID？ 全局事务标识符GTID的全称为Global Transaction Identifier，是在整个复制环境中对一个事务的唯一标识。
+它是MySQL 5.6加入的一个强大特性，目的在于能够实现主从自动定位和切换，而不像以前需要指定文件和位置。替代传统的binlog&#43;pos复制；使用master_auto_position=1自动匹配GTID断点进行复制，slave端在接受master的binlog时，会校验GTID值。
+GTID的格式 ceb0ca3d-8366-11e8-ad2b-000c298b7c9a:1-4
+uuid号：每个mysql实例的唯一编号，1-4是序列号，每次一个事务完成都会自增1。
+GTID的分配 服务器为已提交的事务生成新的GTID。写入二进制日志的每个数据库更改（DDL或DML）都会分配一个GTID。这包括自动提交的更改以及使用BEGIN和COMMIT或START TRANSACTION语句提交的更改。当数据库，以及非表数据库对象，例如过程、函数、触发器、事件、视图、用户、角色在创建、更改或删除时会分配GTID。授权语句和非事务表的更新也会分配GTID。
+gtid_next系统变量 gtid_next是会话系统变量。默认情况下，对于在用户会话中提交的新事务，服务器会自动生成并分配新的GTID。在从库上应用事务时，将保留来自原始服务器的GTID。
+当gtid_next设置为AUTOMATIC（默认值），并且事务已提交并写入二进制日志时，服务器会自动生成并分配新的GTID。如果由于其它原因而回滚事务或未将事务写入二进制日志，则服务器不会生成和分配GTID。
+gtid_purged系统变量 gtid_purged是全局系统变量。@@GLOBAL.gtid_purged中的GTID集包含已在服务器上提交但在服务器上的任何二进制日志文件中不存在的所有事务的GTID。gtid_purged是gtid_executed的子集。
+在从库上禁用二进制日志记录时提交的复制事务的GTID。
+已清除的二进制日志文件中事务的GTID。
+通过语句SET @@GLOBAL.gtid_purged明确添加到集合中的GTID。
+root@(none) 10:38 mysql&gt;show variables like &#39;gtid%&#39;; &#43;----------------------------------&#43;-----------&#43; | Variable_name | Value | &#43;----------------------------------&#43;-----------&#43; | gtid_executed_compression_period | 1000 | | gtid_mode | OFF | | gtid_next | AUTOMATIC | | gtid_owned | | | gtid_purged | | &#43;----------------------------------&#43;-----------&#43; 5 rows in set (0.04 sec) 工作原理 1、master上进行DML操作更新数据时，会在事务前产生GTID，一同记录到binlog日志中。
+2、slave上的i/o 线程将变更的binlog，写入到本地的relay log中。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/ce2ab0bf0572fb69d68afa91ac5c5026/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-08-09T11:08:17+08:00" />
+<meta property="article:modified_time" content="2023-08-09T11:08:17+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">MySQL 基于GTID的半同步主从复制</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h2>什么是GTID？</h2> 
+<p>全局事务标识符GTID的全称为Global Transaction Identifier，是在整个复制环境中对一个事务的唯一标识。</p> 
+<p>它是MySQL 5.6加入的一个强大特性，目的在于能够实现主从自动定位和切换，而不像以前需要指定文件和位置。替代传统的binlog+pos复制；使用master_auto_position=1自动匹配GTID断点进行复制，slave端在接受master的binlog时，会校验GTID值。</p> 
+<h2>GTID的格式</h2> 
+<p>ceb0ca3d-8366-11e8-ad2b-000c298b7c9a:1-4<br> uuid号：每个mysql实例的唯一编号，1-4是序列号，每次一个事务完成都会自增1。</p> 
+<h2>GTID的分配</h2> 
+<p>服务器为已提交的事务生成新的GTID。写入二进制日志的每个数据库更改（DDL或DML）都会分配一个GTID。这包括自动提交的更改以及使用BEGIN和COMMIT或START TRANSACTION语句提交的更改。当数据库，以及非表数据库对象，例如过程、函数、触发器、事件、视图、用户、角色在创建、更改或删除时会分配GTID。授权语句和非事务表的更新也会分配GTID。</p> 
+<h2 id="3.%20gtid_next%E7%B3%BB%E7%BB%9F%E5%8F%98%E9%87%8F">gtid_next系统变量</h2> 
+<p>gtid_next是会话系统变量。默认情况下，对于在用户会话中提交的新事务，服务器会自动生成并分配新的GTID。在从库上应用事务时，将保留来自原始服务器的GTID。</p> 
+<p>当gtid_next设置为AUTOMATIC（默认值），并且事务已提交并写入二进制日志时，服务器会自动生成并分配新的GTID。如果由于其它原因而回滚事务或未将事务写入二进制日志，则服务器不会生成和分配GTID。</p> 
+<h2 id="4.%20gtid_purged%E7%B3%BB%E7%BB%9F%E5%8F%98%E9%87%8F">gtid_purged系统变量</h2> 
+<p>gtid_purged是全局系统变量。@@GLOBAL.gtid_purged中的GTID集包含已在服务器上提交但在服务器上的任何二进制日志文件中不存在的所有事务的GTID。gtid_purged是gtid_executed的子集。</p> 
+<p>在从库上禁用二进制日志记录时提交的复制事务的GTID。</p> 
+<p>已清除的二进制日志文件中事务的GTID。</p> 
+<p>通过语句SET @@GLOBAL.gtid_purged明确添加到集合中的GTID。</p> 
+<pre><code class="hljs">root@(none) 10:38  mysql&gt;show variables like 'gtid%';
++----------------------------------+-----------+
+| Variable_name                    | Value     |
++----------------------------------+-----------+
+| gtid_executed_compression_period | 1000      |
+| gtid_mode                        | OFF       |
+| gtid_next                        | AUTOMATIC |
+| gtid_owned                       |           |
+| gtid_purged                      |           |
++----------------------------------+-----------+
+5 rows in set (0.04 sec)
+</code></pre> 
+<h2>工作原理</h2> 
+<p>1、master上进行DML操作更新数据时，会在事务前产生GTID，一同记录到binlog日志中。<br> 2、slave上的i/o 线程将变更的binlog，写入到本地的relay log中。<br> 3、sql线程从relay log中获取GTID，然后对比master上的binlog是否有记录。<br> 4、如果有记录，说明该GTID的事务已经执行，slave会忽略。<br> 5、如果没有记录，slave就会从relay log中执行该GTID的事务，并记录到binlog。<br> 6、在解析过程中会判断是否有主键，如果没有就用二级索引，如果没有就用全部扫描</p> 
+<h2>配置基于GTID的半同步主从复制</h2> 
+<h3>1. 修改master的配置文件</h3> 
+<pre><code class="language-bash">[root@master ~]# cat /etc/my.cnf
+[mysqld_safe]
+
+[client]
+socket=/data/mysql/mysql.sock
+
+[mysqld]
+socket=/data/mysql/mysql.sock
+port = 3306
+open_files_limit = 8192
+innodb_buffer_pool_size = 512M
+character-set-server=utf8
+
+#开启二进制日志
+log_bin
+server_id = 1
+
+#开启半同步功能
+rpl_semi_sync_master_enabled=1
+rpl_semi_sync_master_timeout=1000  # 1s
+
+#GTID功能
+gtid-mode=ON
+enforce-gtid-consistency=ON
+
+[mysql]
+auto-rehash
+prompt=\u@\d \R:\m  mysql&gt;</code></pre> 
+<h4>安装半同步插件</h4> 
+<pre><code class="language-bash">root@(none) 10:46  mysql&gt;INSTALL PLUGIN rpl_semi_sync_master SONAME 'semisync_master.so';
+Query OK, 0 rows affected (0.00 sec)
+
+root@(none) 10:47  mysql&gt;set global rpl_semi_sync_master_enabled=1;
+Query OK, 0 rows affected (0.00 sec)
+
+root@(none) 10:47  mysql&gt;show variables like '%semi_sync%';
++-------------------------------------------+------------+
+| Variable_name                             | Value      |
++-------------------------------------------+------------+
+| rpl_semi_sync_master_enabled              | ON         |
+| rpl_semi_sync_master_timeout              | 1000       |
+| rpl_semi_sync_master_trace_level          | 32         |
+| rpl_semi_sync_master_wait_for_slave_count | 1          |
+| rpl_semi_sync_master_wait_no_slave        | ON         |
+| rpl_semi_sync_master_wait_point           | AFTER_SYNC |
+| rpl_semi_sync_slave_enabled               | OFF        |
+| rpl_semi_sync_slave_trace_level           | 32         |
++-------------------------------------------+------------+
+8 rows in set (0.01 sec)
+
+</code></pre> 
+<h3>2.修改slave的配置文件</h3> 
+<pre><code class="language-bash">[root@slave ~]# cat /etc/my.cnf
+[mysqld_safe]
+
+[client]
+socket=/data/mysql/mysql.sock
+
+[mysqld]
+socket=/data/mysql/mysql.sock
+port = 3306
+open_files_limit = 8192
+innodb_buffer_pool_size = 512M
+character-set-server=utf8
+
+#开启二进制日志
+log_bin
+server_id = 2
+
+#开启半同步功能
+rpl_semi_sync_slave_enabled=1
+log_slave_updates=ON
+
+#GTID功能
+gtid-mode=ON
+enforce-gtid-consistency=ON
+
+[mysql]
+auto-rehash
+prompt=\u@\d \R:\m  mysql&gt;</code></pre> 
+<h4>安装半同步插件</h4> 
+<pre><code class="language-bash">root@(none) 10:48  mysql&gt;INSTALL PLUGIN rpl_semi_sync_slave SONAME 'semisync_slave.so';
+Query OK, 0 rows affected (0.01 sec)
+
+root@(none) 10:48  mysql&gt;set global rpl_semi_sync_slave_enabled=1;
+Query OK, 0 rows affected (0.00 sec)
+
+root@(none) 10:48  mysql&gt;show variables like '%semi_sync%';
++-------------------------------------------+------------+
+| Variable_name                             | Value      |
++-------------------------------------------+------------+
+| rpl_semi_sync_master_enabled              | ON         |
+| rpl_semi_sync_master_timeout              | 1000       |
+| rpl_semi_sync_master_trace_level          | 32         |
+| rpl_semi_sync_master_wait_for_slave_count | 1          |
+| rpl_semi_sync_master_wait_no_slave        | ON         |
+| rpl_semi_sync_master_wait_point           | AFTER_SYNC |
+| rpl_semi_sync_slave_enabled               | ON         |
+| rpl_semi_sync_slave_trace_level           | 32         |
++-------------------------------------------+------------+
+8 rows in set (0.00 sec)
+</code></pre> 
+<h3>3. master和slave修改完配置文件后都要重启服务</h3> 
+<pre><code class="language-bash">[root@master ~]# service mysqld restart
+Shutting down MySQL.. SUCCESS! 
+Starting MySQL. SUCCESS! 
+
+[root@slave ~]# service mysqld restart
+Shutting down MySQL.. SUCCESS! 
+Starting MySQL. SUCCESS! 
+</code></pre> 
+<h3>4. master上新建一个授权用户，给salve来复制二进制日志</h3> 
+<pre><code class="language-bash">root@(none) 10:51  mysql&gt;grant replication slave on *.* to 'slave'@'192.168.2.%' identified by '123456';
+Query OK, 0 rows affected, 1 warning (1.02 sec)
+</code></pre> 
+<h3>5.在slave上配置master info信息</h3> 
+<pre><code class="language-bash">root@(none) 10:54  mysql&gt;change master to master_host='192.168.2.224',
+    -&gt; master_user='slave',
+    -&gt; master_password='123456',
+    -&gt; master_port=3306,
+    -&gt; master_auto_position=1;
+Query OK, 0 rows affected, 2 warnings (0.00 sec)
+
+
+</code></pre> 
+<h3>6. 启动slave</h3> 
+<pre><code class="language-bash">root@(none) 10:55  mysql&gt;start slave;
+Query OK, 0 rows affected (0.00 sec)
+
+root@(none) 11:02  mysql&gt;show slave status\G;
+*************************** 1. row ***************************
+               Slave_IO_State: Waiting for master to send event
+                  Master_Host: 192.168.2.224
+                  Master_User: slave
+                  Master_Port: 3306
+                Connect_Retry: 60
+              Master_Log_File: master-bin.000001
+          Read_Master_Log_Pos: 154
+               Relay_Log_File: slave-relay-bin.000002
+                Relay_Log_Pos: 369
+        Relay_Master_Log_File: master-bin.000001
+             Slave_IO_Running: Yes
+            Slave_SQL_Running: Yes
+              Replicate_Do_DB: 
+          Replicate_Ignore_DB: 
+           Replicate_Do_Table: 
+       Replicate_Ignore_Table: 
+      Replicate_Wild_Do_Table: 
+  Replicate_Wild_Ignore_Table: 
+                   Last_Errno: 0
+                   Last_Error: 
+                 Skip_Counter: 0
+          Exec_Master_Log_Pos: 154
+              Relay_Log_Space: 576
+              Until_Condition: None
+               Until_Log_File: 
+                Until_Log_Pos: 0
+           Master_SSL_Allowed: No
+           Master_SSL_CA_File: 
+           Master_SSL_CA_Path: 
+              Master_SSL_Cert: 
+            Master_SSL_Cipher: 
+               Master_SSL_Key: 
+        Seconds_Behind_Master: 0
+Master_SSL_Verify_Server_Cert: No
+                Last_IO_Errno: 0
+                Last_IO_Error: 
+               Last_SQL_Errno: 0
+               Last_SQL_Error: 
+  Replicate_Ignore_Server_Ids: 
+             Master_Server_Id: 1
+                  Master_UUID: f1d0cb9e-31b0-11ed-83b8-000c29753d42
+             Master_Info_File: /data/mysql/master.info
+                    SQL_Delay: 0
+          SQL_Remaining_Delay: NULL
+      Slave_SQL_Running_State: Slave has read all relay log; waiting for more updates
+           Master_Retry_Count: 86400
+                  Master_Bind: 
+      Last_IO_Error_Timestamp: 
+     Last_SQL_Error_Timestamp: 
+               Master_SSL_Crl: 
+           Master_SSL_Crlpath: 
+           Retrieved_Gtid_Set: 
+            Executed_Gtid_Set: 
+                Auto_Position: 1
+         Replicate_Rewrite_DB: 
+                 Channel_Name: 
+           Master_TLS_Version: 
+1 row in set (0.00 sec)
+
+ERROR: 
+No query specified
+
+
+</code></pre> 
+<h3>7.验证</h3> 
+<h4>master上创建一个数据库</h4> 
+<pre><code class="language-bash">root@(none) 11:02  mysql&gt;create database changsha;
+Query OK, 1 row affected (0.01 sec)
+</code></pre> 
+<h4>slave上查看</h4> 
+<pre><code class="language-bash">root@(none) 11:02  mysql&gt;show databases;
++--------------------+
+| Database           |
++--------------------+
+| information_schema |
+| TENNIS             |
+| changsha           |
+| mysql              |
+| performance_schema |
+| sc                 |
+| sys                |
+| test_db            |
++--------------------+
+8 rows in set (0.00 sec)
+
+root@(none) 11:03  mysql&gt;show slave status\G;
+*************************** 1. row ***************************
+               Slave_IO_State: Waiting for master to send event
+                  Master_Host: 192.168.2.224
+                  Master_User: slave
+                  Master_Port: 3306
+                Connect_Retry: 60
+              Master_Log_File: master-bin.000001
+          Read_Master_Log_Pos: 325
+               Relay_Log_File: slave-relay-bin.000002
+                Relay_Log_Pos: 540
+        Relay_Master_Log_File: master-bin.000001
+             Slave_IO_Running: Yes
+            Slave_SQL_Running: Yes
+              Replicate_Do_DB: 
+          Replicate_Ignore_DB: 
+           Replicate_Do_Table: 
+       Replicate_Ignore_Table: 
+      Replicate_Wild_Do_Table: 
+  Replicate_Wild_Ignore_Table: 
+                   Last_Errno: 0
+                   Last_Error: 
+                 Skip_Counter: 0
+          Exec_Master_Log_Pos: 325
+              Relay_Log_Space: 747
+              Until_Condition: None
+               Until_Log_File: 
+                Until_Log_Pos: 0
+           Master_SSL_Allowed: No
+           Master_SSL_CA_File: 
+           Master_SSL_CA_Path: 
+              Master_SSL_Cert: 
+            Master_SSL_Cipher: 
+               Master_SSL_Key: 
+        Seconds_Behind_Master: 0
+Master_SSL_Verify_Server_Cert: No
+                Last_IO_Errno: 0
+                Last_IO_Error: 
+               Last_SQL_Errno: 0
+               Last_SQL_Error: 
+  Replicate_Ignore_Server_Ids: 
+             Master_Server_Id: 1
+                  Master_UUID: f1d0cb9e-31b0-11ed-83b8-000c29753d42
+             Master_Info_File: /data/mysql/master.info
+                    SQL_Delay: 0
+          SQL_Remaining_Delay: NULL
+      Slave_SQL_Running_State: Slave has read all relay log; waiting for more updates
+           Master_Retry_Count: 86400
+                  Master_Bind: 
+      Last_IO_Error_Timestamp: 
+     Last_SQL_Error_Timestamp: 
+               Master_SSL_Crl: 
+           Master_SSL_Crlpath: 
+           Retrieved_Gtid_Set: f1d0cb9e-31b0-11ed-83b8-000c29753d42:1
+            Executed_Gtid_Set: f1d0cb9e-31b0-11ed-83b8-000c29753d42:1
+                Auto_Position: 1
+         Replicate_Rewrite_DB: 
+                 Channel_Name: 
+           Master_TLS_Version: 
+1 row in set (0.00 sec)
+
+ERROR: 
+No query specified
+</code></pre> 
+<h3>8.遇到的一个问题（因为不是全新的机器）</h3> 
+<p>slave上的 GTID 比master上的多。</p> 
+<pre><code class="language-bash">root@(none) 11:01  mysql&gt;show slave status\G;
+*************************** 1. row ***************************
+               Slave_IO_State: 
+                  Master_Host: 192.168.2.224
+                  Master_User: slave
+                  Master_Port: 3306
+                Connect_Retry: 60
+              Master_Log_File: 
+          Read_Master_Log_Pos: 4
+               Relay_Log_File: slave-relay-bin.000001
+                Relay_Log_Pos: 4
+        Relay_Master_Log_File: 
+             Slave_IO_Running: No
+            Slave_SQL_Running: Yes
+              Replicate_Do_DB: 
+          Replicate_Ignore_DB: 
+           Replicate_Do_Table: 
+       Replicate_Ignore_Table: 
+      Replicate_Wild_Do_Table: 
+  Replicate_Wild_Ignore_Table: 
+                   Last_Errno: 0
+                   Last_Error: 
+                 Skip_Counter: 0
+          Exec_Master_Log_Pos: 0
+              Relay_Log_Space: 154
+              Until_Condition: None
+               Until_Log_File: 
+                Until_Log_Pos: 0
+           Master_SSL_Allowed: No
+           Master_SSL_CA_File: 
+           Master_SSL_CA_Path: 
+              Master_SSL_Cert: 
+            Master_SSL_Cipher: 
+               Master_SSL_Key: 
+        Seconds_Behind_Master: 0
+Master_SSL_Verify_Server_Cert: No
+                Last_IO_Errno: 1236
+                Last_IO_Error: Got fatal error 1236 from master when reading data from binary log: 'Slave has more GTIDs than the master has, using the master's SERVER_UUID. This may indicate that the end of the binary log was truncated or that the last binary log file was lost, e.g., after a power or disk failure when sync_binlog != 1. The master may or may not have rolled back transactions that were already replicated to the slave. Suggest to replicate any transactions that master has rolled back from slave to master, and/or commit empty transactions on master to account for transactions that have been'
+               Last_SQL_Errno: 0
+               Last_SQL_Error: 
+  Replicate_Ignore_Server_Ids: 
+             Master_Server_Id: 1
+                  Master_UUID: f1d0cb9e-31b0-11ed-83b8-000c29753d42
+             Master_Info_File: /data/mysql/master.info
+                    SQL_Delay: 0
+          SQL_Remaining_Delay: NULL
+      Slave_SQL_Running_State: Slave has read all relay log; waiting for more updates
+           Master_Retry_Count: 86400
+                  Master_Bind: 
+      Last_IO_Error_Timestamp: 230809 11:01:21
+     Last_SQL_Error_Timestamp: 
+               Master_SSL_Crl: 
+           Master_SSL_Crlpath: 
+           Retrieved_Gtid_Set: 
+            Executed_Gtid_Set: f1d0cb9e-31b0-11ed-83b8-000c29753d42:1
+                Auto_Position: 1
+         Replicate_Rewrite_DB: 
+                 Channel_Name: 
+           Master_TLS_Version: 
+1 row in set (0.00 sec)
+
+ERROR: 
+No query specified
+</code></pre> 
+<p>解决</p> 
+<p>slave上清除二进制日志</p> 
+<pre><code class="language-bash">root@(none) 11:01  mysql&gt;stop slave;
+Query OK, 0 rows affected (0.00 sec)
+
+root@(none) 11:02  mysql&gt;reset master;
+Query OK, 0 rows affected (0.00 sec)
+
+root@(none) 11:02  mysql&gt;start slave;
+Query OK, 0 rows affected (0.00 sec)
+</code></pre> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e06256e150e811dc86daf59e03a45de9/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">SQL Server-检索两列之间的月份日期列表</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/6e68d311bede6058abb50f0f8b6b4a7d/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">JavaScript:模块化【CommonJS与ES6】</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

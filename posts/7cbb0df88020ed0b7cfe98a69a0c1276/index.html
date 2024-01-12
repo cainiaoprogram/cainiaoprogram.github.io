@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>设计模式套路2   基于 Spring 实现管道模式的最佳实践 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="设计模式套路2   基于 Spring 实现管道模式的最佳实践" />
+<meta property="og:description" content="管道模式（Pipeline Pattern） 是责任链模式（Chain of Responsibility Pattern）的常用变体之一。在管道模式中，管道扮演着流水线的角色，将数据传递到一个加工处理序列中，数据在每个步骤中被加工处理后，传递到下一个步骤进行加工处理，直到全部步骤处理完毕。
+PS：纯的责任链模式在链上只会有一个处理器用于处理数据，而管道模式上多个处理器都会处理数据。
+何时使用管道模式 任务代码较为复杂，需要拆分为多个子步骤时，尤其是后续可能在任意位置添加新的子步骤、删除旧的子步骤、交换子步骤顺序，可以考虑使用管道模式。
+愉快地使用管道模式 背景回放 最开始做模型平台的时候，创建模型实例的功能，包括：“输入数据校验 -&gt; 根据输入创建模型实例 -&gt; 保存模型实例到相关 DB 表”总共三个步骤，也不算复杂，所以当时的代码大概是这样的：
+public class ModelServiceImpl implements ModelService { /** * 提交模型（构建模型实例） */ public CommonReponse&lt;Long&gt; buildModelInstance(InstanceBuildRequest request) { // 输入数据校验 validateInput(request); // 根据输入创建模型实例 ModelInstance instance = createModelInstance(request); // 保存实例到相关 DB 表 saveInstance(instance); } } 然而没有过多久，我们发现表单输入数据的格式并不完全符合模型的输入要求，于是我们要加入 “表单数据的预处理”。这功能还没动手呢，又有业务方提出自己也存在需要对数据进行处理的情况（比如根据商家的表单输入，生成一些其他业务数据作为模型输入）。
+所以在 “输入数据校验” 之后，还需要加入 “表单输入输出预处理” 和 “业务方自定义数据处理（可选）”。这个时候我就面临一个选择：是否继续通过在 buildModelInstance 中加入新的方法来实现这些新的处理步骤？好处就是可以当下偷懒，但是坏处呢：
+ModelService 应该只用来接收 HSF 请求，而不应该承载业务逻辑，如果将 提交模型 的逻辑都写在这个类当中，违反了 单一职责，而且后面会导致 类代码爆炸。将来每加入一个新的处理步骤或者删除某个步骤，我就要修改 buildModelInstance 这个本应该非常内聚的方法，违反了 开闭原则。 所以，为了不给以后的自己挖坑，我觉得要思考一个万全的方案。这个时候，我小脑袋花开始飞转，突然闪过了 Netty 中的 ChannelPipeline —— 对哦，管道模式，不就正是我需要的嘛！" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/7cbb0df88020ed0b7cfe98a69a0c1276/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-05-13T11:36:00+08:00" />
+<meta property="article:modified_time" content="2021-05-13T11:36:00+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">设计模式套路2   基于 Spring 实现管道模式的最佳实践</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div class="content"> 
+ <p><strong>管道模式（Pipeline Pattern）</strong> 是责任链模式（Chain of Responsibility Pattern）的常用变体之一。在管道模式中，管道扮演着流水线的角色，将数据传递到一个加工处理序列中，数据在每个步骤中被加工处理后，传递到下一个步骤进行加工处理，直到全部步骤处理完毕。</p> 
+ <p>PS：纯的责任链模式在链上只会有一个处理器用于处理数据，而管道模式上多个处理器都会处理数据。</p> 
+ <h4>何时使用管道模式</h4> 
+ <p>任务代码较为复杂，需要拆分为多个子步骤时，尤其是后续可能在任意位置添加新的子步骤、删除旧的子步骤、交换子步骤顺序，可以考虑使用管道模式。</p> 
+ <h4>愉快地使用管道模式</h4> 
+ <ul><li>背景回放</li></ul> 
+ <p>最开始做模型平台的时候，创建模型实例的功能，包括：“<strong>输入数据校验 -&gt; 根据输入创建模型实例 -&gt; 保存模型实例到相关 DB 表</strong>”总共三个步骤，也不算复杂，所以当时的代码大概是这样的：</p> 
+ <pre><code>public class ModelServiceImpl implements ModelService {
+
+    /**
+     * 提交模型（构建模型实例）
+     */
+    public CommonReponse&lt;Long&gt; buildModelInstance(InstanceBuildRequest request) {
+        // 输入数据校验
+        validateInput(request);
+        // 根据输入创建模型实例
+        ModelInstance instance = createModelInstance(request);
+        // 保存实例到相关 DB 表
+        saveInstance(instance);
+    }
+}
+</code></pre> 
+ <p>然而没有过多久，我们发现表单输入数据的格式并不完全符合模型的输入要求，于是我们要加入 “表单数据的预处理”。这功能还没动手呢，又有业务方提出自己也存在需要对数据进行处理的情况（比如根据商家的表单输入，生成一些其他业务数据作为模型输入）。</p> 
+ <p>所以在 “输入数据校验” 之后，还需要加入 “表单输入输出预处理” 和 “业务方自定义数据处理（可选）”。这个时候我就面临一个选择：是否继续通过在 buildModelInstance 中加入新的方法来实现这些新的处理步骤？好处就是可以当下偷懒，但是坏处呢：</p> 
+ <ol><li>ModelService 应该只用来接收 HSF 请求，而不应该承载业务逻辑，如果将 提交模型 的逻辑都写在这个类当中，违反了 单一职责，而且后面会导致 类代码爆炸。</li><li>将来每加入一个新的处理步骤或者删除某个步骤，我就要修改 buildModelInstance 这个本应该非常内聚的方法，违反了 开闭原则。</li></ol> 
+ <p>所以，为了不给以后的自己挖坑，我觉得要思考一个万全的方案。这个时候，我小脑袋花开始飞转，突然闪过了 Netty 中的 ChannelPipeline —— 对哦，<strong>管道模式</strong>，不就正是我需要的嘛！</p> 
+ <p>管道模式的实现方式也是多种多样，接下来基于前面的背景，我分享一下我目前基于 Spring 实现管道模式的 “最佳套路”。</p> 
+ <ul><li>定义管道处理的上下文</li></ul> 
+ <pre><code>/**
+ * 传递到管道的上下文
+ */
+@Getter
+@Setter
+public class PipelineContext {
+
+    /**
+     * 处理开始时间
+     */
+    private LocalDateTime startTime;
+
+    /**
+     * 处理结束时间
+     */
+    private LocalDateTime endTime;
+
+    /**
+     * 获取数据名称
+     */
+    public String getName() {
+        return this.getClass().getSimpleName();
+    }
+}
+</code></pre> 
+ <ul><li>定义上下文处理器</li></ul> 
+ <pre><code>/**
+ * 管道中的上下文处理器
+ */
+public interface ContextHandler&lt;T extends PipelineContext&gt; {
+
+    /**
+     * 处理输入的上下文数据
+     *
+     * @param context 处理时的上下文数据
+     * @return 返回 true 则表示由下一个 ContextHandler 继续处理，返回 false 则表示处理结束
+     */
+    boolean handle(T context);
+}
+</code></pre> 
+ <p>为了方便说明，我们现在先定义出最早版 【提交模型逻辑】 的上下文和相关处理器：</p> 
+ <pre><code>/**
+ * 模型实例构建的上下文
+ */
+@Getter
+@Setter
+public class InstanceBuildContext extends PipelineContext {
+
+    /**
+     * 模型 id
+     */
+    private Long modelId;
+
+    /**
+     * 用户 id
+     */
+    private long userId;
+
+    /**
+     * 表单输入
+     */
+    private Map&lt;String, Object&gt; formInput;
+
+    /**
+     * 保存模型实例完成后，记录下 id
+     */
+    private Long instanceId;
+
+    /**
+     * 模型创建出错时的错误信息
+     */
+    private String errorMsg;
+
+    // 其他参数
+
+    @Override
+    public String getName() {
+        return "模型实例构建上下文";
+    }
+}
+</code></pre> 
+ <p>处理器 - 输入数据校验：</p> 
+ <pre><code>@Component
+public class InputDataPreChecker implements ContextHandler&lt;InstanceBuildContext&gt; {
+
+    private final Logger logger = LoggerFactory.getLogger(this.getClass());
+
+    @Override
+    public boolean handle(InstanceBuildContext context) {
+        logger.info("--输入数据校验--");
+
+        Map&lt;String, Object&gt; formInput = context.getFormInput();
+
+        if (MapUtils.isEmpty(formInput)) {
+            context.setErrorMsg("表单输入数据不能为空");
+            return false;
+        }
+
+        String instanceName = (String) formInput.get("instanceName");
+
+        if (StringUtils.isBlank(instanceName)) {
+            context.setErrorMsg("表单输入数据必须包含实例名称");
+            return false;
+        }
+
+        return true;
+    }
+}
+</code></pre> 
+ <p>处理器 - 根据输入创建模型实例：</p> 
+ <pre><code>@Component
+public class ModelInstanceCreator implements ContextHandler&lt;InstanceBuildContext&gt; {
+
+    private final Logger logger = LoggerFactory.getLogger(this.getClass());
+
+    @Override
+    public boolean handle(InstanceBuildContext context) {
+        logger.info("--根据输入数据创建模型实例--");
+
+        // 假装创建模型实例
+
+        return true;
+    }
+}
+</code></pre> 
+ <p>处理器 - 保存模型实例到相关DB表：</p> 
+ <pre><code>@Component
+public class ModelInstanceSaver implements ContextHandler&lt;InstanceBuildContext&gt; {
+
+    private final Logger logger = LoggerFactory.getLogger(this.getClass());
+
+    @Override
+    public boolean handle(InstanceBuildContext context) {
+        logger.info("--保存模型实例到相关DB表--");
+
+        // 假装保存模型实例
+
+        return true;
+    }
+}
+</code></pre> 
+ <p>到这里，有个问题就出现了：应该使用什么样的方式，将同一种 Context 的 ContextHandler 串联为管道呢？思考一下：</p> 
+ <ol><li>给 ContextHandler 加一个 setNext 方法，每个实现类必须指定其下一个处理器。缺点也很明显，如果在当前管道中间加入一个新的 ContextHandler，那么要势必要修改前一个 ContextHandler 的 setNext 方法；另外，代码是写给人阅读的，这样做没法一眼就直观的知道整个管道的处理链路，还要进入到每个相关的 ContextHandler 中去查看才知道。</li><li>给 ContextHandler 加上 <a href="https://my.oschina.net/u/212650" rel="nofollow">@Order</a> 注解，根据 <a href="https://my.oschina.net/u/212650" rel="nofollow">@Order</a> 中给定的数字来确定每个 ContextHandler 的序列，一开始时每个数字间隔的可以大些（比如 10、20、30），后续加入新的 ContextHandler 时，可以指定数字为 （11、21、31）这种，那么可以避免上面方案中要修改代码的问题，但是仍然无法避免要进入每个相关的 ContextHandler 中去查看才能知道管道处理链路的问题。</li><li>提前写好一份路由表，指定好 ”Context -&gt; 管道“ 的映射（管道用 List&lt;ContextHandler&gt; 来表示），以及管道中处理器的顺序 。Spring 来根据这份路由表，在启动时就构建好一个 Map，Map 的键为 Context 的类型，值为 管道（即 List&lt;ContextHandler&gt;）。这样的话，如果想知道每个管道的处理链路，直接看这份路由表就行，一目了然。缺点嘛，就是每次加入新的 ContextHandler 时，这份路由表也需要在对应管道上进行小改动 —— 但是如果能让阅读代码更清晰，我觉得这样的修改是值得的、可接受的~</li></ol> 
+ <ul><li>构建管道路由表</li></ul> 
+ <p>基于 Spring 的 Java Bean 配置，我们可以很方便的构建管道的路由表：</p> 
+ <pre><code>/**
+ * 管道路由的配置
+ */
+@Configuration
+public class PipelineRouteConfig implements ApplicationContextAware {
+
+    /**
+     * 数据类型-&gt;管道中处理器类型列表 的路由
+     */
+    private static final
+    Map&lt;Class&lt;? extends PipelineContext&gt;,
+        List&lt;Class&lt;? extends ContextHandler&lt;? extends PipelineContext&gt;&gt;&gt;&gt; PIPELINE_ROUTE_MAP = new HashMap&lt;&gt;(4);
+
+    /*
+     * 在这里配置各种上下文类型对应的处理管道：键为上下文类型，值为处理器类型的列表
+     */
+    static {
+        PIPELINE_ROUTE_MAP.put(InstanceBuildContext.class,
+                               Arrays.asList(
+                                       InputDataPreChecker.class,
+                                       ModelInstanceCreator.class,
+                                       ModelInstanceSaver.class
+                               ));
+
+        // 将来其他 Context 的管道配置
+    }
+
+    /**
+     * 在 Spring 启动时，根据路由表生成对应的管道映射关系
+     */
+    @Bean("pipelineRouteMap")
+    public Map&lt;Class&lt;? extends PipelineContext&gt;, List&lt;? extends ContextHandler&lt;? extends PipelineContext&gt;&gt;&gt; getHandlerPipelineMap() {
+        return PIPELINE_ROUTE_MAP.entrySet()
+                                 .stream()
+                                 .collect(Collectors.toMap(Map.Entry::getKey, this::toPipeline));
+    }
+
+    /**
+     * 根据给定的管道中 ContextHandler 的类型的列表，构建管道
+     */
+    private List&lt;? extends ContextHandler&lt;? extends PipelineContext&gt;&gt; toPipeline(
+            Map.Entry&lt;Class&lt;? extends PipelineContext&gt;, List&lt;Class&lt;? extends ContextHandler&lt;? extends PipelineContext&gt;&gt;&gt;&gt; entry) {
+        return entry.getValue()
+                    .stream()
+                    .map(appContext::getBean)
+                    .collect(Collectors.toList());
+    }
+
+    private ApplicationContext appContext;
+
+    @Override
+    public void setApplicationContext(ApplicationContext applicationContext) throws BeansException {
+        appContext = applicationContext;
+    }
+}
+</code></pre> 
+ <ul><li>定义管道执行器</li></ul> 
+ <p>最后一步，定义管道执行器。管道执行器 根据传入的上下文数据的类型，找到其对应的管道，然后将上下文数据放入管道中去进行处理。</p> 
+ <pre><code>/**
+ * 管道执行器
+ */
+@Component
+public class PipelineExecutor {
+
+    private final Logger logger = LoggerFactory.getLogger(this.getClass());
+
+    /**
+     * 引用 PipelineRouteConfig 中的 pipelineRouteMap
+     */
+    @Resource
+    private Map&lt;Class&lt;? extends PipelineContext&gt;,
+                List&lt;? extends ContextHandler&lt;? super PipelineContext&gt;&gt;&gt; pipelineRouteMap;
+
+    /**
+     * 同步处理输入的上下文数据&lt;br/&gt;
+     * 如果处理时上下文数据流通到最后一个处理器且最后一个处理器返回 true，则返回 true，否则返回 false
+     *
+     * @param context 输入的上下文数据
+     * @return 处理过程中管道是否畅通，畅通返回 true，不畅通返回 false
+     */
+    public boolean acceptSync(PipelineContext context) {
+        Objects.requireNonNull(context, "上下文数据不能为 null");
+        // 拿到数据类型
+        Class&lt;? extends PipelineContext&gt; dataType = context.getClass();
+        // 获取数据处理管道
+        List&lt;? extends ContextHandler&lt;? super PipelineContext&gt;&gt; pipeline = pipelineRouteMap.get(dataType);
+
+        if (CollectionUtils.isEmpty(pipeline)) {
+            logger.error("{} 的管道为空", dataType.getSimpleName());
+            return false;
+        }
+
+        // 管道是否畅通
+        boolean lastSuccess = true;
+
+        for (ContextHandler&lt;? super PipelineContext&gt; handler : pipeline) {
+            try {
+                // 当前处理器处理数据，并返回是否继续向下处理
+                lastSuccess = handler.handle(context);
+            } catch (Throwable ex) {
+                lastSuccess = false;
+                logger.error("[{}] 处理异常，handler={}", context.getName(), handler.getClass().getSimpleName(), ex);
+            }
+
+            // 不再向下处理
+            if (!lastSuccess) { break; }
+        }
+
+        return lastSuccess;
+    }
+}
+</code></pre> 
+ <ul><li>使用管道模式</li></ul> 
+ <p>此时，我们可以将最开始的 buildModelInstance 修改为：</p> 
+ <pre><code>public CommonResponse&lt;Long&gt; buildModelInstance(InstanceBuildRequest request) {
+    InstanceBuildContext data = createPipelineData(request);
+    boolean success = pipelineExecutor.acceptSync(data);
+
+    // 创建模型实例成功
+    if (success) {
+        return CommonResponse.success(data.getInstanceId());
+    }
+
+    logger.error("创建模式实例失败：{}", data.getErrorMsg());
+    return CommonResponse.failed(data.getErrorMsg());
+}
+</code></pre> 
+ <p>这个时候我们再为 InstanceBuildContext 加入新的两个 ContextHandler：FormInputPreprocessor（表单输入数据预处理） 和 BizSideCustomProcessor（业务方自定义数据处理）。</p> 
+ <pre><code>@Component
+public class FormInputPreprocessor implements ContextHandler&lt;InstanceBuildContext&gt; {
+
+    private final Logger logger = LoggerFactory.getLogger(this.getClass());
+
+    @Override
+    public boolean handle(InstanceBuildContext context) {
+        logger.info("--表单输入数据预处理--");
+
+        // 假装进行表单输入数据预处理
+
+        return true;
+    }
+}
+</code></pre> 
+ <pre><code>@Component
+public class BizSideCustomProcessor implements ContextHandler&lt;InstanceBuildContext&gt; {
+
+    private final Logger logger = LoggerFactory.getLogger(this.getClass());
+
+    @Override
+    public boolean handle(InstanceBuildContext context) {
+        logger.info("--业务方自定义数据处理--");
+
+        // 先判断是否存在自定义数据处理，如果没有，直接返回 true
+
+        // 调用业务方的自定义的表单数据处理
+
+        return true;
+    }
+}
+</code></pre> 
+ <p>此时 buildModelInstance 不需要做任何修改，我们只需要在 “路由表” 里面，将这两个 ContextHandler 加入到 InstanceBuildContext 关联的管道中，<strong>Spring 启动的时候，会自动帮我们构建好每种 Context 对应的管道</strong>：</p> 
+ <h4>总结</h4> 
+ <p>通过管道模式，我们大幅降低了系统的耦合度和提升了内聚程度与扩展性：</p> 
+ <p>ModelService 只负责处理 HSF 请求，不用关心具体的业务逻辑 PipelineExecutor 只做执行工作，不用关心具体的管道细节 每个 ContextHandler 只负责自己那部分的业务逻辑，不需要知道管道的结构，与其他ContextHandler 的业务逻辑解耦 新增、删除 或者 交换子步骤时，都只需要操作路由表的配置，而不要修改原来的调用代码</p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/9e3d3c8bed7164650fd727ae4566c208/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">linux socket 错误处理,Linux - socket编程处理EINTR错误</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/06f17f566e745a41bec153c09b6b0360/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">ubuntu 18.04 按计划执行脚本</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

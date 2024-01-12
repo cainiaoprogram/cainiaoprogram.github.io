@@ -1,0 +1,954 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>常用内存分配函数kmalloc、vmalloc、malloc和mmap实现原理 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="常用内存分配函数kmalloc、vmalloc、malloc和mmap实现原理" />
+<meta property="og:description" content="1.kmalloc函数 static __always_inline void *kmalloc(size_t size, gfp_t flags) { if (__builtin_constant_p(size)) { #ifndef CONFIG_SLOB unsigned int index; #endif if (size &gt; KMALLOC_MAX_CACHE_SIZE) return kmalloc_large(size, flags); #ifndef CONFIG_SLOB index = kmalloc_index(size); ///查找使用的哪个slab缓冲区 if (!index) return ZERO_SIZE_PTR; return kmem_cache_alloc_trace( ///从slab分配内存 kmalloc_caches[kmalloc_type(flags)][index], flags, size); #endif } return __kmalloc(size, flags); } kmem_cache_alloc_trace分配函数
+void * kmem_cache_alloc_trace(struct kmem_cache *cachep, gfp_t flags, size_t size) { void *ret; ret = slab_alloc(cachep, flags, size, _RET_IP_); ///分配slab缓存 ret = kasan_kmalloc(cachep, ret, size, flags); trace_kmalloc(_RET_IP_, ret, size, cachep-&gt;size, flags); return ret; } 可见，kmalloc()基于slab分配器实现，因此分配的内存，物理上都是连续的。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/dff169523440e1464ead55d157c1060e/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-02-06T16:36:12+08:00" />
+<meta property="article:modified_time" content="2023-02-06T16:36:12+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">常用内存分配函数kmalloc、vmalloc、malloc和mmap实现原理</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div class="kdocs-document"> 
+ <h3 style="text-align:left;"><span class="kdocs-bold" style="font-weight:bold;">1.kmalloc函数</span></h3> 
+ <pre class="kdocs-plaintext"><code class="language-plaintext">static __always_inline void *kmalloc(size_t size, gfp_t flags)
+{
+    if (__builtin_constant_p(size)) {
+#ifndef CONFIG_SLOB
+        unsigned int index;
+#endif
+        if (size &gt; KMALLOC_MAX_CACHE_SIZE)
+            return kmalloc_large(size, flags);
+#ifndef CONFIG_SLOB
+        index = kmalloc_index(size);  ///查找使用的哪个slab缓冲区
+ 
+        if (!index)
+            return ZERO_SIZE_PTR;
+ 
+        return kmem_cache_alloc_trace(    ///从slab分配内存
+                kmalloc_caches[kmalloc_type(flags)][index],
+                flags, size);
+#endif
+    }
+    return __kmalloc(size, flags);
+}</code></pre> 
+ <p style="text-align:null;">kmem_cache_alloc_trace分配函数</p> 
+ <pre class="kdocs-plaintext"><code class="language-plaintext">void *
+kmem_cache_alloc_trace(struct kmem_cache *cachep, gfp_t flags, size_t size)
+{
+    void *ret;
+ 
+    ret = slab_alloc(cachep, flags, size, _RET_IP_);  ///分配slab缓存
+ 
+    ret = kasan_kmalloc(cachep, ret, size, flags);
+    trace_kmalloc(_RET_IP_, ret,
+              size, cachep-&gt;size, flags);
+    return ret;
+}</code></pre> 
+ <p style="text-align:null;">可见，kmalloc()基于slab分配器实现，因此分配的内存，物理上都是连续的。</p> 
+ <h3 style="text-align:left;"><span class="kdocs-bold" style="font-weight:bold;">2.vmalloc函数</span></h3> 
+ <pre class="kdocs-plaintext"><code class="language-plaintext">vmalloc()
+    -&gt;__vmalloc_node_flags()
+    -&gt;__vmalloc_node()
+    -&gt;__vmalloc_node_range()</code></pre> 
+ <h3 style="text-align:left;"><span class="kdocs-bold" style="font-weight:bold;">核心函数__vmalloc_node_range</span></h3> 
+ <pre class="kdocs-plaintext"><code class="language-plaintext">static void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
+                 pgprot_t prot, unsigned int page_shift,
+                 int node)
+{
+    const gfp_t nested_gfp = (gfp_mask &amp; GFP_RECLAIM_MASK) | __GFP_ZERO;
+    unsigned long addr = (unsigned long)area-&gt;addr;
+    unsigned long size = get_vm_area_size(area);   ///计算vm_struct包含多少个页面
+    unsigned long array_size;
+    unsigned int nr_small_pages = size &gt;&gt; PAGE_SHIFT;
+    unsigned int page_order;
+    struct page **pages;
+    unsigned int i;
+ 
+    array_size = (unsigned long)nr_small_pages * sizeof(struct page *);
+    gfp_mask |= __GFP_NOWARN;
+    if (!(gfp_mask &amp; (GFP_DMA | GFP_DMA32)))
+        gfp_mask |= __GFP_HIGHMEM;
+ 
+    /* Please note that the recursion is strictly bounded. */
+    if (array_size &gt; PAGE_SIZE) {
+        pages = __vmalloc_node(array_size, 1, nested_gfp, node,
+                    area-&gt;caller);
+    } else {
+        pages = kmalloc_node(array_size, nested_gfp, node);
+    }
+ 
+    if (!pages) {
+        free_vm_area(area);
+        warn_alloc(gfp_mask, NULL,
+               "vmalloc size %lu allocation failure: "
+               "page array size %lu allocation failed",
+               nr_small_pages * PAGE_SIZE, array_size);
+        return NULL;
+    }
+ 
+    area-&gt;pages = pages;  ///保存已分配页面的page数据结构的指针
+    area-&gt;nr_pages = nr_small_pages;
+    set_vm_area_page_order(area, page_shift - PAGE_SHIFT);
+ 
+    page_order = vm_area_page_order(area);
+ 
+    /*
+     * Careful, we allocate and map page_order pages, but tracking is done
+     * per PAGE_SIZE page so as to keep the vm_struct APIs independent of
+     * the physical/mapped size.
+     */
+    for (i = 0; i &lt; area-&gt;nr_pages; i += 1U &lt;&lt; page_order) {
+        struct page *page;
+        int p;
+ 
+        /* Compound pages required for remap_vmalloc_page */
+        page = alloc_pages_node(node, gfp_mask | __GFP_COMP, page_order); ///分配物理页面
+        if (unlikely(!page)) {
+            /* Successfully allocated i pages, free them in __vfree() */
+            area-&gt;nr_pages = i;
+            atomic_long_add(area-&gt;nr_pages, &amp;nr_vmalloc_pages);
+            warn_alloc(gfp_mask, NULL,
+                   "vmalloc size %lu allocation failure: "
+                   "page order %u allocation failed",
+                   area-&gt;nr_pages * PAGE_SIZE, page_order);
+            goto fail;
+        }
+ 
+        for (p = 0; p &lt; (1U &lt;&lt; page_order); p++)
+            area-&gt;pages[i + p] = page + p;
+ 
+        if (gfpflags_allow_blocking(gfp_mask))
+            cond_resched();
+    }
+    atomic_long_add(area-&gt;nr_pages, &amp;nr_vmalloc_pages);
+ 
+    if (vmap_pages_range(addr, addr + size, prot, pages, page_shift) &lt; 0) { ///建立物理页面到vma的映射
+        warn_alloc(gfp_mask, NULL,
+               "vmalloc size %lu allocation failure: "
+               "failed to map pages",
+               area-&gt;nr_pages * PAGE_SIZE);
+        goto fail;
+    }
+ 
+    return area-&gt;addr;
+ 
+fail:
+    __vfree(area-&gt;addr);
+    return NULL;
+}</code></pre> 
+ <p style="text-align:null;">可见，vmalloc是临时在vmalloc内存区申请vma，并且分配物理页面，建立映射；直接分配物理页面，至少一个页4K，因此vmalloc适合用于分配较大内存，并且物理内存不一定连续；</p> 
+ <blockquote class="kdocs-blockquote" style="text-align:left;"> 
+  <span class="kdocs-bold" style="font-weight:bold;">【文章福利】</span>小编推荐自己的Linux内核技术交流群： 
+  <a class="kdocs-link" style="color:#0A6CFF;" href="https://link.zhihu.com/?target=https%3A//jq.qq.com/%3F_wv%3D1027%26k%3DvkcwSVb6" rel="nofollow noopener noreferrer" target="_blank">【977878001】</a>整理一些个人觉得比较好得学习书籍、视频资料共享在群文件里面，有需要的可以自行添加哦！！！前100进群领取，额外赠送一份 
+  <span class="kdocs-bold" style="font-weight:bold;">价值699的内核资料包</span>（含视频教程、电子书、实战项目及代码） 
+ </blockquote> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:780px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:39.74359%;height:0;"> 
+    <img src="https://images2.imgbox.com/e8/82/k49EsVJL_o.jpg" style="margin-left:;display:block;width:780px;margin-top:-39.74359%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:null;"><span class="kdocs-bold" style="font-weight:bold;">内核资料直通车：</span><a class="kdocs-link" style="color:#0A6CFF;" href="https://link.zhihu.com/?target=https%3A//docs.qq.com/doc/DUGZVQk1qWVBHTEl3" rel="nofollow noopener noreferrer" target="_blank">Linux内核源码技术学习路线+视频教程代码资料</a></p> 
+ <p style="text-align:null;"><span class="kdocs-bold" style="font-weight:bold;">学习直通车：</span><a class="kdocs-link" style="color:#0A6CFF;" href="https://link.zhihu.com/?target=https%3A//ke.qq.com/course/4032547%3FflowToken%3D1044374" rel="nofollow noopener noreferrer" target="_blank">Linux内核源码/内存调优/文件系统/进程管理/设备驱动/网络协议栈</a></p> 
+ <h3 style="text-align:left;"><span class="kdocs-bold" style="font-weight:bold;">3.malloc函数</span></h3> 
+ <p style="text-align:null;">malloc是C库实现的函数，C库维护了一个缓存，当内存够用时，malloc直接从C库缓存分配，只有当C库缓存不够用；</p> 
+ <p style="text-align:null;">通过系统调用brk，向内核申请，从堆空间申请一个vma；</p> 
+ <p style="text-align:null;">malloc实现流程图：</p> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:2539px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:41.079166%;height:0;"> 
+    <img src="https://images2.imgbox.com/3a/e8/s1tl19Mt_o.png" style="margin-left:;display:block;width:2539px;margin-top:-41.079166%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <h3 style="text-align:left;"><span class="kdocs-bold" style="font-weight:bold;">__do_sys_brk函数</span></h3> 
+ <p style="text-align:null;">经过平台相关实现，malloc最终会调用SYSCALL_DEFINE1宏，扩展为__do_sys_brk函数</p> 
+ <pre class="kdocs-plaintext"><code class="language-plaintext">SYSCALL_DEFINE1(brk, unsigned long, brk)
+{
+    unsigned long retval;
+    unsigned long newbrk, oldbrk, origbrk;
+    struct mm_struct *mm = current-&gt;mm;
+    struct vm_area_struct *next;
+    unsigned long min_brk;
+    bool populate;
+    bool downgraded = false;
+    LIST_HEAD(uf);
+ 
+    if (down_write_killable(&amp;mm-&gt;mmap_sem))  ///申请写类型读写信号量
+        return -EINTR;
+ 
+    origbrk = mm-&gt;brk;    ///brk记录动态分配区的当前底部
+ 
+#ifdef CONFIG_COMPAT_BRK
+    /*
+     * CONFIG_COMPAT_BRK can still be overridden by setting
+     * randomize_va_space to 2, which will still cause mm-&gt;start_brk
+     * to be arbitrarily shifted
+     */
+    if (current-&gt;brk_randomized)
+        min_brk = mm-&gt;start_brk;
+    else
+        min_brk = mm-&gt;end_data;
+#else
+    min_brk = mm-&gt;start_brk;
+#endif
+    if (brk &lt; min_brk)
+        goto out;
+ 
+    /*
+     * Check against rlimit here. If this check is done later after the test
+     * of oldbrk with newbrk then it can escape the test and let the data
+     * segment grow beyond its set limit the in case where the limit is
+     * not page aligned -Ram Gupta
+     */
+    if (check_data_rlimit(rlimit(RLIMIT_DATA), brk, mm-&gt;start_brk,
+                  mm-&gt;end_data, mm-&gt;start_data))
+        goto out;
+ 
+    newbrk = PAGE_ALIGN(brk);
+    oldbrk = PAGE_ALIGN(mm-&gt;brk);
+    if (oldbrk == newbrk) {
+        mm-&gt;brk = brk;
+        goto success;
+    }
+ 
+    /*
+     * Always allow shrinking brk.
+     * __do_munmap() may downgrade mmap_sem to read.
+     */
+    if (brk &lt;= mm-&gt;brk) {  ///请求释放空间
+        int ret;
+ 
+        /*
+         * mm-&gt;brk must to be protected by write mmap_sem so update it
+         * before downgrading mmap_sem. When __do_munmap() fails,
+         * mm-&gt;brk will be restored from origbrk.
+         */
+        mm-&gt;brk = brk;
+        ret = __do_munmap(mm, newbrk, oldbrk-newbrk, &amp;uf, true);
+        if (ret &lt; 0) {
+            mm-&gt;brk = origbrk;
+            goto out;
+        } else if (ret == 1) {
+            downgraded = true;
+        }
+        goto success;
+    }
+ 
+    /* Check against existing mmap mappings. */
+    next = find_vma(mm, oldbrk);
+    if (next &amp;&amp; newbrk + PAGE_SIZE &gt; vm_start_gap(next))   ///发现有重叠，不需要寻找
+        goto out;
+ 
+    /* Ok, looks good - let it rip. */
+    if (do_brk_flags(oldbrk, newbrk-oldbrk, 0, &amp;uf) &lt; 0)  ///无重叠，新分配一个vma
+        goto out;
+    mm-&gt;brk = brk;   ///更新brk地址
+ 
+success:
+    populate = newbrk &gt; oldbrk &amp;&amp; (mm-&gt;def_flags &amp; VM_LOCKED) != 0;
+    if (downgraded)
+        up_read(&amp;mm-&gt;mmap_sem);
+    else
+        up_write(&amp;mm-&gt;mmap_sem);
+    userfaultfd_unmap_complete(mm, &amp;uf);
+    if (populate)  ///调用mlockall()系统调用，mm_populate会立刻分配物理内存
+        mm_populate(oldbrk, newbrk - oldbrk);
+    return brk;
+ 
+out:
+    retval = origbrk;
+    up_write(&amp;mm-&gt;mmap_sem);
+    return retval;
+}</code></pre> 
+ <p style="text-align:null;">总结下__do_sys_brk()功能：</p> 
+ <p style="text-align:null;">(1)从旧的brk边界去查询，是否有可用vma，若发现有重叠，直接使用；</p> 
+ <p style="text-align:null;">(2)若无发现重叠，新分配一个vma；</p> 
+ <p style="text-align:null;">(3)应用程序若调用mlockall()，会锁住进程所有虚拟地址空间，防止内存被交换出去，且立刻分配物理内存；否则，物理页面会等到使用时，触发缺页异常分配；</p> 
+ <h4 style="text-align:left;"><span class="kdocs-bold" style="font-weight:bold;">do_brk_flags函数</span></h4> 
+ <p style="text-align:null;">函数实现：</p> 
+ <p style="text-align:null;">(1)寻找一个可使用的线性地址；</p> 
+ <p style="text-align:null;">(2)查找最适合插入红黑树的节点；</p> 
+ <p style="text-align:null;">(3)寻到的线性地址是否可以合并现有vma，所不能，新建一个vma;</p> 
+ <p style="text-align:null;">(4)将新建vma插入mmap链表和红黑树中</p> 
+ <pre class="kdocs-plaintext"><code class="language-plaintext">/*
+ *  this is really a simplified "do_mmap".  it only handles
+ *  anonymous maps.  eventually we may be able to do some
+ *  brk-specific accounting here.
+ */
+static int do_brk_flags(unsigned long addr, unsigned long len, unsigned long flags, struct list_head *uf)
+{
+    struct mm_struct *mm = current-&gt;mm;
+    struct vm_area_struct *vma, *prev;
+    struct rb_node **rb_link, *rb_parent;
+    pgoff_t pgoff = addr &gt;&gt; PAGE_SHIFT;
+    int error;
+    unsigned long mapped_addr;
+ 
+    /* Until we need other flags, refuse anything except VM_EXEC. */
+    if ((flags &amp; (~VM_EXEC)) != 0)
+        return -EINVAL;
+    flags |= VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm-&gt;def_flags;  ///默认属性，可读写
+ 
+    mapped_addr = get_unmapped_area(NULL, addr, len, 0, MAP_FIXED); ///返回未使用过的，未映射的线性地址区间的，起始地址
+    if (IS_ERR_VALUE(mapped_addr))
+        return mapped_addr;
+ 
+    error = mlock_future_check(mm, mm-&gt;def_flags, len);
+    if (error)
+        return error;
+ 
+    /* Clear old maps, set up prev, rb_link, rb_parent, and uf */
+    if (munmap_vma_range(mm, addr, len, &amp;prev, &amp;rb_link, &amp;rb_parent, uf)) ///寻找适合插入的红黑树节点
+        return -ENOMEM;
+ 
+    /* Check against address space limits *after* clearing old maps... */
+    if (!may_expand_vm(mm, flags, len &gt;&gt; PAGE_SHIFT))
+        return -ENOMEM;
+ 
+    if (mm-&gt;map_count &gt; sysctl_max_map_count)
+        return -ENOMEM;
+ 
+    if (security_vm_enough_memory_mm(mm, len &gt;&gt; PAGE_SHIFT))
+        return -ENOMEM;
+ 
+    /* Can we just expand an old private anonymous mapping? */  ///检查是否能合并addr到附近的vma，若不能，只能新建一个vma
+    vma = vma_merge(mm, prev, addr, addr + len, flags,
+            NULL, NULL, pgoff, NULL, NULL_VM_UFFD_CTX);
+    if (vma)
+        goto out;
+ 
+    /*
+     * create a vma struct for an anonymous mapping
+     */
+    vma = vm_area_alloc(mm);
+    if (!vma) {
+        vm_unacct_memory(len &gt;&gt; PAGE_SHIFT);
+        return -ENOMEM;
+    }
+ 
+    vma_set_anonymous(vma);
+    vma-&gt;vm_start = addr;
+    vma-&gt;vm_end = addr + len;
+    vma-&gt;vm_pgoff = pgoff;
+    vma-&gt;vm_flags = flags;
+    vma-&gt;vm_page_prot = vm_get_page_prot(flags);
+    vma_link(mm, vma, prev, rb_link, rb_parent);  ///新vma添加到mmap链表和红黑树
+out:
+    perf_event_mmap(vma);
+    mm-&gt;total_vm += len &gt;&gt; PAGE_SHIFT;
+    mm-&gt;data_vm += len &gt;&gt; PAGE_SHIFT;
+    if (flags &amp; VM_LOCKED)
+        mm-&gt;locked_vm += (len &gt;&gt; PAGE_SHIFT);
+    vma-&gt;vm_flags |= VM_SOFTDIRTY;
+    return 0;
+}</code></pre> 
+ <h4 style="text-align:left;"><span class="kdocs-bold" style="font-weight:bold;">mm_populate()函数</span></h4> 
+ <p style="text-align:null;">依次调用</p> 
+ <pre class="kdocs-plaintext"><code class="language-plaintext">mm_populate()
+    -&gt;__mm_populate()
+    -&gt;populate_vma_page_range()
+    -&gt;__get_user_pages()</code></pre> 
+ <p style="text-align:null;">当设置VM_LOCKED标志时，表示要马上申请物理页面，并与vma建立映射；</p> 
+ <p style="text-align:null;">否则，这里不操作，直到访问该vma时，触发缺页异常，再分配物理页面，并建立映射；</p> 
+ <h4 style="text-align:left;"><span class="kdocs-bold" style="font-weight:bold;">__get_user_pages()函数</span></h4> 
+ <pre class="kdocs-plaintext"><code class="language-plaintext">static long __get_user_pages(struct mm_struct *mm,
+        unsigned long start, unsigned long nr_pages,
+        unsigned int gup_flags, struct page **pages,
+        struct vm_area_struct **vmas, int *locked)
+{
+    long ret = 0, i = 0;
+    struct vm_area_struct *vma = NULL;
+    struct follow_page_context ctx = { NULL };
+ 
+    if (!nr_pages)
+        return 0;
+ 
+    start = untagged_addr(start);
+ 
+    VM_BUG_ON(!!pages != !!(gup_flags &amp; (FOLL_GET | FOLL_PIN)));
+ 
+    /*
+     * If FOLL_FORCE is set then do not force a full fault as the hinting
+     * fault information is unrelated to the reference behaviour of a task
+     * using the address space
+     */
+    if (!(gup_flags &amp; FOLL_FORCE))
+        gup_flags |= FOLL_NUMA;
+ 
+    do {  ///依次处理每个页面
+        struct page *page;
+        unsigned int foll_flags = gup_flags;
+        unsigned int page_increm;
+ 
+        /* first iteration or cross vma bound */
+        if (!vma || start &gt;= vma-&gt;vm_end) {
+            vma = find_extend_vma(mm, start);  ///检查是否可以扩增vma
+            if (!vma &amp;&amp; in_gate_area(mm, start)) {
+                ret = get_gate_page(mm, start &amp; PAGE_MASK,
+                        gup_flags, &amp;vma,
+                        pages ? &amp;pages[i] : NULL);
+                if (ret)
+                    goto out;
+                ctx.page_mask = 0;
+                goto next_page;
+            }
+ 
+            if (!vma) {
+                ret = -EFAULT;
+                goto out;
+            }
+            ret = check_vma_flags(vma, gup_flags);
+            if (ret)
+                goto out;
+ 
+            if (is_vm_hugetlb_page(vma)) {  ///支持巨页
+                i = follow_hugetlb_page(mm, vma, pages, vmas,
+                        &amp;start, &amp;nr_pages, i,
+                        gup_flags, locked);
+                if (locked &amp;&amp; *locked == 0) {
+                    /*
+                     * We've got a VM_FAULT_RETRY
+                     * and we've lost mmap_lock.
+                     * We must stop here.
+                     */
+                    BUG_ON(gup_flags &amp; FOLL_NOWAIT);
+                    BUG_ON(ret != 0);
+                    goto out;
+                }
+                continue;
+            }
+        }
+retry:
+        /*
+         * If we have a pending SIGKILL, don't keep faulting pages and
+         * potentially allocating memory.
+         */
+        if (fatal_signal_pending(current)) {  ///如果当前进程收到SIGKILL信号，直接退出
+            ret = -EINTR;
+            goto out;
+        }
+        cond_resched();  //判断是否需要调度，内核中常用该函数，优化系统延迟
+ 
+        page = follow_page_mask(vma, start, foll_flags, &amp;ctx);  ///查看VMA的虚拟页面是否已经分配物理内存，返回已经映射的页面的page
+        if (!page) {
+            ret = faultin_page(vma, start, &amp;foll_flags, locked); ///若无映射，主动触发虚拟页面到物理页面的映射
+            switch (ret) {
+            case 0:
+                goto retry;
+            case -EBUSY:
+                ret = 0;
+                fallthrough;
+            case -EFAULT:
+            case -ENOMEM:
+            case -EHWPOISON:
+                goto out;
+            case -ENOENT:
+                goto next_page;
+            }
+            BUG();
+        } else if (PTR_ERR(page) == -EEXIST) {
+            /*
+             * Proper page table entry exists, but no corresponding
+             * struct page.
+             */
+            goto next_page;
+        } else if (IS_ERR(page)) {
+            ret = PTR_ERR(page);
+            goto out;
+        }
+        if (pages) {
+            pages[i] = page;
+            flush_anon_page(vma, page, start);  ///分配完物理页面，刷新缓存
+            flush_dcache_page(page);
+            ctx.page_mask = 0;
+        }
+next_page:
+        if (vmas) {
+            vmas[i] = vma;
+            ctx.page_mask = 0;
+        }
+        page_increm = 1 + (~(start &gt;&gt; PAGE_SHIFT) &amp; ctx.page_mask);
+        if (page_increm &gt; nr_pages)
+            page_increm = nr_pages;
+        i += page_increm;
+        start += page_increm * PAGE_SIZE;
+        nr_pages -= page_increm;
+    } while (nr_pages);
+out:
+    if (ctx.pgmap)
+        put_dev_pagemap(ctx.pgmap);
+    return i ? i : ret;
+}
+ 
+follow_page_mask函数返回已经映射的页面的page，最终会调用follow_page_pte函数，其实现如下：</code></pre> 
+ <h4 style="text-align:left;"><span class="kdocs-bold" style="font-weight:bold;">follow_page_pte函数</span></h4> 
+ <pre class="kdocs-plaintext"><code class="language-plaintext">static struct page *follow_page_pte(struct vm_area_struct *vma,
+        unsigned long address, pmd_t *pmd, unsigned int flags,
+        struct dev_pagemap **pgmap)
+{
+    struct mm_struct *mm = vma-&gt;vm_mm;
+    struct page *page;
+    spinlock_t *ptl;
+    pte_t *ptep, pte;
+    int ret;
+ 
+    /* FOLL_GET and FOLL_PIN are mutually exclusive. */
+    if (WARN_ON_ONCE((flags &amp; (FOLL_PIN | FOLL_GET)) ==
+             (FOLL_PIN | FOLL_GET)))
+        return ERR_PTR(-EINVAL);
+retry:
+    if (unlikely(pmd_bad(*pmd)))
+        return no_page_table(vma, flags);
+ 
+    ptep = pte_offset_map_lock(mm, pmd, address, &amp;ptl);  ///获得pte和一个锁
+    pte = *ptep;
+    if (!pte_present(pte)) {  ///处理页面不在内存中，作以下处理
+        swp_entry_t entry;
+        /*
+         * KSM's break_ksm() relies upon recognizing a ksm page
+         * even while it is being migrated, so for that case we
+         * need migration_entry_wait().
+         */
+        if (likely(!(flags &amp; FOLL_MIGRATION)))
+            goto no_page;
+        if (pte_none(pte))
+            goto no_page;
+        entry = pte_to_swp_entry(pte);
+        if (!is_migration_entry(entry))
+            goto no_page;
+        pte_unmap_unlock(ptep, ptl);
+        migration_entry_wait(mm, pmd, address);   ///等待页面合并完成再尝试
+        goto retry;
+    }
+    if ((flags &amp; FOLL_NUMA) &amp;&amp; pte_protnone(pte))
+        goto no_page;
+    if ((flags &amp; FOLL_WRITE) &amp;&amp; !can_follow_write_pte(pte, flags)) {
+        pte_unmap_unlock(ptep, ptl);
+        return NULL;
+    }
+ 
+    page = vm_normal_page(vma, address, pte); ///根据pte，返回物理页面page(只返回普通页面，特殊页面不参与内存管理)
+    if (!page &amp;&amp; pte_devmap(pte) &amp;&amp; (flags &amp; (FOLL_GET | FOLL_PIN))) { ///处理设备映射文件
+        /*
+         * Only return device mapping pages in the FOLL_GET or FOLL_PIN
+         * case since they are only valid while holding the pgmap
+         * reference.
+         */
+        *pgmap = get_dev_pagemap(pte_pfn(pte), *pgmap);
+        if (*pgmap)
+            page = pte_page(pte);
+        else
+            goto no_page;
+    } else if (unlikely(!page)) {   ///处理vm_normal_page()没返回有效页面情况
+        if (flags &amp; FOLL_DUMP) {
+            /* Avoid special (like zero) pages in core dumps */
+            page = ERR_PTR(-EFAULT);
+            goto out;
+        }
+ 
+        if (is_zero_pfn(pte_pfn(pte))) {   ///系统零页，不会返回错误
+            page = pte_page(pte);
+        } else {
+            ret = follow_pfn_pte(vma, address, ptep, flags);
+            page = ERR_PTR(ret);
+            goto out;
+        }
+    }
+ 
+    /* try_grab_page() does nothing unless FOLL_GET or FOLL_PIN is set. */
+    if (unlikely(!try_grab_page(page, flags))) {
+        page = ERR_PTR(-ENOMEM);
+        goto out;
+    }
+    /*
+     * We need to make the page accessible if and only if we are going
+     * to access its content (the FOLL_PIN case).  Please see
+     * Documentation/core-api/pin_user_pages.rst for details.
+     */
+    if (flags &amp; FOLL_PIN) {
+        ret = arch_make_page_accessible(page);
+        if (ret) {
+            unpin_user_page(page);
+            page = ERR_PTR(ret);
+            goto out;
+        }
+    }
+    if (flags &amp; FOLL_TOUCH) { ///FOLL_TOUCH, 标记页面可访问
+        if ((flags &amp; FOLL_WRITE) &amp;&amp;
+            !pte_dirty(pte) &amp;&amp; !PageDirty(page))
+            set_page_dirty(page);
+        /*
+         * pte_mkyoung() would be more correct here, but atomic care
+         * is needed to avoid losing the dirty bit: it is easier to use
+         * mark_page_accessed().
+         */
+        mark_page_accessed(page);
+    }
+    if ((flags &amp; FOLL_MLOCK) &amp;&amp; (vma-&gt;vm_flags &amp; VM_LOCKED)) {
+        /* Do not mlock pte-mapped THP */
+        if (PageTransCompound(page))
+            goto out;
+ 
+        /*
+         * The preliminary mapping check is mainly to avoid the
+         * pointless overhead of lock_page on the ZERO_PAGE
+         * which might bounce very badly if there is contention.
+         *
+         * If the page is already locked, we don't need to
+         * handle it now - vmscan will handle it later if and
+         * when it attempts to reclaim the page.
+         */
+        if (page-&gt;mapping &amp;&amp; trylock_page(page)) {
+            lru_add_drain();  /* push cached pages to LRU */
+            /*
+             * Because we lock page here, and migration is
+             * blocked by the pte's page reference, and we
+             * know the page is still mapped, we don't even
+             * need to check for file-cache page truncation.
+             */
+            mlock_vma_page(page);
+            unlock_page(page);
+        }
+    }
+out:
+    pte_unmap_unlock(ptep, ptl);
+    return page;
+no_page:
+    pte_unmap_unlock(ptep, ptl);
+    if (!pte_none(pte))
+        return NULL;
+    return no_page_table(vma, flags);
+}</code></pre> 
+ <p style="text-align:null;">总结：</p> 
+ <p style="text-align:null;">(1)malloc函数，从C库缓存分配内存，其分配或释放内存，未必马上会执行；</p> 
+ <p style="text-align:null;">(2)malloc实际分配内存动作，要么主动设置mlockall()，人为触发缺页异常，分配物理页面；或者在访问内存时触发缺页异常，分配物理页面；</p> 
+ <p style="text-align:null;">(3)malloc分配虚拟内存，有三种情况：</p> 
+ <p style="text-align:null;">a.malloc()分配内存后，直接读，linux内核进入缺页异常，调用do_anonymous_page函数使用零页映射，此时PTE属性只读；</p> 
+ <p style="text-align:null;">b.malloc()分配内存后，先读后写，linux内核第一次触发缺页异常，映射零页；第二次触发异常，触发写时复制；</p> 
+ <p style="text-align:null;">c.malloc()分配内存后, 直接写，linux内核进入匿名页面的缺页异常，调用alloc_zeroed_user_highpage_movable分配一个新页面，这个PTE是可写的；</p> 
+ <h3 style="text-align:left;"><span class="kdocs-bold" style="font-weight:bold;">4.mmap函数</span></h3> 
+ <p style="text-align:null;">mmap一般用于用户程序分配内存，读写大文件，链接动态库，多进程内存共享等；</p> 
+ <p style="text-align:null;">实现过程流程图：</p> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:2494px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:49.839615%;height:0;"> 
+    <img src="https://images2.imgbox.com/92/2c/nhgHOcUT_o.png" style="margin-left:;display:block;width:2494px;margin-top:-49.839615%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:null;">mmap根据文件关联性和映射区域是否共享等属性，其映射分为4类</p> 
+ <p style="text-align:null;"><span class="kdocs-bold" style="font-weight:bold;">1.私有匿名映射</span></p> 
+ <p style="text-align:null;">fd=-1,且flags=MAP_ANONYMOUS|MAP_PRIVATE,创建的mmap映射是私有匿名映射；</p> 
+ <p style="text-align:null;">用途是在glibc分配大内存时，如果需分配内存大于MMAP_THREASHOLD（128KB），glibc默认用mmap代替brk分配内存；</p> 
+ <p style="text-align:null;"><span class="kdocs-bold" style="font-weight:bold;">2.共享匿名映射</span></p> 
+ <p style="text-align:null;">fd=-1,且flags=MAP_ANONYMOUS|MAP_SHARED;</p> 
+ <p style="text-align:null;">常用于父子进程的通信，共享一块内存区域；</p> 
+ <p style="text-align:null;">do_mmap_pgoff()-&gt;mmap_region(),最终调用shmem_zero_setup打开/dev/zero设备文件；</p> 
+ <p style="text-align:null;">另外直接打开/dev/zero设备文件，然后使用这个句柄创建mmap，也是最终调用shmem模块创建共享匿名映射；</p> 
+ <p style="text-align:null;"><span class="kdocs-bold" style="font-weight:bold;">3.私有文件映射</span></p> 
+ <p style="text-align:null;">flags=MAP_PRIVATE；</p> 
+ <p style="text-align:null;">常用场景是，加载动态共享库；</p> 
+ <p style="text-align:null;"><span class="kdocs-bold" style="font-weight:bold;">4.共享文件映射</span></p> 
+ <p style="text-align:null;">flags=MAP_SHARED；有两个应用场景；</p> 
+ <p style="text-align:null;">(1)读写文件：</p> 
+ <p style="text-align:null;">内核的会写机制会将内存数据同步到磁盘；</p> 
+ <p style="text-align:null;">(2)进程间通信：</p> 
+ <p style="text-align:null;">多个独立进程，打开同一个文件，互相都可以观察到，可是实现多进程通信；</p> 
+ <p style="text-align:null;">核心函数如下：</p> 
+ <pre class="kdocs-plaintext"><code class="language-plaintext">unsigned long mmap_region(struct file *file, unsigned long addr,
+        unsigned long len, vm_flags_t vm_flags, unsigned long pgoff,
+        struct list_head *uf)
+{
+    struct mm_struct *mm = current-&gt;mm;
+    struct vm_area_struct *vma, *prev, *merge;
+    int error;
+    struct rb_node **rb_link, *rb_parent;
+    unsigned long charged = 0;
+ 
+    /* Check against address space limit. */
+    if (!may_expand_vm(mm, vm_flags, len &gt;&gt; PAGE_SHIFT)) {
+        unsigned long nr_pages;
+ 
+        /*
+         * MAP_FIXED may remove pages of mappings that intersects with
+         * requested mapping. Account for the pages it would unmap.
+         */
+        nr_pages = count_vma_pages_range(mm, addr, addr + len);
+ 
+        if (!may_expand_vm(mm, vm_flags,
+                    (len &gt;&gt; PAGE_SHIFT) - nr_pages))
+            return -ENOMEM;
+    }
+ 
+    /* Clear old maps, set up prev, rb_link, rb_parent, and uf */
+    if (munmap_vma_range(mm, addr, len, &amp;prev, &amp;rb_link, &amp;rb_parent, uf))
+        return -ENOMEM;
+    /*
+     * Private writable mapping: check memory availability
+     */
+    if (accountable_mapping(file, vm_flags)) {
+        charged = len &gt;&gt; PAGE_SHIFT;
+        if (security_vm_enough_memory_mm(mm, charged))
+            return -ENOMEM;
+        vm_flags |= VM_ACCOUNT;
+    }
+ 
+    /*
+     * Can we just expand an old mapping?
+     */
+    vma = vma_merge(mm, prev, addr, addr + len, vm_flags,   ///尝试合并vma
+            NULL, file, pgoff, NULL, NULL_VM_UFFD_CTX);
+    if (vma)
+        goto out;
+ 
+    /*
+     * Determine the object being mapped and call the appropriate
+     * specific mapper. the address has already been validated, but
+     * not unmapped, but the maps are removed from the list.
+     */
+    vma = vm_area_alloc(mm);   ///分配一个新vma
+    if (!vma) {
+        error = -ENOMEM;
+        goto unacct_error;
+    }
+ 
+    vma-&gt;vm_start = addr;
+    vma-&gt;vm_end = addr + len;
+    vma-&gt;vm_flags = vm_flags;
+    vma-&gt;vm_page_prot = vm_get_page_prot(vm_flags);
+    vma-&gt;vm_pgoff = pgoff;
+ 
+    if (file) {   ///文件映射  
+        if (vm_flags &amp; VM_DENYWRITE) {
+            error = deny_write_access(file);
+            if (error)
+                goto free_vma;
+        }
+        if (vm_flags &amp; VM_SHARED) {
+            error = mapping_map_writable(file-&gt;f_mapping);
+            if (error)
+                goto allow_write_and_free_vma;
+        }
+ 
+        /* -&gt;mmap() can change vma-&gt;vm_file, but must guarantee that
+         * vma_link() below can deny write-access if VM_DENYWRITE is set
+         * and map writably if VM_SHARED is set. This usually means the
+         * new file must not have been exposed to user-space, yet.
+         */
+        vma-&gt;vm_file = get_file(file);
+        error = call_mmap(file, vma);
+        if (error)
+            goto unmap_and_free_vma;
+ 
+        /* Can addr have changed??
+         *
+         * Answer: Yes, several device drivers can do it in their
+         *         f_op-&gt;mmap method. -DaveM
+         * Bug: If addr is changed, prev, rb_link, rb_parent should
+         *      be updated for vma_link()
+         */
+        WARN_ON_ONCE(addr != vma-&gt;vm_start);
+ 
+        addr = vma-&gt;vm_start;
+ 
+        /* If vm_flags changed after call_mmap(), we should try merge vma again
+         * as we may succeed this time.
+         */
+        if (unlikely(vm_flags != vma-&gt;vm_flags &amp;&amp; prev)) {
+            merge = vma_merge(mm, prev, vma-&gt;vm_start, vma-&gt;vm_end, vma-&gt;vm_flags,
+                NULL, vma-&gt;vm_file, vma-&gt;vm_pgoff, NULL, NULL_VM_UFFD_CTX);
+            if (merge) {
+                /* -&gt;mmap() can change vma-&gt;vm_file and fput the original file. So
+                 * fput the vma-&gt;vm_file here or we would add an extra fput for file
+                 * and cause general protection fault ultimately.
+                 */
+                fput(vma-&gt;vm_file);
+                vm_area_free(vma);
+                vma = merge;
+                /* Update vm_flags to pick up the change. */
+                vm_flags = vma-&gt;vm_flags;
+                goto unmap_writable;
+            }
+        }
+ 
+        vm_flags = vma-&gt;vm_flags;
+    } else if (vm_flags &amp; VM_SHARED) {   ///共享映射
+        error = shmem_zero_setup(vma);   ///共享匿名映射
+        if (error)
+            goto free_vma;
+    } else {
+        vma_set_anonymous(vma);  ///匿名映射
+    }
+ 
+    /* Allow architectures to sanity-check the vm_flags */
+    if (!arch_validate_flags(vma-&gt;vm_flags)) {
+        error = -EINVAL;
+        if (file)
+            goto unmap_and_free_vma;
+        else
+            goto free_vma;
+    }
+ 
+    vma_link(mm, vma, prev, rb_link, rb_parent);   ///vma加入mm系统
+    /* Once vma denies write, undo our temporary denial count */
+    if (file) {
+unmap_writable:
+        if (vm_flags &amp; VM_SHARED)
+            mapping_unmap_writable(file-&gt;f_mapping);
+        if (vm_flags &amp; VM_DENYWRITE)
+            allow_write_access(file);
+    }
+    file = vma-&gt;vm_file;
+out:
+    perf_event_mmap(vma);
+ 
+    vm_stat_account(mm, vm_flags, len &gt;&gt; PAGE_SHIFT);
+    if (vm_flags &amp; VM_LOCKED) {
+        if ((vm_flags &amp; VM_SPECIAL) || vma_is_dax(vma) ||
+                    is_vm_hugetlb_page(vma) ||
+                    vma == get_gate_vma(current-&gt;mm))
+            vma-&gt;vm_flags &amp;= VM_LOCKED_CLEAR_MASK;
+        else
+            mm-&gt;locked_vm += (len &gt;&gt; PAGE_SHIFT);
+    }
+ 
+    if (file)
+        uprobe_mmap(vma);
+ 
+    /*
+     * New (or expanded) vma always get soft dirty status.
+     * Otherwise user-space soft-dirty page tracker won't
+     * be able to distinguish situation when vma area unmapped,
+     * then new mapped in-place (which must be aimed as
+     * a completely new data area).
+     */
+    vma-&gt;vm_flags |= VM_SOFTDIRTY;
+ 
+    vma_set_page_prot(vma);
+ 
+    return addr;
+ 
+unmap_and_free_vma:
+    fput(vma-&gt;vm_file);
+    vma-&gt;vm_file = NULL;
+ 
+    /* Undo any partial mapping done by a device driver. */
+    unmap_region(mm, vma, prev, vma-&gt;vm_start, vma-&gt;vm_end);
+    charged = 0;
+    if (vm_flags &amp; VM_SHARED)
+        mapping_unmap_writable(file-&gt;f_mapping);
+allow_write_and_free_vma:
+    if (vm_flags &amp; VM_DENYWRITE)
+        allow_write_access(file);
+free_vma:
+    vm_area_free(vma);
+unacct_error:
+    if (charged)
+        vm_unacct_memory(charged);
+    return error;
+}</code></pre> 
+ <p style="text-align:null;">总结：</p> 
+ <p style="text-align:null;">以上的malloc,mmap函数，若无特别设定，默认都是指建立虚拟地址空间，但没有建立虚拟地址空间到物理地址空间的映射；</p> 
+ <p style="text-align:null;">当访问未映射的虚拟空间时，触发缺页异常，linxu内核会处理缺页异常，缺页异常服务程序中，会分配物理页，并建立虚拟地址到物理页的映射；</p> 
+ <p style="text-align:null;">补充两个问题：</p> 
+ <p style="text-align:null;">1.当mmap重复申请相同地址，为什么不会失败？</p> 
+ <p style="text-align:null;">find_vma_links()函数便利该进程所有的vma，当检查到当前要映射区域和已有vma重叠时，先销毁旧映射区，重新映射，所以第二次申请，不会报错。</p> 
+ <p style="text-align:null;">2.mmap打开多个文件时，比如播放视频时，为什么会卡顿？</p> 
+ <p style="text-align:null;">mmap只是建立vma，并未实际分配物理页面读取文件内存，当播放器真正读取文件时，会频繁触发缺页异常，再从磁盘读取文件到页面高速缓存中，会导致磁盘读性能较差；</p> 
+ <p style="text-align:null;">madvise(add,len,MADV_WILLNEED|MADV_SEQUENTIAL)对文件内容进行预读和顺序读；</p> 
+ <p style="text-align:null;">但是内核默认的预读功能就可以实现；且madvise不适合流媒体，只适合随机读取场景；</p> 
+ <p style="text-align:null;">能够有效提高流媒体服务I/O性能的方法是最大内核默认预读窗口；内核默认是128K，可以通过“blockdev --setra”命令修改；</p> 
+ <p style=""></p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/996184eb16b563cc373cf085111d1c1f/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【ybtoj】【线性基】k小异或和</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/ce1f260c268f877201d1f9273b60e516/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">epoll边沿触发/水平触发实现分析</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

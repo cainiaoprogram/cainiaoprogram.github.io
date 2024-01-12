@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>三种妙法搞定冗余表数据一致性 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="三种妙法搞定冗余表数据一致性" />
+<meta property="og:description" content=" 引用地址:58沈剑：三种妙法搞定冗余表数据一致性！
+在这次DBAplus社群的分享中给大家带来的主题是“冗余表数据一致性保证”，主要包括四个方面的内容：
+为什么会有冗余表的需求如何实现冗余表正反冗余表谁先执行冗余表如何保证数据的一致性 一、为什么会有冗余表的需求 首先聊聊为什么会有冗余表的需求。互联网很多业务场景的数据量很大，此时数据库架构要进行水平切分，水平切分会有一个patition key，通过patition key的查询能够直接定位到库，但是非patition key上的查询可能就需要扫描多个库了。 例如订单表，业务上对用户和商家都有订单查询需求： Order(oid, info_detail) T(buyer_id, seller_id, oid)。 如果用buyer_id来分库，seller_id的查询就需要扫描多库。如果用seller_id来分库，buyer_id的查询就需要扫描多库。这类需求，为了做到高吞吐量低延时的查询，往往使用“数据冗余”的方式来实现，就是我们所说的的“冗余表”： T1(buyer_id, seller_id, oid) T2(seller_id, buyer_id, oid) 同一个数据，冗余两份，一份以buyer_id来分库，满足买家的查询需求；一份以seller_id来分库，满足卖家的查询需求。当然，元数据还是放在Order(oid, info_detail)里。冗余表的业务场景说清楚了，再来看下冗余表的实现方案。 二、如何实现冗余表 方法一：服务同步写 顾名思义，由服务层同步写冗余数据，如上图流程： 业务方调用服务，新增数据 服务先插入T1数据 服务再插入T2数据 服务返回业务方新增数据成功 优点： 不复杂，服务层由单次写，变两次写 数据一致性相对较高（因为双写成功才返回） 缺点： 请求的处理时间增加（要插入次，时间加倍） 数据仍可能不一致，例如第二步写入T1完成后服务重启，则数据不会写入T2 如果系统对处理时间比较敏感，引出常用的第二种方案。 方法二：服务异步写 数据的双写并不再由服务来完成，服务层异步发出一个消息，通过消息总线发送给一个专门的数据复制服务来写入冗余数据，如上图1-6流程：
+业务方调用服务，新增数据
+服务先插入T1数据
+服务向消息总线发送一个异步消息（发出即可，不用等返回，通常很快就能完成）
+服务返回业务方新增数据成功
+消息总线将消息投递给数据同步中心
+数据同步中心插入T2数据
+优点： 请求处理时间短（只插入1次） 缺点： 系统的复杂性增加了，多引入了一个组件（消息总线）和一个服务（专用的数据复制服务） 因为返回业务线数据插入成功时，数据还不一定插入到T2中，因此数据有一个不一致时间窗口（这个窗口很短，最终是一致的） 在消息总线丢失消息时，冗余表数据会不一致 如果想解除“数据冗余”对系统的耦合，引出常用的第三种方案。 方法三：线下异步写 数据的双写不再由服务层来完成，而是由线下的一个服务或者任务来完成，如上图1-6流程： 业务方调用服务，新增数据 服务先插入T1数据 服务返回业务方新增数据成功 数据会被写入到数据库的log中 线下服务或者任务读取数据库的log 线下服务或者任务插入T2数据 优点： 数据双写与业务完全解耦 请求处理时间短（只插入1次） 缺点： 返回业务线数据插入成功时，数据还不一定插入到T2中，因此数据有一个不一致时间窗口（这个窗口很短，最终是一致的） 数据的一致性依赖于线下服务或者任务的可靠性 三、正反冗余表谁先执行 上述三种方案各有优缺点，但不管哪种方案，都会面临： “究竟先写T1还是先写T2”的问题 都可能不一致，应该怎么解决的问题 先看看第一个问题，先操作哪一个的问题：究竟先写正表还是反表？ 对于一个不能保证事务性的操作，一定涉及“哪个任务先做，哪个任务后做”的问题，解决这个问题的方向是：【如果出现不一致】，谁先做对业务的影响较小，就谁先执行。 以上文的订单生成业务为例，buyer和seller冗余表都需要插入数据： T1(buyer_id, seller_id, oid) T2(seller_id, buyer_id, oid) 用户下单时，如果“先插入buyer表T1，再插入seller冗余表T2”，当第一步成功、第二步失败时，出现的业务影响是“买家能看到自己的订单，卖家看不到推送的订单”。 相反，如果“先插入seller表T2，再插入buyer冗余表T1”，当第一步成功、第二步失败时，出现的业务影响是“卖家能看到推送的订单，买家看不到自己的订单”。 由于这个生成订单的动作是买家发起的，买家如果看不到订单，会觉得非常奇怪，并且无法支付以推动订单状态的流转，此时即使卖家看到有人下单也是没有意义的。 因此，在此例中，应该先插入buyer表T1，再插入seller表T2。however，记住结论：对于一个不能保证事务性的操作，【如果出现不一致】，谁先做对业务的影响较小，就谁先执行。 四、冗余表如何保证数据的一致性 最后是一致性的问题。不管是同步写入，异步写入，线下异步写入，都有可能出现数据不一致，怎么解决？常见的方案有这么几种： 方法一：线下扫描正反冗余表全部数据 如上图所示，线下启动一个离线的扫描工具，不停的比对正表T1和反表T2，如果发现数据不一致，就进行补偿修复。 优点： 比较简单，开发代价小 线上服务无需修改，修复工具与线上服务解耦 缺点： 扫描效率低，会扫描大量的“已经能够保证一致”的数据 由于扫描的数据量大，扫描一轮的时间比较长，即数据如果不一致，不一致的时间窗口比较长 很容易想到这个方案的优化方向。有没有可能只扫描“可能存在不一致可能性”的数据，而不是每次扫描全部数据，以提高效率呢？这就引出了第二种方案。 方法二：线下扫描增量数据 每次只扫描增量的日志数据，就能够极大提高效率，缩短数据不一致的时间窗口，如上图1-4流程所示： 写入正表T1 第一步成功后，写入日志log1 写入反表T2 第二步成功后，写入日志log2 当然，我们还是需要一个离线的扫描工具，不停的比对日志log1和日志log2，如果发现数据不一致，就进行补偿修复。互联网大部分业务是读多写少的场景。其实对于新增的数据量，是很小的，所有折中方案只需要扫描很少的数据，保证一致的数据也不会被重复扫描。 优点： 虽比方法一复杂，但仍然是比较简单的 数据扫描效率高，只扫描增量数据 缺点： 线上服务略有修改（代价不高，多写了2条日志） 虽然比方法一更实时，但时效性还是不高，不一致窗口取决于扫描的周期 我们之前的im好友表与反向好友表，修复周期是1天。当然这个周期也是由业务场景决定的。无论如何，修复还是不实时，有没有更为实时的修复方法呢？这就引出了方案三。 方法三：实时线上“消息对”检测 这次不是写日志了，而是向消息总线发送消息，如上图1-4流程所示： 写入正表T1 第一步成功后，发送消息msg1 写入反表T2 第二步成功后，发送消息msg2 这次不是需要一个周期扫描的离线工具了，而是一个实时订阅消息的服务不停的收消息。 假设正常情况下，msg1和msg2的接收时间应该在3s以内，如果检测服务在收到msg1后没有收到msg2，就尝试检测数据的一致性，不一致时进行补偿修复。 优点： 效率高，每个数据只扫一次 实时性高，消息的通知很实时 缺点： 方案相对比较复杂，引入了消息总线这个组件 线下多了一个订阅总线的检测服务 However，技术方案本身就是一个投入产出比的折衷，可以根据业务对一致性的需求程度决定使用哪一种方法。 五、总结 1、互联网很多业务场景的数据量很大，此时数据库架构要进行水平切分，切分后为了做到高吞吐量低延时的查询，往往使用“数据冗余”的方式来实现多个 字段上的高效查询（都不需要遍历库）。 2、冗余表有三种实现方式： 服务同步写 服务异步写 线下异步写 3、冗余表到底正表先操作还是反表先操作的解决方法论是：对于一个不能保证事务性的操作，【如果出现不一致】，谁先做对业务的影响较小，就谁先执行。 4、为了发现冗余表数据不一致，并进行数据修复的常见方案有3种： 线下扫描正反冗余表全部数据 线下扫描增量数据 实时线上“消息对”检测 六、Q &amp; A Q1：方案3的消息总线都有哪些实现方式？ A1：消息总线，msg-queue，开源的，自研的都行，像ActiveMQ，ZeroMQ，RabbitMQ都行。 Q2：买家、卖家的这种表数据量都比较大，应该都是分库分表，里面t1,t2应该是一个笼统的概念，t1,t2内部应该会映射更多的分库吧，这些分库间映射，数据一致性和冗余，能不能再简单说说？ A2：没错，正向表和反向表都会进行水平切分，而且patition key是不一样的。数据冗余上文提到就是一条数据冗余了2份，一致性也如上文所说有3种常见的方法来保证（仅限冗余表的一致性保证）。 Q3：用触发器来插入另一个表怎么样？ A3：触发器恐怕不通用，互联网场景数据量大，并发量大，分库了之后，数据都是分布在不同的实例，不同的机器上的。 Q4：实时线上“消息对”检测中，如果消息总线出现问题，数据完整性，数据修复处理方式，能否简单说一下？ A4：出现数据不一致的概率很低（例如10w个请求一个不一致，1/10w），消息总线出现问题的概率更低（消息总线100w个请求出现一个不一致？1/100w），这种巧合的概率在1/(10w*100w)。当然，如果硬要细究，最差可以退化到扫全量、扫增量。 " />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/6e1b35a9ba378ee9c42d49cc2613f011/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2016-05-30T22:36:52+08:00" />
+<meta property="article:modified_time" content="2016-05-30T22:36:52+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">三种妙法搞定冗余表数据一致性</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p style="margin:0 0 0 40px; border:none; padding:0px">引用地址:<a target="_blank" href="http://mp.weixin.qq.com/s?__biz=MzI4NTA1MDEwNg==&amp;mid=2650755525&amp;idx=2&amp;sn=b8f11fd0bc94f75df236b4c520334a7f&amp;scene=4#wechat_redirect" rel="nofollow noopener noreferrer">58沈剑：三种妙法搞定冗余表数据一致性！</a></p> 
+<p style="margin:0 0 0 40px; border:none; padding:0px"><br> </p> 
+<p style="margin:0 0 0 40px; border:none; padding:0px">在这次DBAplus社群的分享中给大家带来的主题是“冗余表数据一致性保证”，主要包括四个方面的内容：</p> 
+<p style="margin:0 0 0 40px; border:none; padding:0px"></p> 
+<ul><li><ul><li>为什么会有冗余表的需求</li><li>如何实现冗余表</li><li>正反冗余表谁先执行</li><li>冗余表如何保证数据的一致性</li></ul> 
+</li></ul> 
+<blockquote style="margin:0 0 0 40px; border:none; padding:0px"> 
+ <h5>一、为什么会有冗余表的需求</h5> 
+ <div> 
+  <br> 
+ </div> 
+ <div>
+   首先聊聊为什么会有冗余表的需求。互联网很多业务场景的数据量很大，此时数据库架构要进行水平切分，水平切分会有一个patition key，通过patition key的查询能够直接定位到库，但是非patition key上的查询可能就需要扫描多个库了。 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div>
+   例如订单表，业务上对用户和商家都有订单查询需求： 
+ </div> 
+ <div>
+   Order(oid, info_detail) 
+ </div> 
+ <div>
+   T(buyer_id, seller_id, oid)。 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div>
+   如果用buyer_id来分库，seller_id的查询就需要扫描多库。如果用seller_id来分库，buyer_id的查询就需要扫描多库。这类需求，为了做到高吞吐量低延时的查询，往往使用“数据冗余”的方式来实现，就是我们所说的的“冗余表”： 
+ </div> 
+ <div>
+   T1(buyer_id, seller_id, oid) 
+ </div> 
+ <div>
+   T2(seller_id, buyer_id, oid) 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div>
+   同一个数据，冗余两份，一份以buyer_id来分库，满足买家的查询需求；一份以seller_id来分库，满足卖家的查询需求。当然，元数据还是放在Order(oid, info_detail)里。冗余表的业务场景说清楚了，再来看下冗余表的实现方案。 
+ </div> 
+ <h5><br> 二、如何实现冗余表</h5> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <span style="color:#006600">方法一：服务同步写</span> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div style="text-align:left"> 
+  <img src="https://images2.imgbox.com/b4/cd/MSILauth_o.png" alt="111"> 
+ </div> 
+ <div style="text-align:left">
+   顾名思义，由服务层同步写冗余数据，如上图流程： 
+ </div> 
+ <div style="text-align:left">
+   业务方调用服务，新增数据 
+ </div> 
+ <div style="text-align:left">
+   服务先插入T1数据 
+ </div> 
+ <div style="text-align:left">
+   服务再插入T2数据 
+ </div> 
+ <div style="text-align:left">
+   服务返回业务方新增数据成功 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <div style="text-align:left"> 
+  <span style="color:#009900">优点：</span> 
+ </div> 
+ <div style="text-align:left">
+   不复杂，服务层由单次写，变两次写 
+ </div> 
+ <div style="text-align:left">
+   数据一致性相对较高（因为双写成功才返回） 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <div style="text-align:left"> 
+  <span style="color:#ff0000">缺点：</span> 
+ </div> 
+ <div style="text-align:left">
+   请求的处理时间增加（要插入次，时间加倍） 
+ </div> 
+ <div style="text-align:left">
+   数据仍可能不一致，例如第二步写入T1完成后服务重启，则数据不会写入T2 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <div style="text-align:left">
+   如果系统对处理时间比较敏感，引出常用的第二种方案。 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <div style="text-align:left"> 
+  <span style="color:#009900">方法二：服务异步写</span> 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <img src="https://images2.imgbox.com/4a/a4/iicwHOuf_o.png" alt="111"> 
+</blockquote> 
+<p style="margin:0 0 0 40px; border:none; padding:0px"><br> </p> 
+<p style="margin:0 0 0 40px; border:none; padding:0px"><br> </p> 
+<p style="margin:0 0 0 40px; border:none; padding:0px">数据的双写并不再由服务来完成，服务层异步发出一个消息，通过消息总线发送给一个专门的数据复制服务来写入冗余数据，如上图1-6流程：<br> 业务方调用服务，新增数据<br> 服务先插入T1数据<br> 服务向消息总线发送一个异步消息（发出即可，不用等返回，通常很快就能完成）<br> 服务返回业务方新增数据成功<br> 消息总线将消息投递给数据同步中心<br> 数据同步中心插入T2数据<br> </p> 
+<div style="text-align:left"> 
+ <br> 
+</div> 
+<blockquote style="margin:0 0 0 40px; border:none; padding:0px"> 
+ <div style="text-align:left"> 
+  <span style="color:#006600">优点：</span> 
+ </div> 
+ <div style="text-align:left">
+   请求处理时间短（只插入1次） 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <div style="text-align:left"> 
+  <span style="color:#ff0000">缺点：</span> 
+ </div> 
+ <div style="text-align:left">
+   系统的复杂性增加了，多引入了一个组件（消息总线）和一个服务（专用的数据复制服务） 
+ </div> 
+ <div style="text-align:left">
+   因为返回业务线数据插入成功时，数据还不一定插入到T2中，因此数据有一个不一致时间窗口（这个窗口很短，最终是一致的） 
+ </div> 
+ <div style="text-align:left">
+   在消息总线丢失消息时，冗余表数据会不一致 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <div style="text-align:left">
+   如果想解除“数据冗余”对系统的耦合，引出常用的第三种方案。 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <div style="text-align:left"> 
+  <span style="color:#006600">方法三：线下异步写</span> 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <div style="text-align:left">
+     
+  <img src="https://images2.imgbox.com/80/c5/uMss6VuS_o.png" alt="111"> 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <div style="text-align:left">
+   数据的双写不再由服务层来完成，而是由线下的一个服务或者任务来完成，如上图1-6流程： 
+ </div> 
+ <div style="text-align:left">
+   业务方调用服务，新增数据 
+ </div> 
+ <div style="text-align:left">
+   服务先插入T1数据 
+ </div> 
+ <div style="text-align:left">
+   服务返回业务方新增数据成功 
+ </div> 
+ <div style="text-align:left">
+   数据会被写入到数据库的log中 
+ </div> 
+ <div style="text-align:left">
+   线下服务或者任务读取数据库的log 
+ </div> 
+ <div style="text-align:left">
+   线下服务或者任务插入T2数据 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <div style="text-align:left"> 
+  <span style="color:#006600">优点：</span> 
+ </div> 
+ <div style="text-align:left">
+   数据双写与业务完全解耦 
+ </div> 
+ <div style="text-align:left">
+   请求处理时间短（只插入1次） 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <div style="text-align:left"> 
+  <span style="color:#cc0000">缺点：</span> 
+ </div> 
+ <div style="text-align:left">
+   返回业务线数据插入成功时，数据还不一定插入到T2中，因此数据有一个不一致时间窗口（这个窗口很短，最终是一致的） 
+ </div> 
+ <div style="text-align:left">
+   数据的一致性依赖于线下服务或者任务的可靠性 
+ </div> 
+ <div style="text-align:left"> 
+  <br> 
+ </div> 
+ <h5 style="text-align:left">三、正反冗余表谁先执行</h5> 
+ <div> 
+  <br> 
+ </div> 
+ <div>
+   上述三种方案各有优缺点，但不管哪种方案，都会面临： 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div>
+   “究竟先写T1还是先写T2”的问题 
+ </div> 
+ <div>
+   都可能不一致，应该怎么解决的问题 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div>
+   先看看第一个问题，先操作哪一个的问题：究竟先写正表还是反表？ 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div>
+   对于一个不能保证事务性的操作，一定涉及“哪个任务先做，哪个任务后做”的问题，解决这个问题的方向是：【如果出现不一致】，谁先做对业务的影响较小，就谁先执行。 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div>
+   以上文的订单生成业务为例，buyer和seller冗余表都需要插入数据： 
+ </div> 
+ <div>
+   T1(buyer_id, seller_id, oid) 
+ </div> 
+ <div>
+   T2(seller_id, buyer_id, oid) 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div>
+   用户下单时，如果“先插入buyer表T1，再插入seller冗余表T2”，当第一步成功、第二步失败时，出现的业务影响是“买家能看到自己的订单，卖家看不到推送的订单”。 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div>
+   相反，如果“先插入seller表T2，再插入buyer冗余表T1”，当第一步成功、第二步失败时，出现的业务影响是“卖家能看到推送的订单，买家看不到自己的订单”。 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div>
+   由于这个生成订单的动作是买家发起的，买家如果看不到订单，会觉得非常奇怪，并且无法支付以推动订单状态的流转，此时即使卖家看到有人下单也是没有意义的。 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div>
+   因此，在此例中，应该先插入buyer表T1，再插入seller表T2。however，记住结论：对于一个不能保证事务性的操作，【如果出现不一致】，谁先做对业务的影响较小，就谁先执行。 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <h5>四、冗余表如何保证数据的一致性</h5> 
+ <div> 
+  <br> 
+ </div> 
+ <div>
+   最后是一致性的问题。不管是同步写入，异步写入，线下异步写入，都有可能出现数据不一致，怎么解决？常见的方案有这么几种： 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <span style="color:#006600">方法一：线下扫描正反冗余表全部数据</span> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <img src="https://images2.imgbox.com/f3/e4/LldWEZdG_o.png" alt="111"> 
+ </div> 
+ <div>
+   如上图所示，线下启动一个离线的扫描工具，不停的比对正表T1和反表T2，如果发现数据不一致，就进行补偿修复。 
+  <br> 
+  <br> 
+  <br> 
+  <span style="color:#006600">优点：</span> 
+  <br> 比较简单，开发代价小 
+  <br> 线上服务无需修改，修复工具与线上服务解耦 
+  <br> 
+  <br> 
+  <br> 
+  <span style="color:#cc0000">缺点：</span> 
+  <br> 扫描效率低，会扫描大量的“已经能够保证一致”的数据 
+  <br> 由于扫描的数据量大，扫描一轮的时间比较长，即数据如果不一致，不一致的时间窗口比较长 
+  <br> 
+  <br> 
+  <br> 很容易想到这个方案的优化方向。有没有可能只扫描“可能存在不一致可能性”的数据，而不是每次扫描全部数据，以提高效率呢？这就引出了第二种方案。 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <span style="color:#006600">方法二：线下扫描增量数据</span> 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <img src="https://images2.imgbox.com/a4/af/CDGqdkzo_o.png" alt="111"> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div>
+   每次只扫描增量的日志数据，就能够极大提高效率，缩短数据不一致的时间窗口，如上图1-4流程所示： 
+  <br> 写入正表T1 
+  <br> 第一步成功后，写入日志log1 
+  <br> 写入反表T2 
+  <br> 第二步成功后，写入日志log2 
+  <br> 
+  <br> 
+  <br> 当然，我们还是需要一个离线的扫描工具，不停的比对日志log1和日志log2，如果发现数据不一致，就进行补偿修复。互联网大部分业务是读多写少的场景。其实对于新增的数据量，是很小的，所有折中方案只需要扫描很少的数据，保证一致的数据也不会被重复扫描。 
+  <br> 
+  <br> 
+  <span style="color:#006600"><br> 优点：</span> 
+ </div> 
+ <div>
+   虽比方法一复杂，但仍然是比较简单的 
+  <br> 数据扫描效率高，只扫描增量数据 
+  <br> 
+  <br> 
+  <span style="color:#cc0000">缺点：</span> 
+ </div> 
+ <div>
+   线上服务略有修改（代价不高，多写了2条日志） 
+  <br> 虽然比方法一更实时，但时效性还是不高，不一致窗口取决于扫描的周期 
+  <br> 
+  <br> 我们之前的im好友表与反向好友表，修复周期是1天。当然这个周期也是由业务场景决定的。无论如何，修复还是不实时，有没有更为实时的修复方法呢？这就引出了方案三。 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <span style="color:#006600">方法三：实时线上“消息对”检测</span> 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <img src="https://images2.imgbox.com/c7/81/fNAewPOb_o.png" alt="111"> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div>
+   这次不是写日志了，而是向消息总线发送消息，如上图1-4流程所示： 
+  <br> 写入正表T1 
+  <br> 第一步成功后，发送消息msg1 
+  <br> 写入反表T2 
+  <br> 第二步成功后，发送消息msg2 
+  <br> 
+  <br> 
+  <br> 这次不是需要一个周期扫描的离线工具了，而是一个实时订阅消息的服务不停的收消息。 
+  <br> 
+  <br> 假设正常情况下，msg1和msg2的接收时间应该在3s以内，如果检测服务在收到msg1后没有收到msg2，就尝试检测数据的一致性，不一致时进行补偿修复。 
+  <br> 
+  <br> 
+  <span style="color:#006600">优点：</span> 
+  <br> 效率高，每个数据只扫一次 
+  <br> 实时性高，消息的通知很实时 
+  <br> 
+  <br> 
+  <span style="color:#990000">缺点：</span> 
+  <br> 方案相对比较复杂，引入了消息总线这个组件 
+  <br> 线下多了一个订阅总线的检测服务 
+  <br> 
+  <br> However，技术方案本身就是一个投入产出比的折衷，可以根据业务对一致性的需求程度决定使用哪一种方法。 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <h5>五、总结</h5> 
+  <br> 1、互联网很多业务场景的数据量很大，此时数据库架构要进行水平切分，切分后为了做到高吞吐量低延时的查询，往往使用“数据冗余”的方式来实现多个 字段上的高效查询（都不需要遍历库）。 
+  <br> 
+  <br> 2、冗余表有三种实现方式： 
+  <br> 服务同步写 
+  <br> 服务异步写 
+  <br> 线下异步写 
+  <br> 
+  <br> 3、冗余表到底正表先操作还是反表先操作的解决方法论是：对于一个不能保证事务性的操作，【如果出现不一致】，谁先做对业务的影响较小，就谁先执行。 
+  <br> 
+  <br> 4、为了发现冗余表数据不一致，并进行数据修复的常见方案有3种： 
+  <br> 线下扫描正反冗余表全部数据 
+  <br> 线下扫描增量数据 
+  <br> 实时线上“消息对”检测 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <h5>六、Q &amp; A</h5> 
+ <div> 
+  <br> 
+ </div> 
+ <div>
+   Q1：方案3的消息总线都有哪些实现方式？ 
+  <br> A1：消息总线，msg-queue，开源的，自研的都行，像ActiveMQ，ZeroMQ，RabbitMQ都行。 
+  <br> 
+  <br> 
+  <br> Q2：买家、卖家的这种表数据量都比较大，应该都是分库分表，里面t1,t2应该是一个笼统的概念，t1,t2内部应该会映射更多的分库吧，这些分库间映射，数据一致性和冗余，能不能再简单说说？ 
+  <br> A2：没错，正向表和反向表都会进行水平切分，而且patition key是不一样的。数据冗余上文提到就是一条数据冗余了2份，一致性也如上文所说有3种常见的方法来保证（仅限冗余表的一致性保证）。 
+  <br> 
+  <br> 
+  <br> Q3：用触发器来插入另一个表怎么样？ 
+  <br> A3：触发器恐怕不通用，互联网场景数据量大，并发量大，分库了之后，数据都是分布在不同的实例，不同的机器上的。 
+  <br> 
+  <br> 
+  <br> Q4：实时线上“消息对”检测中，如果消息总线出现问题，数据完整性，数据修复处理方式，能否简单说一下？ 
+  <br> A4：出现数据不一致的概率很低（例如10w个请求一个不一致，1/10w），消息总线出现问题的概率更低（消息总线100w个请求出现一个不一致？1/100w），这种巧合的概率在1/(10w*100w)。当然，如果硬要细究，最差可以退化到扫全量、扫增量。 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+ <div> 
+  <br> 
+ </div> 
+</blockquote> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/9d85daeaa8356ed0a27b0e844b5b8f68/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">循环链表的算法操作</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/2a909a6973bc45823e0c1f2ac1daa167/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">PostgresSQL使用命令</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

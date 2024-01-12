@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>LINUX网络流量限速控制 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="LINUX网络流量限速控制" />
+<meta property="og:description" content="一、TC原理介绍 Linux操作系统中的流量控制器TC（Traffic Control）用于Linux内核的流量控制，主要是通过在输出端口处建立一个队列来实现流量控制。
+Linux流量控制的基本原理如下图所示。
+接收包从输入接口（Input Interface）进来后，经过流量限制（Ingress Policing）丢弃不符合规定的数据包，由输入多路分配器（Input De-Multiplexing）进行判断选择：如果接收包的目的是本主机，那么将该包送给上层处理；否则需要进行转发，将接收包交到转发块（Forwarding Block）处理。转发块同时也接收本主机上层（TCP、UDP等）产生的包。转发块通过查看路由表，决定所处理包的下一跳。然后，对包进行排列以便将它们传送到输出接口（Output Interface）。一般我们只能限制网卡发送的数据包，不能限制网卡接收的数据包，所以我们可以通过改变发送次序来控制传输速率。Linux流量控制主要是在输出接口排列时进行处理和实现的。
+Linux的网络流控，控发不控收 , 所以只能对产生瓶颈网卡处的发包速率进行控制.
+二、TC规则 1、流量控制方式
+流量控制包括以下几种方式：
+SHAPING(限制)
+当流量被限制，它的传输速率就被控制在某个值以下。限制值可以大大小于有效带宽，这样可以平滑突发数据流量，使网络更为稳定。shaping（限制）只适用于向外的流量。
+SCHEDULING(调度)
+通过调度数据包的传输，可以在带宽范围内，按照优先级分配带宽。SCHEDULING(调度)也只适于向外的流量。
+POLICING(策略)
+SHAPING用于处理向外的流量，而POLICIING(策略)用于处理接收到的数据。
+DROPPING(丢弃)
+如果流量超过某个设定的带宽，就丢弃数据包，不管是向内还是向外。
+2、流量控制处理对象
+流量的处理由三种对象控制，它们是：qdisc(排队规则)、class(类别)和filter(过滤器)。
+QDISC(排队规则)
+QDisc(排队规则)是queueing discipline的简写，它是理解流量控制(traffic control)的基础。无论何时，内核如果需要通过某个网络接口发送数据包，它都需要按照为这个接口配置的qdisc(排队规则)把数据包加入队列。然后，内核会尽可能多地从qdisc里面取出数据包，把它们交给网络适配器驱动模块。最简单的QDisc是pfifo它不对进入的数据包做任何的处理，数据包采用先入先出的方式通过队列。不过，它会保存网络接口一时无法处理的数据包。
+CLASS(类)
+某些QDisc(排队规则)可以包含一些类别，不同的类别中可以包含更深入的QDisc(排队规则)，通过这些细分的QDisc还可以为进入的队列的数据包排队。通过设置各种类别数据包的离队次序，QDisc可以为设置网络数据流量的优先级。
+FILTER(过滤器)
+Filter(过滤器)用于为数据包分类，决定它们按照何种QDisc进入队列。无论何时数据包进入一个划分子类的类别中，都需要进行分类。分类的方法可以有多种，使用fileter(过滤器)就是其中之一。使用filter(过滤器)分类时，内核会调用附属于这个类(class)的所有过滤器，直到返回一个判决。如果没有判决返回，就作进一步的处理，而处理方式和QDISC有关。需要注意的是，filter(过滤器)是在QDisc内部，它们不能作为主体。
+3、操作原理
+类(Class)组成一个树，每个类都只有一个父类，而一个类可以有多个子类。某些QDisc(例如：CBQ和HTB)允许在运行时动态添加类，而其它的QDisc(例如：PRIO)不允许动态建立类。允许动态添加类的QDisc可以有零个或者多个子类，由它们为数据包排队。此外，每个类都有一个叶子QDisc，默认情况下，这个叶子QDisc使用pfifo的方式排队，我们也可以使用其它类型的QDisc代替这个默认的QDisc。而且，这个叶子叶子QDisc有可以分类，不过每个子类只能有一个叶子QDisc。
+当一个数据包进入一个分类QDisc，它会被归入某个子类。我们可以使用以下三种方式为数据包归类，不过不是所有的QDisc都能够使用这三种方式。
+tc过滤器(tc filter)
+如果过滤器附属于一个类，相关的指令就会对它们进行查询。过滤器能够匹配数据包头所有的域，也可以匹配由ipchains或者iptables做的标记。
+服务类型(Type of Service)
+某些QDisc有基于服务类型（Type of Service,ToS）的内置的规则为数据包分类。
+skb-&gt;priority
+用户空间的应用程序可以使用SO_PRIORITY选项在skb-&gt;priority域设置一个类的ID。
+树的每个节点都可以有自己的过滤器，但是高层的过滤器也可以直接用于其子类。
+如果数据包没有被成功归类，就会被排到这个类的叶子QDisc的队中。相关细节在各个QDisc的手册页中。
+4、命名规则
+所有的QDisc、类和过滤器都有ID。ID可以手工设置，也可以有内核自动分配。ID由一个主序列号和一个从序列号组成，两个数字用一个冒号分开。
+QDISC
+一个QDisc会被分配一个主序列号，叫做句柄(handle)，然后把从序列号作为类的命名空间。句柄采用象10:一样的表达方式。习惯上，需要为有子类的QDisc显式地分配一个句柄。
+类(CLASS)
+在同一个QDisc里面的类分享这个QDisc的主序列号，但是每个类都有自己的从序列号，叫做类识别符(classid)。类识别符只与父QDisc有关，和父类无关。类的命名习惯和QDisc的相同。
+过滤器(FILTER)
+过滤器的ID有三部分，只有在对过滤器进行散列组织才会用到。
+5、单位
+tc命令的所有参数都可以使用浮点数，可能会涉及到以下计数单位。
+1》带宽或者流速单位：
+kbps 千字节／秒
+mbps 兆字节／秒
+kbit KBits／秒
+mbit MBits／秒" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/6f96dbc4ba9deb9d7336d059e6449ab2/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-03-01T10:03:05+08:00" />
+<meta property="article:modified_time" content="2023-03-01T10:03:05+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">LINUX网络流量限速控制</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div class="kdocs-document"> 
+ <h2 style="text-align:left;"><span class="kdocs-bold" style="font-weight:bold;">一、TC原理介绍</span></h2> 
+ <p style="text-align:null;">Linux操作系统中的流量控制器TC（Traffic Control）用于Linux内核的流量控制，主要是通过在输出端口处建立一个队列来实现流量控制。</p> 
+ <p style="text-align:null;">Linux流量控制的基本原理如下图所示。</p> 
+ <div class="kdocs-line-container" style="display:flex;"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;display:flex;width:629px;justify-content:center;align-items:center;height:auto;"> 
+   <div class="kdocs-img" style="padding-top:30.842607%;height:0;"> 
+    <img src="https://images2.imgbox.com/cf/c3/fkOHCKOR_o.png" style="margin-left:;display:block;width:629px;margin-top:-30.842607%;height:auto;"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style=""></p> 
+ <p style="text-align:null;">接收包从输入接口（Input Interface）进来后，经过流量限制（Ingress Policing）丢弃不符合规定的数据包，由输入多路分配器（Input De-Multiplexing）进行判断选择：如果接收包的目的是本主机，那么将该包送给上层处理；否则需要进行转发，将接收包交到转发块（Forwarding Block）处理。转发块同时也接收本主机上层（TCP、UDP等）产生的包。转发块通过查看路由表，决定所处理包的下一跳。然后，对包进行排列以便将它们传送到输出接口（Output Interface）。一般我们只能限制网卡发送的数据包，不能限制网卡接收的数据包，所以我们可以通过改变发送次序来控制传输速率。Linux流量控制主要是在输出接口排列时进行处理和实现的。</p> 
+ <p style="text-align:null;"> Linux的网络流控，控发不控收 , 所以只能对产生瓶颈网卡处的发包速率进行控制.</p> 
+ <h2 style="text-align:left;"><span class="kdocs-bold" style="font-weight:bold;">二、TC规则</span></h2> 
+ <p style="text-align:null;">1、流量控制方式</p> 
+ <p style="text-align:null;">流量控制包括以下几种方式：</p> 
+ <p style="text-align:null;"><span class="kdocs-bold" style="font-weight:bold;">SHAPING(限制)</span></p> 
+ <p style="padding-left:1.4em;text-align:null;">当流量被限制，它的传输速率就被控制在某个值以下。限制值可以大大小于有效带宽，这样可以平滑突发数据流量，使网络更为稳定。shaping（限制）只适用于向外的流量。</p> 
+ <p style="text-align:null;"><span class="kdocs-bold" style="font-weight:bold;">SCHEDULING(调度)</span></p> 
+ <p style="padding-left:1.4em;text-align:null;">通过调度数据包的传输，可以在带宽范围内，按照优先级分配带宽。SCHEDULING(调度)也只适于向外的流量。</p> 
+ <p style="text-align:null;"><span class="kdocs-bold" style="font-weight:bold;">POLICING(策略)</span></p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">SHAPING用于处理向外的流量，而POLICIING(策略)用于处理接收到的数据。</p> 
+ <p style="text-align:null;"><span class="kdocs-bold" style="font-weight:bold;">DROPPING(丢弃)</span></p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">如果流量超过某个设定的带宽，就丢弃数据包，不管是向内还是向外。</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;"> </p> 
+ <p style="text-align:null;">2、流量控制处理对象</p> 
+ <p style="text-align:null;">流量的处理由三种对象控制，它们是：qdisc(排队规则)、class(类别)和filter(过滤器)。</p> 
+ <p style="text-align:null;"><span class="kdocs-bold" style="font-weight:bold;">QDISC(排队规则)</span></p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">QDisc(排队规则)是queueing discipline的简写，它是理解流量控制(traffic control)的基础。无论何时，内核如果需要通过某个网络接口发送数据包，它都需要按照为这个接口配置的qdisc(排队规则)把数据包加入队列。然后，内核会尽可能多地从qdisc里面取出数据包，把它们交给网络适配器驱动模块。最简单的QDisc是pfifo它不对进入的数据包做任何的处理，数据包采用先入先出的方式通过队列。不过，它会保存网络接口一时无法处理的数据包。</p> 
+ <p style="text-align:null;"><span class="kdocs-bold" style="font-weight:bold;">CLASS(类)</span></p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">某些QDisc(排队规则)可以包含一些类别，不同的类别中可以包含更深入的QDisc(排队规则)，通过这些细分的QDisc还可以为进入的队列的数据包排队。通过设置各种类别数据包的离队次序，QDisc可以为设置网络数据流量的优先级。</p> 
+ <p style="text-align:null;"><span class="kdocs-bold" style="font-weight:bold;">FILTER(过滤器)</span></p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">Filter(过滤器)用于为数据包分类，决定它们按照何种QDisc进入队列。无论何时数据包进入一个划分子类的类别中，都需要进行分类。分类的方法可以有多种，使用fileter(过滤器)就是其中之一。使用filter(过滤器)分类时，内核会调用附属于这个类(class)的所有过滤器，直到返回一个判决。如果没有判决返回，就作进一步的处理，而处理方式和QDISC有关。需要注意的是，filter(过滤器)是在QDisc内部，它们不能作为主体。</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;"> </p> 
+ <p style="text-align:null;">3、操作原理</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">类(Class)组成一个树，每个类都只有一个父类，而一个类可以有多个子类。某些QDisc(例如：CBQ和HTB)允许在运行时动态添加类，而其它的QDisc(例如：PRIO)不允许动态建立类。允许动态添加类的QDisc可以有零个或者多个子类，由它们为数据包排队。此外，每个类都有一个叶子QDisc，默认情况下，这个叶子QDisc使用pfifo的方式排队，我们也可以使用其它类型的QDisc代替这个默认的QDisc。而且，这个叶子叶子QDisc有可以分类，不过每个子类只能有一个叶子QDisc。</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">当一个数据包进入一个分类QDisc，它会被归入某个子类。我们可以使用以下三种方式为数据包归类，不过不是所有的QDisc都能够使用这三种方式。</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">tc过滤器(tc filter)</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">如果过滤器附属于一个类，相关的指令就会对它们进行查询。过滤器能够匹配数据包头所有的域，也可以匹配由ipchains或者iptables做的标记。</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">服务类型(Type of Service)</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">某些QDisc有基于服务类型（Type of Service,ToS）的内置的规则为数据包分类。</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">skb-&gt;priority</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">用户空间的应用程序可以使用SO_PRIORITY选项在skb-&gt;priority域设置一个类的ID。</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">树的每个节点都可以有自己的过滤器，但是高层的过滤器也可以直接用于其子类。</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">如果数据包没有被成功归类，就会被排到这个类的叶子QDisc的队中。相关细节在各个QDisc的手册页中。</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;"> </p> 
+ <p style="text-align:null;">4、命名规则</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">所有的QDisc、类和过滤器都有ID。ID可以手工设置，也可以有内核自动分配。ID由一个主序列号和一个从序列号组成，两个数字用一个冒号分开。</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">QDISC</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">一个QDisc会被分配一个主序列号，叫做句柄(handle)，然后把从序列号作为类的命名空间。句柄采用象10:一样的表达方式。习惯上，需要为有子类的QDisc显式地分配一个句柄。</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">类(CLASS)</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;"> </p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">在同一个QDisc里面的类分享这个QDisc的主序列号，但是每个类都有自己的从序列号，叫做类识别符(classid)。类识别符只与父QDisc有关，和父类无关。类的命名习惯和QDisc的相同。</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">过滤器(FILTER)</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">过滤器的ID有三部分，只有在对过滤器进行散列组织才会用到。</p> 
+ <p style="text-align:null;">5、单位</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">tc命令的所有参数都可以使用浮点数，可能会涉及到以下计数单位。</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">1》带宽或者流速单位：</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">kbps 千字节／秒</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">mbps 兆字节／秒</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">kbit KBits／秒</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">mbit MBits／秒</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">bps或者一个无单位数字 字节数／秒</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;"> </p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">2》数据的数量单位：</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">kb或者k 千字节</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">mb或者m 兆字节</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">mbit 兆bit</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">kbit 千bit</p> 
+ <p style="text-align:null;"> </p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">3》时间的计量单位：</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">s、sec或者secs 秒</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">ms、msec或者msecs 分钟</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;">us、usec、usecs或者一个无单位数字 微秒</p> 
+ <p style="text-align:null;"> </p> 
+ <h2 style="text-align:left;"><span class="kdocs-bold" style="font-weight:bold;">三、具体操作场景测试</span></h2> 
+ <p style="text-align:null;">Linux流量控制主要分为建立队列、建立分类和建立过滤器三个方面。</p> 
+ <p style="text-align:null;">1、基本实现步骤为：</p> 
+ <p style="padding-left:1.4em;text-align:null;">（1） 针对网络物理设备（如以太网卡ens32）绑定一个队列QDisc；</p> 
+ <p style="padding-left:1.4em;text-align:null;">（2） 在该队列上建立分类class；</p> 
+ <p style="padding-left:1.4em;text-align:null;">（3） 根据需要建立子队列和子分类;</p> 
+ <p style="padding-left:1.4em;text-align:null;">（4） 为每个分类建立过滤器。</p> 
+ <p style="text-indent:1.4em;padding-left:1.4em;text-align:null;"> </p> 
+ <p style="text-align:null;"> </p> 
+ <p style="text-align:null;">2、环境模拟实例: </p> 
+ <p style="text-align:null;">流量控制器上的以太网卡(ens32) 的IP地址为192.168.100.100。</p> 
+ <p style="text-align:null;"> </p> 
+ <p style="text-align:null;">假如有三种类型的流量需要控制:</p> 
+ <p style="text-align:null;">1) 是发往主机1的，其IP地址为192.168.100.101。其流量带宽控制在30Mbit，优先级为2；　</p> 
+ <p style="text-align:null;">2) 是发往主机2的，其IP地址为192.168.100.102。其流量带宽控制在20Mbit，优先级为1；　</p> 
+ <p style="text-align:null;">3) 是发往子网1的，其子网号为192.168.101.*，子网掩码为255.255.255.0。流量带宽控制在10Mbit,优先级为6。</p> 
+ <p style="text-align:null;"> </p> 
+ <p style="text-align:null;">a. 建立队列</p> 
+ <p style="padding-left:1.4em;text-align:null;">一般情况下，针对一个网卡只需建立一个队列。</p> 
+ <p style="padding-left:1.4em;text-align:null;">首先，需要为网卡ens32配置一个HTB队列，使用下列命令：</p> 
+ <p style="padding-left:1.4em;text-align:null;">tc qdisc add dev ens32 root handle 10: htb default 256</p> 
+ <p style="padding-left:1.4em;text-align:null;">这里，命令中的"add 表示要添加，"dev ens32 表示要操作的网卡为ens32。"root 表示为网卡ens32添加的是一个根队列。"handle 10: 表示队列的句柄为10:。"htb 表示要添加的队列为HTB队列。命令最后的"default 256 是htb特有的队列参数，意思是所有未分类的流量都将分配给类别10:256。</p> 
+ <p style="padding-left:1.4em;text-align:null;"></p> 
+ <p style="text-align:null;">b、为根队列创建相应的类别</p> 
+ <p style="text-align:null;">可以利用下面这三个命令为根队列10创建三个类别，分别是10:11、10:12和10:13，它们分别占用30、20和10mb的带宽。</p> 
+ <p style="text-align:null;">tc class add dev ens32 parent 10: classid 10:1 htb rate 30mbit ceil 30mbit</p> 
+ <p style="text-align:null;">tc class add dev ens32 parent 10: classid 10:2 htb rate 20mbit ceil 20mbit</p> 
+ <p style="text-align:null;">tc class add dev ens32 parent 10: classid 10:3 htb rate 10mbit ceil 10mbit</p> 
+ <p style="text-align:null;">命令中，"parent 10:"表示类别的父亲为根队列1:。"classid10:1"表示创建一个标识为10:1的类别，"rate 30mbit"表示系统将为该类别确保带宽30mbit，"ceil 30mbit"，表示该类别的最高可占用带宽为30mbit。</p> 
+ <p style="text-align:null;"> </p> 
+ <p style="text-align:null;">c、为各个类别设置过滤器</p> 
+ <p style="text-align:null;">创建三个过滤器，如下面的三个命令:</p> 
+ <p style="text-align:null;">tc filter add dev ens32 parent 10: protocol ip prio 2 handle 100 fw classid 10:1</p> 
+ <p style="text-align:null;">tc filter add dev ens32 parent 10: protocol ip prio 1 handle 200 fw classid 10:2</p> 
+ <p style="text-align:null;">tc filter add dev ens32 parent 10: protocol ip prio 6 handle 300 fw classid 10:3</p> 
+ <p style="text-align:null;"> </p> 
+ <p style="text-align:null;">d、结合iptables限速</p> 
+ <p style="text-align:null;">iptables -t mangle -A POSTROUTING -d 192.168.100.101 -j MARK --set-mark 100</p> 
+ <p style="text-align:null;">iptables -t mangle -A POSTROUTING -d 192.168.100.102 -j MARK --set-mark 200</p> 
+ <p style="text-align:null;">iptables -t mangle -A POSTROUTING -d 192.168101.0/24 -j MARK --set-mark 300</p> 
+ <p style="text-align:null;"></p> 
+ <p style="text-align:null;">e、取消限速操作</p> 
+ <p style="text-align:null;">tc qdisc del dev ens32 root</p> 
+ <p style="text-align:null;">iptables -t mangle -F</p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/9c819dee76d77c2ea5440088652cfd16/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">[软件测试]如何使用Eclipse导入项目并打开</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/677e7a66884d8b3283ca5a748afc38d2/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">【FFMPEG源码分析】通过ffmpeg截图命令分析ffmpeg.c源码流程</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>PyTorch训练多任务模型技巧 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="PyTorch训练多任务模型技巧" />
+<meta property="og:description" content="一、解决在分布式训练中，如果对同一模型进行多次调用的报错 报错如下：
+RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation: [torch.cuda.FloatTensor [256)] is at version 4; expected version 3 instead. Hint: enable anomaly detection to find the operation that failed to compute its gradient, with torch.autograd.set_detect_anomaly(True).
+参考知乎文章《【PyTorch踩坑】一个排查了一下午的坑》
+经过一些调试发现，只有当某些特定情况下才会触发此报错。下面结合一个对比学习的例子（并不是完整的脚本）来简单描述：
+import torch import torch.nn as nn from torchvision.models import resnet50 def main(): model = resnet50(num_classes=256).cuda() model = nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank], find_unused_parameters=True) criterion = nn.MSELoss() optimizer = torch." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/f65c0471c8b630b8ddc3da64146173bd/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-12-29T14:37:39+08:00" />
+<meta property="article:modified_time" content="2023-12-29T14:37:39+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">PyTorch训练多任务模型技巧</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h2>一、解决<strong>在分布式训练中，如果对同一模型进行多次调用的报错</strong></h2> 
+<p><span style="color:#fe2c24;"><strong>报错如下：</strong></span></p> 
+<blockquote> 
+ <p>RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation: [torch.cuda.FloatTensor [256)] is at version 4; expected version 3 instead. Hint: enable anomaly detection to find the operation that failed to compute its gradient, with torch.autograd.set_detect_anomaly(True).</p> 
+</blockquote> 
+<p>参考知乎文章《<a class="link-info" href="https://zhuanlan.zhihu.com/p/409117481" rel="nofollow" title="【PyTorch踩坑】一个排查了一下午的坑">【PyTorch踩坑】一个排查了一下午的坑</a>》</p> 
+<p> 经过一些调试发现，只有当某些特定情况下才会触发此报错。下面结合一个对比学习的例子（并不是完整的脚本）来简单描述：</p> 
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+from torchvision.models import resnet50
+
+def main():
+    model = resnet50(num_classes=256).cuda()
+    model = nn.parallel.DistributedDataParallel(model, 
+                                                device_ids=[args.local_rank], 
+                                                find_unused_parameters=True)
+    criterion = nn.MSELoss()
+    
+    optimizer = torch.optim.SGD(model.parameters(),
+                                lr=0.001,
+                                momentum=0.99,
+                                weight_decay=1e-4)
+
+    for i in range(10):
+        input0 = torch.randn((4, 3, 224, 224), dtype=torch.float32).cuda()
+        input2 = torch.randn((4, 3, 224, 224), dtype=torch.float32).cuda()
+
+        out1 = model(input0)
+        out2 = model(input1)
+
+        loss = criterion(out1, out2)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+if __name__ == '__main__':
+    main()</code></pre> 
+<p>经过调试发现，当使用<code>nn.DataParallel</code>并行训练或者单卡训练均可正常运行；另外如果将两次模型调用集成到model中，即通过<code>out1, out2 = model(input0, input1)</code> 的方式在分布式训练下也不会报错。</p> 
+<p>由此可以猜测：<span style="color:#fe2c24;"><strong>在分布式训练中，如果对同一模型进行多次调用</strong></span>则会触发以上报错，即<code>nn.parallel.DistributedDataParallel</code>方法封装的模型，<code>forword()</code>函数和<code>backward()</code>函数必须交替执行，如果执行多个（次）<code>forward()</code>然后执行一次<code>backward()</code>则会报错。</p> 
+<p>那么解决此问题的入手点则可以聚焦到<code>nn.parallel.DistributedDataParallel</code>接口上。 通过查询PyTorch官方文档发现此接口下的两个参数：</p> 
+<pre><code>- find_unused_parameters: 如果模型的输出有不需要进行反向传播的，此参数需要设置为True；若你的代码运行后卡住不动，基本上就是该参数的问题。
+- broadcast_buffers: 该参数默认为True，设置为True时，在模型执行forward之前，gpu0会把buffer中的参数值全部覆盖到别的gpu上。</code></pre> 
+<p>问题基本可以定位出来了，即<code>broadcast_buffers=True</code>导致参数被覆盖修改。解决办法：</p> 
+<pre><code> model = nn.parallel.DistributedDataParallel(model, 
+                                             device_ids=[args.local_rank], 
+                                             broadcast_buffers=False,
+                                             find_unused_parameters=True)</code></pre> 
+<h3>参考</h3> 
+<p><a href="https://link.zhihu.com/?target=https%3A//pytorch.org/docs/stable/distributed.html" rel="nofollow" title="distributed: https://pytorch.org/docs/stable/distributed.html">distributed: https://pytorch.org/docs/stable/distributed.html</a></p> 
+<p><a href="https://link.zhihu.com/?target=https%3A//github.com/pytorch/pytorch/issues/22095" rel="nofollow" title="Inplace error if DistributedDataParallel module that contains a buffer is called twice">Inplace error if DistributedDataParallel module that contains a buffer is called twice</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/9e60f453fe7128763e7402d6d26d081a/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Rust 修改源</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/051069f8e08ba8a2e89dfb3658211448/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">深入了解小红书笔记详情API：为内容创新提供动力</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

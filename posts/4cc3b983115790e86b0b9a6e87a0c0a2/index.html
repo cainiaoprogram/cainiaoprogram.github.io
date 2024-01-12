@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>第二篇：MySQL之InnoDB物理存储结构 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="第二篇：MySQL之InnoDB物理存储结构" />
+<meta property="og:description" content="第二篇：MySQL中InnoDB引擎的物理存储结构 1. 个人理解 看了很多MySQL的书籍和博客，感觉都是互相抄来抄去，把知识点的罗列，讲不清楚前因后果，让人看起来莫名其妙的。所以，我决定从MySQL的底层物理存储结构了解，掌握了InnoDB的物理存储结构，再理解索引，锁，事务，日志之类的上层优化就很容易了。
+2. 知识来源 本文主要观点来自于阿里数据库内核月报
+http://mysql.taobao.org/monthly/2016/02/01/
+和一篇CSDN博客
+https://blog.csdn.net/jiang18238032891/article/details/108471750
+本文主要梳理大致组织结构，不会深入每个细节，主要想让读者明白大致原理即可，因为InnoDB的组织过于复杂。如果文章存在错误，请多多包涵，望批评指正。
+3. 基本知识 3.1、页PAGE 首先，InnoDB将物理磁盘划分为页page，每页的大小默认为16KB，页是最小的存储单位。因为上层应用的需要，比如索引、日志等，页有很多的格式。我们主要说数据页，也就是存储实际数据的页。
+首先看，数据页的基本格式，如下图
+3.1.1、File Header
+描述数据页的外部信息，比如属于哪一个表空间、前后页的页号等。
+名称描述check_sum数据页的校验和page_num数据页的编号space_id数据页所属的表空间idprev_page_num上一个数据页的页号next_page_num下一个数据页的页号lsn最近刷新的日志编号 数据页在物理磁盘上是按照双向链表的方式来连接的
+3.1.2、User Records
+用户纪录，也就是数据库表中对应的数据，这里我们说常用的compact格式。
+3.1.2.1、变长字段长度列表
+InnoDB支持变成VARCHAR等数据格式，所以，在纪录的最前边纪录起占用的字节数，通过字节数来正确的读取数据
+3.1.2.2、NULL值列表
+通过NULL值列表用一个bit来标记为NULL的列，代替用NULL来标记真实数据，可以省空间
+3.1.2.3、纪录头信息
+用来描述纪录的一些信息
+比如是否删除、下一条纪录的位置等信息
+名称描述next_record下一条纪录的位置信息delete是否被删除type0表示普通记录，1表示B&#43;树非叶子节点记录，2表示最小记录，3表示最大记录 3.1.2.4、列对应的真实数据
+InnoDB除了我们插入的数据外，还有一些隐藏列，transaction_id（事务ID）、roll_pointer（回滚指针）是一定添加的。row_id则不一定，根据以下策略生成：
+优先使用用户建表时指定的主键，若用户没有指定主键，则使用unique键。若unique键都没有，则系统自动生成row_id，为隐藏列。
+3.1.3、Page Header
+PAGE_HEADER用来描述数据页中的具体信息，比如存在多少条纪录，第一条纪录的位置等
+名称描述rec_count纪录的数量free_topfreespace的最小地址delete_addr第一条被删除的纪录地址delete_space删除纪录的总空间btree_level当前页在B&#43;树中的层级 3.1.4、infimum和supremum纪录
+infimum和supremum是系统生成的纪录，分别为最小和最大纪录值，infimum的下一条是用户纪录中键值最小的纪录，supremum的上一条是用户纪录中键值最大的纪录，通过next_record字段来相连。
+3.1.5、Free Space
+页中目前空闲的存储，可以插入纪录
+3.1.6、Page Dictionary
+类似于字典的目录结构，根据主键大小，每隔4-8个纪录设置一个槽，用来纪录其位置，当根据主键查找数据时，首先一步到位找到数据所在的槽，然后在槽中线性搜素。这种方法比从前到后遍历页的链表的效率更快。
+3.1.7、Page Tailer
+File Header存储刷盘前内存的校验和，Page Tailer储存刷盘后的校验和。当刷盘的时候，出现异常，Page Tailer和File Header中的校验和不一致，则说明出现刷盘错误。
+3.1.8、插入纪录过程
+如果Free Space的空间足够的话，直接分配空间来添加纪录，并将插入前最后一条纪录的next_record指向当前插入的纪录，将当前插入纪录的next_record指向supremum纪录。
+如果Free Space的空间不够的话，则首先将之前删除造成的碎片重新整理之后，按照上述步骤插入纪录。
+如果当前页空间整理碎片之后仍然不足的话，则重新申请一个页，将页初始化之后，按照上述步骤插入纪录
+3.2、区EXTENT 引入EXTENT的原因：
+如果只有页这一层次的话，页的个数是非常多的，存储空间的分配和回收都会很麻烦，因为要维护这么多的页的状态是非常麻烦的。
+所以，InnoDB又引入了区extent。一个区默认是64个连续的页组成的，也就是1MB。通过对EXTENT进行管理来进行存储空间的分配和回收就比较容易了。
+3.3、段SEGMENT 为什么要引入段呢，这要从索引说起。我们都知道索引的目的是为了加快查找速度，是一种典型的用空间换时间的方法。
+我们首先看没有索引的时候，数据是怎么查找的：
+根据page的列表，从头到尾来遍历，速度极慢。可以看出没有索引的话，数据的查找效率极慢
+那么索引是怎么来解决问题的呢" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/4cc3b983115790e86b0b9a6e87a0c0a2/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-11-19T17:19:57+08:00" />
+<meta property="article:modified_time" content="2020-11-19T17:19:57+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">第二篇：MySQL之InnoDB物理存储结构</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="MySQLInnoDB_0"></a>第二篇：MySQL中InnoDB引擎的物理存储结构</h3> 
+<h3><a id="1__2"></a>1. 个人理解</h3> 
+<p>看了很多MySQL的书籍和博客，感觉都是互相抄来抄去，把知识点的罗列，讲不清楚前因后果，让人看起来莫名其妙的。所以，我决定从MySQL的底层物理存储结构了解，掌握了InnoDB的物理存储结构，再理解索引，锁，事务，日志之类的上层优化就很容易了。</p> 
+<h3><a id="2__6"></a>2. 知识来源</h3> 
+<p>本文主要观点来自于阿里数据库内核月报<br> <a href="http://mysql.taobao.org/monthly/2016/02/01/" rel="nofollow">http://mysql.taobao.org/monthly/2016/02/01/</a><br> 和一篇CSDN博客<br> <a href="https://blog.csdn.net/jiang18238032891/article/details/108471750">https://blog.csdn.net/jiang18238032891/article/details/108471750</a><br> 本文主要梳理大致组织结构，不会深入每个细节，主要想让读者明白大致原理即可，因为InnoDB的组织过于复杂。如果文章存在错误，请多多包涵，望批评指正。</p> 
+<h3><a id="3__14"></a>3. 基本知识</h3> 
+<h3><a id="31PAGE_16"></a>3.1、页PAGE</h3> 
+<p>首先，InnoDB将物理磁盘划分为页page，每页的大小默认为16KB，页是最小的存储单位。因为上层应用的需要，比如索引、日志等，页有很多的格式。我们主要说数据页，也就是存储实际数据的页。<br> 首先看，数据页的基本格式，如下图<br> <img src="https://images2.imgbox.com/86/60/Vi5bjE3M_o.png" alt="数据页的基本格式"><br> 3.1.1、File Header<br> 描述数据页的外部信息，比如属于哪一个表空间、前后页的页号等。</p> 
+<table><thead><tr><th>名称</th><th>描述</th></tr></thead><tbody><tr><td>check_sum</td><td>数据页的校验和</td></tr><tr><td>page_num</td><td>数据页的编号</td></tr><tr><td>space_id</td><td>数据页所属的表空间id</td></tr><tr><td>prev_page_num</td><td>上一个数据页的页号</td></tr><tr><td>next_page_num</td><td>下一个数据页的页号</td></tr><tr><td>lsn</td><td>最近刷新的日志编号</td></tr></tbody></table> 
+<p>数据页在物理磁盘上是按照双向链表的方式来连接的</p> 
+<p>3.1.2、User Records<br> 用户纪录，也就是数据库表中对应的数据，这里我们说常用的compact格式。</p> 
+<p>3.1.2.1、变长字段长度列表<br> InnoDB支持变成VARCHAR等数据格式，所以，在纪录的最前边纪录起占用的字节数，通过字节数来正确的读取数据</p> 
+<p>3.1.2.2、NULL值列表<br> 通过NULL值列表用一个bit来标记为NULL的列，代替用NULL来标记真实数据，可以省空间</p> 
+<p>3.1.2.3、纪录头信息<br> 用来描述纪录的一些信息<br> 比如是否删除、下一条纪录的位置等信息</p> 
+<table><thead><tr><th>名称</th><th>描述</th></tr></thead><tbody><tr><td>next_record</td><td>下一条纪录的位置信息</td></tr><tr><td>delete</td><td>是否被删除</td></tr><tr><td>type</td><td>0表示普通记录，1表示B+树非叶子节点记录，2表示最小记录，3表示最大记录</td></tr></tbody></table> 
+<p>3.1.2.4、列对应的真实数据<br> InnoDB除了我们插入的数据外，还有一些隐藏列，transaction_id（事务ID）、roll_pointer（回滚指针）是一定添加的。row_id则不一定，根据以下策略生成：<br> 优先使用用户建表时指定的主键，若用户没有指定主键，则使用unique键。若unique键都没有，则系统自动生成row_id，为隐藏列。<br> <img src="https://images2.imgbox.com/3b/2a/YhyR0keS_o.png" alt="compact格式"></p> 
+<p>3.1.3、Page Header<br> PAGE_HEADER用来描述数据页中的具体信息，比如存在多少条纪录，第一条纪录的位置等</p> 
+<table><thead><tr><th>名称</th><th>描述</th></tr></thead><tbody><tr><td>rec_count</td><td>纪录的数量</td></tr><tr><td>free_top</td><td>freespace的最小地址</td></tr><tr><td>delete_addr</td><td>第一条被删除的纪录地址</td></tr><tr><td>delete_space</td><td>删除纪录的总空间</td></tr><tr><td>btree_level</td><td>当前页在B+树中的层级</td></tr></tbody></table> 
+<p>3.1.4、infimum和supremum纪录<br> infimum和supremum是系统生成的纪录，分别为最小和最大纪录值，infimum的下一条是用户纪录中键值最小的纪录，supremum的上一条是用户纪录中键值最大的纪录，通过next_record字段来相连。</p> 
+<p>3.1.5、Free Space<br> 页中目前空闲的存储，可以插入纪录</p> 
+<p>3.1.6、Page Dictionary<br> 类似于字典的目录结构，根据主键大小，每隔4-8个纪录设置一个槽，用来纪录其位置，当根据主键查找数据时，首先一步到位找到数据所在的槽，然后在槽中线性搜素。这种方法比从前到后遍历页的链表的效率更快。</p> 
+<p>3.1.7、Page Tailer<br> File Header存储刷盘前内存的校验和，Page Tailer储存刷盘后的校验和。当刷盘的时候，出现异常，Page Tailer和File Header中的校验和不一致，则说明出现刷盘错误。</p> 
+<p>3.1.8、插入纪录过程<br> 如果Free Space的空间足够的话，直接分配空间来添加纪录，并将插入前最后一条纪录的next_record指向当前插入的纪录，将当前插入纪录的next_record指向supremum纪录。<br> 如果Free Space的空间不够的话，则首先将之前删除造成的碎片重新整理之后，按照上述步骤插入纪录。</p> 
+<p>如果当前页空间整理碎片之后仍然不足的话，则重新申请一个页，将页初始化之后，按照上述步骤插入纪录</p> 
+<h3><a id="32EXTENT_87"></a>3.2、区EXTENT</h3> 
+<p>引入EXTENT的原因：<br> 如果只有页这一层次的话，页的个数是非常多的，存储空间的分配和回收都会很麻烦，因为要维护这么多的页的状态是非常麻烦的。</p> 
+<p>所以，InnoDB又引入了区extent。一个区默认是64个连续的页组成的，也就是1MB。通过对EXTENT进行管理来进行存储空间的分配和回收就比较容易了。</p> 
+<h3><a id="33SEGMENT_94"></a>3.3、段SEGMENT</h3> 
+<p>为什么要引入段呢，这要从索引说起。我们都知道索引的目的是为了加快查找速度，是一种典型的用空间换时间的方法。</p> 
+<p>我们首先看没有索引的时候，数据是怎么查找的：<br> 根据page的列表，从头到尾来遍历，速度极慢。可以看出没有索引的话，数据的查找效率极慢</p> 
+<p>那么索引是怎么来解决问题的呢</p> 
+<p>首先我们创建一个表</p> 
+<pre><code class="prism language-sql">mysql<span class="token operator">&gt;</span> <span class="token keyword">CREATE</span> <span class="token keyword">TABLE</span> index_demo<span class="token punctuation">(</span>
+    <span class="token operator">-</span><span class="token operator">&gt;</span>     c1 <span class="token keyword">INT</span><span class="token punctuation">,</span>
+    <span class="token operator">-</span><span class="token operator">&gt;</span>     c2 <span class="token keyword">INT</span><span class="token punctuation">,</span>
+    <span class="token operator">-</span><span class="token operator">&gt;</span>     c3 <span class="token keyword">CHAR</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    <span class="token operator">-</span><span class="token operator">&gt;</span>     <span class="token keyword">PRIMARY</span> <span class="token keyword">KEY</span><span class="token punctuation">(</span>c1<span class="token punctuation">)</span>
+    <span class="token operator">-</span><span class="token operator">&gt;</span> <span class="token punctuation">)</span> ROW_FORMAT <span class="token operator">=</span> Compact<span class="token punctuation">;</span>
+Query OK<span class="token punctuation">,</span> <span class="token number">0</span> <span class="token keyword">rows</span> affected <span class="token punctuation">(</span><span class="token number">0.03</span> sec<span class="token punctuation">)</span>
+
+</code></pre> 
+<p>下图为其纪录对应的格式。<br> record_type：记录头信息的一项属性，表示记录的类型，0表示普通记录、1表示索引纪录（下文中会提到）、2表示最小记录、3表示最大记录<br> <img src="https://images2.imgbox.com/49/37/6MXgN01O_o.png" alt=""><br> 放入页中的示意图如下<br> <img src="https://images2.imgbox.com/72/7b/PCWrlcmu_o.png" alt=""><br> 然后我们向表中插入数据</p> 
+<pre><code class="prism language-sql">mysql<span class="token operator">&gt;</span> <span class="token keyword">INSERT</span> <span class="token keyword">INTO</span> index_demo <span class="token keyword">VALUES</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">,</span> <span class="token string">'u'</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">9</span><span class="token punctuation">,</span> <span class="token string">'d'</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">5</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> <span class="token string">'y'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+Query OK<span class="token punctuation">,</span> <span class="token number">3</span> <span class="token keyword">rows</span> affected <span class="token punctuation">(</span><span class="token number">0.01</span> sec<span class="token punctuation">)</span>
+Records: <span class="token number">3</span>  Duplicates: <span class="token number">0</span>  <span class="token keyword">Warnings</span>: <span class="token number">0</span>
+
+</code></pre> 
+<p>按照主键大小排列成单链表存储在页中（物理位置不一定是挨个排列的），效果图如下<br> <img src="https://images2.imgbox.com/a0/a9/jTke2pSx_o.png" alt="在这里插入图片描述"><br> 此时我们再插入一条纪录</p> 
+<pre><code class="prism language-sql">mysql<span class="token operator">&gt;</span> <span class="token keyword">INSERT</span> <span class="token keyword">INTO</span> index_demo <span class="token keyword">VALUES</span><span class="token punctuation">(</span><span class="token number">4</span><span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">,</span> <span class="token string">'a'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+Query OK<span class="token punctuation">,</span> <span class="token number">1</span> <span class="token keyword">row</span> affected <span class="token punctuation">(</span><span class="token number">0.00</span> sec<span class="token punctuation">)</span>
+
+</code></pre> 
+<p>我们假设每个页中最多只能存在3条记录，所以需要申请一个新的页来存储，示意图如下：<br> <img src="https://images2.imgbox.com/d2/a6/f190H4Cb_o.png" alt="在这里插入图片描述"><br> 为了显示效果，我们多插入几条纪录<br> <img src="https://images2.imgbox.com/2f/fb/PFfjKThl_o.png" alt="在这里插入图片描述"><br> 这是我们可以每隔若干个页来抽取一个页来建立上层目录，类似于跳表的数据结构<br> <img src="https://images2.imgbox.com/24/65/yLrn0z5L_o.png" alt="在这里插入图片描述"><br> 目录项中只包含被抽中页中的最小的键值和其对应的页号。</p> 
+<p>那么目录项怎么存储呢？有没有发现跟数据页中的纪录很像？<br> 所以，引入了索引页，其中的纪录的record_type为1.</p> 
+<p><img src="https://images2.imgbox.com/f4/22/cd1XfAhS_o.png" alt="在这里插入图片描述"><br> 然后我们迭代抽取页来建立上层索引，直至到一层只有一个页为止<br> <img src="https://images2.imgbox.com/8d/a8/NfNVin9K_o.png" alt="在这里插入图片描述"><br> 上图的结构就是B+树。</p> 
+<p>当有了索引之后，我们如何查找数据呢？</p> 
+<p>跟二叉搜索树的查找过程极为相似，但是B+树有多个子节点，我们根据PageDictionary来快速查找目的的子节点，然后不断细化到叶子结点即可。<br> 这种查找方式的效率比单链表的从头到尾遍历要高效很多倍</p> 
+<p>B+树的叶子节点存放的是我们的具体数据，非叶子结点是索引页。<br> 所以B+树将数据分为了两部分，叶子节点部分和非叶子节点部分，也就我们要介绍的段Segment，创建两个Segment来存放对应的两部分数据。</p> 
+<p>Segment是一种逻辑上的组织，其层次结构从上到下一次为Segment、Extent、Page。</p> 
+<h3><a id="4InnoDB_162"></a>4、InnoDB物理存储架构</h3> 
+<p><img src="https://images2.imgbox.com/43/17/Gi0MeHiR_o.png" alt="在这里插入图片描述"><br> 上图为InnoDB的系统架构图。</p> 
+<p>每个表对应着一个文件，将文件划分为若干个页。<br> 其中有三个比较特殊的页：<br> 1、Page0:page0为文件的第一个页，类型为FIL_PAGE_TYPE_FSP_HDR， 主要用于维护文件中的空间分配和释放<br> 2、IBUF BITMAP PAGE：与本文关系不大，忽略<br> 3、inodePage：内含多个inode_entry来描述B+树占用的Page和Extent情况。</p> 
+<h3><a id="41Page0_173"></a>4.1、Page0</h3> 
+<p>page0分为两部分<br> <strong>1、文件管理信息</strong><br> <strong>主要维护了5个链表，头节点和尾节点</strong><br> free：还未被使用过的extent，指向当前还空闲的extent的entry<br> frag：被使用但是还未使用完的extent，指向有碎片的extent的entry<br> full：完全被使用完的extent，指向被填满的extent的entry<br> inode_free：可用的inode页<br> inode_full:被完全使用的inode页<br> <img src="https://images2.imgbox.com/15/a3/FjZGLekq_o.png" alt="在这里插入图片描述"><br> **<strong>当所有的free链表上的extent都用完后，会申请新的extent，并将其信息注册到对应的extent page 中的extent entry，并将其extent entry加到free链表中。</strong></p> 
+<p>**<strong>如果inode_free中inode page也用完后，也会申请新的inode page 将其加入到inode _free链表上</strong></p> 
+<p><strong>2、256个extent entry</strong><br> 一个extent entry用来描述一个extent的信息，一个extent是由连续的64个page组成，一个extent的大小为1M。<br> 也就是说每隔256MB（不一定连续）就需要一个extent page来描述对应的256个extent的状态。</p> 
+<p>extent page 和page0的格式大概一致，只不过少了文件管理信息，只有用256个extent entry。</p> 
+<p><strong>extent page存在于第一个extent的第一个page，那么这个extent在被使用的时候会被加入到frag中，而不是free中。</strong></p> 
+<table><thead><tr><th>名称</th><th>描述</th></tr></thead><tbody><tr><td>id</td><td>如果当前extent被完全分配给某个segment的话，填入其SegmentID</td></tr><tr><td>prev</td><td>上一个extent的地址</td></tr><tr><td>next</td><td>下一个extent的地址</td></tr><tr><td>bitmap</td><td>用一个bit来表示其所管理的64个page是否被使用</td></tr></tbody></table> 
+<h3><a id="42Inode_Page_205"></a>4.2、Inode Page</h3> 
+<p>Inode Page用来管理文件中的segment，默认可以存85个inode_entry，一个entry对应一个segment。</p> 
+<table><thead><tr><th>名称</th><th>描述</th></tr></thead><tbody><tr><td>prev</td><td>上一个inodepage的地址</td></tr><tr><td>next</td><td>下一个inodepage的地址</td></tr><tr><td>inode_entry1</td><td>第一个InodeEntry</td></tr><tr><td>…</td><td>…</td></tr><tr><td>inode_entry85</td><td>第85个inodeentry</td></tr></tbody></table> 
+<p>InodeEntry的结构如下</p> 
+<table><thead><tr><th>名称</th><th>描述</th></tr></thead><tbody><tr><td>segmentId</td><td>对应的segment的id</td></tr><tr><td>free</td><td>分配给该segment却还未使用的extent链表</td></tr><tr><td>frag</td><td>分配给该segment已经使用过的extent链表</td></tr><tr><td>full</td><td>分配给该segment并完全使用过的extent链表</td></tr><tr><td>num</td><td>frag链表中被使用的page的个数</td></tr><tr><td>page0</td><td>第1个独立的page</td></tr><tr><td>page1</td><td>第2个独立的page</td></tr><tr><td>…</td><td>…</td></tr><tr><td>page31</td><td>第32个独立的page</td></tr></tbody></table> 
+<h3><a id="43_231"></a>4.3、表创建过程</h3> 
+<p>1、首先创建表的时候，InnoDB默认会创建一个B+树。<br> 主键的生成策略：<br> 优先使用用户建表时指定的主键，若用户没有指定主键，则使用unique键。若unique键都没有，则系统自动生成row_id，为隐藏列。</p> 
+<p>B+树根据主键大小来进行排序</p> 
+<p>如上文所说，B+树分为leaf_segment和non_leaf_segment。两者的生成方式大致一样，以non_left_segment为例，</p> 
+<p>1、首先利用Page0中的inode_free链表来获取一个inode page，并得到其中的一个InodeEntry，将其segmentid填入，并将其中的page0作为rootpage，初始化完成。</p> 
+<p>2、分配新page，按照以下策略获取：<br> a、尽量使用32个独立的page<br> b、尽量使用与当前页面物理位置接近的页面<br> c、尽量使用frag链表中的页面</p> 
+<p>3、回收page<br> a、若page所在的extent为full，则将其变为frag，并挂到full链表的末尾，如果extent变为了free，则挂到free链表的末尾<br> b、改变extent_entry中的bitmap的标志位</p> 
+<h3><a id="5_254"></a>5、结束</h3> 
+<p>大概先写这么多吧，第一次写博客，有点前言不搭后语，望多多包涵。如果有这方面不错的的技术文章或者书籍，希望朋友们留言评论。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/607ac396d6bbda5b6b4ef88e1d7e9bd7/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">java 远程执行linux命令_Pikachu-RCE远程命令执行漏洞</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/065fc47158aeaf37b2bb0828f083aa59/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">qtcreator 使用不同版本的编译器进行编译</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

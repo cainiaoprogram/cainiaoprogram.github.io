@@ -1,0 +1,1203 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>各种FIFO硬件设计（FIFO概念、异步、同步、非2次幂深度FIFO） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="各种FIFO硬件设计（FIFO概念、异步、同步、非2次幂深度FIFO）" />
+<meta property="og:description" content="文章目录 一、FIFO概述二、FIFO分类三、FIFO重要信号与参数3.1 信号3.2 参数3.2.1 data_depth的确定 四、FIFO存储原理五、同步FIFO5.1 空满信号判断5.2 同步FIFO源码5.3 测试源码5.4 功能仿真结果在这里插入图片描述 六、异步FIFO6.1 异步FIFO架构6.2 设计源码6.2.1 二进制-格雷码转换器6.2.2 信号同步器(dff)6.2.3 异步FIFO顶层6.2.4 测试源码6.2.5 功能仿真结果 七、非2的次幂FIFO7.1 设计思路7.2 设计源码7.3 测试程序7.4 功能仿真 八、非2次幂FIFO(带将空将满信号与FIFO余量)8.1 设计源码8.2 测试源码8.3 功能仿真结果 (码字不易、三连支持)
+一、FIFO概述 FIFO（first in first out）是一种先进先出的存储器，与栈不同，栈对应的是一种先进后出的数据存储理念。
+FIFO无论是在IC设计中、IP核设计中、SOC设计中都存在广泛的应用。特别是随着设计复杂度的提高，在一个系统中往往会引入多个时钟，这也就使得数据的跨时钟域处理显得尤为重要，而FIFO正是解决这一问题的有效方法。
+FIFO的设计应用：
+1.德州仪器tm4c123g单片机的UART模块使用FIFO做缓冲。
+2.NXP单片机正交解码器缓冲。
+3.摄像头的数据缓冲。
+4.使用ADC配合FIFO与DMA实现高速采集。
+5.提高状态机模块的数据吞吐率（软件不需要再读状态机的busy标志位，只需关心fifo是否空满）。
+二、FIFO分类 FIFO根据读写时钟域的不同可分为同步FIFO与异步FIFO。
+同步FIFO是指读写通道均在相同的时钟下进行信号采样的FIFO，主要用于设备之间数据传输速率的匹配。
+异步FIFO是指读写通道在不同的时钟下进行信号采样的FIFO，主要处理跨时钟域之间的数据传输问题。
+系统2如果直接去采样处于时钟域1的系统数据，很有可能会采样到处于亚稳态的数据。使用异步FIFO对数据进行缓冲一定程度上减少了亚稳态发生的概率。
+(无论是同步还是异步的FIFO，都是面向数据流的一种数据存储器，都具有数据缓冲作用）。
+三、FIFO重要信号与参数 3.1 信号 通道信号位宽描述nrst1复位信号，有效时将清空FIFO中已缓冲的数据写通道clk_w1写数据时钟，上升沿采样写通道信号写通道wr_en1写有效信号，当其无效时，FIFO将忽略写通道传输的数据；也可视为写数据的同步帧；当其有效时，FIFO会写入当前数据；写通道wrdata任意（需与RAM匹配）写数据输入，位宽视需求任意；写通道full1FIFO满信号，当写满时，此信号有效，此时FIFO将阻塞数据的输入；写通道almost_full1将满信号，当FIFO中存储的数据达到或超过设定的余量时，将有效；此时FIFO不会阻塞数据的写入，但设备可以通过此信号来决定是否继续写入数据；读通道clk_r1读数据通道时钟；（在同步FIFO中，该信号必须与clk_w接至同一时钟）读通道rd_en1读有效信号，当其无效时，FIFO停止数据的读出；也可视为读数据的同步帧；当其有效时，FIFO会读出数据；读通道rddata任意（需与RAM匹配）读数据输出，位宽视需求任意；读通道empty1空信号，当FIFO中数据为空时有效；此时FIFO将阻塞数据的读取；读通道almost_empty1将空信号，当FIFO中存储的数据达到或低于设定的最小余量时，将有效；此时FIFO不会阻塞数据的读出，但设备可以通过此信号来判断是否继续读出数据；data_count任意(与数据深度匹配)存储计数器，表示当前FIFO中存储数据的数量，设备可根据该信号来判断是否写入或读出数据； 在FIFO实际的应用中，一般将empty与almost_full配合起来使用。为了减少FIFO上溢的风险，full信号很少使用。
+3.2 参数 参数描述data_depth数据深度，代表了FIFO缓冲数据的能力；一般为2的次幂；在支持非2次幂深度的FIFO中，可任意；data_width数据读写宽度，一般与内部RAM匹配数据宽度，在不匹配情况下需要对数据进行补位处理；addr_width地址宽度，与深度对应，其关系式：addr_width = log2(data_depth) data_depth是否越大越好？
+否，data_depth应该根据读写数据方的速率进行合理确定。
+过大的data_depth会消耗过多的资源（若RAM是LUT实现，则消耗大量的LUT，若是Block RAM 则消耗Block RAM资源）
+3.2.1 data_depth的确定 深度的确定既要满足数据不丢失，且不能过多的浪费资源；
+这里首先考虑极端情况：
+如果写数据方的写入速率大于读数据方的读出速率，则FIFO的数据深度只有无穷大时，才能确保数据不溢出；显然无穷大深度的FIFO是不存在的；这种情况是无解的；
+相较于上述的极端情况，更多的是考虑写入Burst数据的情况，虽然写入数据流是连续的，但写Burst之间数据往往存在时间间隔；
+fw&gt;fr，且读写之间没有空闲周期：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/01381b4e1b68ac53e2095d3cfd90279f/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-08-11T14:59:37+08:00" />
+<meta property="article:modified_time" content="2022-08-11T14:59:37+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">各种FIFO硬件设计（FIFO概念、异步、同步、非2次幂深度FIFO）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><a href="#FIFO_7" rel="nofollow">一、FIFO概述</a></li><li><a href="#FIFO_17" rel="nofollow">二、FIFO分类</a></li><li><a href="#FIFO_29" rel="nofollow">三、FIFO重要信号与参数</a></li><li><ul><li><a href="#31__30" rel="nofollow">3.1 信号</a></li><li><a href="#32__48" rel="nofollow">3.2 参数</a></li><li><ul><li><a href="#321_data_depth_59" rel="nofollow">3.2.1 data_depth的确定</a></li></ul> 
+  </li></ul> 
+  </li><li><a href="#FIFO_79" rel="nofollow">四、FIFO存储原理</a></li><li><a href="#FIFO_99" rel="nofollow">五、同步FIFO</a></li><li><ul><li><a href="#51__100" rel="nofollow">5.1 空满信号判断</a></li><li><a href="#52_FIFO_114" rel="nofollow">5.2 同步FIFO源码</a></li><li><a href="#53__211" rel="nofollow">5.3 测试源码</a></li><li><a href="#54__272" rel="nofollow">5.4 功能仿真结果</a></li><li><a href="#httpsimgblogcsdnimgcn3e1b1fd6b0af46ce9aee021cf16cd153png_273" rel="nofollow">在这里插入图片描述</a></li></ul> 
+  </li><li><a href="#FIFO_275" rel="nofollow">六、异步FIFO</a></li><li><ul><li><a href="#61_FIFO_276" rel="nofollow">6.1 异步FIFO架构</a></li><li><a href="#62__300" rel="nofollow">6.2 设计源码</a></li><li><ul><li><a href="#621__301" rel="nofollow">6.2.1 二进制-格雷码转换器</a></li><li><a href="#622_dff_337" rel="nofollow">6.2.2 信号同步器(dff)</a></li><li><a href="#623_FIFO_374" rel="nofollow">6.2.3 异步FIFO顶层</a></li><li><a href="#624__521" rel="nofollow">6.2.4 测试源码</a></li><li><a href="#625__592" rel="nofollow">6.2.5 功能仿真结果</a></li></ul> 
+  </li></ul> 
+  </li><li><a href="#2FIFO_599" rel="nofollow">七、非2的次幂FIFO</a></li><li><ul><li><a href="#71__600" rel="nofollow">7.1 设计思路</a></li><li><a href="#72__634" rel="nofollow">7.2 设计源码</a></li><li><a href="#73__811" rel="nofollow">7.3 测试程序</a></li><li><a href="#74__888" rel="nofollow">7.4 功能仿真</a></li></ul> 
+  </li><li><a href="#2FIFOFIFO_890" rel="nofollow">八、非2次幂FIFO(带将空将满信号与FIFO余量)</a></li><li><ul><li><a href="#81__901" rel="nofollow">8.1 设计源码</a></li><li><a href="#82__1126" rel="nofollow">8.2 测试源码</a></li><li><a href="#83__1215" rel="nofollow">8.3 功能仿真结果</a></li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<hr> 
+<p>(码字不易、三连支持)</p> 
+<h2><a id="FIFO_7"></a>一、FIFO概述</h2> 
+<p>  FIFO（first in first out）是一种先进先出的存储器，与栈不同，栈对应的是一种先进后出的数据存储理念。<br>   FIFO无论是在IC设计中、IP核设计中、SOC设计中都存在广泛的应用。特别是随着设计复杂度的提高，在一个系统中往往会引入多个时钟，这也就使得数据的跨时钟域处理显得尤为重要，而FIFO正是解决这一问题的有效方法。<br>   FIFO的设计应用：<br>   1.德州仪器tm4c123g单片机的UART模块使用FIFO做缓冲。<br>   2.NXP单片机正交解码器缓冲。<br>   3.摄像头的数据缓冲。<br>   4.使用ADC配合FIFO与DMA实现高速采集。<br>   5.提高状态机模块的数据吞吐率（软件不需要再读状态机的busy标志位，只需关心fifo是否空满）。</p> 
+<h2><a id="FIFO_17"></a>二、FIFO分类</h2> 
+<p>  FIFO根据读写时钟域的不同可分为同步FIFO与异步FIFO。<br>   同步FIFO是指读写通道均在相同的时钟下进行信号采样的FIFO，主要用于设备之间数据传输速率的匹配。<br> <img src="https://images2.imgbox.com/4c/ab/kFC45qQX_o.png" alt="在这里插入图片描述"><br>   异步FIFO是指读写通道在不同的时钟下进行信号采样的FIFO，主要处理跨时钟域之间的数据传输问题。<br>   系统2如果直接去采样处于时钟域1的系统数据，很有可能会采样到处于亚稳态的数据。使用异步FIFO对数据进行缓冲一定程度上减少了亚稳态发生的概率。<br> <img src="https://images2.imgbox.com/62/e9/gRCd2mPp_o.png" alt="在这里插入图片描述"><br>   (无论是同步还是异步的FIFO，都是面向数据流的一种数据存储器，都具有数据缓冲作用）。</p> 
+<hr> 
+<h2><a id="FIFO_29"></a>三、FIFO重要信号与参数</h2> 
+<h3><a id="31__30"></a>3.1 信号</h3> 
+<table><thead><tr><th>通道</th><th>信号</th><th>位宽</th><th>描述</th></tr></thead><tbody><tr><td></td><td>nrst</td><td>1</td><td>复位信号，有效时将清空FIFO中已缓冲的数据</td></tr><tr><td>写通道</td><td>clk_w</td><td>1</td><td>写数据时钟，上升沿采样写通道信号</td></tr><tr><td>写通道</td><td>wr_en</td><td>1</td><td>写有效信号，当其无效时，FIFO将忽略写通道传输的数据；也可视为写数据的同步帧；当其有效时，FIFO会写入当前数据；</td></tr><tr><td>写通道</td><td>wrdata</td><td>任意（需与RAM匹配）</td><td>写数据输入，位宽视需求任意；</td></tr><tr><td>写通道</td><td>full</td><td>1</td><td>FIFO满信号，当写满时，此信号有效，此时FIFO将阻塞数据的输入；</td></tr><tr><td>写通道</td><td>almost_full</td><td>1</td><td>将满信号，当FIFO中存储的数据达到或超过设定的余量时，将有效；此时FIFO不会阻塞数据的写入，但设备可以通过此信号来决定是否继续写入数据；</td></tr><tr><td>读通道</td><td>clk_r</td><td>1</td><td>读数据通道时钟；（在同步FIFO中，该信号必须与clk_w接至同一时钟）</td></tr><tr><td>读通道</td><td>rd_en</td><td>1</td><td>读有效信号，当其无效时，FIFO停止数据的读出；也可视为读数据的同步帧；当其有效时，FIFO会读出数据；</td></tr><tr><td>读通道</td><td>rddata</td><td>任意（需与RAM匹配）</td><td>读数据输出，位宽视需求任意；</td></tr><tr><td>读通道</td><td>empty</td><td>1</td><td>空信号，当FIFO中数据为空时有效；此时FIFO将阻塞数据的读取；</td></tr><tr><td>读通道</td><td>almost_empty</td><td>1</td><td>将空信号，当FIFO中存储的数据达到或低于设定的最小余量时，将有效；此时FIFO不会阻塞数据的读出，但设备可以通过此信号来判断是否继续读出数据；</td></tr><tr><td></td><td>data_count</td><td>任意(与数据深度匹配)</td><td>存储计数器，表示当前FIFO中存储数据的数量，设备可根据该信号来判断是否写入或读出数据；</td></tr></tbody></table> 
+<p>在FIFO实际的应用中，一般将empty与almost_full配合起来使用。为了减少FIFO上溢的风险，full信号很少使用。</p> 
+<h3><a id="32__48"></a>3.2 参数</h3> 
+<table><thead><tr><th>参数</th><th>描述</th></tr></thead><tbody><tr><td>data_depth</td><td>数据深度，代表了FIFO缓冲数据的能力；一般为2的次幂；在支持非2次幂深度的FIFO中，可任意；</td></tr><tr><td>data_width</td><td>数据读写宽度，一般与内部RAM匹配数据宽度，在不匹配情况下需要对数据进行补位处理；</td></tr><tr><td>addr_width</td><td>地址宽度，与深度对应，其关系式：addr_width = log2(data_depth)</td></tr></tbody></table> 
+<p>data_depth是否越大越好？<br> 否，data_depth应该根据读写数据方的速率进行合理确定。<br> 过大的data_depth会消耗过多的资源（若RAM是LUT实现，则消耗大量的LUT，若是Block RAM 则消耗Block RAM资源）</p> 
+<h4><a id="321_data_depth_59"></a>3.2.1 data_depth的确定</h4> 
+<p>  深度的确定既要满足数据不丢失，且不能过多的浪费资源；<br>   这里首先考虑极端情况：<br>   如果写数据方的写入速率大于读数据方的读出速率，则FIFO的数据深度只有无穷大时，才能确保数据不溢出；显然无穷大深度的FIFO是不存在的；这种情况是无解的；<br>   相较于上述的极端情况，更多的是考虑写入Burst数据的情况，虽然写入数据流是连续的，但写Burst之间数据往往存在时间间隔；<br>   <strong>fw&gt;fr，且读写之间没有空闲周期：</strong><br>   假设fw为100Mhz，fr为80Mhz，一个Burst传输长度为2400。<br>   根据fw，可以知道写入一个数据需要10ns<br>   同理根据fr，可知读出一个数据需要12.5ns<br>   将2400个数据写入FIFO需要2400*10ns = 24000ns<br>   而在这2400个数据被写入期间，FIFO实际被读出的数据为24000/12.5 = 1920个<br>   则该情况下FIFO深度需要2400-1920 = 480</p> 
+<p>  其他情况下的FIFO深度计算也可以参考上述的情况，无论情形如何，最终需要计算的都是写入数据与读出数据之差；<br>   如写时钟大于读时钟，且连写入之间会有1时钟空闲，读出之间会有3时钟空闲；<br>   这种情况下其实写入的频率变为了100Mhz/(1+1) = 50Mhz,读出频率变为了80Mhz/(3+1) = 20Mhz，后面的解法就和上面一样了；<br>   还有些情况会给出读写使能信号的占空比，这其实也变相的给出了读写频率，如wr_en占空比50%，rd_en占空比25%则fw = 100Mhz*(50%) = 50Mhz,fr = 80Mhz*(25%) = 20Mhz；总之万变不离其宗；</p> 
+<hr> 
+<h2><a id="FIFO_79"></a>四、FIFO存储原理</h2> 
+<p>  FIFO的存储地址是不需要设备给出的，每次读使能有效则地址自增1，每次写使能有效则地址自增1；<br>   如果说RAM对应的是存储地址首尾不相接的数据空间，则FIFO的地址是首位相连的；<br>   如下图在初始化后，写指针与读指针指向地址0，此时FIFO为空状态；此时若强行读出数据，r_ptr则增1，到地址1的位置，很显然此处并无数据写入这个数据是错误的，这种情况为为数据下溢；<br> <img src="https://images2.imgbox.com/03/cb/YAcoJXXS_o.png" alt="在这里插入图片描述"><br>   当FIFO写入了7个数据后，w_ptr指向地址7，此时若再写入一个数据，写指针w_ptr将回到地址0，w_ptr与r_ptr相同此时FIFO写满，若继续写入数据，则会覆盖之前的数据，这就是数据的上溢。<br> <img src="https://images2.imgbox.com/3b/54/vBaBZiFm_o.png" alt="在这里插入图片描述"><br>   在FIFO实际使用中，写和读操作往往同时进行，此时w_ptr与r_ptr就会在这个环式地址空间上赛跑；假设写入了5个数据，则此时w_ptr指向了地址5，此时读出了两个数据，则r_ptr指向了地址2，如下图（红色为写入数据，蓝色为已读出的数据）。<br>   被读出的数据可以看作是被释放了出来，可以再次被写入数据；读写指针就这不断进行绕圈；<br> <img src="https://images2.imgbox.com/a2/35/x3PlcNJ9_o.png" alt="在这里插入图片描述"></p> 
+<p>  在绕圈情况中，如果r_ptr超过了w_ptr（蓝色部分完全覆盖了红色部分），则会读出错误数据；<br>   若w_ptr超过r_ptr（红色部分覆盖了蓝色部分），则会出现覆盖数据的情况；<br>   上述两种情况需要避免，可以通过空满信号来避免；<br>   当r_ptr 赶上w_ptr时，则判断为空，此时FIFO阻止数据继续读出；<br>   当w_ptr赶上r_ptr时，则判断为满，此时FIFO阻止数据继续写入；</p> 
+<hr> 
+<h2><a id="FIFO_99"></a>五、同步FIFO</h2> 
+<h3><a id="51__100"></a>5.1 空满信号判断</h3> 
+<p>  同比FIFO设计中，空满信号的判断比较简单，我们只需要想办法描述上述的两种“赶上”情况就可以了；<br>   描述方法有很多，这里给出一个最简单的方法：<br>   假设深度为8，则地址宽度为3，我们在设计中对实际的地址进行1位扩位来存储“圈数”。<br>   此时地址枚举出来如下：<br>   我们可以看到在自增8之后，高位从0变为了1，此时就代表该指针已经开始跑第二圈了；若此时写指针追上了还在跑上一圈（高位不同）的读指针，则说明此时FIFO满；<br>   空则是相同圈内（高位相同），读指针赶上了写指针；<br> <img src="https://images2.imgbox.com/04/d5/mnPMXi53_o.png" alt="在这里插入图片描述"><br> 上述逻辑则可以写为：</p> 
+<pre><code class="prism language-clike">assign fifo_empty <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>w_ptr <span class="token operator">==</span> r_ptr<span class="token punctuation">)</span><span class="token operator">||</span><span class="token punctuation">(</span><span class="token punctuation">(</span>w_ptr<span class="token operator">==</span><span class="token string">'b0)&amp;(r_ptr=='</span>b0<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">;</span>
+assign  fifo_full <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>w_ptr<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token punctuation">]</span> <span class="token operator">!=</span> r_ptr<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token operator">&amp;&amp;</span><span class="token punctuation">(</span>w_ptr<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">==</span> r_ptr<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">;</span>
+</code></pre> 
+<h3><a id="52_FIFO_114"></a>5.2 同步FIFO源码</h3> 
+<pre><code class="prism language-clike">module Synchronous_FIFO#<span class="token punctuation">(</span>
+        parameter   integer RAM_ADDR_WIDTH <span class="token operator">=</span> <span class="token number">5</span><span class="token punctuation">,</span>
+        parameter   integer FIFO_DATA_DEPTH <span class="token operator">=</span> <span class="token number">8</span><span class="token punctuation">,</span>
+        parameter   integer FIFO_ADDR_WIDTH <span class="token operator">=</span> $<span class="token function">clog2</span><span class="token punctuation">(</span>FIFO_DATA_DEPTH<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        parameter   integer FIFO_DATA_WIDTH <span class="token operator">=</span> <span class="token number">8</span>
+    <span class="token punctuation">)</span><span class="token punctuation">(</span>
+        input   wire                              nrst<span class="token punctuation">,</span>
+        input   wire                             clk_w<span class="token punctuation">,</span>
+        input   wire                             wr_en<span class="token punctuation">,</span>
+        input   wire <span class="token punctuation">[</span>FIFO_DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span>      wrdata<span class="token punctuation">,</span>
+        output  wire                         fifo_full<span class="token punctuation">,</span>
+ 
+        input   wire                             clk_r<span class="token punctuation">,</span>
+        input   wire                             rd_en<span class="token punctuation">,</span>
+        output  wire <span class="token punctuation">[</span>FIFO_DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span>      rddata<span class="token punctuation">,</span>
+        output  wire                        fifo_empty
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">/</span>
+<span class="token comment">/*
+    w_ptr : the write data pointer (RAM Write address)
+    r_ptr : the read data pointer (RAM Read address)
+*/</span>
+<span class="token comment"></span>
+    reg   <span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> w_ptr<span class="token punctuation">;</span>
+    reg   <span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> r_ptr<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>RAM_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> ram_wr_addr<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>RAM_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> ram_rd_addr<span class="token punctuation">;</span>
+
+    assign ram_wr_addr <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span><span class="token punctuation">(</span>RAM_ADDR_WIDTH<span class="token operator">-</span>FIFO_ADDR_WIDTH<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span><span class="token number">1</span>'b0<span class="token punctuation">}</span><span class="token punctuation">}</span><span class="token punctuation">,</span>w_ptr<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+    assign ram_rd_addr <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span><span class="token punctuation">(</span>RAM_ADDR_WIDTH<span class="token operator">-</span>FIFO_ADDR_WIDTH<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span><span class="token number">1</span>'b0<span class="token punctuation">}</span><span class="token punctuation">}</span><span class="token punctuation">,</span>r_ptr<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+<span class="token comment">/</span>
+<span class="token comment">/*
+    fifo_wr :  (RAM Write enable). valid only when fifo is not full and fifo data write enable  
+    fifo_rd :  (RAM Read enable). valid only when fifo is not empty and fifo data read enable  
+*/</span>
+<span class="token comment"></span>
+    wire   fifo_wr<span class="token punctuation">;</span>
+    wire   fifo_rd<span class="token punctuation">;</span>
+    assign fifo_wr <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token operator">~</span>fifo_full<span class="token punctuation">)</span><span class="token operator">&amp;</span>wr_en<span class="token punctuation">;</span>
+    assign fifo_rd <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token operator">~</span>fifo_empty<span class="token punctuation">)</span><span class="token operator">&amp;</span>rd_en<span class="token punctuation">;</span>
+
+<span class="token comment">/</span>
+<span class="token comment">/*
+    fifo_empty : valid only when w_ptr is equal with r_ptr   
+    fifo_full :  valid only when w_ptr's 1 MSB is equal with not( r_ptr's 1 MSB) and w_ptr's 
+                 other bits equals r_ptr's
+*/</span>
+<span class="token comment"></span>
+    assign fifo_empty <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>w_ptr <span class="token operator">==</span> r_ptr<span class="token punctuation">)</span><span class="token operator">||</span><span class="token punctuation">(</span><span class="token punctuation">(</span>w_ptr<span class="token operator">==</span><span class="token string">'b0)&amp;(r_ptr=='</span>b0<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">;</span>
+    assign  fifo_full <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>w_ptr<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token punctuation">]</span> <span class="token operator">!=</span> r_ptr<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token operator">&amp;&amp;</span><span class="token punctuation">(</span>w_ptr<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">==</span> r_ptr<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">;</span>
+
+
+    always @<span class="token punctuation">(</span>posedge clk_w<span class="token punctuation">,</span>negedge nrst<span class="token punctuation">)</span> begin
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">~</span>nrst<span class="token punctuation">)</span> begin
+            <span class="token comment">// reset</span>
+            w_ptr <span class="token operator">&lt;=</span> 'b0<span class="token punctuation">;</span>
+        end
+        <span class="token keyword">else</span> begin
+            <span class="token keyword">if</span><span class="token punctuation">(</span>fifo_wr<span class="token punctuation">)</span>
+                w_ptr <span class="token operator">&lt;=</span> w_ptr <span class="token operator">+</span> 'b1<span class="token punctuation">;</span>
+            <span class="token keyword">else</span>
+                w_ptr <span class="token operator">&lt;=</span> w_ptr <span class="token punctuation">;</span>
+        end
+    end
+
+    always @<span class="token punctuation">(</span>posedge clk_r<span class="token punctuation">,</span>negedge nrst<span class="token punctuation">)</span> begin
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">~</span>nrst<span class="token punctuation">)</span> begin
+            <span class="token comment">// reset</span>
+            r_ptr <span class="token operator">&lt;=</span> 'b0<span class="token punctuation">;</span>
+        end
+        <span class="token keyword">else</span> begin
+            <span class="token keyword">if</span><span class="token punctuation">(</span>fifo_rd<span class="token punctuation">)</span>
+                r_ptr <span class="token operator">&lt;=</span> r_ptr <span class="token operator">+</span> 'b1<span class="token punctuation">;</span>
+            <span class="token keyword">else</span>
+                r_ptr <span class="token operator">&lt;=</span> r_ptr <span class="token punctuation">;</span>
+        end
+    end
+
+
+    blk_mem_gen_0 <span class="token function">ram0</span><span class="token punctuation">(</span>
+            <span class="token punctuation">.</span>addra <span class="token punctuation">(</span>ram_wr_addr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>clka  <span class="token punctuation">(</span>clk_w<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>dina  <span class="token punctuation">(</span>wrdata<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>wea   <span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>ena   <span class="token punctuation">(</span>fifo_wr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            
+            <span class="token punctuation">.</span>addrb <span class="token punctuation">(</span>ram_rd_addr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>clkb  <span class="token punctuation">(</span>clk_r<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>doutb <span class="token punctuation">(</span>rddata<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>enb   <span class="token punctuation">(</span>fifo_rd<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+endmodule
+</code></pre> 
+<h3><a id="53__211"></a>5.3 测试源码</h3> 
+<pre><code class="prism language-clike">module <span class="token function">Synchronous_FIFO_tb</span><span class="token punctuation">(</span>
+
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    parameter   integer FIFO_DATA_DEPTH <span class="token operator">=</span> <span class="token number">8</span><span class="token punctuation">;</span>
+    parameter   integer FIFO_DATA_WIDTH <span class="token operator">=</span> <span class="token number">8</span><span class="token punctuation">;</span>
+
+        reg                              nrst<span class="token punctuation">;</span>
+        reg                             clk<span class="token punctuation">;</span>
+        reg                             wr_en<span class="token punctuation">;</span>
+        reg <span class="token punctuation">[</span>FIFO_DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span>      wrdata<span class="token punctuation">;</span>
+        wire                        fifo_full<span class="token punctuation">;</span>
+        reg                             rd_en<span class="token punctuation">;</span>
+        wire <span class="token punctuation">[</span>FIFO_DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span>     rddata<span class="token punctuation">;</span>
+        wire                       fifo_empty<span class="token punctuation">;</span>
+    
+    integer i<span class="token punctuation">;</span>
+    initial begin
+        clk <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        forever begin
+            #<span class="token number">1</span> clk <span class="token operator">=</span> <span class="token operator">~</span>clk<span class="token punctuation">;</span>
+        end
+    end
+
+
+    initial begin
+            nrst <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        #<span class="token number">2</span>  nrst <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+            wr_en <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+            wrdata <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+            rd_en <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+            <span class="token keyword">while</span><span class="token punctuation">(</span>wrdata <span class="token operator">&lt;=</span> <span class="token number">8</span><span class="token punctuation">)</span>
+            begin
+               #<span class="token number">2</span> wr_en  <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+                  wrdata <span class="token operator">=</span> wrdata <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>
+            end
+            wr_en <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+            rd_en <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    end
+
+
+   Synchronous_FIFO#<span class="token punctuation">(</span>
+       <span class="token punctuation">.</span> <span class="token function">FIFO_DATA_DEPTH</span><span class="token punctuation">(</span>FIFO_DATA_DEPTH<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span> <span class="token function">FIFO_DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_DATA_WIDTH<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token function">Synchronous_FIFO_inist0</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">nrst</span><span class="token punctuation">(</span>nrst<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">clk_w</span><span class="token punctuation">(</span>clk<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">wr_en</span><span class="token punctuation">(</span>wr_en<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">wrdata</span><span class="token punctuation">(</span>wrdata<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">fifo_full</span><span class="token punctuation">(</span>fifo_full<span class="token punctuation">)</span><span class="token punctuation">,</span>
+ 
+        <span class="token punctuation">.</span> <span class="token function">clk_r</span><span class="token punctuation">(</span>clk<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">rd_en</span><span class="token punctuation">(</span>rd_en<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">rddata</span><span class="token punctuation">(</span>rddata<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">fifo_empty</span><span class="token punctuation">(</span>fifo_empty<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+endmodule
+</code></pre> 
+<h3><a id="54__272"></a>5.4 功能仿真结果</h3> 
+<h3><a id="httpsimgblogcsdnimgcn3e1b1fd6b0af46ce9aee021cf16cd153png_273"></a><img src="https://images2.imgbox.com/a2/4a/2sdu5gFc_o.png" alt="在这里插入图片描述"></h3> 
+<h2><a id="FIFO_275"></a>六、异步FIFO</h2> 
+<h3><a id="61_FIFO_276"></a>6.1 异步FIFO架构</h3> 
+<p>  异步FIFO设计则需要考虑同步问题；<br>   此时同步FIFO中指针计数器会出现亚稳态问题，因为地址从上一个变化到下一个会产生多个比特位的变化，如0111到1000，变化的比特位为4位，由于布局布线的问题，每一比特位的变化速度不同，这将导致采集到不可预测的错误数据；<br>   因此我们需要另一种比特位变化更少的编码，即格雷码；<br> *二进制码与格雷码对照表<br> <img src="https://images2.imgbox.com/54/02/Spz0JyQV_o.png" alt="在这里插入图片描述"><br>   如上表，相邻的两位变化的比特位仅为1；除此之外，格雷码还具有很重要的对称性，我们可以在上图的7到8之间画一条分界线，除了高位，其余为按照这条分界线对称；<br>   另一方面，需要将转换后的格雷码进行时钟域同步，这里采用典型的二级同步器；<br>   <strong>空逻辑判断：</strong><br>   将w_ptr对应的格雷码w2r_ptr_gray同步到读时钟域，再将同步后的w2r_ptr_gray与r_ptr对应的格雷码r_ptr_gray进行对比，若两者相等则判定为空；</p> 
+<pre><code class="prism language-clike">assign fifo_empty <span class="token operator">=</span> <span class="token punctuation">(</span>r_ptr_gray <span class="token operator">==</span> w2r_ptr_gray<span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>  <strong>满逻辑判断：</strong><br>   将r_ptr对应的格雷码r2w_ptr_gray同步到写时钟域，再将同步后的r2w_ptr_gray与w_ptr对应的格雷码w_ptr_gray进行对比，若两者高两位为取反关系，剩余位相同，则判断为满；</p> 
+<pre><code class="prism language-clike"> assign  fifo_full <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>w_ptr_gray<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token punctuation">:</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">==</span> <span class="token operator">~</span><span class="token punctuation">(</span>r2w_ptr_gray<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token punctuation">:</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token operator">&amp;&amp;</span><span class="token punctuation">(</span>w_ptr_gray<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">2</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">==</span> r2w_ptr_gray<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">2</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>  综上，异步FIFO的架构可以总结为下图所示：<br> <img src="https://images2.imgbox.com/9d/51/SqFAdlSd_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="62__300"></a>6.2 设计源码</h3> 
+<h4><a id="621__301"></a>6.2.1 二进制-格雷码转换器</h4> 
+<pre><code class="prism language-clike">module Gray_encoder#<span class="token punctuation">(</span>
+        parameter integer   DATA_WIDTH <span class="token operator">=</span> <span class="token number">8</span>
+    <span class="token punctuation">)</span><span class="token punctuation">(</span>
+        input   wire    <span class="token punctuation">[</span>DATA_WIDTH <span class="token operator">-</span> <span class="token number">1</span> <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span>     data_in<span class="token punctuation">,</span>
+        output  wire    <span class="token punctuation">[</span>DATA_WIDTH <span class="token operator">-</span> <span class="token number">1</span> <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span>    data_out
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    assign data_out <span class="token operator">=</span> <span class="token punctuation">(</span>data_in <span class="token operator">&gt;</span><span class="token operator">&gt;</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token operator">^</span> data_in<span class="token punctuation">;</span>
+
+endmodule
+</code></pre> 
+<pre><code class="prism language-clike">module Gray_decoder#<span class="token punctuation">(</span>
+        parameter integer   DATA_WIDTH <span class="token operator">=</span> <span class="token number">8</span>
+    <span class="token punctuation">)</span><span class="token punctuation">(</span>
+        input   wire    <span class="token punctuation">[</span>DATA_WIDTH <span class="token operator">-</span> <span class="token number">1</span> <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span>     data_in<span class="token punctuation">,</span>
+        output  wire    <span class="token punctuation">[</span>DATA_WIDTH <span class="token operator">-</span> <span class="token number">1</span> <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span>    data_out
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    reg <span class="token punctuation">[</span>DATA_WIDTH <span class="token operator">-</span> <span class="token number">1</span> <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> data_out_r<span class="token punctuation">;</span>
+    assign data_out <span class="token operator">=</span> data_out_r<span class="token punctuation">;</span>
+
+    integer index<span class="token punctuation">;</span>
+
+    always @<span class="token punctuation">(</span><span class="token operator">*</span><span class="token punctuation">)</span> begin
+        <span class="token keyword">for</span><span class="token punctuation">(</span>index <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> index <span class="token operator">&lt;</span> DATA_WIDTH<span class="token punctuation">;</span> index <span class="token operator">=</span> index <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span>
+            data_out_r<span class="token punctuation">[</span>index<span class="token punctuation">]</span> <span class="token operator">&lt;=</span> <span class="token operator">^</span><span class="token punctuation">(</span>data_in<span class="token operator">&gt;</span><span class="token operator">&gt;</span>index<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    end
+    
+
+endmodule
+</code></pre> 
+<h4><a id="622_dff_337"></a>6.2.2 信号同步器(dff)</h4> 
+<pre><code class="prism language-clike">module dff#<span class="token punctuation">(</span>
+        parameter integer DFF_LEVEL  <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">,</span>
+        parameter integer DATA_WIDTH <span class="token operator">=</span> <span class="token number">8</span>
+<span class="token punctuation">)</span><span class="token punctuation">(</span>
+        input wire                     clk<span class="token punctuation">,</span>
+        input wire <span class="token punctuation">[</span>DATA_WIDTH <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span>  din<span class="token punctuation">,</span>
+        input wire <span class="token punctuation">[</span>DATA_WIDTH <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> dout<span class="token punctuation">,</span>
+        input wire                    nrst
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    reg <span class="token punctuation">[</span>DATA_WIDTH <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> din_buff <span class="token punctuation">[</span>DFF_LEVEL<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+    assign dout <span class="token operator">=</span> din_buff<span class="token punctuation">[</span>DFF_LEVEL<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+    integer i<span class="token punctuation">;</span>
+
+    always @<span class="token punctuation">(</span>posedge clk or negedge nrst<span class="token punctuation">)</span> begin
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">~</span>nrst<span class="token punctuation">)</span> begin
+            <span class="token comment">// reset</span>
+            <span class="token keyword">for</span><span class="token punctuation">(</span>i<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span>i<span class="token operator">&lt;</span>DFF_LEVEL<span class="token punctuation">;</span>i<span class="token operator">=</span>i<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+            begin
+                din_buff<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">&lt;=</span> 'b0<span class="token punctuation">;</span>
+            end
+        end
+        <span class="token keyword">else</span> begin
+            <span class="token keyword">for</span><span class="token punctuation">(</span>i<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">;</span>i<span class="token operator">&lt;</span>DFF_LEVEL<span class="token punctuation">;</span>i<span class="token operator">=</span>i<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+            begin
+                din_buff<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">&lt;=</span> din_buff<span class="token punctuation">[</span>i<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+            end
+                din_buff<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">&lt;=</span> din<span class="token punctuation">;</span>
+        end
+    end
+    
+endmodule
+</code></pre> 
+<h4><a id="623_FIFO_374"></a>6.2.3 异步FIFO顶层</h4> 
+<pre><code class="prism language-clike">module Asynchronous_FIFO#<span class="token punctuation">(</span>
+        parameter   integer RAM_ADDR_WIDTH <span class="token operator">=</span> <span class="token number">5</span><span class="token punctuation">,</span>
+        parameter   integer FIFO_DATA_DEPTH <span class="token operator">=</span> <span class="token number">8</span><span class="token punctuation">,</span>
+        parameter   integer FIFO_ADDR_WIDTH <span class="token operator">=</span> $<span class="token function">clog2</span><span class="token punctuation">(</span>FIFO_DATA_DEPTH<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        parameter   integer FIFO_DATA_WIDTH <span class="token operator">=</span> <span class="token number">8</span>
+    <span class="token punctuation">)</span><span class="token punctuation">(</span>
+        input   wire                              nrst<span class="token punctuation">,</span>
+        input   wire                             clk_w<span class="token punctuation">,</span>
+        input   wire                             wr_en<span class="token punctuation">,</span>
+        input   wire <span class="token punctuation">[</span>FIFO_DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span>      wrdata<span class="token punctuation">,</span>
+        output  wire                         fifo_full<span class="token punctuation">,</span>
+ 
+        input   wire                             clk_r<span class="token punctuation">,</span>
+        input   wire                             rd_en<span class="token punctuation">,</span>
+        output  wire <span class="token punctuation">[</span>FIFO_DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span>      rddata<span class="token punctuation">,</span>
+        output  wire                        fifo_empty
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">/</span>
+<span class="token comment">/*
+    w_ptr : the write data pointer (RAM Write address)
+    r_ptr : the read data pointer (RAM Read address)
+*/</span>
+<span class="token comment"></span>
+    reg   <span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> w_ptr<span class="token punctuation">;</span>
+    reg   <span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> r_ptr<span class="token punctuation">;</span>
+
+    wire <span class="token punctuation">[</span>RAM_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> ram_wr_addr<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>RAM_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> ram_rd_addr<span class="token punctuation">;</span>
+
+    assign ram_wr_addr <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span><span class="token punctuation">(</span>RAM_ADDR_WIDTH<span class="token operator">-</span>FIFO_ADDR_WIDTH<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span><span class="token number">1</span>'b0<span class="token punctuation">}</span><span class="token punctuation">}</span><span class="token punctuation">,</span>w_ptr<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+    assign ram_rd_addr <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span><span class="token punctuation">(</span>RAM_ADDR_WIDTH<span class="token operator">-</span>FIFO_ADDR_WIDTH<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span><span class="token number">1</span>'b0<span class="token punctuation">}</span><span class="token punctuation">}</span><span class="token punctuation">,</span>r_ptr<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+    wire   fifo_wr<span class="token punctuation">;</span>
+    wire   fifo_rd<span class="token punctuation">;</span>
+
+<span class="token comment">/</span>
+<span class="token comment">/*
+    fifo_wr :  (RAM Write enable). valid only when fifo is not full and fifo data write enable  
+    fifo_rd :  (RAM Read enable). valid only when fifo is not empty and fifo data read enable  
+*/</span>
+<span class="token comment"></span>
+    assign fifo_wr <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token operator">~</span>fifo_full<span class="token punctuation">)</span><span class="token operator">&amp;</span>wr_en<span class="token punctuation">;</span>
+    assign fifo_rd <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token operator">~</span>fifo_empty<span class="token punctuation">)</span><span class="token operator">&amp;</span>rd_en<span class="token punctuation">;</span>
+
+
+    wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> w_ptr_gray<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> r_ptr_gray<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> w2r_ptr_gray<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> r2w_ptr_gray<span class="token punctuation">;</span>
+<span class="token comment">/</span>
+<span class="token comment">/*
+    fifo_empty : valid only when r_ptr_gray(read ptr's gray code) is equal with w2r_ptr_gray
+                (w_ptr's gray code Sync from write clock domain)  
+    fifo_full :  valid only when w_ptr_gray's 2 MSB is equal with not( r2w_ptr_gray's 2 MSB) and w_ptr_gray's 
+                 other bits equals r2w_ptr_gray's
+*/</span>
+<span class="token comment"></span>
+    assign fifo_empty <span class="token operator">=</span> <span class="token punctuation">(</span>r_ptr_gray <span class="token operator">==</span> w2r_ptr_gray<span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">;</span>
+    assign  fifo_full <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>w_ptr_gray<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token punctuation">:</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">==</span> <span class="token operator">~</span><span class="token punctuation">(</span>r2w_ptr_gray<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token punctuation">:</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token operator">&amp;&amp;</span><span class="token punctuation">(</span>w_ptr_gray<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">2</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">==</span> r2w_ptr_gray<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">2</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token comment">/</span>
+<span class="token comment">/*
+    Gray code exchange logic
+*/</span>
+<span class="token comment"></span>
+     Gray_encoder#<span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_ADDR_WIDTH<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token function">Gray_encoder_inist0</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">data_in</span><span class="token punctuation">(</span>w_ptr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">data_out</span><span class="token punctuation">(</span>w_ptr_gray<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    Gray_encoder#<span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_ADDR_WIDTH<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token function">Gray_encoder_inist1</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">data_in</span><span class="token punctuation">(</span>r_ptr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">data_out</span><span class="token punctuation">(</span>r_ptr_gray<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    always @<span class="token punctuation">(</span>posedge clk_w<span class="token punctuation">,</span>negedge nrst<span class="token punctuation">)</span> begin
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">~</span>nrst<span class="token punctuation">)</span> begin
+            <span class="token comment">// reset</span>
+            w_ptr <span class="token operator">&lt;=</span> 'b0<span class="token punctuation">;</span>
+        end
+        <span class="token keyword">else</span> begin
+            <span class="token keyword">if</span><span class="token punctuation">(</span>fifo_wr<span class="token punctuation">)</span>
+                w_ptr <span class="token operator">&lt;=</span> w_ptr <span class="token operator">+</span> 'b1<span class="token punctuation">;</span>
+            <span class="token keyword">else</span>
+                w_ptr <span class="token operator">&lt;=</span> w_ptr <span class="token punctuation">;</span>
+        end
+    end
+
+    always @<span class="token punctuation">(</span>posedge clk_r<span class="token punctuation">,</span>negedge nrst<span class="token punctuation">)</span> begin
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">~</span>nrst<span class="token punctuation">)</span> begin
+            <span class="token comment">// reset</span>
+            r_ptr <span class="token operator">&lt;=</span> 'b0<span class="token punctuation">;</span>
+        end
+        <span class="token keyword">else</span> begin
+            <span class="token keyword">if</span><span class="token punctuation">(</span>fifo_rd<span class="token punctuation">)</span>
+                r_ptr <span class="token operator">&lt;=</span> r_ptr <span class="token operator">+</span> 'b1<span class="token punctuation">;</span>
+            <span class="token keyword">else</span>
+                r_ptr <span class="token operator">&lt;=</span> r_ptr <span class="token punctuation">;</span>
+        end
+    end
+<span class="token comment">/</span>
+<span class="token comment">/*
+    Synchronize logic across clock domains
+*/</span>
+<span class="token comment"></span>
+    dff#<span class="token punctuation">(</span>
+        <span class="token punctuation">.</span><span class="token function">DFF_LEVEL</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span><span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_ADDR_WIDTH<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+<span class="token punctuation">)</span><span class="token function">dff_inist0</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span>  <span class="token function">clk</span><span class="token punctuation">(</span>clk_r<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>  <span class="token function">din</span><span class="token punctuation">(</span>w_ptr_gray<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">dout</span><span class="token punctuation">(</span>w2r_ptr_gray<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">nrst</span><span class="token punctuation">(</span>nrst<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    dff#<span class="token punctuation">(</span>
+        <span class="token punctuation">.</span><span class="token function">DFF_LEVEL</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span><span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_ADDR_WIDTH<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+<span class="token punctuation">)</span><span class="token function">dff_inist1</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span>  <span class="token function">clk</span><span class="token punctuation">(</span>clk_w<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>  <span class="token function">din</span><span class="token punctuation">(</span>r_ptr_gray<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">dout</span><span class="token punctuation">(</span>r2w_ptr_gray<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">nrst</span><span class="token punctuation">(</span>nrst<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+    
+   blk_mem_gen_0 <span class="token function">ram0</span><span class="token punctuation">(</span>
+            <span class="token punctuation">.</span>addra <span class="token punctuation">(</span>ram_wr_addr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>clka  <span class="token punctuation">(</span>clk_w<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>dina  <span class="token punctuation">(</span>wrdata<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>wea   <span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>ena   <span class="token punctuation">(</span>fifo_wr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            
+            <span class="token punctuation">.</span>addrb <span class="token punctuation">(</span>ram_rd_addr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>clkb  <span class="token punctuation">(</span>clk_r<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>doutb <span class="token punctuation">(</span>rddata<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>enb   <span class="token punctuation">(</span>fifo_rd<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+endmodule
+</code></pre> 
+<h4><a id="624__521"></a>6.2.4 测试源码</h4> 
+<pre><code class="prism language-clike">module <span class="token function">async_fifo_tb</span><span class="token punctuation">(</span>
+
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+    parameter   integer RAM_ADDR_WIDTH <span class="token operator">=</span> <span class="token number">5</span><span class="token punctuation">;</span>
+    parameter   integer FIFO_DATA_DEPTH <span class="token operator">=</span> <span class="token number">8</span><span class="token punctuation">;</span>
+    parameter   integer FIFO_DATA_WIDTH <span class="token operator">=</span> <span class="token number">8</span><span class="token punctuation">;</span>
+
+        reg                              nrst<span class="token punctuation">;</span>
+        reg                             clk_w<span class="token punctuation">;</span>
+        reg                             wr_en<span class="token punctuation">;</span>
+        reg <span class="token punctuation">[</span>FIFO_DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span>      wrdata<span class="token punctuation">;</span>
+        wire                        fifo_full<span class="token punctuation">;</span>
+ 
+        reg                             clk_r<span class="token punctuation">;</span>
+        reg                             rd_en<span class="token punctuation">;</span>
+        wire <span class="token punctuation">[</span>FIFO_DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span>     rddata<span class="token punctuation">;</span>
+        wire                       fifo_empty<span class="token punctuation">;</span>
+    
+    integer i<span class="token punctuation">;</span>
+    initial begin
+        clk_w <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        forever begin
+            #<span class="token number">2</span> clk_w <span class="token operator">=</span> <span class="token operator">~</span>clk_w<span class="token punctuation">;</span>
+        end
+    end
+
+    initial begin
+        clk_r <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        #<span class="token number">1</span>
+        forever begin
+            #<span class="token number">2</span> clk_r <span class="token operator">=</span> <span class="token operator">~</span>clk_r<span class="token punctuation">;</span>
+        end
+    end
+
+    initial begin
+            nrst <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        #<span class="token number">4</span>  nrst <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+            wr_en <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+            wrdata <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+            rd_en <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+            <span class="token keyword">while</span><span class="token punctuation">(</span>wrdata <span class="token operator">&lt;=</span> <span class="token number">8</span><span class="token punctuation">)</span>
+            begin
+               #<span class="token number">4</span> wr_en  <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+                  wrdata <span class="token operator">=</span> wrdata <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>
+            end
+            wr_en <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+            rd_en <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    end
+
+
+   Asynchronous_FIFO#<span class="token punctuation">(</span>
+       <span class="token punctuation">.</span> <span class="token function">RAM_ADDR_WIDTH</span><span class="token punctuation">(</span>RAM_ADDR_WIDTH<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span> <span class="token function">FIFO_DATA_DEPTH</span><span class="token punctuation">(</span>FIFO_DATA_DEPTH<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span> <span class="token function">FIFO_DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_DATA_WIDTH<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token function">Asynchronous_FIFO_inist0</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">nrst</span><span class="token punctuation">(</span>nrst<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">clk_w</span><span class="token punctuation">(</span>clk_w<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">wr_en</span><span class="token punctuation">(</span>wr_en<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">wrdata</span><span class="token punctuation">(</span>wrdata<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">fifo_full</span><span class="token punctuation">(</span>fifo_full<span class="token punctuation">)</span><span class="token punctuation">,</span>
+ 
+        <span class="token punctuation">.</span> <span class="token function">clk_r</span><span class="token punctuation">(</span>clk_r<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">rd_en</span><span class="token punctuation">(</span>rd_en<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">rddata</span><span class="token punctuation">(</span>rddata<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">fifo_empty</span><span class="token punctuation">(</span>fifo_empty<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+endmodule
+</code></pre> 
+<h4><a id="625__592"></a>6.2.5 功能仿真结果</h4> 
+<p><img src="https://images2.imgbox.com/04/c0/TU0USfis_o.png" alt="在这里插入图片描述">  我们观察上面的仿真图，fifo_empty在写入两个数据后才拉低，fifo_full在读出两个数据后才拉低，这就是假空假满现象；<br>   本质上这个现象是由同步器造成的，空信号是在读时钟与将读指针与同步过来的写指针进行比较，由于同步器采用了两级，因此会有两个clk的滞后输出，即实际的写地址已经增至2了，但同步过来的地址仍为0；假满状态同理；<br>   但这种现象并不会影响FIFO的使用，因为这样产生的空满信号实际上是悲观的，虽然FIFO中有数据，但空信号仍然会阻止数据的读出，因此只会在FIFO的效率上产生影响。</p> 
+<hr> 
+<h2><a id="2FIFO_599"></a>七、非2的次幂FIFO</h2> 
+<h3><a id="71__600"></a>7.1 设计思路</h3> 
+<p>  非2次幂FIFO实际上与2次幂异步FIFO差不多，只不过在编码格式上我们需要有所改变，对应的空满信号的判断也需要稍加改动；<br>   假设是6深度的FIFO，使用顺序的格雷码，变化的比特位就不再是1位了；<br>   如从6变化到0，共两个码位发生了变化；</p> 
+<p><img src="https://images2.imgbox.com/1c/81/UTp8oiwg_o.png" alt="在这里插入图片描述"></p> 
+<p>  针对这个问题，可以利用格雷码的对称性解决；如下图<br>   由13到2，（1011）到（0011）只变化了1位；<br> <img src="https://images2.imgbox.com/a7/61/rVUqFeyj_o.png" alt="在这里插入图片描述"><br>   将原来的顺序格雷码映射到对称格雷码也比较简单；<br>   只需在指针与格雷码的转换逻辑上，每次转换的指针加上一个偏置项FIFO_DEPTH_COMPLE；</p> 
+<pre><code class="prism language-clike">Gray_encoder#<span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_ADDR_WIDTH<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token function">Gray_encoder_inist0</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">data_in</span><span class="token punctuation">(</span>w_ptr<span class="token operator">+</span>FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">data_out</span><span class="token punctuation">(</span>w_ptr_gray<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    Gray_encoder#<span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_ADDR_WIDTH<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token function">Gray_encoder_inist1</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">data_in</span><span class="token punctuation">(</span>r_ptr<span class="token operator">+</span>FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">data_out</span><span class="token punctuation">(</span>r_ptr_gray<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>  FIFO_DEPTH_COMPLE同时也为地址的补偿比特位，其使得FIFO_DATA_DEPTH + FIFO_DEPTH_COMPLE 为大于FIFO_DATA_DEPTH的最小2的次幂整数；<br>   如FIFO_DATA_DEPTH为6，则大于6的最小2次幂整数为8，则FIFO_DEPTH_COMPLE = 8 - FIFO_DATA_DEPTH = 2；</p> 
+<p>  采用这种编码方式，满信号的逻辑无法再使用两格雷码高两位取反，其余位相同的逻辑来进行了；<br>   这里采用将同步过来的格雷码形式的指针转换为二进制，再通过对两二进制指针作差取绝对值算出FIFO中当前写入的数据数，来判断是否空满；</p> 
+<h3><a id="72__634"></a>7.2 设计源码</h3> 
+<pre><code class="prism language-clike">module Asynchronous_FIFO_npow2#<span class="token punctuation">(</span>
+        <span class="token comment">//BLOCK RAM address width </span>
+        parameter   integer RAM_ADDR_WIDTH <span class="token operator">=</span> <span class="token number">5</span><span class="token punctuation">,</span>
+        <span class="token comment">//FIFO true depth</span>
+        parameter   integer FIFO_DATA_DEPTH <span class="token operator">=</span> <span class="token number">6</span><span class="token punctuation">,</span>
+        <span class="token comment">//FIFO compensate depth,(FIFO_DATA_DEPTH+FIFO_DEPTH_COMPLE) must be the data of power 2</span>
+        parameter   integer FIFO_DEPTH_COMPLE <span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">,</span>
+        parameter   integer FIFO_ADDR_WIDTH <span class="token operator">=</span> $<span class="token function">clog2</span><span class="token punctuation">(</span>FIFO_DATA_DEPTH<span class="token operator">+</span>FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        parameter   integer FIFO_DATA_WIDTH <span class="token operator">=</span> <span class="token number">8</span>
+    <span class="token punctuation">)</span><span class="token punctuation">(</span>
+        input   wire                              nrst<span class="token punctuation">,</span>
+        input   wire                             clk_w<span class="token punctuation">,</span>
+        input   wire                             wr_en<span class="token punctuation">,</span>
+        input   wire <span class="token punctuation">[</span>FIFO_DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span>      wrdata<span class="token punctuation">,</span>
+        output  wire                         fifo_full<span class="token punctuation">,</span>
+ 
+        input   wire                             clk_r<span class="token punctuation">,</span>
+        input   wire                             rd_en<span class="token punctuation">,</span>
+        output  wire <span class="token punctuation">[</span>FIFO_DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span>      rddata<span class="token punctuation">,</span>
+        output  wire                        fifo_empty
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">/</span>
+<span class="token comment">/*
+    w_ptr : the write data pointer (RAM Write address)
+    r_ptr : the read data pointer (RAM Read address)
+*/</span>
+<span class="token comment"></span>
+    reg   <span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> w_ptr<span class="token punctuation">;</span>
+    reg   <span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> r_ptr<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>RAM_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> ram_wr_addr<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>RAM_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> ram_rd_addr<span class="token punctuation">;</span>
+
+    assign ram_wr_addr <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span><span class="token punctuation">(</span>RAM_ADDR_WIDTH<span class="token operator">-</span>FIFO_ADDR_WIDTH<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span><span class="token number">1</span>'b0<span class="token punctuation">}</span><span class="token punctuation">}</span><span class="token punctuation">,</span>w_ptr<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+    assign ram_rd_addr <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span><span class="token punctuation">(</span>RAM_ADDR_WIDTH<span class="token operator">-</span>FIFO_ADDR_WIDTH<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span><span class="token number">1</span>'b0<span class="token punctuation">}</span><span class="token punctuation">}</span><span class="token punctuation">,</span>r_ptr<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+    wire   fifo_wr<span class="token punctuation">;</span>
+    wire   fifo_rd<span class="token punctuation">;</span>
+
+<span class="token comment">/</span>
+<span class="token comment">/*
+    fifo_wr :  (RAM Write enable). valid only when fifo is not full and fifo data write enable  
+    fifo_rd :  (RAM Read enable). valid only when fifo is not empty and fifo data read enable  
+*/</span>
+<span class="token comment"></span>
+    assign fifo_wr <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token operator">~</span>fifo_full<span class="token punctuation">)</span><span class="token operator">&amp;</span>wr_en<span class="token punctuation">;</span>
+    assign fifo_rd <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token operator">~</span>fifo_empty<span class="token punctuation">)</span><span class="token operator">&amp;</span>rd_en<span class="token punctuation">;</span>
+
+
+    wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> w_ptr_gray<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> r_ptr_gray<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> w2r_ptr_gray<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> r2w_ptr_gray<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> w2r_ptr_bin<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> r2w_ptr_bin<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> w_fifo_data_count<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> r_fifo_data_count<span class="token punctuation">;</span>
+
+    assign r_fifo_data_count <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>w2r_ptr_bin <span class="token operator">-</span> FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token operator">&gt;</span> r_ptr<span class="token punctuation">)</span> <span class="token operator">?</span> 
+    <span class="token punctuation">(</span>w2r_ptr_bin <span class="token operator">-</span> r_ptr <span class="token operator">-</span> FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">:</span><span class="token punctuation">(</span>r_ptr <span class="token operator">-</span> w2r_ptr_bin <span class="token operator">+</span> FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    assign w_fifo_data_count <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>r2w_ptr_bin <span class="token operator">-</span> FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token operator">&gt;</span> w_ptr<span class="token punctuation">)</span> <span class="token operator">?</span> 
+    <span class="token punctuation">(</span>r2w_ptr_bin <span class="token operator">-</span> w_ptr <span class="token operator">-</span> FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">:</span><span class="token punctuation">(</span>w_ptr <span class="token operator">-</span> r2w_ptr_bin <span class="token operator">+</span> FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">/</span>
+<span class="token comment">/*
+    fifo_empty : valid only when r_ptr_gray(read ptr's gray code) is equal with w2r_ptr_gray
+                (w_ptr's gray code Sync from write clock domain)  
+    fifo_full :  valid only when w_ptr_gray's 2 MSB is equal with not( r2w_ptr_gray's 2 MSB) and w_ptr_gray's 
+                 other bits equals r2w_ptr_gray's
+*/</span>
+<span class="token comment"></span>
+    assign fifo_empty <span class="token operator">=</span> <span class="token punctuation">(</span>r_fifo_data_count <span class="token operator">==</span> 'b0<span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">;</span>
+    assign  fifo_full <span class="token operator">=</span> <span class="token punctuation">(</span>w_fifo_data_count <span class="token operator">==</span> FIFO_DATA_DEPTH<span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token comment">/</span>
+<span class="token comment">/*
+    Gray code exchange logic
+*/</span>
+<span class="token comment"></span>
+     Gray_encoder#<span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_ADDR_WIDTH<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token function">Gray_encoder_inist0</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">data_in</span><span class="token punctuation">(</span>w_ptr<span class="token operator">+</span>FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">data_out</span><span class="token punctuation">(</span>w_ptr_gray<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    Gray_encoder#<span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_ADDR_WIDTH<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token function">Gray_encoder_inist1</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">data_in</span><span class="token punctuation">(</span>r_ptr<span class="token operator">+</span>FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">data_out</span><span class="token punctuation">(</span>r_ptr_gray<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    always @<span class="token punctuation">(</span>posedge clk_w<span class="token punctuation">,</span>negedge nrst<span class="token punctuation">)</span> begin
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">~</span>nrst<span class="token punctuation">)</span> begin
+            <span class="token comment">// reset</span>
+            w_ptr <span class="token operator">&lt;=</span> 'b0<span class="token punctuation">;</span>
+        end
+        <span class="token keyword">else</span> begin
+            <span class="token keyword">if</span><span class="token punctuation">(</span>fifo_wr<span class="token punctuation">)</span>
+                w_ptr <span class="token operator">&lt;=</span> w_ptr <span class="token operator">+</span> 'b1<span class="token punctuation">;</span>
+            <span class="token keyword">else</span>
+                w_ptr <span class="token operator">&lt;=</span> w_ptr <span class="token punctuation">;</span>
+        end
+    end
+
+    always @<span class="token punctuation">(</span>posedge clk_r<span class="token punctuation">,</span>negedge nrst<span class="token punctuation">)</span> begin
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">~</span>nrst<span class="token punctuation">)</span> begin
+            <span class="token comment">// reset</span>
+            r_ptr <span class="token operator">&lt;=</span> 'b0<span class="token punctuation">;</span>
+        end
+        <span class="token keyword">else</span> begin
+            <span class="token keyword">if</span><span class="token punctuation">(</span>fifo_rd<span class="token punctuation">)</span>
+                r_ptr <span class="token operator">&lt;=</span> r_ptr <span class="token operator">+</span> 'b1<span class="token punctuation">;</span>
+            <span class="token keyword">else</span>
+                r_ptr <span class="token operator">&lt;=</span> r_ptr <span class="token punctuation">;</span>
+        end
+    end
+<span class="token comment">/</span>
+<span class="token comment">/*
+    Synchronize logic across clock domains
+*/</span>
+<span class="token comment"></span>
+    dff#<span class="token punctuation">(</span>
+        <span class="token punctuation">.</span><span class="token function">DFF_LEVEL</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span><span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_ADDR_WIDTH<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+<span class="token punctuation">)</span><span class="token function">dff_inist0</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span>  <span class="token function">clk</span><span class="token punctuation">(</span>clk_r<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>  <span class="token function">din</span><span class="token punctuation">(</span>w_ptr_gray<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">dout</span><span class="token punctuation">(</span>w2r_ptr_gray<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">nrst</span><span class="token punctuation">(</span>nrst<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    dff#<span class="token punctuation">(</span>
+        <span class="token punctuation">.</span><span class="token function">DFF_LEVEL</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span><span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_ADDR_WIDTH<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+<span class="token punctuation">)</span><span class="token function">dff_inist1</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span>  <span class="token function">clk</span><span class="token punctuation">(</span>clk_w<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>  <span class="token function">din</span><span class="token punctuation">(</span>r_ptr_gray<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">dout</span><span class="token punctuation">(</span>r2w_ptr_gray<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">nrst</span><span class="token punctuation">(</span>nrst<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">/</span>
+<span class="token comment">/*
+    read and write pointer decode logic
+*/</span>
+<span class="token comment"></span>
+    Gray_decoder#<span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_ADDR_WIDTH<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token function">Gray_decoder_inist0</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span>  <span class="token function">data_in</span><span class="token punctuation">(</span>w2r_ptr_gray<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">data_out</span><span class="token punctuation">(</span>w2r_ptr_bin<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    Gray_decoder#<span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_ADDR_WIDTH<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token function">Gray_decoder_inist1</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span>  <span class="token function">data_in</span><span class="token punctuation">(</span>r2w_ptr_gray<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">data_out</span><span class="token punctuation">(</span>r2w_ptr_bin<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+   blk_mem_gen_0 <span class="token function">ram0</span><span class="token punctuation">(</span>
+            <span class="token punctuation">.</span>addra <span class="token punctuation">(</span>ram_wr_addr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>clka  <span class="token punctuation">(</span>clk_w<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>dina  <span class="token punctuation">(</span>wrdata<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>wea   <span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>ena   <span class="token punctuation">(</span>fifo_wr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            
+            <span class="token punctuation">.</span>addrb <span class="token punctuation">(</span>ram_rd_addr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>clkb  <span class="token punctuation">(</span>clk_r<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>doutb <span class="token punctuation">(</span>rddata<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>enb   <span class="token punctuation">(</span>fifo_rd<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+endmodule
+</code></pre> 
+<h3><a id="73__811"></a>7.3 测试程序</h3> 
+<pre><code class="prism language-clike">module <span class="token function">Asynchronous_FIFO_npow2_tb</span><span class="token punctuation">(</span>
+
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+    parameter   integer RAM_ADDR_WIDTH <span class="token operator">=</span> <span class="token number">5</span><span class="token punctuation">;</span>
+    parameter   integer FIFO_DATA_DEPTH <span class="token operator">=</span> <span class="token number">3</span><span class="token punctuation">;</span>
+    parameter   integer FIFO_DEPTH_COMPLE <span class="token operator">=</span> <span class="token number">5</span><span class="token punctuation">;</span>
+    parameter   integer FIFO_DATA_WIDTH <span class="token operator">=</span> <span class="token number">8</span><span class="token punctuation">;</span>
+
+        reg                              nrst<span class="token punctuation">;</span>
+        reg                             clk_w<span class="token punctuation">;</span>
+        reg                             wr_en<span class="token punctuation">;</span>
+        reg <span class="token punctuation">[</span>FIFO_DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span>      wrdata<span class="token punctuation">;</span>
+        wire                        fifo_full<span class="token punctuation">;</span>
+ 
+        reg                             clk_r<span class="token punctuation">;</span>
+        reg                             rd_en<span class="token punctuation">;</span>
+        wire <span class="token punctuation">[</span>FIFO_DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span>     rddata<span class="token punctuation">;</span>
+        wire                       fifo_empty<span class="token punctuation">;</span>
+    
+    integer i<span class="token punctuation">;</span>
+    initial begin
+        clk_w <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        forever begin
+            #<span class="token number">2</span> clk_w <span class="token operator">=</span> <span class="token operator">~</span>clk_w<span class="token punctuation">;</span>
+        end
+    end
+
+    initial begin
+        clk_r <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        #<span class="token number">1</span>
+        forever begin
+            #<span class="token number">2</span> clk_r <span class="token operator">=</span> <span class="token operator">~</span>clk_r<span class="token punctuation">;</span>
+        end
+    end
+
+    initial begin
+            nrst <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        #<span class="token number">4</span>  nrst <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+            wr_en <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+            wrdata <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+            rd_en <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+            <span class="token keyword">while</span><span class="token punctuation">(</span>wrdata <span class="token operator">&lt;=</span> <span class="token number">8</span><span class="token punctuation">)</span>
+            begin
+               #<span class="token number">4</span> wr_en  <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+                  wrdata <span class="token operator">=</span> wrdata <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>
+            end
+            wr_en <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+            rd_en <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    end
+
+
+    Asynchronous_FIFO_npow2#<span class="token punctuation">(</span>
+        <span class="token comment">//BLOCK RAM address width </span>
+        <span class="token punctuation">.</span> RAM_ADDR_WIDTH <span class="token punctuation">(</span>RAM_ADDR_WIDTH<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token comment">//FIFO true depth</span>
+        <span class="token punctuation">.</span> FIFO_DATA_DEPTH <span class="token punctuation">(</span>FIFO_DATA_DEPTH<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token comment">//FIFO compensate depth,(FIFO_DATA_DEPTH+FIFO_DEPTH_COMPLE) must be the data of power 2</span>
+        <span class="token punctuation">.</span> FIFO_DEPTH_COMPLE <span class="token punctuation">(</span>FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> FIFO_DATA_WIDTH <span class="token punctuation">(</span>FIFO_DATA_WIDTH<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token function">Asynchronous_FIFO_npow2_inist</span><span class="token punctuation">(</span>
+       <span class="token punctuation">.</span>      <span class="token function">nrst</span><span class="token punctuation">(</span>nrst<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span>     <span class="token function">clk_w</span><span class="token punctuation">(</span>clk_w<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span>     <span class="token function">wr_en</span><span class="token punctuation">(</span>wr_en<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span>    <span class="token function">wrdata</span><span class="token punctuation">(</span>wrdata<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span> <span class="token function">fifo_full</span><span class="token punctuation">(</span>fifo_full<span class="token punctuation">)</span><span class="token punctuation">,</span>
+
+       <span class="token punctuation">.</span>     <span class="token function">clk_r</span><span class="token punctuation">(</span>clk_r<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span>     <span class="token function">rd_en</span><span class="token punctuation">(</span>rd_en<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span>    <span class="token function">rddata</span><span class="token punctuation">(</span>rddata<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span><span class="token function">fifo_empty</span><span class="token punctuation">(</span>fifo_empty<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+endmodule
+
+</code></pre> 
+<h3><a id="74__888"></a>7.4 功能仿真</h3> 
+<p><img src="https://images2.imgbox.com/ef/dc/mDyNNeha_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="2FIFOFIFO_890"></a>八、非2次幂FIFO(带将空将满信号与FIFO余量)</h2> 
+<p>  进一步在第七章中的FIFO上进行将空将满信号的设计；<br>  将空将满已经在之前介绍过了，可以视作一个阈值，当FIFO中的数据数大于等于这个阈值时将满信号拉高，反之将空信号拉高；<br>   上一章已经介绍了r_fifo_data_count与w_fifo_data_count的计算方法，我们使用这两个计数值来增加将空将满逻辑，如下：</p> 
+<pre><code class="prism language-clike">assign fifo_almost_full <span class="token operator">=</span> <span class="token punctuation">(</span>w_fifo_data_count <span class="token operator">&gt;=</span> <span class="token punctuation">(</span>FIFO_DATA_DEPTH <span class="token operator">-</span> FIFO_DATA_DEPTH_MARGIN<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token number">1</span><span class="token string">'b1:1'</span>b0<span class="token punctuation">;</span>
+assign fifo_almost_empty <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>r_fifo_data_count <span class="token operator">&lt;=</span> FIFO_DATA_DEPTH_MARGIN<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token number">1</span><span class="token string">'b1:1'</span>b0<span class="token punctuation">;</span>
+</code></pre> 
+<p>  FIFO_DATA_DEPTH_MARGIN为余量值；</p> 
+<h3><a id="81__901"></a>8.1 设计源码</h3> 
+<pre><code class="prism language-clike">module Asynchronous_FIFO_npow2#<span class="token punctuation">(</span>
+        <span class="token comment">//BLOCK RAM address width </span>
+        parameter   integer RAM_ADDR_WIDTH <span class="token operator">=</span> <span class="token number">5</span><span class="token punctuation">,</span>
+        <span class="token comment">//FIFO true depth</span>
+        parameter   integer FIFO_DATA_DEPTH <span class="token operator">=</span> <span class="token number">6</span><span class="token punctuation">,</span>
+        <span class="token comment">//FIFO degth's margin</span>
+        parameter   integer FIFO_DATA_DEPTH_MARGIN <span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">,</span>
+        <span class="token comment">//FIFO compensate depth,(FIFO_DATA_DEPTH+FIFO_DEPTH_COMPLE) must be the data of power 2</span>
+        parameter   integer FIFO_DEPTH_COMPLE <span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">,</span>
+        parameter   integer FIFO_ADDR_WIDTH <span class="token operator">=</span> $<span class="token function">clog2</span><span class="token punctuation">(</span>FIFO_DATA_DEPTH<span class="token operator">+</span>FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        parameter   integer FIFO_DATA_WIDTH <span class="token operator">=</span> <span class="token number">8</span>
+    <span class="token punctuation">)</span><span class="token punctuation">(</span>
+        input   wire                                     nrst<span class="token punctuation">,</span>
+        input   wire                                    clk_w<span class="token punctuation">,</span>
+        input   wire                                    wr_en<span class="token punctuation">,</span>
+        input   wire <span class="token punctuation">[</span>FIFO_DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span>             wrdata<span class="token punctuation">,</span>
+        output  wire                                fifo_full<span class="token punctuation">,</span>
+        output  wire                         fifo_almost_full<span class="token punctuation">,</span>
+        output  wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span>      fifo_count_wr<span class="token punctuation">,</span>
+ 
+        input   wire                                    clk_r<span class="token punctuation">,</span>
+        input   wire                                    rd_en<span class="token punctuation">,</span>
+        output  wire <span class="token punctuation">[</span>FIFO_DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span>             rddata<span class="token punctuation">,</span>
+        output  wire                               fifo_empty<span class="token punctuation">,</span>
+        output  wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span>      fifo_count_rd<span class="token punctuation">,</span>
+        output  wire                        fifo_almost_empty
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">/</span>
+<span class="token comment">/*
+    w_ptr : the write data pointer (RAM Write address)
+    r_ptr : the read data pointer (RAM Read address)
+*/</span>
+<span class="token comment"></span>
+    reg   <span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> w_ptr<span class="token punctuation">;</span>
+    reg   <span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> r_ptr<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>RAM_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> ram_wr_addr<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>RAM_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span> ram_rd_addr<span class="token punctuation">;</span>
+
+    assign ram_wr_addr <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span><span class="token punctuation">(</span>RAM_ADDR_WIDTH<span class="token operator">-</span>FIFO_ADDR_WIDTH<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span><span class="token number">1</span>'b0<span class="token punctuation">}</span><span class="token punctuation">}</span><span class="token punctuation">,</span>w_ptr<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+    assign ram_rd_addr <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span><span class="token punctuation">(</span>RAM_ADDR_WIDTH<span class="token operator">-</span>FIFO_ADDR_WIDTH<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span><span class="token number">1</span>'b0<span class="token punctuation">}</span><span class="token punctuation">}</span><span class="token punctuation">,</span>r_ptr<span class="token punctuation">[</span>FIFO_ADDR_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+    wire   fifo_wr<span class="token punctuation">;</span>
+    wire   fifo_rd<span class="token punctuation">;</span>
+
+<span class="token comment">/</span>
+<span class="token comment">/*
+    fifo_wr :  (RAM Write enable). valid only when fifo is not full and fifo data write enable  
+    fifo_rd :  (RAM Read enable). valid only when fifo is not empty and fifo data read enable  
+*/</span>
+<span class="token comment"></span>
+    assign fifo_wr <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token operator">~</span>fifo_full<span class="token punctuation">)</span><span class="token operator">&amp;</span>wr_en<span class="token punctuation">;</span>
+    assign fifo_rd <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token operator">~</span>fifo_empty<span class="token punctuation">)</span><span class="token operator">&amp;</span>rd_en<span class="token punctuation">;</span>
+
+
+    wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> w_ptr_gray<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> r_ptr_gray<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> w2r_ptr_gray<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> r2w_ptr_gray<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> w2r_ptr_bin<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> r2w_ptr_bin<span class="token punctuation">;</span>
+    reg <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> w_fifo_data_count<span class="token punctuation">;</span>
+    reg <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span> r_fifo_data_count<span class="token punctuation">;</span>
+
+    assign fifo_count_wr <span class="token operator">=</span> w_fifo_data_count<span class="token punctuation">;</span>
+    assign fifo_count_rd <span class="token operator">=</span> r_fifo_data_count<span class="token punctuation">;</span>
+
+    always@<span class="token punctuation">(</span><span class="token operator">*</span><span class="token punctuation">)</span>
+    begin
+        <span class="token keyword">if</span><span class="token punctuation">(</span><span class="token operator">~</span>nrst<span class="token punctuation">)</span>
+        begin
+            r_fifo_data_count <span class="token operator">&lt;=</span> 'b0<span class="token punctuation">;</span>
+        end
+        <span class="token keyword">else</span>
+        begin
+            <span class="token keyword">if</span><span class="token punctuation">(</span>w2r_ptr_bin <span class="token operator">&lt;</span> FIFO_DEPTH_COMPLE<span class="token punctuation">)</span>
+            begin
+                r_fifo_data_count <span class="token operator">&lt;=</span> 'b0<span class="token punctuation">;</span>
+            end
+            <span class="token keyword">else</span> begin
+                <span class="token keyword">if</span><span class="token punctuation">(</span><span class="token punctuation">(</span>w2r_ptr_bin <span class="token operator">-</span> FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token operator">&gt;</span> r_ptr<span class="token punctuation">)</span>
+                    r_fifo_data_count <span class="token operator">&lt;=</span> <span class="token punctuation">(</span>w2r_ptr_bin <span class="token operator">-</span> r_ptr <span class="token operator">-</span> FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">else</span>
+                    r_fifo_data_count <span class="token operator">&lt;=</span> <span class="token punctuation">(</span>r_ptr <span class="token operator">-</span> w2r_ptr_bin <span class="token operator">+</span> FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            end
+        end
+    end
+
+    always@<span class="token punctuation">(</span><span class="token operator">*</span><span class="token punctuation">)</span>
+    begin
+        <span class="token keyword">if</span><span class="token punctuation">(</span><span class="token operator">~</span>nrst<span class="token punctuation">)</span>
+        begin
+            w_fifo_data_count <span class="token operator">&lt;=</span> 'b0<span class="token punctuation">;</span>
+        end
+        <span class="token keyword">else</span>
+        begin
+            <span class="token keyword">if</span><span class="token punctuation">(</span>r2w_ptr_bin <span class="token operator">&lt;</span> FIFO_DEPTH_COMPLE<span class="token punctuation">)</span>
+            begin
+                w_fifo_data_count <span class="token operator">&lt;=</span> 'b0<span class="token punctuation">;</span>
+            end
+            <span class="token keyword">else</span> begin
+                <span class="token keyword">if</span><span class="token punctuation">(</span><span class="token punctuation">(</span>r2w_ptr_bin <span class="token operator">-</span> FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token operator">&gt;</span> w_ptr<span class="token punctuation">)</span>
+                    w_fifo_data_count <span class="token operator">&lt;=</span> <span class="token punctuation">(</span>r2w_ptr_bin <span class="token operator">-</span> w_ptr <span class="token operator">-</span> FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">else</span>
+                    w_fifo_data_count <span class="token operator">&lt;=</span> <span class="token punctuation">(</span>w_ptr <span class="token operator">-</span> r2w_ptr_bin <span class="token operator">+</span> FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            end
+        end
+    end
+<span class="token comment">/</span>
+<span class="token comment">/*
+    fifo_empty : valid only when r_ptr_gray(read ptr's gray code) is equal with w2r_ptr_gray
+                (w_ptr's gray code Sync from write clock domain)  
+    fifo_full :  valid only when w_ptr_gray's 2 MSB is equal with not( r2w_ptr_gray's 2 MSB) and w_ptr_gray's 
+                 other bits equals r2w_ptr_gray's
+*/</span>
+<span class="token comment"></span>
+    assign fifo_empty <span class="token operator">=</span> <span class="token punctuation">(</span>r_fifo_data_count <span class="token operator">==</span> 'b0<span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">;</span>
+    assign  fifo_full <span class="token operator">=</span> <span class="token punctuation">(</span>w_fifo_data_count <span class="token operator">==</span> FIFO_DATA_DEPTH<span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">;</span>
+
+    assign fifo_almost_full <span class="token operator">=</span> <span class="token punctuation">(</span>w_fifo_data_count <span class="token operator">&gt;=</span> <span class="token punctuation">(</span>FIFO_DATA_DEPTH <span class="token operator">-</span> FIFO_DATA_DEPTH_MARGIN<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token number">1</span><span class="token string">'b1:1'</span>b0<span class="token punctuation">;</span>
+    assign fifo_almost_empty <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>r_fifo_data_count <span class="token operator">&lt;=</span> FIFO_DATA_DEPTH_MARGIN<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token number">1</span><span class="token string">'b1:1'</span>b0<span class="token punctuation">;</span>
+<span class="token comment">/</span>
+<span class="token comment">/*
+    Gray code exchange logic
+*/</span>
+<span class="token comment"></span>
+     Gray_encoder#<span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_ADDR_WIDTH<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token function">Gray_encoder_inist0</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">data_in</span><span class="token punctuation">(</span>w_ptr<span class="token operator">+</span>FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">data_out</span><span class="token punctuation">(</span>w_ptr_gray<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    Gray_encoder#<span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_ADDR_WIDTH<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token function">Gray_encoder_inist1</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">data_in</span><span class="token punctuation">(</span>r_ptr<span class="token operator">+</span>FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">data_out</span><span class="token punctuation">(</span>r_ptr_gray<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    always @<span class="token punctuation">(</span>posedge clk_w<span class="token punctuation">,</span>negedge nrst<span class="token punctuation">)</span> begin
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">~</span>nrst<span class="token punctuation">)</span> begin
+            <span class="token comment">// reset</span>
+            w_ptr <span class="token operator">&lt;=</span> 'b0<span class="token punctuation">;</span>
+        end
+        <span class="token keyword">else</span> begin
+            <span class="token keyword">if</span><span class="token punctuation">(</span>fifo_wr<span class="token punctuation">)</span>
+                w_ptr <span class="token operator">&lt;=</span> w_ptr <span class="token operator">+</span> 'b1<span class="token punctuation">;</span>
+            <span class="token keyword">else</span>
+                w_ptr <span class="token operator">&lt;=</span> w_ptr <span class="token punctuation">;</span>
+        end
+    end
+
+    always @<span class="token punctuation">(</span>posedge clk_r<span class="token punctuation">,</span>negedge nrst<span class="token punctuation">)</span> begin
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">~</span>nrst<span class="token punctuation">)</span> begin
+            <span class="token comment">// reset</span>
+            r_ptr <span class="token operator">&lt;=</span> 'b0<span class="token punctuation">;</span>
+        end
+        <span class="token keyword">else</span> begin
+            <span class="token keyword">if</span><span class="token punctuation">(</span>fifo_rd<span class="token punctuation">)</span>
+                r_ptr <span class="token operator">&lt;=</span> r_ptr <span class="token operator">+</span> 'b1<span class="token punctuation">;</span>
+            <span class="token keyword">else</span>
+                r_ptr <span class="token operator">&lt;=</span> r_ptr <span class="token punctuation">;</span>
+        end
+    end
+<span class="token comment">/</span>
+<span class="token comment">/*
+    Synchronize logic across clock domains
+*/</span>
+<span class="token comment"></span>
+    dff#<span class="token punctuation">(</span>
+        <span class="token punctuation">.</span><span class="token function">DFF_LEVEL</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span><span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_ADDR_WIDTH<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+<span class="token punctuation">)</span><span class="token function">dff_inist0</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span>  <span class="token function">clk</span><span class="token punctuation">(</span>clk_r<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>  <span class="token function">din</span><span class="token punctuation">(</span>w_ptr_gray<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">dout</span><span class="token punctuation">(</span>w2r_ptr_gray<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">nrst</span><span class="token punctuation">(</span>nrst<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    dff#<span class="token punctuation">(</span>
+        <span class="token punctuation">.</span><span class="token function">DFF_LEVEL</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span><span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_ADDR_WIDTH<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+<span class="token punctuation">)</span><span class="token function">dff_inist1</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span>  <span class="token function">clk</span><span class="token punctuation">(</span>clk_w<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>  <span class="token function">din</span><span class="token punctuation">(</span>r_ptr_gray<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">dout</span><span class="token punctuation">(</span>r2w_ptr_gray<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">nrst</span><span class="token punctuation">(</span>nrst<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">/</span>
+<span class="token comment">/*
+    read and write pointer decode logic
+*/</span>
+<span class="token comment"></span>
+    Gray_decoder#<span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_ADDR_WIDTH<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token function">Gray_decoder_inist0</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span>  <span class="token function">data_in</span><span class="token punctuation">(</span>w2r_ptr_gray<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">data_out</span><span class="token punctuation">(</span>w2r_ptr_bin<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    Gray_decoder#<span class="token punctuation">(</span>
+        <span class="token punctuation">.</span> <span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>FIFO_ADDR_WIDTH<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token function">Gray_decoder_inist1</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span>  <span class="token function">data_in</span><span class="token punctuation">(</span>r2w_ptr_gray<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> <span class="token function">data_out</span><span class="token punctuation">(</span>r2w_ptr_bin<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+   blk_mem_gen_0 <span class="token function">ram0</span><span class="token punctuation">(</span>
+            <span class="token punctuation">.</span>addra <span class="token punctuation">(</span>ram_wr_addr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>clka  <span class="token punctuation">(</span>clk_w<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>dina  <span class="token punctuation">(</span>wrdata<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>wea   <span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>ena   <span class="token punctuation">(</span>fifo_wr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            
+            <span class="token punctuation">.</span>addrb <span class="token punctuation">(</span>ram_rd_addr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>clkb  <span class="token punctuation">(</span>clk_r<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>doutb <span class="token punctuation">(</span>rddata<span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token punctuation">.</span>enb   <span class="token punctuation">(</span>fifo_rd<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+endmodule
+</code></pre> 
+<h3><a id="82__1126"></a>8.2 测试源码</h3> 
+<pre><code class="prism language-clike">
+module <span class="token function">Asynchronous_FIFO_npow2_tb</span><span class="token punctuation">(</span>
+
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+    parameter   integer RAM_ADDR_WIDTH <span class="token operator">=</span> <span class="token number">5</span><span class="token punctuation">;</span>
+    parameter   integer FIFO_DATA_DEPTH <span class="token operator">=</span> <span class="token number">14</span><span class="token punctuation">;</span>
+    parameter   integer FIFO_DATA_DEPTH_MARGIN <span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">;</span>
+    parameter   integer FIFO_DEPTH_COMPLE <span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">;</span>
+    parameter   integer FIFO_DATA_WIDTH <span class="token operator">=</span> <span class="token number">8</span><span class="token punctuation">;</span>
+    parameter   integer FIFO_ADDR_WIDTH <span class="token operator">=</span> $<span class="token function">clog2</span><span class="token punctuation">(</span>FIFO_DATA_DEPTH<span class="token operator">+</span>FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        reg                                       nrst<span class="token punctuation">;</span>
+        reg                                      clk_w<span class="token punctuation">;</span>
+        reg                                      wr_en<span class="token punctuation">;</span>
+        reg <span class="token punctuation">[</span>FIFO_DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span>               wrdata<span class="token punctuation">;</span>
+        wire                                 fifo_full<span class="token punctuation">;</span>
+        wire                          fifo_almost_full<span class="token punctuation">;</span>
+        wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span>       fifo_count_wr<span class="token punctuation">;</span>
+ 
+        reg                                      clk_r<span class="token punctuation">;</span>
+        reg                                      rd_en<span class="token punctuation">;</span>
+        wire <span class="token punctuation">[</span>FIFO_DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">]</span>              rddata<span class="token punctuation">;</span>
+        wire                                fifo_empty<span class="token punctuation">;</span>
+        wire <span class="token punctuation">[</span>FIFO_ADDR_WIDTH <span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">]</span>       fifo_count_rd<span class="token punctuation">;</span>
+        wire                         fifo_almost_empty<span class="token punctuation">;</span>
+    
+    integer i<span class="token punctuation">;</span>
+    initial begin
+        clk_w <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        forever begin
+            #<span class="token number">2</span> clk_w <span class="token operator">=</span> <span class="token operator">~</span>clk_w<span class="token punctuation">;</span>
+        end
+    end
+
+    initial begin
+        clk_r <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        #<span class="token number">1</span>
+        forever begin
+            #<span class="token number">2</span> clk_r <span class="token operator">=</span> <span class="token operator">~</span>clk_r<span class="token punctuation">;</span>
+        end
+    end
+
+    initial begin
+            nrst <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        #<span class="token number">4</span>  nrst <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+            wr_en <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+            wrdata <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+            rd_en <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+            <span class="token keyword">while</span><span class="token punctuation">(</span>wrdata <span class="token operator">&lt;=</span> <span class="token number">14</span><span class="token punctuation">)</span>
+            begin
+               #<span class="token number">4</span> wr_en  <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+                  wrdata <span class="token operator">=</span> wrdata <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>
+            end
+            wr_en <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+            rd_en <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    end
+
+
+    Asynchronous_FIFO_npow2#<span class="token punctuation">(</span>
+        <span class="token comment">//BLOCK RAM address width </span>
+        <span class="token punctuation">.</span> RAM_ADDR_WIDTH <span class="token punctuation">(</span>RAM_ADDR_WIDTH<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token comment">//FIFO true depth</span>
+        <span class="token punctuation">.</span> FIFO_DATA_DEPTH <span class="token punctuation">(</span>FIFO_DATA_DEPTH<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> FIFO_DATA_DEPTH_MARGIN <span class="token punctuation">(</span>FIFO_DATA_DEPTH_MARGIN<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token comment">//FIFO compensate depth,(FIFO_DATA_DEPTH+FIFO_DEPTH_COMPLE) must be the data of power 2</span>
+        <span class="token punctuation">.</span> FIFO_DEPTH_COMPLE <span class="token punctuation">(</span>FIFO_DEPTH_COMPLE<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span> FIFO_DATA_WIDTH <span class="token punctuation">(</span>FIFO_DATA_WIDTH<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token function">Asynchronous_FIFO_npow2_inist</span><span class="token punctuation">(</span>
+       <span class="token punctuation">.</span>      <span class="token function">nrst</span><span class="token punctuation">(</span>nrst<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span>     <span class="token function">clk_w</span><span class="token punctuation">(</span>clk_w<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span>     <span class="token function">wr_en</span><span class="token punctuation">(</span>wr_en<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span>    <span class="token function">wrdata</span><span class="token punctuation">(</span>wrdata<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span> <span class="token function">fifo_full</span><span class="token punctuation">(</span>fifo_full<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span> <span class="token function">fifo_almost_full</span><span class="token punctuation">(</span>fifo_almost_full<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span> <span class="token function">fifo_count_wr</span><span class="token punctuation">(</span>fifo_count_wr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+
+       <span class="token punctuation">.</span>     <span class="token function">clk_r</span><span class="token punctuation">(</span>clk_r<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span>     <span class="token function">rd_en</span><span class="token punctuation">(</span>rd_en<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span>    <span class="token function">rddata</span><span class="token punctuation">(</span>rddata<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span> <span class="token function">fifo_empty</span><span class="token punctuation">(</span>fifo_empty<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span> <span class="token function">fifo_almost_empty</span><span class="token punctuation">(</span>fifo_almost_empty<span class="token punctuation">)</span><span class="token punctuation">,</span>
+       <span class="token punctuation">.</span> <span class="token function">fifo_count_rd</span><span class="token punctuation">(</span>fifo_count_rd<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+endmodule
+
+</code></pre> 
+<h3><a id="83__1215"></a>8.3 功能仿真结果</h3> 
+<p><img src="https://images2.imgbox.com/03/be/ABSxVZIF_o.png" alt="在这里插入图片描述">  这里观察almost_empty和almost_empty信号，其假将空与假将满产生的原因与empty和full的假空假满相同；</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/a13d5c2437f1fe5cc4f43015c05f6aae/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Android 获取手机Ram 和 Rom大小</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/c221eddef084bb0b8a920d3f8e355593/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">黑马程序员---三天快速入门Python机器学习（第三天）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

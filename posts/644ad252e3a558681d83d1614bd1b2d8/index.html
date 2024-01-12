@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【Skynet】Skynet项目-球球作战实例 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【Skynet】Skynet项目-球球作战实例" />
+<meta property="og:description" content="Skynet项目-球球作战实例 一、拓扑结构1.1 各服务功能1.2 消息流程1.3 设计要点 二、目录结构2.1 项目根目录2.2 service目录2.3 lualib目录2.4 luaclib_src目录2.5 luaclib目录2.6 proto目录2.7 storage目录2.8 tools目录2.9 etc目录 三、启动流程四、项目地址 一、拓扑结构 如图3-3，其中圆圈代表服务，圈内文字代表服务类型和编号，比如：”gateway1“代表”gateway“类型的1号服务。
+该拓扑结构支持横向拓展（增加物理机）
+1.1 各服务功能 服务说明gateway即网关，用于处理客户端连接的服务。客户端会知道所有网关地址（选服列表）。选择连接某个网关（gateway），如果玩家尚未登录，网关会把消息转发给节点内某个login服务，以处理账号校验等操作；如果登陆成功，则会把消息转发给客户端对应的agent服务。一个节点可以开启多个网关以分摊性能login即登录服务，用于处理登录逻辑的服务，比如账号校验。一个节点可以开启多个登录服务以分摊性能agent即代理服务，每个客户端会对应一个代理服务（agent），负责对应角色的数据加载、数据存储、单服逻辑的处理（比如强化装备、成就等）。出于性能考虑，agent必须与它对应的客户端连接（即客户端连接的gateway）处在同一个节点agentmgr即管理代理（agent）的服务，它会记录每个agent所在的节点，避免不同的客户端登录同一账号nodemgr即节点管理，每隔节点会开启一个nodemgr服务，用于管理该节点（新建agent服务）和监控性能scene即场景服务，处理战斗逻辑的服务，每一局游戏由一个场景服务器负责 1.2 消息流程 登录过程：
+①：客户端连接某个gateway，然后发送登录协议
+②：gateway将登陆协议转发给login
+③：如果login校验通过，转发给agentmgr校验
+④：agentmgr发现玩家已在线，通知另一客户端agent踢下线
+⑤：另一客户端的agent通知gateway和客户端断开socket连接
+⑥：agentmgr通知nodemgr新建一个agent服务
+⑦：新建一个agent服务
+⑧：新建的agent通知login，login再通知gateway告诉玩家登陆成功
+游戏过程：
+⑨：客户端发消息给gateway，gateway直接转发给对应的agent
+1.3 设计要点 1.gateway
+这套服务端系统采用传统C&#43;&#43;服务器架构方案。gateway只做消息转发，启用gateway服务有以下的好处：
+隔离客户端和服务端系统。如果要更改客户端协议（比如改用json协议或者protobuf），仅需更改gateway，不会对系统内部产生影响。预留了断线重连功能，如果客户端断线，仅影响gateway，不影响agent 然而引入gateway意味着客户端消息需经过一层转发，会带来一定的延迟。将同一个客户端连接的gateway、login、agent置于同一节点，有助于减少延迟。
+2.agent和scene的关系
+agent可以和任意一个scene通信，但跨节点通信的开销比较大。一个节点可以支撑数千名玩家，足以支撑各种段位的匹配，玩家应尽可能地进入同一节点的战斗场景服务器（scene）。
+3.agentmgr
+agentmgr仅记录agent的状态、处理玩家登录、登出功能，所有对它的访问都以玩家id为索引。它是个单点，但很容易拓展成分布式。
+二、目录结构 2.1 项目根目录 etc：存放服务配置的文件夹example：测试用例luaclib：存放一些C模块（.so文件）luaclib_src：存放C模块的源代码（.c、.h）lualib：存放Lua模块service：存放各服务的Lua代码skynet：skynet框架，我们不会改动skynet的任何内容。如果后续skynet有更新，直接替换该文件夹即可proto：存放通信协议文件（.proto）storage：存放数据库协议文件（.proto）tools：存放工具文件start.sh：启动服务的脚本（本质就是./skynet [配置]） 2.2 service目录 admin：类似skynet的debug_console编写的一个”管理控制台“服务，服务器管理者可以通过telnet登入控制台，然后输入指令。如”stop“妥善关闭服务器，把玩家全部踢下线。如”mail“给在线玩家发邮件等。agent：agent服务agentmgr：agentmgr服务gateway：gateway服务login：login服务nodemgr：nodemgr服务scene：scene服务main.lua：main服务是节点启动后第一个被加载的服务，用于启动其他各个服务 2.3 lualib目录 protobuf.lua：protobuf用到的Lua模块代码service.lua：是agent、agentmgr、gateway、login、nodemgr、scene服务的父类。这些服务都继承自service。service里封装了一些skynet的API和一些自有的属性，方便子服务的创建、通信、辨别不同服务类型等，减少代码编写。register.lua：提供一个注册类，用于把模块方法注册进里面，然后通过register模块API取出模块里函数，实现代码简洁，不用再多处维护不同的函数列表extension目录：该目录下存放扩展lua标准库方法的文件。例如./extension/table.lua文件，存放扩展标准库table的函数：如PrintTable()打印表的内容、update()更新表内容，然后把自己实现的方法注册到标准库table表里即可，即table.PrintTable = PrintTable、table.update = update。 2.4 luaclib_src目录 lua-cjson：cjson的源代码，用于json和lua之间的转换。pbc：pbc的源代码，用于protobuf。 lua-cjson下载与编译：
+cd luaclib_src	#进入luaclib_src目录 git clone https://github." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/644ad252e3a558681d83d1614bd1b2d8/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-02-04T23:45:00+08:00" />
+<meta property="article:modified_time" content="2022-02-04T23:45:00+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【Skynet】Skynet项目-球球作战实例</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>Skynet项目-球球作战实例</h4> 
+ <ul><li><ul><li><ul><li><a href="#_2" rel="nofollow">一、拓扑结构</a></li><li><ul><li><a href="#11__8" rel="nofollow">1.1 各服务功能</a></li><li><a href="#12__18" rel="nofollow">1.2 消息流程</a></li><li><a href="#13__33" rel="nofollow">1.3 设计要点</a></li></ul> 
+    </li><li><a href="#_50" rel="nofollow">二、目录结构</a></li><li><ul><li><a href="#21__52" rel="nofollow">2.1 项目根目录</a></li><li><a href="#22_service_68" rel="nofollow">2.2 service目录</a></li><li><a href="#23_lualib_80" rel="nofollow">2.3 lualib目录</a></li><li><a href="#24_luaclib_src_88" rel="nofollow">2.4 luaclib_src目录</a></li><li><a href="#25_luaclib_137" rel="nofollow">2.5 luaclib目录</a></li><li><a href="#26_proto_143" rel="nofollow">2.6 proto目录</a></li><li><a href="#27_storage_198" rel="nofollow">2.7 storage目录</a></li><li><a href="#28_tools_334" rel="nofollow">2.8 tools目录</a></li><li><a href="#29_etc_348" rel="nofollow">2.9 etc目录</a></li></ul> 
+    </li><li><a href="#_354" rel="nofollow">三、启动流程</a></li><li><a href="#_523" rel="nofollow">四、项目地址</a></li></ul> 
+  </li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h4><a id="_2"></a>一、拓扑结构</h4> 
+<p><img src="https://images2.imgbox.com/6a/0b/BPgINAUG_o.jpg" alt="请添加图片描述"><br> 如图3-3，其中圆圈代表服务，圈内文字代表服务类型和编号，比如：”gateway1“代表”gateway“类型的1号服务。</p> 
+<p>该拓扑结构支持横向拓展（增加物理机）</p> 
+<h5><a id="11__8"></a>1.1 各服务功能</h5> 
+<table><thead><tr><th>服务</th><th align="left">说明</th></tr></thead><tbody><tr><td>gateway</td><td align="left">即网关，用于处理客户端连接的服务。客户端会知道所有网关地址（选服列表）。选择连接某个网关（gateway），如果玩家尚未登录，网关会把消息转发给节点内某个login服务，以处理账号校验等操作；如果登陆成功，则会把消息转发给客户端对应的agent服务。一个节点可以开启多个网关以分摊性能</td></tr><tr><td>login</td><td align="left">即登录服务，用于处理登录逻辑的服务，比如账号校验。一个节点可以开启多个登录服务以分摊性能</td></tr><tr><td>agent</td><td align="left">即代理服务，每个客户端会对应一个代理服务（agent），负责对应角色的数据加载、数据存储、单服逻辑的处理（比如强化装备、成就等）。出于性能考虑，agent必须与它对应的客户端连接（即客户端连接的gateway）处在同一个节点</td></tr><tr><td>agentmgr</td><td align="left">即管理代理（agent）的服务，它会记录每个agent所在的节点，避免不同的客户端登录同一账号</td></tr><tr><td>nodemgr</td><td align="left">即节点管理，每隔节点会开启一个nodemgr服务，用于管理该节点（新建agent服务）和监控性能</td></tr><tr><td>scene</td><td align="left">即场景服务，处理战斗逻辑的服务，每一局游戏由一个场景服务器负责</td></tr></tbody></table> 
+<h5><a id="12__18"></a>1.2 消息流程</h5> 
+<p><img src="https://images2.imgbox.com/74/a5/pWuyy7LM_o.jpg" alt="请添加图片描述"></p> 
+<p><strong>登录过程：</strong><br> ①：客户端连接某个gateway，然后发送登录协议<br> ②：gateway将登陆协议转发给login<br> ③：如果login校验通过，转发给agentmgr校验<br> ④：agentmgr发现玩家已在线，通知另一客户端agent踢下线<br> ⑤：另一客户端的agent通知gateway和客户端断开socket连接<br> ⑥：agentmgr通知nodemgr新建一个agent服务<br> ⑦：新建一个agent服务<br> ⑧：新建的agent通知login，login再通知gateway告诉玩家登陆成功</p> 
+<p><strong>游戏过程：</strong><br> ⑨：客户端发消息给gateway，gateway直接转发给对应的agent</p> 
+<h5><a id="13__33"></a>1.3 设计要点</h5> 
+<p><strong>1.gateway</strong></p> 
+<p>这套服务端系统采用传统C++服务器架构方案。gateway只做消息转发，启用gateway服务有以下的好处：</p> 
+<ul><li>隔离客户端和服务端系统。如果要更改客户端协议（比如改用json协议或者protobuf），仅需更改gateway，不会对系统内部产生影响。</li><li>预留了断线重连功能，如果客户端断线，仅影响gateway，不影响agent</li></ul> 
+<p>然而引入gateway意味着客户端消息需经过一层转发，会带来一定的延迟。将同一个客户端连接的gateway、login、agent置于同一节点，有助于减少延迟。</p> 
+<p><strong>2.agent和scene的关系</strong></p> 
+<p>agent可以和任意一个scene通信，但跨节点通信的开销比较大。一个节点可以支撑数千名玩家，足以支撑各种段位的匹配，玩家应尽可能地进入同一节点的战斗场景服务器（scene）。</p> 
+<p><strong>3.agentmgr</strong></p> 
+<p>agentmgr仅记录agent的状态、处理玩家登录、登出功能，所有对它的访问都以玩家id为索引。它是个单点，但很容易拓展成分布式。</p> 
+<h4><a id="_50"></a>二、目录结构</h4> 
+<h5><a id="21__52"></a>2.1 项目根目录</h5> 
+<p><img src="https://images2.imgbox.com/eb/e4/MtQTo1YH_o.png" alt="在这里插入图片描述"></p> 
+<ul><li><strong>etc</strong>：存放服务配置的文件夹</li><li><strong>example</strong>：测试用例</li><li><strong>luaclib</strong>：存放一些C模块（.so文件）</li><li><strong>luaclib_src</strong>：存放C模块的源代码（.c、.h）</li><li><strong>lualib</strong>：存放Lua模块</li><li><strong>service</strong>：存放各服务的Lua代码</li><li><strong>skynet</strong>：skynet框架，我们不会改动skynet的任何内容。如果后续skynet有更新，直接替换该文件夹即可</li><li><strong>proto</strong>：存放通信协议文件（.proto）</li><li><strong>storage</strong>：存放数据库协议文件（.proto）</li><li><strong>tools</strong>：存放工具文件</li><li><strong>start.sh</strong>：启动服务的脚本（本质就是./skynet [配置]）</li></ul> 
+<h5><a id="22_service_68"></a>2.2 service目录</h5> 
+<p><img src="https://images2.imgbox.com/54/af/Z41n8oQe_o.png" alt="在这里插入图片描述"></p> 
+<ul><li><strong>admin</strong>：类似skynet的debug_console编写的一个”管理控制台“服务，服务器管理者可以通过telnet登入控制台，然后输入指令。如”stop“妥善关闭服务器，把玩家全部踢下线。如”mail“给在线玩家发邮件等。</li><li><strong>agent</strong>：agent服务</li><li><strong>agentmgr</strong>：agentmgr服务</li><li><strong>gateway</strong>：gateway服务</li><li><strong>login</strong>：login服务</li><li><strong>nodemgr</strong>：nodemgr服务</li><li><strong>scene</strong>：scene服务</li><li><strong>main.lua</strong>：main服务是节点启动后第一个被加载的服务，用于启动其他各个服务</li></ul> 
+<h5><a id="23_lualib_80"></a>2.3 lualib目录</h5> 
+<p><img src="https://images2.imgbox.com/84/e1/CDDKLqRC_o.png" alt="在这里插入图片描述"></p> 
+<ul><li><strong>protobuf.lua</strong>：protobuf用到的Lua模块代码</li><li><strong>service.lua</strong>：是agent、agentmgr、gateway、login、nodemgr、scene服务的父类。这些服务都继承自service。service里封装了一些skynet的API和一些自有的属性，方便子服务的创建、通信、辨别不同服务类型等，减少代码编写。</li><li><strong>register.lua</strong>：提供一个注册类，用于把模块方法注册进里面，然后通过register模块API取出模块里函数，实现代码简洁，不用再多处维护不同的函数列表</li><li><strong>extension目录</strong>：该目录下存放扩展lua标准库方法的文件。例如./extension/table.lua文件，存放扩展标准库table的函数：如PrintTable()打印表的内容、update()更新表内容，然后把自己实现的方法注册到标准库table表里即可，即table.PrintTable = PrintTable、table.update = update。</li></ul> 
+<h5><a id="24_luaclib_src_88"></a>2.4 luaclib_src目录</h5> 
+<p><img src="https://images2.imgbox.com/4c/54/HuE1NPwQ_o.png" alt="在这里插入图片描述"></p> 
+<ul><li><strong>lua-cjson</strong>：cjson的源代码，用于json和lua之间的转换。</li><li><strong>pbc</strong>：pbc的源代码，用于protobuf。</li></ul> 
+<p>lua-cjson下载与编译：</p> 
+<pre><code>cd luaclib_src	#进入luaclib_src目录
+git clone https://github.com/mpx/lua-cjson	#下载第三方库lua-cjson的源码
+cd lua-cjson	#进入lua-cjson源码目录
+make	#编译，成功后会多出名为cjson.so的文件
+cp cjson.so ../../luaclib	#将cjson.so复制到存放C模块的luaclib目录中
+</code></pre> 
+<p>pbc使用protoc 2.5.0参与编译，下载安装protoc 2.5.0</p> 
+<pre><code>cd ~ 
+wget https://github.com/protocolbuffers/protobuf/archive/refs/tags/v2.5.0.zip
+unzip v2.5.0.zip
+cd protobuf-2.5.0/
+./autogen.sh
+./configure
+make
+make install
+</code></pre> 
+<p>pbc下载与编译：</p> 
+<pre><code>cd luaclib_src	#进入项目工程luaclib_src目录
+git clone https://github.com/cloudwu/pbc	#下载第三方库pbc的源码
+cd pbc	#进入pbc源码目录
+make	#编译pbc
+cd pbc/binding/lua53	#进入pbc的binding目录，它包含skynet'可用的C库源码
+make	#工具编译。成功后会在同目录下生成 库文件protobuf.so 和 Lua模块protobuf.lua
+cp protobuf.so ../../../../luaclib/	#将protobuf.so复制到存放C模块的luaclib目录中
+cp protobuf.lua ../../../../lualib/	#将protobuf.lua复制到存放Lua模块的lualib目录中
+</code></pre> 
+<p>注意：编译pbc、pbc工具和cjson时，用的Lua版本和Skynet/3rd目录下的Lua版本要一致。目前新版的skynet支持了lua5.4.2，因此保证<code>lua -v</code>版本要和skynet支持的lua版本一致。否则会导致protobuf.so和cjson.so使用时会报错：<br> <img src="https://images2.imgbox.com/da/d6/t2s8UXqS_o.png" alt="在这里插入图片描述"><br> 报错内容：如上图所示，<br> error loading module ‘protobuf.c’ from file ‘./luaclib/protobuf.so’</p> 
+<p>原因：编译时未 link 5.4 的 .h 的缘故。lua_newuserdata 在 5.4 是以宏的方式提供。</p> 
+<h5><a id="25_luaclib_137"></a>2.5 luaclib目录</h5> 
+<p><img src="https://images2.imgbox.com/c3/7b/7IM6wUup_o.png" alt="在这里插入图片描述"></p> 
+<ul><li><strong>cjson</strong>：cjson用到的C模块动态库</li><li><strong>protobuf.so</strong>：protobuf用到的C模块动态库</li></ul> 
+<h5><a id="26_proto_143"></a>2.6 proto目录</h5> 
+<p><img src="https://images2.imgbox.com/cf/85/mKjr7KMG_o.png" alt="在这里插入图片描述"></p> 
+<ul><li><strong>login.proto</strong>：描述文件。使用protobuf的第一步是编写描述文件。</li><li><strong>login.pb</strong>：根据proto描述文件生成的二进制文件。</li></ul> 
+<p><strong>protobuf使用过程步骤：</strong></p> 
+<ol><li>编写proto文件，如：</li></ol> 
+<pre><code>package login;
+
+message Login {
+	required int32 id = 1;
+	required string pw = 2;
+	optional int32 result = 3;
+}
+</code></pre> 
+<ol start="2"><li>编译proto文件：</li></ol> 
+<pre><code>cd proto	#进入proto目录
+protoc --descriptor_set_out login.pb login.proto
+</code></pre> 
+<ol start="3"><li>使用pbc模块API编码解码：</li></ol> 
+<pre><code>local skynet = require "skynet"
+local pb = require "protobuf"
+
+--protobuf编码解码
+function test()
+	pb.register_file("../proto/login.pb") --注册编译文件(.pb文件)
+	--编码
+	local msg = {
+		id = 101,
+		pw = "123456",
+	}
+	local buff = pb.encode("login.Login", msg) --参数1：协议名，由proto描述文件的包名和协议名组成。参数2：协议对象。返回值：二进制数据
+	print("len:" .. string.len(buff))
+	--解码
+	local umsg = pb.decode("login.Login", buff)--参数1：协议名，由proto描述文件的包名和协议名组成。参数2：二进制数据。返回值：失败返回nil，成功返回协议对象。
+	if umsg then
+		print("id:"..umsg.id)
+		print("pw:"..umsg.pw)
+	else
+		print("error")
+	end
+end
+
+skynet.start(function ()
+	test()
+end)
+</code></pre> 
+<p><img src="https://images2.imgbox.com/12/64/PnfVGVry_o.jpg" alt="请添加图片描述"></p> 
+<h5><a id="27_storage_198"></a>2.7 storage目录</h5> 
+<p><img src="https://images2.imgbox.com/0f/cf/Ku1MNsOx_o.png" alt="在这里插入图片描述"></p> 
+<ul><li><strong>playerdata.proto</strong>：描述文件。</li><li><strong>playerdata.pb</strong>：根据proto描述文件生成的二进制文件</li></ul> 
+<p><strong>传统数据库</strong>：难以应付版本迭代<br> <img src="https://images2.imgbox.com/e8/02/yvHIDczw_o.jpg" alt="请添加图片描述"><br> 一个表有playerid（作为索引）、name、coin、level、last_login_time等几个栏位。</p> 
+<p>如果有策划需要增加skin栏位， 可能拓展数据库导致十几小时停服，而且，策划要求玩家上线后赠送id为1的皮肤，代码会如下：</p> 
+<pre><code>function test()
+	local playerdata = {}
+	local res = db:query("select * from player where playerid = 105")
+	
+	if res[1].skin then
+		playerdata.skin = res[1].skin
+	else
+		playerdata.skin = 1
+	end			
+end
+</code></pre> 
+<p>经历多次版本迭代后，这些“判断历史数据的代码”会变得冗长而混乱，后期接手项目的同事，他们没有经历过前期版本迭代，很难理解这些代码的用意，很难做维护。</p> 
+<p><strong>key-value表结构</strong>：</p> 
+<p>将玩家数据序列化，数据库仅存储序列化后的二进制数据。它类似于“Key-Value”（键值对）数据库，以玩家id为键，以序列化数据为值，其中的playerid代表玩家id，用作索引，data存储序列化后的数据。<br> <img src="https://images2.imgbox.com/08/14/IpV4BlmJ_o.jpg" alt="请添加图片描述"><br> 使用Key-Value数据表，可以构造稳定的数据库结构，还能兼顾NoSQL，让服务端系统拥有无缝切换MySQL和MongoDB这两种数据库的潜力。</p> 
+<p><strong>数据存储过程实例</strong>：</p> 
+<p>playerdata.proto</p> 
+<pre><code>package playerdata;
+
+message BaseInfo {
+	required int32 playerid = 1;
+	required int32 coin = 2;
+	required string name = 3;
+	required int32 level = 4;
+	required int32 last_login_time = 5;
+	required int32 skin = 6 [default = 10];
+}
+
+message Bag {}
+message Task {}
+message friend {}
+message mail {}
+message achieve {}
+message title {}
+</code></pre> 
+<p>storage_test.lua</p> 
+<pre><code>local skynet = require "skynet"
+local mysql = require "skynet.db.mysql"
+local pb = require "protobuf"
+
+local db = nil
+
+--创角
+function test()
+	--注册编译文件(.pb文件)
+	pb.register_file("../storage/playerdata.pb")
+	--创角(按照功能模块划分的玩家数据）
+	--playerdata表里每个key对应一个表，如baseinfo对应baseinfo表、bag对应bag表
+	--拆分数据表的原因是查询表需要加载，数据越大加载的时间越长，因此做数据表拆分
+	local playerdata = {
+		baseinfo = {
+			playerid = 109,
+			coin = 97,
+			name = "Tiny",
+			level = 3,
+			last_login_time = os.time(),
+		}, --基本信息
+		bag = {}, --背包
+		task = {}, --任务
+		friend = {}, --朋友
+		mail = {}, --邮件
+		achieve = {}, --成就
+		title = {}, --称号
+	}
+	--序列化
+	local data = pb.encode("playerdata.BaseInfo", playerdata.baseinfo)
+	print("data len:" .. string.len(data))
+	--存入数据库（这里仅示例存入baseinfo表，其他如bag、mail等表的存储略）
+	local sql = string.format("insert into baseinfo(playerid, data) values (%d, %s)", 109, mysql.quote_sql_str(data)) --由于变量data是二进制数据，因此，拼接成SQL语句时，需用mysql.quote_sql_str做转换。
+	local res = db:query(sql)
+	--查看存储结果
+	if res.err then
+		print("error:" .. res.err)
+	else
+		print("ok")
+	end
+end
+
+--读取角色数据
+function test2()
+	pb.register_file("../storage/playerdata.pb")
+	--读取数据库（忽略读取失败的情况）
+	local sql = string.format("select * from baseinfo where playerid = 109")
+	local res = db:query(sql)
+	--反序列化
+	local data = res[1].data
+	print("data len:" .. string.len(data))
+	local udata = pb.decode("playerdata.BaseInfo", data)
+	if not udata then
+		print("error")
+		return false
+	end
+	--输出
+	local playerdata = {}
+	playerdata.baseinfo = udata
+	print("coin:" .. playerdata.baseinfo.coin)
+	print("name:" .. playerdata.baseinfo.name)
+	print("time:" .. playerdata.baseinfo.last_login_time)
+	print("skin:" .. playerdata.baseinfo.skin)
+end
+
+skynet.start(function ()
+	--连接数据库
+	db = mysql.connect({
+		host="192.168.184.130",
+		port=3306,
+		database="message_board",
+		user="root",
+		password="123456",
+		max_packet_size=1024*1024,
+		on_connect=nil
+	})
+
+	test()
+	test2()
+end)
+</code></pre> 
+<p><img src="https://images2.imgbox.com/48/8b/qIgCQfOD_o.jpg" alt="请添加图片描述"></p> 
+<h5><a id="28_tools_334"></a>2.8 tools目录</h5> 
+<p><img src="https://images2.imgbox.com/29/3c/a1rZzWqB_o.png" alt="在这里插入图片描述"></p> 
+<ul><li><strong>genProtold.py</strong>：python文件，给run_on_chang.sh使用。作用是生成message_define.bytes文件，这个文件是用于和客户端的通信协议id找协议名对应关系表</li><li><strong>run_on_change.sh</strong>：当写好新的和客户端通信的.proto文件后，使用该shell脚本，会把./proto目录下所有的.proto文件集中生成为一个.pb文件（all.bytes），和生成一个协议id和协议名对照的文件message_define.bytes，方便pbc模块的api解析协议内容。</li></ul> 
+<p><strong>run_on_chang.sh:</strong></p> 
+<pre><code>#!/bin/sh
+cd ../proto	#进入./proto目录
+protoc -o../service/proto/all.bytes *.proto #把./proto目录下所有.proto文件生成为一个.pb文件（all.bytes）
+cd ..	#回到项目根目录
+python tools/genProtoId.py --output=./service/proto/message_define.bytes ./proto/*.proto #执行python文件genProtoId.py，生成协议id和协议名对应的文件message_define.bytes
+</code></pre> 
+<h5><a id="29_etc_348"></a>2.9 etc目录</h5> 
+<p><img src="https://images2.imgbox.com/0a/b0/MRj3iEOf_o.png" alt="在这里插入图片描述"></p> 
+<ul><li><strong>runconfig.lua</strong>：服务配置，提供服务所需的一些参数</li><li><strong>config.node1</strong>：节点1的启动配置，供./skynet用的配置</li><li><strong>config.node2</strong>：节点2的启动配置，供./skynet用的配置</li></ul> 
+<h4><a id="_354"></a>三、启动流程</h4> 
+<ol><li><code>sh start.sh [num]</code></li></ol> 
+<p><strong>start.sh</strong></p> 
+<pre><code>./skynet/skynet ./etc/config.node$1
+</code></pre> 
+<p>例如：在项目根目录，输入命令<code>sh start.sh 1</code> 。意思是：载入<code>./etc/config.node1</code>的配置给<code>./skynet/skynet</code>程序使用。</p> 
+<p><strong>config.node1</strong></p> 
+<pre><code>--必须配置
+thread = 8	--启用多少个工作线程
+cpath = "./skynet/cservice/?.so"	--用c编写的服务模块位置
+bootstrap = "snlua bootstrap"	--启动的第一个服务
+
+--bootstrap配置
+start = "main"	--主服务入口
+harbor = 0 	--不使用主从节点模式
+
+--lua配置项
+lualoader = "./skynet/lualib/loader.lua"
+luaservice = "./service/?.lua;" .. "./service/?/init.lua;" .. "./skynet/service/?.lua;"
+lua_path = "./etc/?.lua;" .. "./lualib/?.lua;" .. "./skynet/lualib/?.lua;" .. "./skynet/lualib/?/init.lua"
+lua_cpath = "./luaclib/?.so;" .. "./skynet/luaclib/?.so"
+
+--后台模式
+--daemon = "./skynet.pid"
+--logger = "./userlog"
+
+--节点
+node = "node1"
+</code></pre> 
+<p>config.node1配置解析：</p> 
+<ul><li>/skynet/lualib/loader.lua这个loader加载Lua服务时，会到<code>"luaservice= "</code>配置配好的地址去查找。</li><li>在lua文件中require时，会到<code>"lua_path ="</code> 和 <code>"lua_cpath ="</code>配好的地址查找对应的Lua模块和C模块</li></ul> 
+<ol start="2"><li>然后skynet会启动bootstrap等一系列skynet启动的服务。最后启动如上配置（<code>./etc/config.node1</code>）start指定的的main服务（./service/main.lua）。这个main.lua是我们自己写的服务程序入口。</li></ol> 
+<p><strong>runconfig.lua</strong></p> 
+<pre><code>return {
+	--集群
+	cluster = {
+		node1 = "127.0.0.1:7771",
+		node2 = "127.0.0.1:7772",
+	},
+	--agentmgr
+	agentmgr = { node = "node1" },
+	--scene
+	scene = {
+		node1 = {1001, 1002},
+		--node2 = {1003},
+	},
+	--节点1
+	node1 = {
+		gateway = {
+			[1] = {port=8001},
+			[2] = {port=8002},
+		},
+		login = {
+			[1] = {},
+			[2] = {},
+		},
+	},
+	--节点2
+	node2 = {
+		gateway = {
+			[1] = {port=8011},
+			[2] = {port=8022},
+		},
+		login = {
+			[1] = {},
+			[2] = {},
+		},
+	},
+}
+</code></pre> 
+<p><strong>main.lua</strong></p> 
+<pre><code>local skynet = require "skynet"
+local skynet_manager = require "skynet.manager"
+local cluster = require "skynet.cluster"
+local runconfig = require "runconfig"
+
+skynet.start(function ()
+	--初始化
+	local mynode = skynet.getenv("node")
+	local nodecfg = runconfig[mynode]
+	--nodemgr
+	local nodemgr = skynet.newservice("nodemgr", "nodemgr", 0)
+	skynet.name("nodemgr", nodemgr)
+	--集群
+	cluster.reload(runconfig.cluster)
+	cluster.open(mynode)
+	--gate
+	for i,v in pairs(nodecfg.gateway or {}) do
+		local srv = skynet.newservice("gateway", "gateway", i)
+		skynet.name("gateway"..i, srv)
+	end
+	--login
+	for i,v in pairs(nodecfg.login or {}) do
+		local srv = skynet.newservice("login", "login", i)
+		skynet.name("login"..i, srv)
+	end
+	--agentmgr
+	local anode = runconfig.agentmgr.node
+	if mynode == anode then
+		local srv = skynet.newservice("agentmgr", "agentmgr", 0)
+		skynet.name("agentmgr", srv)
+	else
+		local proxy = cluster.proxy(anode, "agentmgr")
+		skynet.name("agentmgr", proxy)
+	end
+	--scene
+	for _, sid in pairs(runconfig.scene[mynode] or {}) do --sid-&gt;sceneid
+		local srv = skynet.newservice("scene", "scene", sid)
+		skynet.name("scene"..sid, srv)
+	end
+	--admin
+	local admin = skynet.newservice("admin", "admin", 0)
+	skynet.name("admin", admin)
+	--退出自身
+	skynet.exit()
+end)
+</code></pre> 
+<p><strong>如上代码，main服务的流程</strong>：</p> 
+<ol><li>reload集群，打开自己的集群接口(cluster.open(mynode))</li><li>创建一个nodemgr服务</li><li>根据runconfig配置信息，创建多个gate服务</li><li>根据runconfig配置信息，创建多个login服务</li><li>根据runconfig配置信息，创建一个agentmgr服务</li><li>根据runconfig配置信息，创建多个scene服务</li><li>创建一个admin服务</li><li>退出自身，即关闭main服务</li></ol> 
+<p>最后，skynet进程除了有bootstrap等skynet启动的服务外，还有我们写的服务：多个gate服务、多个login服务、一个nodemgr服务、一个agentmgr服务、多个scene服务。客户端登陆成功后，每个客户端还会对应生成一个agent服务。</p> 
+<p><strong>注意</strong>：<br> skynet创建服务（newservice）其实调用了底层C代码创建了一个服务类对象（struct），并且这个服务类对象拥有一个Lua虚拟机（luaState，其实就是一个C-union结构体）。</p> 
+<p>因此，nodemgr服务、gate服务、login服务、agentmgr服务、scene服务、agent服务等，每个服务都有自己的Lua虚拟机（luaState，其实就是一个C-union结构体），也就是说，每个服务都有自己的全局表，Upvalue表、常量表等。因此每个服务之间的Lua代码是独立的，生成的对象也是独立的。</p> 
+<p>举例：</p> 
+<p>gateway.lua</p> 
+<pre><code>local s = require "service"
+
+s.hehe = 1
+</code></pre> 
+<p>agent.lua</p> 
+<pre><code>local s = require "service"
+</code></pre> 
+<p>如上代码，两个文件在调用require后，"service"文件的内容被装在了全局表的一个地址里，如<code>_G[0x7f29fe7d7e00]</code>，返回值s是全局表的那个对应的地址（即0x7f29fe7d7e00）。</p> 
+<p>因为gateway和agent是不同的服务对象（即不同的struct），因此，他们有自己的Lua虚拟机，这两个文件内的全局表是各自维护的，互相不能访问。所以agent里的s索引不到gateway的”hehe“。</p> 
+<p>就算开启了两个gateway服务，这两个服务也是不同的服务对象（即不同的struct），因此，他们也有各自的Lua虚拟机，各自维护自己的全局表、Upvalue表、常量表等（注：全局表、Upvalue表、常量表都是Lua的概念，可以自行去看Lua书籍熟悉相关概念）。</p> 
+<h4><a id="_523"></a>四、项目地址</h4> 
+<p>github：</p> 
+<pre><code>https://github.com/hhhhhhh12123/BoxGameServer
+</code></pre> 
+<p>gitee：</p> 
+<pre><code>https://gitee.com/smallppppig/boxgame
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/90299072d96a53d8be8fae52af11d503/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【常见的优化算法介绍】</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/615f7576a04f9173827aa437e002db8f/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">【技术年货】字节技术年货篇</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

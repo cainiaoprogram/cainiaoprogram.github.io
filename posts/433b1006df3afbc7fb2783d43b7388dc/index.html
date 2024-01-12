@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>LVS的NAT模式 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="LVS的NAT模式" />
+<meta property="og:description" content="上次总结了DR模式的转发流程这次模拟一下LVS的NAT模式来抓包分析一下流程
+LVS NAT原理
+类似于防火墙的私有网络结构，Director Server作为所有服务器节点的网关，即作为客户端的访问入口，也是各节点回应客户端的访问出口，其外网地址作为整个群集的VIP地址，其内网地址与后端服务器Real Server在同一个物理网络，Real Server必须使用私有IP地址。
+数据包流向分析：
+用户发送请求到Director Server,请求的数据报文（源IP是CIP,目标IP是VIP）到达内核空间。
+内核空间判断数据包的目标IP是本机，此时IPVS比对数据包请求的服务是否为集群服务，若是，修改数据包的目标IP地址为后端服务器IP，重新封装数据包（源IP为CIP，目标IP为RIP），然后选路将数据包发送给Real Server。
+Real Server比对发现目标IP是本机的IP，重新封装报文（源IP为RIP，目标IP为CIP）发回给Director Server。
+Director Server重新封装数据包，将源IP地址修改为自己的VIP地址，然后响应给客户端。 此时报文的源IP为VIP，目标IP为CIP。
+NAT模型的特点
+（1）RS必须使用私有IP地址，网关指向DIP。
+（2）DIP与RIP必须在同一网段内。
+（3）DS作为所有服务器节点的网关，也就是说请求和响应报文都需要经过Director Server。
+（4）支持端口映射，高负载场景中，Director Server压力比较大，易成为性能瓶颈。
+实验环境：GNS3
+实验拓扑：
+本拓扑中，内网网段是192.168.1.0/24，外网网段是192.168.2.0/24两个RS的ip地址分别是192.168.1.2和192.168.1.3，lvs的内网ip地址为192.168.1.1，外网ip是192.168.2.1，client的ip为192.168.2.2
+环境搭建：
+1. 按照拓扑所示在各个虚拟机上配置ip地址
+lvs
+RS1
+RS2
+client
+2. 在lvs上配置用iptables配置nat转发
+192.168.1.0/24是内网网段，ens37是连接外网的网卡
+3. 用ipvsadm添加服务
+这里采用简单的轮询算法，-m表示使用nat模式
+4. 在RS上添加路由并开启http服务
+在client上使用curl命令查看效果
+抓包分析过程：（以请求到web2上为例）
+在lvs的两侧进行抓包来分析这个过程，在client和lvs之间的链路上抓包结果如下
+前三个包是tcp连接建立的三次握手的过程，来看一下第一个syn数据包
+可以看到这个数据包的源ip是client的IP，源mac是client的mac，目的ip是lvs的公网ip，目的mac是lvs的外网网卡的mac地址，这个syn数据包在lvs的另一个链路上的结果为
+可以看到这个syn数据包的源ip和源端口同样是client的ip，但是目的ip被lvs转换成了web2的IP地址，源mac是lvs的连接内网的网卡的mac地址，目的mac是web2的mac地址，这样交换机会把这个数据包转发给web2，web2收到这个数据包后会返回syn,ack数据包
+可以看到这个数据包的源ip是web2的IP地址目的ip是client的ip地址，源mac是web2的mac，目的mac是lvs的内网网卡的mac地址，这个数据包经过lvs后会变成这样
+可以看到源ip地址变成了lvs的外网ip地址，目的ip还是client的IP，源mac是lvs的外网网卡的mac地址，目的mac是client的mac地址，这样这个syn,ack数据包就会返回给client，client收到这个数据包后发发送第三次握手请求，整个过程和刚才的过程一样，都是经过lvs后，目的ip地址会变成RS的IP地址，而请求的响应经过lvs后源ip会变成lvs的ip地址，所以整个总结起来如下：
+（1）客户端请求lvs的公网ip（即VIP）
+（2）所有的请求经过lvs后目的ip会变成内网RS的ip地址，源ip不变（源ip是客户端的ip），即发生DNAT
+（3）所有的响应经过lvs后源ip会变成lvs的公网ip地址，目的ip不变（目的ip是客户端的ip），即发生SNAT
+（4）对于MAC地址的更新过程和三层交换一样，都是经过lvs后把对链路层解封装，然后根据各主机的mac地址对mac地址重新封装，因此可以把lvs比作一个三层交换设备
+所以从这个过程来看，lvs的功能=三层交换&#43;对源ip或者目的ip的转换
+端口转换：
+另外，lvs的nat模式同样支持端口转换，在刚才的实验环境基础上做出如下改变
+1. 修改/etc/httpd/conf/httpd.conf改变web1和web2的http服务的端口
+然后用systemctl restart httpd命令重启http服务
+2. 改变ipvsadm注册的服务，将vip的80端口关联到RS的8080端口
+改变之后，在client上使用curl进行请求发现还是可以进行的
+这说明lvs的nat模式支持端口转换，来抓包看一下这个过程，同样以请求到web2为例，首先client还是发送syn数据包
+这个数据包和没有使用端口转换的情况是一样的，经过lvs的转换后数据包会变成这样
+可以看到这个数据包的源ip还是不变，目的ip变成了web2的ip地址，源端口不变还是客户端的端口，但是目的ip已经转换成了8080，也就是变成了RS的开放的http服务的端口，这样这个数据包可以被RS来处理，RS收到这个syn数据包后会返回如下syn,ack数据包" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/433b1006df3afbc7fb2783d43b7388dc/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2019-08-23T10:16:57+08:00" />
+<meta property="article:modified_time" content="2019-08-23T10:16:57+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">LVS的NAT模式</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p style="margin-left:0cm;">上次总结了DR模式的转发流程这次模拟一下LVS的NAT模式来抓包分析一下流程</p> 
+<p style="margin-left:0cm;"><strong>LVS NAT原理</strong></p> 
+<p style="margin-left:0cm;">类似于防火墙的私有网络结构，Director Server作为所有服务器节点的网关，即作为客户端的访问入口，也是各节点回应客户端的访问出口，其外网地址作为整个群集的VIP地址，其内网地址与后端服务器Real Server在同一个物理网络，Real Server必须使用私有IP地址。</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="308" src="https://images2.imgbox.com/79/38/Cx4oNpBT_o.png" width="554"></p> 
+<p style="margin-left:0cm;"><strong>数据包流向分析：</strong></p> 
+<p style="margin-left:0cm;">用户发送请求到Director Server,请求的数据报文（源IP是CIP,目标IP是VIP）到达内核空间。</p> 
+<p style="margin-left:0cm;">内核空间判断数据包的目标IP是本机，此时IPVS比对数据包请求的服务是否为集群服务，若是，修改数据包的目标IP地址为后端服务器IP，重新封装数据包（源IP为CIP，目标IP为RIP），然后选路将数据包发送给Real Server。</p> 
+<p style="margin-left:0cm;">Real Server比对发现目标IP是本机的IP，重新封装报文（源IP为RIP，目标IP为CIP）发回给Director Server。</p> 
+<p style="margin-left:0cm;">Director Server重新封装数据包，将源IP地址修改为自己的VIP地址，然后响应给客户端。 此时报文的源IP为VIP，目标IP为CIP。</p> 
+<p style="margin-left:0cm;"><strong>NAT模型的特点</strong></p> 
+<p style="margin-left:0cm;">（1）RS必须使用私有IP地址，网关指向DIP。</p> 
+<p style="margin-left:0cm;">（2）DIP与RIP必须在同一网段内。</p> 
+<p style="margin-left:0cm;">（3）DS作为所有服务器节点的网关，也就是说请求和响应报文都需要经过Director Server。</p> 
+<p style="margin-left:0cm;">（4）支持端口映射，高负载场景中，Director Server压力比较大，易成为性能瓶颈。</p> 
+<p style="margin-left:0cm;"><strong>实验环境：GNS3</strong></p> 
+<p style="margin-left:0cm;"><strong>实验拓扑：</strong></p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="245" src="https://images2.imgbox.com/91/a5/NifEw7QA_o.png" width="554"></p> 
+<p style="margin-left:0cm;">本拓扑中，内网网段是192.168.1.0/24，外网网段是192.168.2.0/24两个RS的ip地址分别是192.168.1.2和192.168.1.3，lvs的内网ip地址为192.168.1.1，外网ip是192.168.2.1，client的ip为192.168.2.2</p> 
+<p style="margin-left:0cm;"><strong>环境搭建：</strong></p> 
+<p style="margin-left:0cm;">1. 按照拓扑所示在各个虚拟机上配置ip地址</p> 
+<p style="margin-left:0cm;">lvs</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="81" src="https://images2.imgbox.com/42/82/tZYdHbN0_o.png" width="586"></p> 
+<p style="margin-left:0cm;">RS1</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="56" src="https://images2.imgbox.com/5f/26/MxCUvHwd_o.png" width="599"></p> 
+<p style="margin-left:0cm;">RS2</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="50" src="https://images2.imgbox.com/50/1a/sE1lsGI6_o.png" width="606"></p> 
+<p style="margin-left:0cm;">client</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="68" src="https://images2.imgbox.com/5d/d5/6TV0393f_o.png" width="591"></p> 
+<p style="margin-left:0cm;">2. 在lvs上配置用iptables配置nat转发</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="61" src="https://images2.imgbox.com/32/e3/wkP5NhjY_o.png" width="749"></p> 
+<p style="margin-left:0cm;">192.168.1.0/24是内网网段，ens37是连接外网的网卡</p> 
+<p style="margin-left:0cm;">3. 用ipvsadm添加服务</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="73" src="https://images2.imgbox.com/28/0e/JNS2laqQ_o.png" width="580"></p> 
+<p style="margin-left:0cm;">这里采用简单的轮询算法，-m表示使用nat模式</p> 
+<p style="margin-left:0cm;">4. 在RS上添加路由并开启http服务</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="58" src="https://images2.imgbox.com/4b/fc/XroCb62i_o.png" width="489"></p> 
+<p style="margin-left:0cm;">在client上使用curl命令查看效果</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="375" src="https://images2.imgbox.com/2c/b0/6ZR1Ba2u_o.png" width="304"></p> 
+<p style="margin-left:0cm;"><strong>抓包分析过程：（以请求到web2上为例）</strong></p> 
+<p style="margin-left:0cm;">在lvs的两侧进行抓包来分析这个过程，在client和lvs之间的链路上抓包结果如下</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="206" src="https://images2.imgbox.com/08/0f/X228bruo_o.png" width="1200"></p> 
+<p style="margin-left:0cm;">前三个包是tcp连接建立的三次握手的过程，来看一下第一个syn数据包</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="85" src="https://images2.imgbox.com/b3/05/LHdhIYak_o.png" width="788"></p> 
+<p style="margin-left:0cm;">可以看到这个数据包的源ip是client的IP，源mac是client的mac，目的ip是lvs的公网ip，目的mac是lvs的外网网卡的mac地址，这个syn数据包在lvs的另一个链路上的结果为</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="121" src="https://images2.imgbox.com/17/4f/RXYQHekD_o.png" width="805"></p> 
+<p style="margin-left:0cm;">可以看到这个syn数据包的源ip和源端口同样是client的ip，但是目的ip被lvs转换成了web2的IP地址，源mac是lvs的连接内网的网卡的mac地址，目的mac是web2的mac地址，这样交换机会把这个数据包转发给web2，web2收到这个数据包后会返回syn,ack数据包</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="145" src="https://images2.imgbox.com/a8/ce/eSdRq0QW_o.png" width="815"></p> 
+<p style="margin-left:0cm;">可以看到这个数据包的源ip是web2的IP地址目的ip是client的ip地址，源mac是web2的mac，目的mac是lvs的内网网卡的mac地址，这个数据包经过lvs后会变成这样</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="141" src="https://images2.imgbox.com/82/54/3XZYO5HO_o.png" width="815"></p> 
+<p style="margin-left:0cm;">可以看到源ip地址变成了lvs的外网ip地址，目的ip还是client的IP，源mac是lvs的外网网卡的mac地址，目的mac是client的mac地址，这样这个syn,ack数据包就会返回给client，client收到这个数据包后发发送第三次握手请求，整个过程和刚才的过程一样，都是经过lvs后，目的ip地址会变成RS的IP地址，而请求的响应经过lvs后源ip会变成lvs的ip地址，所以整个总结起来如下：</p> 
+<p style="margin-left:0cm;">（1）客户端请求lvs的公网ip（即VIP）</p> 
+<p style="margin-left:0cm;">（2）所有的请求经过lvs后目的ip会变成内网RS的ip地址，源ip不变（源ip是客户端的ip），即发生DNAT</p> 
+<p style="margin-left:0cm;">（3）所有的响应经过lvs后源ip会变成lvs的公网ip地址，目的ip不变（目的ip是客户端的ip），即发生SNAT</p> 
+<p style="margin-left:0cm;">（4）对于MAC地址的更新过程和三层交换一样，都是经过lvs后把对链路层解封装，然后根据各主机的mac地址对mac地址重新封装，因此可以把lvs比作一个三层交换设备</p> 
+<p style="margin-left:0cm;">所以从这个过程来看，lvs的功能=三层交换+对源ip或者目的ip的转换</p> 
+<p style="margin-left:0cm;"><strong>端口转换：</strong></p> 
+<p style="margin-left:0cm;">另外，lvs的nat模式同样支持端口转换，在刚才的实验环境基础上做出如下改变</p> 
+<p style="margin-left:0cm;">1. 修改/etc/httpd/conf/httpd.conf改变web1和web2的http服务的端口</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="90" src="https://images2.imgbox.com/ac/30/0RkgHYKv_o.png" width="546"></p> 
+<p style="margin-left:0cm;">然后用systemctl restart httpd命令重启http服务</p> 
+<p style="margin-left:0cm;">2. 改变ipvsadm注册的服务，将vip的80端口关联到RS的8080端口</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="86" src="https://images2.imgbox.com/8e/56/NZ1ZYzBc_o.png" width="607"></p> 
+<p style="margin-left:0cm;">改变之后，在client上使用curl进行请求发现还是可以进行的</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="133" src="https://images2.imgbox.com/d9/ac/3oe581wa_o.png" width="311"></p> 
+<p style="margin-left:0cm;">这说明lvs的nat模式支持端口转换，来抓包看一下这个过程，同样以请求到web2为例，首先client还是发送syn数据包</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="100" src="https://images2.imgbox.com/2d/05/HkXAjmQt_o.png" width="795"></p> 
+<p style="margin-left:0cm;">这个数据包和没有使用端口转换的情况是一样的，经过lvs的转换后数据包会变成这样</p> 
+<p style="margin-left:0cm;"> </p> 
+<table align="left"><tbody><tr><td> </td></tr><tr><td> </td><td><img alt="" class="has" height="154" src="https://images2.imgbox.com/8c/44/xVvm8zYU_o.png" width="820"></td></tr></tbody></table> 
+<p> </p> 
+<p> </p> 
+<p style="margin-left:0cm;">可以看到这个数据包的源ip还是不变，目的ip变成了web2的ip地址，源端口不变还是客户端的端口，但是目的ip已经转换成了8080，也就是变成了RS的开放的http服务的端口，这样这个数据包可以被RS来处理，RS收到这个syn数据包后会返回如下syn,ack数据包</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="133" src="https://images2.imgbox.com/79/6c/MJsOelsp_o.png" width="812"></p> 
+<p style="margin-left:0cm;">目的ip和目的端口都是客户端的，但是源ip和源端口是web2的，经过lvs转换后会变成这样</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="116" src="https://images2.imgbox.com/7a/3f/CZmu06SN_o.png" width="805"></p> 
+<p style="margin-left:0cm;">源ip和源端口都会变成lvs的VIP和当时在ipvsadm上注册的80端口，目的ip和目的端口还是客户端的，后边的数据包的转换过程和上述过程一样</p> 
+<p style="margin-left:0cm;"> </p> 
+<p style="margin-left:0cm;">可以看出来关于端口的转换逻辑和ip转换的逻辑也是一样的，所以总结起来：</p> 
+<p style="margin-left:0cm;">（1）客户端请求lvs的vip和端口</p> 
+<p style="margin-left:0cm;">（2）所有的请求经过lvs后目的ip会变成内网RS的ip地址，目的端口转换为RS的端口，源ip不变和源端口不变（源ip是客户端的ip，源端口是客户端的端口）</p> 
+<p style="margin-left:0cm;">（3）所有的响应经过lvs后源ip会变成lvs的公网ip地址，源端口会变成lvs的端口，目的ip不变和目的端口不变（目的ip是客户端的ip，目的端口是客户端的端口）</p> 
+<p style="margin-left:0cm;"> </p> 
+<p style="margin-left:0cm;">那么DR模式是否支持这种端口转换呢</p> 
+<p style="margin-left:0cm;">按照上次笔记构建出来lvs的DR模式的实验环境</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="573" src="https://images2.imgbox.com/9f/c7/s12tCgKP_o.png" width="655"></p> 
+<p style="margin-left:0cm;">按照刚才的做法，我们把web1和web2的http的端口改成8080，并在ipvsadm上注册相应的服务</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="90" src="https://images2.imgbox.com/e7/39/KuEWQKDf_o.png" width="546"></p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="94" src="https://images2.imgbox.com/58/02/hzOaIxFj_o.png" width="606"></p> 
+<p style="margin-left:0cm;">此时在客户端上使用curl命令发现请求是失败的</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="64" src="https://images2.imgbox.com/7b/f4/MJM4G3WZ_o.png" width="529"></p> 
+<p style="margin-left:0cm;">来抓包看一下这个过程为什么会失败，首先看到client会发送syn数据包</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="134" src="https://images2.imgbox.com/dc/ee/OITRv2r2_o.png" width="824"></p> 
+<p style="margin-left:0cm;">目的端口是80，目的mac是lvs的mac，lvs收到这个数据包后会对其进行转换</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="134" src="https://images2.imgbox.com/05/68/iZur3kZ1_o.png" width="840"></p> 
+<p style="margin-left:0cm;">可以看到，转换后的数据包目的mac变成了web1的mac地址，但是目的端口没有做出改变，而此时web1的http端口是8080，所以不能正常建立连接，也就是说lvs工作在DR模式的时候是不支持端口转换的，所以即使是lvs接收到客户端的请求后将目的mac转换为RS的mac地址，但是端口不是RS的端口仍然是无法建立连接的</p> 
+<p style="margin-left:0cm;">为了能够实现这种端口转换，可以在RS上配置iptable来实现端口转换，在RS上输入如下命令</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="51" src="https://images2.imgbox.com/45/53/USErGLH1_o.png" width="713"></p> 
+<p style="margin-left:0cm;">这样就实现了在RS上的的80和8080端口之间的转换，再次实验发现可以正常工作</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="151" src="https://images2.imgbox.com/31/71/wsb0EtNJ_o.png" width="516"></p> 
+<p style="margin-left:0cm;">这个时候当RS再次收到经过lvs转发的报文的时候，即使是端口没进行转换，但是在RS上进行了转换，也能将这个数据包发到8080端口上，从而能够正常提供http服务，同时经过RS返回给客户端的响应的源端口也会是80端口而不是8080端口，这样就和客户端发出请求的目的端口是一致的，这样这个通信就能够正常进行，以下是抓到的RS返回给客户端的syn,ack数据包</p> 
+<p style="margin-left:0cm;"><img alt="" class="has" height="115" src="https://images2.imgbox.com/d1/5a/zjl57zvt_o.png" width="802"></p> 
+<p style="margin-left:0cm;"> </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/d8267f7749e29bb82b9faecb02206c40/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">LVS的DR模式</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/b655f1766bda686b6a39c36df9b41095/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">LVS的FULLNAT模式</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

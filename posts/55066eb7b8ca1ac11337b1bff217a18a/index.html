@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>三维重建（SFM）：针对360全景切割图像的单目重建的增量问题的分析与改进（colmap） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="三维重建（SFM）：针对360全景切割图像的单目重建的增量问题的分析与改进（colmap）" />
+<meta property="og:description" content="360摄像机街拍视频根据FOV切割5视角图片进行重建。
+狭窄复杂街道，人群多，光影复杂，匹配度较差（核心问题是畸变造成的干扰过度，后续会加其他实验），图像匹配实验：https://blog.csdn.net/huqinweI987/article/details/108850821
+使用colmap进行点云生成。
+因为colmap的增量过程采用了分块模式，并且此模式在倾斜摄影中应用效果可接受，所以此功能被保留用于AR街景的场景重建。
+分块本身对AR增量过程产生影响的典型情况示意图： 因为360图像采集、切割不当，图像畸变大，图像画幅低（而畸变大小和画幅大小在全景切割中是矛盾的），图像间特征匹配不佳，拓扑结构脆弱，分块容易导致图片间匹配关系的割裂。
+分块后增量实验： 以742张图的第一块为例。
+增量产生多块子模型的间接原因（某些场景会发生，但是根本还是Reconstruct过程）： 首次Reconstruct失败，产生0个manager，for循环，放宽参数继续重建（如成功，则size大于0，break）：
+放宽的参数和负面作用：
+放宽最小角度：容易产生噪声，产生无穷远点（其实三维重建，尤其街景的重建，不需要远点）
+放宽最小内点数量：允许加入匹配更差的图，影响重建质量。
+产生多个模型的直接原因： 启用了“多子模型”模式，一次性无法注册所有图片，且单个子模型满足下限，导致产出多个子模型。
+上图，不注册所有图片无法break，下图，不break需循环指定次数才会结束
+多模型模式下，最小模型size直接影响产出子模型数量和单个模型的规模，且参数数值固定
+结果：并不能注册所有图片，而是产生多个注册图片很少的子模型，具体能利用多少，首先取决于一次初始化能否增量覆盖其他图，其次取决于各种阈值限制和允许的重试次数，一旦重试次数超限，且有任何子模型成立，增量重建过程结束。需要针对参数进行优化（最直观地，增加最小模型注册图限制，增加重试次数）
+产生多个模型的根本原因： 360采集切割数据自身问题，现有参数设定和逻辑对AR应用场景的数据兼容性差。
+实验：不同“最小模型注册图数”对产出模型的影响。 下图是一次重建结果，分别产出13、108、11图片数的子模型，目前不确定建出size=13的块与建出size=108的块的顺序颠倒是否可能影响互相的融合关系（先108，是否会直接产生108&#43;13=121或更大的块，而不是割裂的）。根据局部增图和BA得流程猜测有影响（又或者，有更好的大块可以做增量基础，但是超过重试次数导致没有被发现）
+调整参数(默认10)：options_-&gt;min_model_size = 100 结果可以一个模型注册所有块
+所有图片被注册，也不需要放宽参数
+只产生一个文件夹（对比，之前产生过三四个文件夹）
+下图：对比，一次重建产生了0、1、2三个目录，本次产生0一个目录
+作为对照，排除干扰，直接使用原有分块结果，不重新分块。
+调整参数(默认10)：options_-&gt;min_model_size = 10 不能完成所有图片的注册，产生4个子模型，丢图数=742-19-14-20-11=678，极其烂的结果
+结束是因为超过10次重建重试（也可修改此参数，对于此场景，是很应该改的）
+重建结束后，（分块的）合并过程会使用其中最大的（20张图）子模型，导致丢图722张。
+针对上次实验（最大20）的结果，做一个修补尝试，修改阈值为30： 产出单个模型742张图，不丢图！证明阈值更改有效！拉高阈值能促进寻找更好的优化起点，结果子模型不是从20变30，而是直接变成742全图。
+文件大小对比： 一次成型结果 多个子模型结果 结论与方案： 但是，这个方案只是基于已有数据质量前提下的优化，根本问题是数据的质量和关联度。其实想把模型建好，主要还是依赖行进方向的关联度，这样才能把图片串起来。
+我会单独写一篇实验总结。https://blog.csdn.net/huqinweI987/article/details/109497931" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/55066eb7b8ca1ac11337b1bff217a18a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-10-14T14:28:28+08:00" />
+<meta property="article:modified_time" content="2020-10-14T14:28:28+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">三维重建（SFM）：针对360全景切割图像的单目重建的增量问题的分析与改进（colmap）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>360摄像机街拍视频根据FOV切割5视角图片进行重建。</p> 
+<p><s>狭窄复杂街道，人群多，光影复杂，</s>匹配度较差（核心问题是畸变造成的干扰过度，后续会加其他实验），图像匹配实验：<a href="https://blog.csdn.net/huqinweI987/article/details/108850821">https://blog.csdn.net/huqinweI987/article/details/108850821</a></p> 
+<p> </p> 
+<p>使用colmap进行点云生成。</p> 
+<p>因为colmap的增量过程采用了分块模式，并且此模式在倾斜摄影中应用效果可接受，所以此功能被保留用于AR街景的场景重建。</p> 
+<p> </p> 
+<h2><strong>分块本身对AR增量过程产生影响的典型情况示意图：</strong></h2> 
+<p><strong>因为360图像采集、切割不当，图像畸变大，图像画幅低（而畸变大小和画幅大小在全景切割中是矛盾的），图像间特征</strong><strong>匹配不佳，拓扑结构脆弱，分块容易导致图片间匹配关系的割裂。</strong></p> 
+<p><img alt="" height="1200" src="https://images2.imgbox.com/33/87/PGjTQs9T_o.png" width="1200"></p> 
+<h3> </h3> 
+<p> </p> 
+<h2>分块后增量实验：</h2> 
+<p>以742张图的第一块为例。</p> 
+<h4>增量产生多块子模型的间接原因（某些场景会发生，但是根本还是Reconstruct过程）：</h4> 
+<p>首次Reconstruct失败，产生0个manager，for循环，放宽参数继续重建（如成功，则size大于0，break）：</p> 
+<p><img alt="" height="195" src="https://images2.imgbox.com/32/32/A4s2ytOE_o.png" width="772"></p> 
+<p>放宽的参数和负面作用：</p> 
+<p>放宽最小角度：容易产生噪声，产生无穷远点（其实三维重建，尤其街景的重建，不需要远点）</p> 
+<p>放宽最小内点数量：允许加入匹配更差的图，影响重建质量。</p> 
+<p> </p> 
+<p> </p> 
+<h4 id="id-针对AR的Tric增量过程分析与改进建议-产生多块的直接原因：">产生多个模型的直接原因：</h4> 
+<p>启用了“多子模型”模式，一次性无法注册所有图片，且单个子模型满足下限，导致产出多个子模型。</p> 
+<p><img alt="" height="132" src="https://images2.imgbox.com/18/8c/w5YQw4qI_o.png" width="695"></p> 
+<p>上图，不注册所有图片无法break，下图，不break需循环指定次数才会结束</p> 
+<p><img alt="" height="80" src="https://images2.imgbox.com/c7/8d/y0EBfdwD_o.png" width="693"></p> 
+<p> </p> 
+<p>多模型模式下，最小模型size直接影响产出子模型数量和单个模型的规模，且参数数值固定</p> 
+<p><img alt="" height="260" src="https://images2.imgbox.com/27/e1/8epcpQ57_o.png" width="693"></p> 
+<p> </p> 
+<p>结果：并不能注册所有图片，而是产生多个注册图片很少的子模型，具体能利用多少，首先取决于一次初始化能否增量覆盖其他图，其次取决于各种阈值限制和允许的重试次数，一旦重试次数超限，且有任何子模型成立，增量重建过程结束。需要针对参数进行优化（最直观地，增加最小模型注册图限制，增加重试次数）</p> 
+<p> </p> 
+<h4>产生多个模型的根本原因：</h4> 
+<p>360采集切割数据自身问题，现有参数设定和逻辑对AR应用场景的数据兼容性差。</p> 
+<p> </p> 
+<h3 id="id-针对AR的Tric增量过程分析与改进建议-实验：增图过程，不确定建出size=13的块与建出size=108的块的顺序颠倒是否可能影响互相的融合关系（先108，是否会直接产生108+13=121的块）。"><strong>实验：不同“最小模型注册图数”对产出模型的影响。</strong></h3> 
+<p>下图是一次重建结果，分别产出13、108、11图片数的子模型，目前不确定建出size=13的块与建出size=108的块的顺序颠倒是否可能影响互相的融合关系（先108，是否会直接产生108+13=121或更大的块，而不是割裂的）。根据局部增图和BA得流程猜测有影响（又或者，有更好的大块可以做增量基础，但是超过重试次数导致没有被发现）</p> 
+<p><img alt="" height="462" src="https://images2.imgbox.com/c2/74/HH1Driqp_o.png" width="1200"></p> 
+<p> </p> 
+<h4 id="id-针对AR的Tric增量过程分析与改进建议-调整参数(默认10)：options_-&gt;min_model_size=100">调整参数(默认10)：options_-&gt;min_model_size = 100</h4> 
+<p>结果可以一个模型注册所有块</p> 
+<p><img alt="" height="335" src="https://images2.imgbox.com/72/1b/uDhVz2Or_o.png" width="564"></p> 
+<p>所有图片被注册，也不需要放宽参数</p> 
+<p><img alt="" height="131" src="https://images2.imgbox.com/0f/64/7icPd4No_o.png" width="765"></p> 
+<p> </p> 
+<p>只产生一个文件夹（对比，之前产生过三四个文件夹）</p> 
+<p>下图：对比，一次重建产生了0、1、2三个目录，本次产生0一个目录</p> 
+<p><img alt="" height="487" src="https://images2.imgbox.com/4d/b9/rmVrNO47_o.png" width="1086"></p> 
+<p> </p> 
+<p>作为对照，排除干扰，直接使用原有分块结果，不重新分块。</p> 
+<h4 id="id-针对AR的Tric增量过程分析与改进建议-调整参数(默认10)：options_-&gt;min_model_size=10">调整参数(默认10)：options_-&gt;min_model_size = 10</h4> 
+<p>不能完成所有图片的注册，产生4个子模型，<span style="color:#f33b45;"><strong>丢图数=742-19-14-20-11=678</strong></span>，极其烂的结果</p> 
+<p><img alt="" height="335" src="https://images2.imgbox.com/be/86/XNllxw55_o.png" width="1082"></p> 
+<p>结束是因为超过10次重建重试（也可修改此参数，对于此场景，是很应该改的）</p> 
+<p><img alt="" height="55" src="https://images2.imgbox.com/3c/75/WMWIakdW_o.png" width="598"></p> 
+<p><span style="color:#f33b45;"><strong>重建结束后，（分块的）合并过程会使用其中最大的（20张图）子模型，导致丢图722张。</strong></span></p> 
+<p> </p> 
+<p> </p> 
+<h4 id="id-针对AR的Tric增量过程分析与改进建议-根据此次实验结果，修改阈值为30：">针对上次实验（最大20）的结果，做一个修补尝试，修改阈值为30：</h4> 
+<p> </p> 
+<p><span style="color:#f33b45;"><strong>产出单个模型742张图，不丢图！</strong></span>证明阈值更改有效！拉高阈值能促进寻找更好的优化起点，结果子模型不是从20变30，而是直接变成742全图。</p> 
+<p><img alt="" height="403" src="https://images2.imgbox.com/91/4e/7wSpqI5y_o.png" width="1066"></p> 
+<h3> </h3> 
+<h3 id="id-针对AR的Tric增量过程分析与改进建议-文件大小对比：">文件大小对比：</h3> 
+<h4 id="id-针对AR的Tric增量过程分析与改进建议-一次成型">一次成型结果</h4> 
+<p><img alt="" height="97" src="https://images2.imgbox.com/f5/47/7wpKuYfK_o.png" width="650"></p> 
+<h4 id="id-针对AR的Tric增量过程分析与改进建议-三个子模型">多个子模型结果</h4> 
+<p><img alt="" height="696" src="https://images2.imgbox.com/42/9c/qE36W4Zn_o.png" width="976"></p> 
+<p> </p> 
+<h3 id="id-针对AR的Tric增量过程分析与改进建议-结论与方案：">结论与方案：</h3> 
+<p><img alt="" height="168" src="https://images2.imgbox.com/cd/58/8mkP8c0e_o.png" width="1065"></p> 
+<p> </p> 
+<p> </p> 
+<p>但是，这个方案只是基于已有数据质量前提下的优化，根本问题是数据的质量和关联度。其实想把模型建好，主要还是依赖行进方向的关联度，这样才能把图片串起来。</p> 
+<p>我会单独写一篇实验总结。<a href="https://blog.csdn.net/huqinweI987/article/details/109497931">https://blog.csdn.net/huqinweI987/article/details/109497931</a></p> 
+<p> </p> 
+<p> </p> 
+<p> </p> 
+<p> </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/76a7b4d3da9fc5058d566dedeb82f22a/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">github请求超时_使用危险js和github操作自动执行常见的请求请求反馈</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/8d3bc0c2e5f962eaaef71de9c263b4ab/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">idea编译错误的问题</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

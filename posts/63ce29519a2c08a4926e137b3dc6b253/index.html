@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>GPU连通域分析方法 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="GPU连通域分析方法" />
+<meta property="og:description" content="第1章连通域分析方法 连通域分析方法用于提取图像中相似属性的区域，并给出区域的面积，位置等特征信息。分为两种，基于游程（Runlength），和基于标记(Label)。
+基于游程的方法，按照行对图像进行游程编码，然后，进行深度优先的逐区域扫描，或者广度优先逐行扫描的游程连接。一般来说广度优先扫描只需要扫描一遍游程即得到区域信息，效率较深度优先高。
+基于标记的方法，使用一张标记图，将原始图中相似属性的区域，在标记图中赋值为相同的像素。再对标记图进行后处理，得到区域信息。
+经过测试，基于游程的方案，不管是传输原始blob图到CPU进行游程提取与连接，还是在GPU中对blob图提取游程（压缩），只拷贝（压缩后）游程信息到CPU，其耗时都比较高。
+在3060显卡上，只有当游程像素不超过全图的0.5%的情况下，才会比拷贝全图的方案有优势。在3090显卡上，只有当游程像素不超过全图的1.5%的情况下，才会比拷贝全图的方案有优势。
+因此调研了在GPU上进行连通域分析的方法，认为基于标记的方法更适合在GPU上运行，在GPU上直接得到Blob缺陷信息。
+基于标记的Komura方法，当前未优化代码，8k8k图像的区域标记在Nvidia的RTX4080上，仅需要3ms，Playne方法仅需要2.4ms。标记压缩耗时当前可以优化到11ms，区域信息提取并拷贝到CPU，需要1ms。相当于15ms内就完成了8k8k图像的blob分析。而基于游程的方法，仅从GPU拷贝8k8k图像的理论耗时就耗时7ms（64M/(12.8G/s70%)），即使采用GPU游程压缩方法，游程压缩步骤耗时也在7ms。
+1.1.基于游程的方法 首先对图像按行进行游程编码，然后进行游程连接。
+1.1.1.游程编码 描述方法为：(x1,x2,y)，x采用左闭右开区间。(1,6,1),(2,5,2)。采用2个三元组即描述了如上的区域。
+该算法逐个读取像素，和阈值进行比较，实际执行效率极其低下。以下为采用SIMD并行指令集优化后的代码片段。
+核心的指令共四条：alignr，xor，cmp1，cmp2。
+mres = _mm_loadu_si128((const __m128i*)(pBlob1-16))//0-15 m1 = _mm_loadu_si128((const __m128i*)pBlob1); //16-31 mOffset = _mm_alignr_epi8(m1, mres, 1); //1-16 //mH, mL 作差， 一个非0，一个是0，则对应位置赋值为1 mR = _mm_xor_si128(_mm_cmpeq_epi8(mres, mzero), _mm_cmpeq_epi8(mOffset, mzero)); auto a = _pext_u64(_pos, mR.m128i_u64[0]); while ((uint8_t)a) { pRun1[&#43;&#43;n1Count] = x * 16 &#43; uint8_t(a); a = a &gt;&gt; 8; } auto b = _pext_u64(_pos, mR.m128i_u64[1]); while ((uint8_t)b) { pRun1[&#43;&#43;n1Count] = x * 16 &#43; 8 &#43; uint8_t(b); b = b &gt;&gt; 8; } alignr实现像素的错位,根据0-15和16-31，生成1-16。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/63ce29519a2c08a4926e137b3dc6b253/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-05T11:05:05+08:00" />
+<meta property="article:modified_time" content="2024-01-05T11:05:05+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">GPU连通域分析方法</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="1_0"></a>第1章连通域分析方法</h2> 
+<p>连通域分析方法用于提取图像中相似属性的区域，并给出区域的面积，位置等特征信息。分为两种，基于游程（Runlength），和基于标记(Label)。</p> 
+<p>基于游程的方法，按照行对图像进行游程编码，然后，进行深度优先的逐区域扫描，或者广度优先逐行扫描的游程连接。一般来说广度优先扫描只需要扫描一遍游程即得到区域信息，效率较深度优先高。</p> 
+<p>基于标记的方法，使用一张标记图，将原始图中相似属性的区域，在标记图中赋值为相同的像素。再对标记图进行后处理，得到区域信息。<br> 经过测试，基于游程的方案，不管是传输原始blob图到CPU进行游程提取与连接，还是在GPU中对blob图提取游程（压缩），只拷贝（压缩后）游程信息到CPU，其耗时都比较高。</p> 
+<p>在3060显卡上，只有当游程像素不超过全图的0.5%的情况下，才会比拷贝全图的方案有优势。在3090显卡上，只有当游程像素不超过全图的1.5%的情况下，才会比拷贝全图的方案有优势。</p> 
+<p>因此调研了在GPU上进行连通域分析的方法，认为基于标记的方法更适合在GPU上运行，在GPU上直接得到Blob缺陷信息。</p> 
+<p>基于标记的Komura方法，当前未优化代码，8k<em>8k图像的区域标记在Nvidia的RTX4080上，仅需要3ms，Playne方法仅需要2.4ms。标记压缩耗时当前可以优化到11ms，区域信息提取并拷贝到CPU，需要1ms。相当于15ms内就完成了8k</em>8k图像的blob分析。而基于游程的方法，仅从GPU拷贝8k<em>8k图像的理论耗时就耗时7ms（64M/(12.8G/s</em>70%)），即使采用GPU游程压缩方法，游程压缩步骤耗时也在7ms。</p> 
+<h3><a id="11_15"></a>1.1.基于游程的方法</h3> 
+<p>首先对图像按行进行游程编码，然后进行游程连接。</p> 
+<h4><a id="111_17"></a>1.1.1.游程编码</h4> 
+<p><img src="https://images2.imgbox.com/2d/c1/lOMcR54n_o.png" alt="在这里插入图片描述"><br> 描述方法为：(x1,x2,y)，x采用左闭右开区间。(1,6,1),(2,5,2)。采用2个三元组即描述了如上的区域。<br> 该算法逐个读取像素，和阈值进行比较，实际执行效率极其低下。以下为采用SIMD并行指令集优化后的代码片段。<br> 核心的指令共四条：alignr，xor，cmp1，cmp2。</p> 
+<pre><code class="prism language-cpp">	mres <span class="token operator">=</span> <span class="token function">_mm_loadu_si128</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">const</span> __m128i<span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span>pBlob1<span class="token operator">-</span><span class="token number">16</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token comment">//0-15</span>
+	m1 <span class="token operator">=</span> <span class="token function">_mm_loadu_si128</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">const</span> __m128i<span class="token operator">*</span><span class="token punctuation">)</span>pBlob1<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//16-31</span>
+	mOffset <span class="token operator">=</span> <span class="token function">_mm_alignr_epi8</span><span class="token punctuation">(</span>m1<span class="token punctuation">,</span> mres<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//1-16</span>
+	<span class="token comment">//mH, mL 作差， 一个非0，一个是0，则对应位置赋值为1</span>
+	mR <span class="token operator">=</span> <span class="token function">_mm_xor_si128</span><span class="token punctuation">(</span><span class="token function">_mm_cmpeq_epi8</span><span class="token punctuation">(</span>mres<span class="token punctuation">,</span> mzero<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">_mm_cmpeq_epi8</span><span class="token punctuation">(</span>mOffset<span class="token punctuation">,</span> mzero<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">auto</span> a <span class="token operator">=</span> <span class="token function">_pext_u64</span><span class="token punctuation">(</span>_pos<span class="token punctuation">,</span> mR<span class="token punctuation">.</span>m128i_u64<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">uint8_t</span><span class="token punctuation">)</span>a<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> pRun1<span class="token punctuation">[</span><span class="token operator">++</span>n1Count<span class="token punctuation">]</span> <span class="token operator">=</span> x <span class="token operator">*</span> <span class="token number">16</span> <span class="token operator">+</span> <span class="token keyword">uint8_t</span><span class="token punctuation">(</span>a<span class="token punctuation">)</span><span class="token punctuation">;</span> a <span class="token operator">=</span> a <span class="token operator">&gt;&gt;</span> <span class="token number">8</span><span class="token punctuation">;</span> <span class="token punctuation">}</span>
+	<span class="token keyword">auto</span> b <span class="token operator">=</span> <span class="token function">_pext_u64</span><span class="token punctuation">(</span>_pos<span class="token punctuation">,</span> mR<span class="token punctuation">.</span>m128i_u64<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">uint8_t</span><span class="token punctuation">)</span>b<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> pRun1<span class="token punctuation">[</span><span class="token operator">++</span>n1Count<span class="token punctuation">]</span> <span class="token operator">=</span> x <span class="token operator">*</span> <span class="token number">16</span> <span class="token operator">+</span> <span class="token number">8</span> <span class="token operator">+</span> <span class="token keyword">uint8_t</span><span class="token punctuation">(</span>b<span class="token punctuation">)</span><span class="token punctuation">;</span> b <span class="token operator">=</span> b <span class="token operator">&gt;&gt;</span> <span class="token number">8</span><span class="token punctuation">;</span> <span class="token punctuation">}</span>
+</code></pre> 
+<p>alignr实现像素的错位,根据0-15和16-31，生成1-16。<br> 0-15和阈值比较，得到二值，1-16和阈值比较，得到二值。<br> 0-15的二值和1-16的二值异或 xor，结果为1的像素必定为游程的边界。<br> 使用_pext_u64搜集1的位置，得到游程编码。</p> 
+<h4><a id="112_38"></a>1.1.2.游程连接</h4> 
+<p>深度优先的方法实现检测，代码容易理解。而广度优先的方法，为了得到极致的效率，采用链表，其数据结构设计通常很复杂。<br> 采用分块的方式，每块放8个游程，块间用链表连接，放满后放到下一个块。<br> 当一个blob有7个游程时：<br> <img src="https://images2.imgbox.com/53/a7/wtpGgBye_o.png" alt="在这里插入图片描述"></p> 
+<p>当一个blob有10个游程时：<br> <img src="https://images2.imgbox.com/f1/56/5xILAs9g_o.png" alt="在这里插入图片描述"></p> 
+<p>红色的是索引指针，永远指向链表的尾部。绿色是next指针。<br> 当一个blob有18个游程时：<br> <img src="https://images2.imgbox.com/d3/72/XE11poet_o.png" alt="在这里插入图片描述"></p> 
+<p>红色的是索引指针，永远指向链表的尾部。绿色是next指针。<br> 可以看到，除了正常的单向链表连接外，设计了从首块到尾块的连接，使用首块的地址作为blob的唯一标识，如果判断新的游程需要加入这个blob，则从首块直接定位到可以加入未满的块。<br> <img src="https://images2.imgbox.com/0f/0e/RQwN8m39_o.png" alt="在这里插入图片描述"><br> 如上图所示，如果两个游程被下面的一行连接到一起，则需要对两个独立的链表进行连接，连接方法为：<br> 当一个有18个游程和一个有20个游程的blob被连到一起后：<br> <img src="https://images2.imgbox.com/d3/3e/vjdmJKbQ_o.png" alt="在这里插入图片描述"><br> 蓝色为B，红色为A。<br> 将B的尾(B的头索引指针指向位置)的next指针指向A的头。<br> 将B的头的索引指针指向A的尾(A的头索引指针指向位置）（新的游程将插入这个分块）。</p> 
+<h4><a id="113_61"></a>1.1.3.执行结果</h4> 
+<p>算法执行结果如下：<br> <img src="https://images2.imgbox.com/72/22/HViZoqc0_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/29/a6/ClfflXUH_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/41/30/H4L95o9e_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/2b/47/mbb86L66_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="114CPU_67"></a>1.1.4.总结：基于游程的方法是适合CPU的方法</h4> 
+<p>基于游程的方法，不管是游程提取还是游程连接，都适合在CPU完成。<br> 比如游程提取步骤，换到GPU上，每行开启一个线程进行游程提取，其耗时已经超过了从GPU拷贝整张blob图像到CPU的时间。<br> 至于游程连接步骤，则更是不可能在GPU上实现。</p> 
+<h3><a id="12_72"></a>1.2.基于标记的方法</h3> 
+<p>首先进行像素标记，然后对标记进行处理得到区域信息。<br> <img src="https://images2.imgbox.com/dd/d9/OBtn7kbW_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="121_75"></a>1.2.1.像素标记</h4> 
+<p>将灰度值接近，或者同类像素的对应位置的标记像素设置为相同值。在CPU上采用递归实现。</p> 
+<pre><code class="prism language-cpp"><span class="token comment">// 深度优先搜索函数，用于连通域分析和像素标记</span>
+<span class="token keyword">void</span> <span class="token function">DFS</span><span class="token punctuation">(</span><span class="token keyword">uint8_t</span><span class="token operator">*</span> image<span class="token punctuation">,</span> <span class="token keyword">int</span><span class="token operator">*</span> labels<span class="token punctuation">,</span> <span class="token keyword">int</span> currentLabel<span class="token punctuation">,</span> <span class="token keyword">int</span> x<span class="token punctuation">,</span> <span class="token keyword">int</span> y<span class="token punctuation">,</span> <span class="token keyword">int</span> nW<span class="token punctuation">,</span> <span class="token keyword">int</span> nH<span class="token punctuation">)</span> 
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>x <span class="token operator">&lt;</span> <span class="token number">0</span> <span class="token operator">||</span> x <span class="token operator">&gt;=</span> nW <span class="token operator">||</span> y <span class="token operator">&lt;</span> <span class="token number">0</span> <span class="token operator">||</span> y <span class="token operator">&gt;=</span> nH <span class="token operator">||</span> labels<span class="token punctuation">[</span>y <span class="token operator">*</span> nW <span class="token operator">+</span> x<span class="token punctuation">]</span> <span class="token operator">!=</span> <span class="token number">0</span> <span class="token operator">||</span> image<span class="token punctuation">[</span>y <span class="token operator">*</span> nW <span class="token operator">+</span> x<span class="token punctuation">]</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> 		<span class="token keyword">return</span><span class="token punctuation">;</span>  <span class="token comment">// 递归终止条件</span>
+
+	<span class="token comment">// 标记当前像素</span>
+	labels<span class="token punctuation">[</span>y <span class="token operator">*</span> nW <span class="token operator">+</span> x<span class="token punctuation">]</span> <span class="token operator">=</span> currentLabel<span class="token punctuation">;</span>
+
+	<span class="token comment">// 遍历相邻的像素</span>
+	<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span> i <span class="token operator">&lt;=</span> <span class="token number">1</span><span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span> 
+		<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> j <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span> j <span class="token operator">&lt;=</span> <span class="token number">1</span><span class="token punctuation">;</span> <span class="token operator">++</span>j<span class="token punctuation">)</span> 
+			<span class="token function">dfs</span><span class="token punctuation">(</span>image<span class="token punctuation">,</span> labels<span class="token punctuation">,</span> currentLabel<span class="token punctuation">,</span> x <span class="token operator">+</span> i<span class="token punctuation">,</span> y <span class="token operator">+</span> j<span class="token punctuation">,</span> nW<span class="token punctuation">,</span> nH<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">// 像素标记</span>
+<span class="token keyword">void</span> <span class="token function">Labeling</span><span class="token punctuation">(</span><span class="token keyword">uint8_t</span><span class="token operator">*</span> image<span class="token punctuation">,</span> <span class="token keyword">int</span><span class="token operator">*</span> labels<span class="token punctuation">,</span> <span class="token keyword">int</span> nW<span class="token punctuation">,</span> <span class="token keyword">int</span> nH<span class="token punctuation">)</span> 
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">int</span> currentLabel <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> nH<span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span> 
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> j <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> j <span class="token operator">&lt;</span> nW<span class="token punctuation">;</span> <span class="token operator">++</span>j<span class="token punctuation">)</span> 
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span>image<span class="token punctuation">[</span>i <span class="token operator">*</span> nW <span class="token operator">+</span> j<span class="token punctuation">]</span> <span class="token operator">==</span> <span class="token number">1</span> <span class="token operator">&amp;&amp;</span> labels<span class="token punctuation">[</span>i <span class="token operator">*</span> nW <span class="token operator">+</span> j<span class="token punctuation">]</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> 
+			<span class="token punctuation">{<!-- --></span>
+				<span class="token comment">// 新的连通域开始，递增标签值</span>
+				currentLabel<span class="token operator">++</span><span class="token punctuation">;</span>
+				<span class="token function">DFS</span><span class="token punctuation">(</span>image<span class="token punctuation">,</span> labels<span class="token punctuation">,</span> currentLabel<span class="token punctuation">,</span> j<span class="token punctuation">,</span> i<span class="token punctuation">,</span> nW<span class="token punctuation">,</span> nH<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="122_111"></a>1.2.2.标记压缩（可选）</h4> 
+<p>在GPU上进行区域信息获取时，需要知道共有多少个区域，或者哪些像素属于同一个区域，在计算特征时，属于一个区域的一堆像素只需要计算一个。<br> 如果在标记阶段，采用深度优先的方法，则标记本身就是连续的，不需要该步骤。<br> 但在GPU的像素标记实现算法中，通常采用合并的方式。因此，标记值必定不是从0到区域数量之间连续的，标记值最大可能是图像的像素个数。<br> 此时需要对标记进行压缩，示意如下：<br> <img src="https://images2.imgbox.com/44/f8/zM4pBS8S_o.png" alt="在这里插入图片描述"><br> 将之前不连续的前景标记修改为1的等差数列，在CPU上实现如下。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">void</span> <span class="token function">compressLabels</span><span class="token punctuation">(</span><span class="token keyword">int</span><span class="token operator">*</span> labels<span class="token punctuation">,</span> <span class="token keyword">int</span> width<span class="token punctuation">,</span> <span class="token keyword">int</span> height<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	std<span class="token double-colon punctuation">::</span>vector<span class="token operator">&lt;</span><span class="token keyword">int</span><span class="token operator">&gt;</span> uniqueLabels<span class="token punctuation">;</span>
+	std<span class="token double-colon punctuation">::</span>unordered_map<span class="token operator">&lt;</span><span class="token keyword">int</span><span class="token punctuation">,</span> <span class="token keyword">int</span><span class="token operator">&gt;</span> labelMap<span class="token punctuation">;</span>
+
+	<span class="token comment">// 1. 找到所有不同的标签值</span>
+	<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> width <span class="token operator">*</span> height<span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span> 
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">int</span> label <span class="token operator">=</span> labels<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>label <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token operator">&amp;&amp;</span> std<span class="token double-colon punctuation">::</span><span class="token function">find</span><span class="token punctuation">(</span>uniqueLabels<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> uniqueLabels<span class="token punctuation">.</span><span class="token function">end</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> label<span class="token punctuation">)</span> <span class="token operator">==</span> uniqueLabels<span class="token punctuation">.</span><span class="token function">end</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			uniqueLabels<span class="token punctuation">.</span><span class="token function">push_back</span><span class="token punctuation">(</span>label<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token comment">// 2. 为每个不同的标签值分配一个新的连续的整数值</span>
+	<span class="token keyword">int</span> newLabel <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> label <span class="token operator">:</span> uniqueLabels<span class="token punctuation">)</span> 
+	<span class="token punctuation">{<!-- --></span>
+		labelMap<span class="token punctuation">[</span>label<span class="token punctuation">]</span> <span class="token operator">=</span> newLabel<span class="token operator">++</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token comment">// 3. 遍历标签图，将每个像素的标签值替换为其新的整数值</span>
+	<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> width <span class="token operator">*</span> height<span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">int</span> label <span class="token operator">=</span> labels<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>label <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			labels<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> labelMap<span class="token punctuation">[</span>label<span class="token punctuation">]</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="123_152"></a>1.2.3.区域信息提取</h4> 
+<p>遍历图像，根据标记值，累加更新对应区域的面积，最大最小更新上下左右4个边界。</p> 
+<pre><code class="prism language-cpp">	std<span class="token double-colon punctuation">::</span>vector<span class="token operator">&lt;</span><span class="token keyword">int</span><span class="token operator">&gt;</span> <span class="token function">labelAreas</span><span class="token punctuation">(</span>labelCount<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	std<span class="token double-colon punctuation">::</span>vector<span class="token operator">&lt;</span><span class="token keyword">int</span><span class="token operator">&gt;</span> <span class="token function">labelTop</span><span class="token punctuation">(</span>labelCount<span class="token punctuation">,</span> nH<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	std<span class="token double-colon punctuation">::</span>vector<span class="token operator">&lt;</span><span class="token keyword">int</span><span class="token operator">&gt;</span> <span class="token function">labelLeft</span><span class="token punctuation">(</span>labelCount<span class="token punctuation">,</span> nW<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	std<span class="token double-colon punctuation">::</span>vector<span class="token operator">&lt;</span><span class="token keyword">int</span><span class="token operator">&gt;</span> <span class="token function">labelBottom</span><span class="token punctuation">(</span>labelCount<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	std<span class="token double-colon punctuation">::</span>vector<span class="token operator">&lt;</span><span class="token keyword">int</span><span class="token operator">&gt;</span> <span class="token function">labelRight</span><span class="token punctuation">(</span>labelCount<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> nH<span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> j <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> j <span class="token operator">&lt;</span> nW<span class="token punctuation">;</span> <span class="token operator">++</span>j<span class="token punctuation">)</span> 
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">int</span> label <span class="token operator">=</span> labels<span class="token punctuation">[</span>i <span class="token operator">*</span> nW <span class="token operator">+</span> j<span class="token punctuation">]</span><span class="token punctuation">;</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span>label <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+				labelAreas<span class="token punctuation">[</span>label<span class="token punctuation">]</span><span class="token operator">++</span><span class="token punctuation">;</span>
+				labelTop<span class="token punctuation">[</span>label<span class="token punctuation">]</span> <span class="token operator">=</span> std<span class="token double-colon punctuation">::</span><span class="token function">min</span><span class="token punctuation">(</span>labelTop<span class="token punctuation">[</span>label<span class="token punctuation">]</span><span class="token punctuation">,</span> i<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				labelLeft<span class="token punctuation">[</span>label<span class="token punctuation">]</span> <span class="token operator">=</span> std<span class="token double-colon punctuation">::</span><span class="token function">min</span><span class="token punctuation">(</span>labelLeft<span class="token punctuation">[</span>label<span class="token punctuation">]</span><span class="token punctuation">,</span> j<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				labelBottom<span class="token punctuation">[</span>label<span class="token punctuation">]</span> <span class="token operator">=</span> std<span class="token double-colon punctuation">::</span><span class="token function">max</span><span class="token punctuation">(</span>labelBottom<span class="token punctuation">[</span>label<span class="token punctuation">]</span><span class="token punctuation">,</span> i<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				labelRight<span class="token punctuation">[</span>label<span class="token punctuation">]</span> <span class="token operator">=</span> std<span class="token double-colon punctuation">::</span><span class="token function">max</span><span class="token punctuation">(</span>labelRight<span class="token punctuation">[</span>label<span class="token punctuation">]</span><span class="token punctuation">,</span> j<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+</code></pre> 
+<h2><a id="2GPU_177"></a>第2章基于标记的方法在GPU实现</h2> 
+<h3><a id="12CPUGPU_178"></a>1.2节中对基于标记的方式在CPU上的实现进行了原理验证。在GPU上的实现，需要采用不同的算法思路。</h3> 
+<p>2.1.像素标记方法<br> 为了充分利用GPU的并行处理优势，每像素一个线程，进行像素标记。</p> 
+<h4><a id="2111UnionFind_2017Npp_181"></a>2.1.1.方案1：Union-Find 方法，2017年提出，Npp使用的方案</h4> 
+<p>实现原理：An Optimized Union-Find Algorithm for Connected Components Labeling Using GPUs (2017)。<br> Step1：划分为32<em>32的网格，对应1个block最多1024线程。<br> Step2：每个网格中标记初始化。<br> <img src="https://images2.imgbox.com/cc/df/ptAfvf8V_o.png" alt="在这里插入图片描述"><br> Step3：每个网格进行行列粗合并。<br> <img src="https://images2.imgbox.com/b2/e5/46aL6kQh_o.png" alt="在这里插入图片描述"><br> Step3：每个网格局部找根节点并修改标记为根节点标记值。<br> <img src="https://images2.imgbox.com/53/9e/K0BW3bzQ_o.png" alt="在这里插入图片描述"><br> Step4：所有网格边界像素分析。<br> <img src="https://images2.imgbox.com/b3/3a/mKaLwPWk_o.png" alt="在这里插入图片描述"><br> 直接调用Nppi接口：<br> status = nppiLabelMarkersUF_8u32u_C1R(<br> (Npp8u</em>)imSrc.Ptr(), imSrc.Width(),<br> (Npp32u*)imAResult.Ptr(), imAResult.Width() * imAResult.Depth(),<br> oSrcSizeROI, nppiNormInf, d_tmp);<br> 对于8k<em>8k大小的图像，RTX4080耗时17ms。<br> <img src="https://images2.imgbox.com/f0/1d/4dmACMNt_o.png" alt="在这里插入图片描述"><br> 和论文中耗时还有差距（4k</em>4k 1070耗时3.3ms）。<br> 调用Npp，4080显卡，8k*8k图像需要17ms。自己实现可以超过Npp速度。</p> 
+<h4><a id="2122Komura2015_202"></a>2.1.2.方案2：Komura方法，2015年提出</h4> 
+<p>Komura亮点：在标记初始化阶段，进行了连接判断。得到一个区域内部像素串。根据像素串找根节点，将所有像素赋值为根节点的标记。<br> 实现原理：GPU-based cluster-labeling algorithm without the use of conventional iteration use of conventional iteration（Komura，小村，2015）<br> Step1初始化：标记初始化，每个像素如果和左上有连接，初始化为左上像素的标记值。<br> Step2分析：每个像素找左上，递归找，直到找到根节点，称为root，当前像素赋值为根节点。<br> Step3合并：标记合并，一个区域多个root的情况消除。<br> Step4分析：同Step2，重新找根节点。<br> <img src="https://images2.imgbox.com/57/77/2iZEplSo_o.png" alt="在这里插入图片描述"><br> Step5：背景像素标记赋值为0。<br> 该论文中的直接法，有github实现<br> Github地址：<a href="https://github.com/FolkeV/CUDA_CCL">https://github.com/FolkeV/CUDA_CCL</a><br> 对于8k*8k大小的图像，4080显卡，耗时3.5ms。<br> 论文中给出了Komura直接法和两阶段法的耗时对比<br> <img src="https://images2.imgbox.com/8a/2a/mw7D4fGF_o.png" alt="在这里插入图片描述"><br> 采用两阶段方法，相比直接法，有10%的效率提升。</p> 
+<h4><a id="2133Playne2018_218"></a>2.1.3.方案3：Playne方法，2018年提出</h4> 
+<p>实现原理：A New Algorithm for Parallel Connected-Component Labelling on GPUs(Playne 普莱恩 2018)。<br> 论文中对比了label方法，Komura方法和作者本人提出的Playne方法。<br> Komura方法和Playne方法比较:<br> <img src="https://images2.imgbox.com/36/da/wUclAkSQ_o.png" alt="在这里插入图片描述"><br> Playne使用两阶段，block，共享内存和shl指令优化。<br> <img src="https://images2.imgbox.com/ff/d9/VD4n6KWk_o.png" alt="Playne方法优化后（相比Komura直接法60%左右的提升）"><br> 对于Ising数据集，，Playne方法相比Komura有66%的效率提升（40ms-&gt;24ms）。<br> 作者使用显卡为K20X，处理能力为3060的1/4，为3090的1/8。即对于8k*8k的图像，完成区域标记仅需要3ms。<br> <img src="https://images2.imgbox.com/49/a5/KD3oZMdq_o.png" alt="Playne方法论文中使用的K20显卡和3060显卡比较"></p> 
+<h3><a id="22_228"></a>2.2.标记压缩方法</h3> 
+<p>将之前不连续的前景标记修改为1的等差数列，如下图所示：<br> <img src="https://images2.imgbox.com/26/df/Wi1ytk3e_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="22116000ms_231"></a>2.2.1.方案1：串行得到压缩后映射关系，耗时6000ms</h4> 
+<p>GPU串行方案，使用1个线程计算压缩前标记和压缩后标记的映射关系，使用像素个数线程修改标记。<br> 1个线程的核函数，8k*8k大小的图像，运行需要6200ms。</p> 
+<pre><code class="prism language-cpp">__global__ <span class="token keyword">void</span> <span class="token function">compressLabelsGetMax</span><span class="token punctuation">(</span><span class="token keyword">int</span><span class="token operator">*</span> labels<span class="token punctuation">,</span> <span class="token keyword">int</span><span class="token operator">*</span> labelMap<span class="token punctuation">,</span> <span class="token keyword">int</span><span class="token operator">*</span> nCount<span class="token punctuation">,</span><span class="token keyword">int</span> width<span class="token punctuation">,</span> <span class="token keyword">int</span> height<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">bool</span> isFind<span class="token punctuation">;</span>
+	<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> width <span class="token operator">*</span> height<span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">int</span> label <span class="token operator">=</span> labels<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>label <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">)</span> 
+			<span class="token keyword">continue</span><span class="token punctuation">;</span>
+		isFind <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+		<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> j <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> j <span class="token operator">&lt;</span> <span class="token operator">*</span>nCount<span class="token punctuation">;</span> j<span class="token operator">++</span><span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span>labelMap<span class="token punctuation">[</span>j<span class="token punctuation">]</span> <span class="token operator">==</span> label<span class="token punctuation">)</span>
+			<span class="token punctuation">{<!-- --></span>
+				isFind <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+				<span class="token keyword">break</span><span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>isFind<span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			labelMap<span class="token punctuation">[</span><span class="token punctuation">(</span><span class="token operator">*</span>nCount<span class="token punctuation">)</span><span class="token operator">++</span><span class="token punctuation">]</span> <span class="token operator">=</span> label<span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>而得到映射关系后，使用像素个数线程修改标记的核函数，运行时间为4ms，核函数实现在第2章2.3小节。</p> 
+<h4><a id="222212ms_261"></a>2.2.2.方案2：排序+去重，当前最优实现12ms</h4> 
+<p>拷贝图像，所有像素排序，去掉相邻的重复像素。</p> 
+<pre><code class="prism language-cpp"><span class="token comment">//图像拷贝0.9ms</span>
+<span class="token function">cudaMemcpy</span><span class="token punctuation">(</span>d_labels_cpy<span class="token punctuation">,</span> d_labels<span class="token punctuation">,</span> numPixels <span class="token operator">*</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">int</span><span class="token punctuation">)</span><span class="token punctuation">,</span> cudaMemcpyDeviceToDevice<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">//数据结构转换</span>
+device_ptr<span class="token operator">&lt;</span><span class="token keyword">uint32_t</span><span class="token operator">&gt;</span> <span class="token function">dev_ptr</span><span class="token punctuation">(</span>d_labels_cpy<span class="token punctuation">)</span><span class="token punctuation">;</span>
+device_vector<span class="token operator">&lt;</span><span class="token keyword">uint32_t</span><span class="token operator">&gt;</span> <span class="token function">d_vector</span><span class="token punctuation">(</span>dev_ptr<span class="token punctuation">,</span> dev_ptr <span class="token operator">+</span> nW <span class="token operator">*</span> nH<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		
+<span class="token comment">//GPU排序10ms</span>
+<span class="token function">GPU_sort</span><span class="token punctuation">(</span>d_vector<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> d_vector<span class="token punctuation">.</span><span class="token function">end</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		
+<span class="token comment">//相邻的重复像素去重 0.6ms</span>
+<span class="token keyword">auto</span> uni <span class="token operator">=</span> <span class="token function">GPU_unique</span><span class="token punctuation">(</span>d_vector<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> d_vector<span class="token punctuation">.</span><span class="token function">end</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">//blob数量</span>
+nCompressedLabelCount <span class="token operator">=</span> uni <span class="token operator">-</span> d_vector<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> nCompressedLabelCount <span class="token operator">&lt;&lt;</span> std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+</code></pre> 
+<p>拷贝图像0.9ms，像素排序10ms，去掉相邻的重复像素0.6ms，共耗时11.5ms。<br> 逐像素映射的核函数耗时0.5ms，共耗时12ms。<br> 该方法在stackoverflow也查到过:<br> <a href="https://stackoverflow.com/questions/28797147/compress-sparse-data-with-cuda-ccl-connected-component-labeling-reduction" rel="nofollow">https://stackoverflow.com/questions/28797147/compress-sparse-data-with-cuda-ccl-connected-component-labeling-reduction</a><br> <img src="https://images2.imgbox.com/38/b4/NX5DE8W7_o.png" alt="在这里插入图片描述"><br> 另外提供了一种使用thrust::lower_bound代替二分查找的方案。<br> 二分查找的方案:<br> <a href="https://stackoverflow.com/questions/21658518/search-an-ordered-array-in-a-cuda-kernel" rel="nofollow">https://stackoverflow.com/questions/21658518/search-an-ordered-array-in-a-cuda-kernel</a></p> 
+<h4><a id="2233Nppi_290"></a>2.2.3.方案3：直接调用Nppi提供的接口</h4> 
+<p>nppi中提供的接口，对标记图进行原地操作，直接得到压缩后的图像;</p> 
+<pre><code class="prism language-cpp">status <span class="token operator">=</span> <span class="token function">nppiCompressMarkerLabelsUF_32u_C1IR</span><span class="token punctuation">(</span><span class="token punctuation">(</span>Npp32u<span class="token operator">*</span><span class="token punctuation">)</span>d_labels<span class="token punctuation">,</span> numCols <span class="token operator">*</span> <span class="token number">4</span><span class="token punctuation">,</span> oSrcSizeROI<span class="token punctuation">,</span>
+	nW <span class="token operator">*</span> nH<span class="token punctuation">,</span> <span class="token operator">&amp;</span>nCompressedLabelCount<span class="token punctuation">,</span> d_tmp2<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//12ms</span>
+</code></pre> 
+<p>总耗时12ms，和方案2耗时接近。因此猜测nppi中原理同方案2。</p> 
+<h3><a id="23_299"></a>2.3.标记映射方法</h3> 
+<p>根据2.2.1和2.2.2中得到的映射表，修改标记图像素。核函数实现，对于8k*8k大小的图像，运行需要4ms：</p> 
+<pre><code class="prism language-cpp">__global__ <span class="token keyword">void</span> <span class="token function">compressLabelsRemap</span><span class="token punctuation">(</span><span class="token keyword">int</span><span class="token operator">*</span> labels<span class="token punctuation">,</span> <span class="token keyword">int</span><span class="token operator">*</span> labelMap<span class="token punctuation">,</span> <span class="token keyword">int</span><span class="token operator">*</span> nCount<span class="token punctuation">,</span> <span class="token keyword">int</span> width<span class="token punctuation">,</span> <span class="token keyword">int</span> height<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">int</span> x <span class="token operator">=</span> blockIdx<span class="token punctuation">.</span>x <span class="token operator">*</span> blockDim<span class="token punctuation">.</span>x <span class="token operator">+</span> threadIdx<span class="token punctuation">.</span>x<span class="token punctuation">;</span>
+	<span class="token keyword">int</span> y <span class="token operator">=</span> blockIdx<span class="token punctuation">.</span>y <span class="token operator">*</span> blockDim<span class="token punctuation">.</span>y <span class="token operator">+</span> threadIdx<span class="token punctuation">.</span>y<span class="token punctuation">;</span>
+	<span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>x <span class="token operator">&lt;</span> width <span class="token operator">&amp;&amp;</span> y <span class="token operator">&lt;</span> height<span class="token punctuation">)</span> 
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">int</span> index <span class="token operator">=</span> y <span class="token operator">*</span> width <span class="token operator">+</span> x<span class="token punctuation">;</span>
+		<span class="token keyword">int</span> label <span class="token operator">=</span> labels<span class="token punctuation">[</span>index<span class="token punctuation">]</span><span class="token punctuation">;</span>
+
+		<span class="token keyword">bool</span> isFind <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+		
+		<span class="token keyword">for</span> <span class="token punctuation">(</span>i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> <span class="token operator">*</span>nCount<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span>label <span class="token operator">==</span> labelMap<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">)</span>
+			<span class="token punctuation">{<!-- --></span>
+				isFind <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+				<span class="token keyword">break</span><span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>isFind<span class="token punctuation">)</span>
+			<span class="token keyword">return</span><span class="token punctuation">;</span>
+
+		labels<span class="token punctuation">[</span>index<span class="token punctuation">]</span> <span class="token operator">=</span> i<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>需要对于8k*8k大小的图像，需要4ms。<br> <a href="https://stackoverflow.com/questions/21658518/search-an-ordered-array-in-a-cuda-kernel" rel="nofollow">https://stackoverflow.com/questions/21658518/search-an-ordered-array-in-a-cuda-kernel</a><br> 这个可以优化，参考这个链接，使用二分搜索,有6倍的效率提升，可做到1ms以下。</p> 
+<h3><a id="24_333"></a>2.4.区域信息提取方法</h3> 
+<p>根据1.2.3中CPU上的代码中for循环内容放到核函数，一个线程计算一个像素，最终得到，8k*8k图像，允许耗时0.4ms。</p> 
+<pre><code class="prism language-cpp">__global__ <span class="token keyword">void</span> <span class="token function">compute_blob_info</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">int</span><span class="token operator">*</span> labels<span class="token punctuation">,</span> <span class="token keyword">int</span><span class="token operator">*</span> labelAreas<span class="token punctuation">,</span> <span class="token keyword">int</span><span class="token operator">*</span> labelTop<span class="token punctuation">,</span> <span class="token keyword">int</span><span class="token operator">*</span> labelLeft<span class="token punctuation">,</span> <span class="token keyword">int</span><span class="token operator">*</span> labelBottom<span class="token punctuation">,</span> <span class="token keyword">int</span><span class="token operator">*</span> labelRight<span class="token punctuation">,</span> <span class="token keyword">int</span> labelCount<span class="token punctuation">,</span> <span class="token keyword">int</span> width<span class="token punctuation">,</span> <span class="token keyword">int</span> height<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">int</span> x <span class="token operator">=</span> blockIdx<span class="token punctuation">.</span>x <span class="token operator">*</span> blockDim<span class="token punctuation">.</span>x <span class="token operator">+</span> threadIdx<span class="token punctuation">.</span>x<span class="token punctuation">;</span>
+	<span class="token keyword">int</span> y <span class="token operator">=</span> blockIdx<span class="token punctuation">.</span>y <span class="token operator">*</span> blockDim<span class="token punctuation">.</span>y <span class="token operator">+</span> threadIdx<span class="token punctuation">.</span>y<span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>x <span class="token operator">&gt;=</span> width <span class="token operator">&amp;&amp;</span> y <span class="token operator">&gt;=</span> height<span class="token punctuation">)</span>
+		<span class="token keyword">return</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">int</span> label <span class="token operator">=</span> labels<span class="token punctuation">[</span>y <span class="token operator">*</span> width <span class="token operator">+</span> x<span class="token punctuation">]</span> <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>label <span class="token operator">&gt;=</span> labelCount <span class="token operator">||</span> label <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">)</span>
+		<span class="token keyword">return</span><span class="token punctuation">;</span>
+
+	<span class="token function">atomicAdd</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>labelAreas<span class="token punctuation">[</span>label<span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">atomicMin</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>labelTop<span class="token punctuation">[</span>label<span class="token punctuation">]</span><span class="token punctuation">,</span> y<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">atomicMin</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>labelLeft<span class="token punctuation">[</span>label<span class="token punctuation">]</span><span class="token punctuation">,</span> x<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">atomicMax</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>labelBottom<span class="token punctuation">[</span>label<span class="token punctuation">]</span><span class="token punctuation">,</span> y<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">atomicMax</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>labelRight<span class="token punctuation">[</span>label<span class="token punctuation">]</span><span class="token punctuation">,</span> x<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="25_356"></a>2.5.存在问题及解决方案</h3> 
+<p>基于标记的方案，暂时可以拿到缺陷的外接矩形和面积。缺陷的对比度，可以在GPU中计算，缺陷的区域，如果支持GPU图像直接显示，也可以在界面展示。<br> 标记图采用Int32 最大支持4k<em>4k的图像。 可以采用分块的形式接触限制。<br> 标记压缩步骤当前还没有找到比较好的优化方案，当前最优实现方案和nppi的耗时相当，8k</em>8k的图像需要12ms。</p> 
+<h2><a id="3GPU_360"></a>第3章基于游程的方法在GPU实现</h2> 
+<p>1.2节中对基于标记的方式在CPU上的实现进行了原理验证。在GPU上的实现，需要采用不同的算法思路。<br> 方案1：将blob全图从GPU拷贝到CPU，在CPU中完成游程提取。<br> 方案2：在GPU中完成游程提取，进行压缩后，拷贝到CPU。<br> 如下图所示，对图中的游程区域进行提取并压缩，增加图中游程区域的数据量，进行耗时统计，图像大小为8K*8K，按游程区域占比为1%，2%，4%，100%进行统计。<br> <img src="https://images2.imgbox.com/ee/94/v2szMEPH_o.png" alt="4%前景像素blob图像8k*8k"><br> <img src="https://images2.imgbox.com/f3/d7/Dg38qTIc_o.png" alt="100%前景像素blob图像8k*8k"></p> 
+<h3><a id="31_367"></a>3.1.游程提取</h3> 
+<p>游程提取完成如下操作：<br> <img src="https://images2.imgbox.com/e6/3b/qjvkenE5_o.png" alt="在这里插入图片描述"><br> 使用一张游程图像，记录每一行前景区域的左右边界。每行开启一个线程，进行游程提取，统计游程的占比对游程提取耗时的影响。在4080显卡上进行测试，图像大小为8K*8K。</p> 
+<table><thead><tr><th>ms</th><th>1%</th><th>2%</th><th>4%</th><th>100%</th></tr></thead><tbody><tr><td>游程提取</td><td>1.3</td><td>1.3</td><td>1.3</td><td>0.6</td></tr></tbody></table> 
+<p>不管提多少数据量的游程，耗时无变化。<br> <img src="https://images2.imgbox.com/a9/23/vEdHgJtH_o.png" alt="100%游程图像8k*8k,由于有规律所以耗时短"><br> 100%游程图像8k*8k,由于有规律所以耗时短。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">template</span><span class="token operator">&lt;</span><span class="token keyword">bool</span> bLight<span class="token operator">&gt;</span>
+__global__ <span class="token keyword">void</span> <span class="token function">GetRun</span><span class="token punctuation">(</span><span class="token keyword">uint8_t</span><span class="token operator">*</span> d_blob<span class="token punctuation">,</span> <span class="token keyword">uint16_t</span><span class="token operator">*</span> d_run<span class="token punctuation">,</span> <span class="token keyword">int</span> nRunStep<span class="token punctuation">,</span> <span class="token keyword">uint32_t</span><span class="token operator">*</span> d_count<span class="token punctuation">,</span> <span class="token keyword">int</span> nHeight<span class="token punctuation">,</span> <span class="token keyword">int</span> nWidth<span class="token punctuation">,</span><span class="token keyword">int</span> nThre<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">const</span> <span class="token keyword">unsigned</span> <span class="token keyword">int</span> iy <span class="token operator">=</span> <span class="token punctuation">(</span>blockIdx<span class="token punctuation">.</span>x <span class="token operator">*</span> blockDim<span class="token punctuation">.</span>x<span class="token punctuation">)</span> <span class="token operator">+</span> threadIdx<span class="token punctuation">.</span>x<span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>iy <span class="token operator">&gt;=</span> nHeight<span class="token punctuation">)</span>
+		<span class="token keyword">return</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">uint8_t</span><span class="token operator">*</span> pLine <span class="token operator">=</span> d_blob <span class="token operator">+</span> iy <span class="token operator">*</span> nWidth<span class="token punctuation">;</span>
+	<span class="token keyword">uint16_t</span><span class="token operator">*</span> pRunLine <span class="token operator">=</span> d_run <span class="token operator">+</span> nRunStep <span class="token operator">/</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">uint16_t</span><span class="token punctuation">)</span> <span class="token operator">*</span> iy<span class="token punctuation">;</span>
+	<span class="token keyword">uint16_t</span> nRun <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+	<span class="token keyword">uint16_t</span> nRunCount <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	<span class="token keyword">bool</span> bFlag <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+	<span class="token keyword">int</span> ix<span class="token punctuation">;</span>
+	<span class="token keyword">for</span> <span class="token punctuation">(</span>ix <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> ix <span class="token operator">&lt;</span> nWidth<span class="token punctuation">;</span> ix<span class="token operator">++</span><span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>bLight<span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span>pLine<span class="token punctuation">[</span>ix<span class="token punctuation">]</span> <span class="token operator">&gt;</span> nThre<span class="token punctuation">)</span>
+			<span class="token punctuation">{<!-- --></span>
+				<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>bFlag<span class="token punctuation">)</span>
+				<span class="token punctuation">{<!-- --></span>
+					pRunLine<span class="token punctuation">[</span>nRun<span class="token operator">++</span><span class="token punctuation">]</span> <span class="token operator">=</span> ix<span class="token punctuation">;</span>
+					bFlag <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+				<span class="token punctuation">}</span>
+				nRunCount<span class="token operator">++</span><span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+			<span class="token keyword">else</span>
+			<span class="token punctuation">{<!-- --></span>
+				<span class="token keyword">if</span> <span class="token punctuation">(</span>bFlag<span class="token punctuation">)</span>
+				<span class="token punctuation">{<!-- --></span>
+					pRunLine<span class="token punctuation">[</span>nRun<span class="token operator">++</span><span class="token punctuation">]</span> <span class="token operator">=</span> ix<span class="token punctuation">;</span>
+					bFlag <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+
+					<span class="token keyword">if</span> <span class="token punctuation">(</span>nRun <span class="token operator">/</span> <span class="token number">2</span> <span class="token operator">&gt;</span> <span class="token number">499</span><span class="token punctuation">)</span>
+						<span class="token keyword">break</span><span class="token punctuation">;</span>
+				<span class="token punctuation">}</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">else</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span>pLine<span class="token punctuation">[</span>ix<span class="token punctuation">]</span> <span class="token operator">&lt;</span> nThre<span class="token punctuation">)</span>
+			<span class="token punctuation">{<!-- --></span>
+				<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>bFlag<span class="token punctuation">)</span>
+				<span class="token punctuation">{<!-- --></span>
+					pRunLine<span class="token punctuation">[</span>nRun<span class="token operator">++</span><span class="token punctuation">]</span> <span class="token operator">=</span> ix<span class="token punctuation">;</span>
+					bFlag <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+				<span class="token punctuation">}</span>
+				nRunCount<span class="token operator">++</span><span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+			<span class="token keyword">else</span>
+			<span class="token punctuation">{<!-- --></span>
+				<span class="token keyword">if</span> <span class="token punctuation">(</span>bFlag<span class="token punctuation">)</span>
+				<span class="token punctuation">{<!-- --></span>
+					pRunLine<span class="token punctuation">[</span>nRun<span class="token operator">++</span><span class="token punctuation">]</span> <span class="token operator">=</span> ix<span class="token punctuation">;</span>
+					bFlag <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+
+					<span class="token keyword">if</span> <span class="token punctuation">(</span>nRun <span class="token operator">/</span> <span class="token number">2</span> <span class="token operator">&gt;</span> <span class="token number">499</span><span class="token punctuation">)</span>
+						<span class="token keyword">break</span><span class="token punctuation">;</span>
+				<span class="token punctuation">}</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>bFlag<span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		pRunLine<span class="token punctuation">[</span>nRun<span class="token operator">++</span><span class="token punctuation">]</span> <span class="token operator">=</span> ix<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+
+	pRunLine<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">=</span> nRun <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">;</span>
+	d_count<span class="token punctuation">[</span>iy<span class="token punctuation">]</span> <span class="token operator">=</span> nRun<span class="token punctuation">;</span>
+
+	<span class="token comment">//if (iy == 0)</span>
+	<span class="token comment">//{<!-- --></span>
+	<span class="token comment">//	for (int i = 0; i &lt; nRun; i++)</span>
+	<span class="token comment">//		printf("%d ", pRunLine[i]);</span>
+	<span class="token comment">//	printf("\n");</span>
+	<span class="token comment">//}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>这个实现不一定是最优的，亮暗同时提取，应该能实现更快的速度。</p> 
+<pre><code class="prism language-cpp">GetRun<span class="token operator">&lt;</span><span class="token boolean">true</span><span class="token operator">&gt;</span> <span class="token operator">&lt;&lt;</span> <span class="token operator">&lt;</span>grid<span class="token punctuation">,</span> block <span class="token operator">&gt;&gt;</span> <span class="token operator">&gt;</span>  <span class="token punctuation">(</span>d_blob<span class="token punctuation">,</span> d_run<span class="token punctuation">,</span> nRunStep<span class="token punctuation">,</span> d_count<span class="token punctuation">,</span> nH<span class="token punctuation">,</span> nW<span class="token punctuation">,</span> <span class="token number">128</span><span class="token operator">+</span><span class="token number">6</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+GetRun<span class="token operator">&lt;</span><span class="token boolean">false</span><span class="token operator">&gt;</span> <span class="token operator">&lt;&lt;</span> <span class="token operator">&lt;</span>grid<span class="token punctuation">,</span> block <span class="token operator">&gt;&gt;</span> <span class="token operator">&gt;</span> <span class="token punctuation">(</span>d_blob<span class="token punctuation">,</span> d_run <span class="token operator">+</span> nRunStep<span class="token operator">/</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">uint16_t</span><span class="token punctuation">)</span> <span class="token operator">*</span> nH<span class="token punctuation">,</span> nRunStep<span class="token punctuation">,</span> d_count<span class="token punctuation">,</span> nH<span class="token punctuation">,</span> nW<span class="token punctuation">,</span> <span class="token number">128</span> <span class="token operator">-</span> <span class="token number">6</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>提取结果：<br> <img src="https://images2.imgbox.com/f6/d4/5J7cMh69_o.png" alt="100%游程图像游程提取结果"></p> 
+<h3><a id="32_467"></a>3.2.游程压缩</h3> 
+<p>游程压缩做如下操作：<br> <img src="https://images2.imgbox.com/bd/d5/u2RlMBRe_o.png" alt="在这里插入图片描述"><br> 将每一行稀疏的游程，拷贝到一起，便于拷贝传输。为了实现并行拷贝，需要知道每一行存放的起始位置，这个操作就是前缀和。<br> <img src="https://images2.imgbox.com/0a/8e/ioNz6RCx_o.png" alt="在这里插入图片描述"><br> 首先计算绿色数组，由于要存放游程个数，因此，每个元素加1。<br> 然后计算蓝色数组，每个元素是绿色数组中下标小于当前下标的所有像素和。<br> 如果采用如下的核函数计算，则不能充分利用CPU的并行计算能力：</p> 
+<pre><code class="prism language-cpp">__global__ <span class="token keyword">void</span> <span class="token function">GetRun</span><span class="token punctuation">(</span><span class="token keyword">uint32_t</span><span class="token operator">*</span> d_count<span class="token punctuation">,</span> <span class="token keyword">uint32_t</span><span class="token operator">*</span> d_presum<span class="token punctuation">,</span> <span class="token keyword">int</span> nLength<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">const</span> <span class="token keyword">unsigned</span> <span class="token keyword">int</span> ix <span class="token operator">=</span> <span class="token punctuation">(</span>blockIdx<span class="token punctuation">.</span>x <span class="token operator">*</span> blockDim<span class="token punctuation">.</span>x<span class="token punctuation">)</span> <span class="token operator">+</span> threadIdx<span class="token punctuation">.</span>x<span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>ix <span class="token operator">&gt;=</span> nLength<span class="token punctuation">)</span>
+		<span class="token keyword">return</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> ix<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span>
+		d_presum<span class="token punctuation">[</span>ix<span class="token punctuation">]</span> <span class="token operator">=</span> d_count<span class="token punctuation">[</span>ix<span class="token punctuation">]</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>采用GPU前缀和优化方法，当前采用thrust中接口：</p> 
+<pre><code class="prism language-cpp">thrust<span class="token double-colon punctuation">::</span><span class="token function">exclusive_scan</span><span class="token punctuation">(</span>thrust<span class="token double-colon punctuation">::</span>device<span class="token punctuation">,</span> d_count<span class="token punctuation">,</span> d_count <span class="token operator">+</span> nHRun<span class="token punctuation">,</span> d_presum<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//0.04</span>
+</code></pre> 
+<p>则耗时可以忽略不计。<br> 然后每行开启一个线程，进行游程数据拷贝，最后一行线程计算压缩后数据长度：</p> 
+<pre><code class="prism language-cpp">__global__ <span class="token keyword">void</span> <span class="token function">copy_height</span><span class="token punctuation">(</span><span class="token keyword">uint16_t</span> <span class="token operator">*</span> pRun<span class="token punctuation">,</span> <span class="token keyword">int</span> nRunStep<span class="token punctuation">,</span> <span class="token keyword">uint32_t</span> <span class="token operator">*</span> d_count<span class="token punctuation">,</span> <span class="token keyword">uint32_t</span> <span class="token operator">*</span> d_presum<span class="token punctuation">,</span> <span class="token keyword">int</span> nHeight<span class="token punctuation">,</span> <span class="token keyword">uint16_t</span> <span class="token operator">*</span> pCompressRun<span class="token punctuation">,</span> <span class="token keyword">int</span><span class="token operator">*</span> pnCompressLenght<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">const</span> <span class="token keyword">unsigned</span> <span class="token keyword">int</span> iy <span class="token operator">=</span> <span class="token punctuation">(</span>blockIdx<span class="token punctuation">.</span>x <span class="token operator">*</span> blockDim<span class="token punctuation">.</span>x<span class="token punctuation">)</span> <span class="token operator">+</span> threadIdx<span class="token punctuation">.</span>x<span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>iy <span class="token operator">&gt;=</span> nHeight<span class="token punctuation">)</span>
+		<span class="token keyword">return</span><span class="token punctuation">;</span>
+
+	<span class="token function">memcpy</span><span class="token punctuation">(</span>pCompressRun <span class="token operator">+</span> d_presum<span class="token punctuation">[</span>iy<span class="token punctuation">]</span><span class="token punctuation">,</span>   <span class="token comment">//To</span>
+		pRun <span class="token operator">+</span> nRunStep <span class="token operator">/</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">uint16_t</span><span class="token punctuation">)</span> <span class="token operator">*</span> iy<span class="token punctuation">,</span> <span class="token comment">//From</span>
+		<span class="token punctuation">(</span>d_count<span class="token punctuation">[</span>iy<span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">uint16_t</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//Count</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>iy <span class="token operator">==</span> nHeight <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token operator">*</span>pnCompressLenght <span class="token operator">=</span> d_presum<span class="token punctuation">[</span>iy<span class="token punctuation">]</span> <span class="token operator">+</span> d_count<span class="token punctuation">[</span>iy<span class="token punctuation">]</span> <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>核函数的调用方法如下：</p> 
+<pre><code class="prism language-cpp">dim3 <span class="token function">block1</span><span class="token punctuation">(</span><span class="token number">16</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+dim3 <span class="token function">grid1</span><span class="token punctuation">(</span><span class="token punctuation">(</span>nHRun <span class="token operator">+</span> <span class="token number">15</span><span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token number">16</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+copy_height <span class="token operator">&lt;&lt;</span> <span class="token operator">&lt;</span> grid1<span class="token punctuation">,</span> block1 <span class="token operator">&gt;&gt;</span> <span class="token operator">&gt;</span> <span class="token punctuation">(</span>d_run<span class="token punctuation">,</span> nRunStep<span class="token punctuation">,</span> d_count<span class="token punctuation">,</span> d_presum<span class="token punctuation">,</span> nHRun<span class="token punctuation">,</span> d_pCompressRun<span class="token punctuation">,</span> pnCompressLenght<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>在4080显卡上进行测试，图像大小为8K*8K。</p> 
+<table><thead><tr><th>ms</th><th>1%</th><th>2%</th><th>4%</th><th>100%</th></tr></thead><tbody><tr><td>前缀和计算</td><td>0.04</td><td>0.04</td><td>0.04</td><td>0.04</td></tr><tr><td>游程压缩</td><td>0.04</td><td>0.05</td><td>0.07</td><td>0.6</td></tr><tr><td>随着提取游程数量的增加，压缩的耗时也会增加，但总体耗时不超过1ms。</td><td></td><td></td><td></td><td></td></tr></tbody></table> 
+<h3><a id="33_525"></a>3.3.游程拷贝</h3> 
+<p>将压缩后的游程从GPU拷贝到CPU。<br> 对于一张8K*8K的图，3060显卡，GPU拷贝到CPU上耗时8ms，下表统计不同游程数据压缩后的拷贝耗时，相比于blob全图拷贝，有多少提升,单位为ms。<br> 100%前景像素blob图像，每行最多提取500个游程。</p> 
+<table><thead><tr><th>ms</th><th>1%</th><th>2%</th><th>4%</th><th>100%</th></tr></thead><tbody><tr><td>压缩数据拷贝</td><td>0.07</td><td>0.1</td><td>0.14</td><td>0.54</td></tr><tr><td>占全图拷贝%</td><td>0.8%</td><td>1.25%</td><td>1.7%</td><td>6%</td></tr></tbody></table> 
+<h3><a id="34_534"></a>3.4.效率比较</h3> 
+<p>方案1：GPU拷贝完整blob图到CPU,在CPU中完成游程提取。<br> 方案2：GPU进行游程提取，并进行游程压缩，将压缩后游程拷贝到CPU。<br> <img src="https://images2.imgbox.com/7b/ad/qJ4k3Ec0_o.png" alt="100%游程像素下（每行最多取500个游程）"><br> 100%游程像素下（每行最多取500个游程）<br> <img src="https://images2.imgbox.com/6c/b2/Wpf6TSxY_o.png" alt="100%游程像素示意（每行最多取500个游程）"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/73dbc13dc018cd677ab2d0df2acbc26b/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">怎么让视频进行加速处理并保存</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/3252facec9e207384e01de4ddb40fb3e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">使用openssl计算文件的md5,sha256,以及用aes算法对密码进行加密</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

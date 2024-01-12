@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>简单了解YOLOv8 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="简单了解YOLOv8" />
+<meta property="og:description" content="简单介绍YOLOv8 这里主要关注模型的backbone和后处理的过程，并通过对比YOLOv5的架构来更深入的了解YOLOv8。
+模型框架 YOLOv5中的C3替换为更精简的C2f ，即增加了更多的跳跃连接和split操作；
+Backbone 中 C2f 的block 数从 3-6-9-3 改成了 3-6-6-3；
+耦合头变成了解耦头，分类和回归分为两个分支分别进行；
+数据前处理 1、letterbox缩放：
+yolov8的输入是640*640，原图需要resize至标准大小输入网络，而直接采用拉伸的方式有可能会造成目标比例失衡(失真)，所以yolov8沿用了v5的方式，即等比例缩放(宽/高至640时，剩余使用背景填充)。
+模型推理 1.对 Head 输出的 bbox 分支进行转换，利用 Softmax 和 Conv 计算将积分形式转换为 4 维 bbox 格式。
+2.YOLOv8 输出特征图尺度为 80x80、40x40 和 20x20 的三个特征图。Head 部分输出分类和回归共 6 个尺度的特征图。
+将 6个不同尺度的特征图分别按照两个分支进行拼接，并进行维度变换。为了后续方便处理，会将原先的通道维度置换到最后，类别预测分支和 bbox 预测分支 shape 分别为 (b, 80x80&#43;40x40&#43;20x20, 80)=(b,8400,80)，(b,8400,4)。
+3.对(8400,84)进行后处理，首先采用 score_thr 进行阈值过滤。在这过程中还需要考虑 multi_label 和 nms_pre，确保过滤后的检测框数目不会多于 nms_pre。然后进行 nms ，使得最终输出的检测框不能多于 max_per_img。
+4.筛选后的输出output_box格式为N*[x,y,w,h,conf,class]。N为筛选后预测框的个数，conf为最大类别概率。通过[x,y,w,h,conf,class]可以将预测框输出绘制在原图像上，由于图像的前处理经过了等比例缩放，所以此时要先将预测框的坐标转换为原坐标系的坐标。
+5.输出的ret的格式为N * [x1,y1,x2,y2,conf,class]。
+处理代码 import copy import onnxruntime as rt import numpy as np import cv2 import matplotlib." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/a11c48f3639ffcba327c7b961a8da199/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-08-09T22:08:13+08:00" />
+<meta property="article:modified_time" content="2023-08-09T22:08:13+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">简单了解YOLOv8</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="YOLOv8_2"></a>简单介绍YOLOv8</h2> 
+<p>这里主要关注模型的backbone和后处理的过程，并通过对比YOLOv5的架构来更深入的了解YOLOv8。</p> 
+<h3><a id="_5"></a>模型框架</h3> 
+<p><img src="https://images2.imgbox.com/71/2c/kgolNqZy_o.jpg" alt="在这里插入图片描述"></p> 
+<ol><li> <p><strong>YOLOv5中的C3替换为更精简的C2f</strong> ，即增加了更多的跳跃连接和split操作；<br> <img src="https://images2.imgbox.com/e6/50/Pk6Dvvz4_o.png" alt="在这里插入图片描述"></p> </li><li> <p>Backbone 中 C2f 的<strong>block 数</strong>从 3-6-9-3 改成了 3-6-6-3；</p> </li><li> <p>耦合头变成了解耦头，分类和回归分为两个分支分别进行；<br> <img src="https://images2.imgbox.com/82/d2/VpUsmpjR_o.png" alt="在这里插入图片描述"></p> </li></ol> 
+<h3><a id="_20"></a>数据前处理</h3> 
+<p>1、letterbox缩放：<br> yolov8的输入是640*640，原图需要resize至标准大小输入网络，而直接采用拉伸的方式有可能会造成目标比例失衡(失真)，所以yolov8沿用了v5的方式，即等比例缩放(宽/高至640时，剩余使用背景填充)。</p> 
+<h3><a id="_25"></a>模型推理</h3> 
+<p><img src="https://images2.imgbox.com/cc/a0/XHLtEmPk_o.png" alt="在这里插入图片描述"><br> 1.对 Head 输出的 bbox 分支进行转换，利用 Softmax 和 Conv 计算将积分形式转换为 4 维 bbox 格式。<br> 2.YOLOv8 输出特征图尺度为 80x80、40x40 和 20x20 的三个特征图。Head 部分输出分类和回归共 6 个尺度的特征图。<br> 将 6个不同尺度的特征图分别按照两个分支进行拼接，并进行维度变换。为了后续方便处理，会将原先的通道维度置换到最后，类别预测分支和 bbox 预测分支 shape 分别为 (b, 80x80+40x40+20x20, 80)=(b,8400,80)，(b,8400,4)。<br> 3.对(8400,84)进行后处理，首先采用 score_thr 进行阈值过滤。在这过程中还需要考虑 multi_label 和 nms_pre，确保过滤后的检测框数目不会多于 nms_pre。然后进行 nms ，使得最终输出的检测框不能多于 max_per_img。<br> 4.筛选后的输出output_box格式为N*[x,y,w,h,conf,class]。N为筛选后预测框的个数，conf为最大类别概率。通过[x,y,w,h,conf,class]可以将预测框输出绘制在原图像上，由于图像的前处理经过了等比例缩放，所以此时要先将预测框的坐标转换为原坐标系的坐标。<br> 5.输出的ret的格式为N * [x1,y1,x2,y2,conf,class]。</p> 
+<h3><a id="_34"></a>处理代码</h3> 
+<pre><code>import copy
+import onnxruntime as rt
+import numpy as np
+import cv2
+import matplotlib.pyplot as plt
+import yaml
+ 
+# 前处理(将原图宽/高等比例resize至640*640，剩余部分使用背景填充)
+def resize_image(image, size, letterbox_image):
+    """
+        对输入图像进行resize
+    Args:
+        size:目标尺寸
+        letterbox_image: bool 是否进行letterbox变换
+    Returns:指定尺寸的图像
+    """
+    ih, iw, _ = image.shape
+    print(ih, iw)
+    h, w = size
+    # letterbox_image = False
+    if letterbox_image:
+        scale = min(w/iw, h/ih)
+        nw = int(iw*scale)
+        nh = int(ih*scale)
+        image = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        # cv2.imshow("img", img)
+        # cv2.waitKey()
+        # print(image.shape)
+        # 生成画布
+        image_back = np.ones((h, w, 3), dtype=np.uint8) * 128
+        # 将image放在画布中心区域-letterbox
+        image_back[(h-nh)//2: (h-nh)//2 + nh, (w-nw)//2:(w-nw)//2+nw , :] = image
+    else:
+        image_back = image
+        # cv2.imshow("img", image_back)
+        # cv2.waitKey()
+    return image_back  # 返回图像和坐标原点
+ 
+ # 数据预处理
+def img2input(img):
+    img = np.transpose(img, (2, 0, 1))
+    img = img/255
+    return np.expand_dims(img, axis=0).astype(np.float32)
+ 
+def std_output(pred):
+    """
+    将（1，84，8400）处理成（8400， 85）  85= box:4  conf:1 cls:80
+    """
+    pred = np.squeeze(pred)
+    pred = np.transpose(pred, (1, 0))
+    pred_class = pred[..., 4:]
+    pred_conf = np.max(pred_class, axis=-1)
+    pred = np.insert(pred, 4, pred_conf, axis=-1)
+    return pred       # （8400,85）
+ 
+def xywh2xyxy(*box):
+    """
+    将xywh转换为左上角点和左下角点
+    Args:
+        box:
+    Returns: x1y1x2y2
+    """
+    ret = [box[0] - box[2] // 2, box[1] - box[3] // 2, \
+          box[0] + box[2] // 2, box[1] + box[3] // 2]
+    return ret
+ 
+def get_inter(box1, box2):
+    """
+    计算相交部分面积
+    Args:
+        box1: 第一个框
+        box2: 第二个狂
+    Returns: 相交部分的面积
+    """
+    x1, y1, x2, y2 = xywh2xyxy(*box1)
+    x3, y3, x4, y4 = xywh2xyxy(*box2)
+    # 验证是否存在交集
+    if x1 &gt;= x4 or x2 &lt;= x3:
+        return 0
+    if y1 &gt;= y4 or y2 &lt;= y3:
+        return 0
+    # 将x1,x2,x3,x4排序，因为已经验证了两个框相交，所以x3-x2就是交集的宽
+    x_list = sorted([x1, x2, x3, x4])
+    x_inter = x_list[2] - x_list[1]
+    # 将y1,y2,y3,y4排序，因为已经验证了两个框相交，所以y3-y2就是交集的宽
+    y_list = sorted([y1, y2, y3, y4])
+    y_inter = y_list[2] - y_list[1]
+    # 计算交集的面积
+    inter = x_inter * y_inter
+    return inter
+ 
+def get_iou(box1, box2):
+    """
+    计算交并比： (A n B)/(A + B - A n B)
+    Args:
+        box1: 第一个框
+        box2: 第二个框
+    Returns:  # 返回交并比的值
+    """
+    box1_area = box1[2] * box1[3]  # 计算第一个框的面积
+    box2_area = box2[2] * box2[3]  # 计算第二个框的面积
+    inter_area = get_inter(box1, box2)
+    union = box1_area + box2_area - inter_area   #(A n B)/(A + B - A n B)
+    iou = inter_area / union
+    return iou
+
+def nms(pred, conf_thres, iou_thres):
+    """
+    非极大值抑制nms
+    Args:
+        pred: 模型输出特征图
+        conf_thres: 置信度阈值
+        iou_thres: iou阈值
+    Returns: 输出后的结果
+    """
+    box = pred[pred[..., 4] &gt; conf_thres]  # 置信度筛选
+    cls_conf = box[..., 5:]
+    cls = []
+    for i in range(len(cls_conf)):
+        cls.append(int(np.argmax(cls_conf[i])))
+    total_cls = list(set(cls))  # 记录图像内共出现几种物体
+    output_box = []
+    # 每个预测类别分开考虑
+    for i in range(len(total_cls)):
+        clss = total_cls[i]
+        cls_box = []
+        temp = box[:, :6]
+        for j in range(len(cls)):
+            # 记录[x,y,w,h,conf(最大类别概率),class]值
+            if cls[j] == clss:
+                temp[j][5] = clss
+                cls_box.append(temp[j][:6])
+        #  cls_box 里面是[x,y,w,h,conf(最大类别概率),class]
+        cls_box = np.array(cls_box)
+        sort_cls_box = sorted(cls_box, key=lambda x: -x[4])  # 将cls_box按置信度从大到小排序
+        # box_conf_sort = np.argsort(-box_conf)
+        # 得到置信度最大的预测框
+        max_conf_box = sort_cls_box[0]
+        output_box.append(max_conf_box)
+        sort_cls_box = np.delete(sort_cls_box, 0, 0)
+        # 对除max_conf_box外其他的框进行非极大值抑制
+        while len(sort_cls_box) &gt; 0:
+            # 得到当前最大的框
+            max_conf_box = output_box[-1]
+            del_index = []
+            for j in range(len(sort_cls_box)):
+                current_box = sort_cls_box[j]
+                iou = get_iou(max_conf_box, current_box)
+                if iou &gt; iou_thres:
+                    # 筛选出与当前最大框Iou大于阈值的框的索引
+                    del_index.append(j)
+            # 删除这些索引
+            sort_cls_box = np.delete(sort_cls_box, del_index, 0)
+            if len(sort_cls_box) &gt; 0:
+                # 我认为这里需要将clas_box先按置信度排序， 才能每次取第一个
+                output_box.append(sort_cls_box[0])
+                sort_cls_box = np.delete(sort_cls_box, 0, 0)
+    return output_box
+ 
+ # 坐标框映射
+def cod_trf(result, pre, after):
+    """
+    因为预测框是在经过letterbox后的图像上做预测所以需要将预测框的坐标映射回原图像上
+    Args:
+        result:  [x,y,w,h,conf(最大类别概率),class]
+        pre:    原尺寸图像
+        after:  经过letterbox处理后的图像
+    Returns: 坐标变换后的结果,
+    """
+    res = np.array(result)
+    x, y, w, h, conf, cls = res.transpose((1, 0))
+    x1, y1, x2, y2 = xywh2xyxy(x, y, w, h)  # 左上角点和右下角的点
+    h_pre, w_pre, _ = pre.shape
+    h_after, w_after, _ = after.shape
+    scale = max(w_pre/w_after, h_pre/h_after)  # 缩放比例
+    h_pre, w_pre = h_pre/scale, w_pre/scale  # 计算原图在等比例缩放后的尺寸
+    x_move, y_move = abs(w_pre-w_after)//2, abs(h_pre-h_after)//2  # 计算平移的量
+    ret_x1, ret_x2 = (x1 - x_move) * scale, (x2 - x_move) * scale
+    ret_y1, ret_y2 = (y1 - y_move) * scale, (y2 - y_move) * scale
+    ret = np.array([ret_x1, ret_y1, ret_x2, ret_y2, conf, cls]).transpose((1, 0))
+    return ret
+ 
+def draw(res, image, cls):
+    """
+    将预测框绘制在image上
+    Args:
+        res: 预测框数据
+        image: 原图
+        cls: 类别列表，类似["apple", "banana", "people"]  可以自己设计或者通过数据集的yaml文件获取
+    Returns:
+    """
+    for r in res:
+        # 画框
+        image = cv2.rectangle(image, (int(r[0]), int(r[1])), (int(r[2]), int(r[3])), (255, 0, 0), 1)
+        # 表明类别
+        text = "{}:{}".format(cls[int(r[5])], \
+                               round(float(r[4]), 2))
+        h, w = int(r[3]) - int(r[1]), int(r[2]) - int(r[0])  # 计算预测框的长宽
+        font_size = min(h/640, w/640) * 3  # 计算字体大小（随框大小调整）
+        image = cv2.putText(image, text, (max(10, int(r[0])), max(20, int(r[1]))), cv2.FONT_HERSHEY_COMPLEX, max(font_size, 0.3), (0, 0, 255), 1)   # max()为了确保字体不过界
+    cv2.imshow("result", image)
+    cv2.waitKey()
+    return image
+ 
+# 加载配置文件
+config_file = "my_datasets/my_datasets.yaml"
+with open(config_file, "r") as config:
+    config = yaml.safe_load(config)
+if __name__ == '__main__':
+    std_h, std_w = 640, 640  # 标准输入尺寸
+    dic = config["names"]  # 得到的是模型类别字典
+    class_list = list(dic.values())
+    input_path = "my_datasets/images/"  # 输入图片的根目录路径
+    img_path =  "000000000074.jpg"  # 输入图片的文件名
+    img = cv2.imread(input_path+img_path)
+    if img.size == 0:
+        print("路径有误！")
+    # 前处理
+    img_after = resize_image(img, (std_w, std_h), True)  # （640， 640， 3）
+    # 将图像处理成输入的格式
+    data = img2input(img_after)
+    # 输入模型
+    sess = rt.InferenceSession('runs/detect/train49/weights/best.onnx')  # yolov8模型onnx格式
+    input_name = sess.get_inputs()[0].name
+    label_name = sess.get_outputs()[0].name
+    pred = sess.run([label_name], {input_name: data})[0]  # 输出(bs, 84=80cls+4reg, 8400=3种尺度的特征图叠加), 这里的预测框的回归参数是xywh， 而不是中心点到框边界的距离
+    pred = std_output(pred)
+    result = nms(pred, 0.5, 0.4)  # [x,y,w,h,conf(最大类别概率),class]
+    # 返回了三个框， 第三个框和第一个和第二个都有相交
+    result = cod_trf(result, img, img_after)
+    image = draw(result, img, class_list)
+    # 保存输出图像
+    out_path = "./runs/my_predicts/"
+    cv2.imwrite(out_path + img_path, image)
+    cv2.destroyWindow("result")
+
+</code></pre> 
+<p>reference<br> [1]: https://zhuanlan.zhihu.com/p/598566644?utm_id=0<br> [2]: https://blog.csdn.net/kuabiku/article/details/132083671</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/3e22d5481d6bd313436a440e39508307/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【slam】视觉slam十四讲笔记</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/7eb0293d7474bc72cc9d678250a9917e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">HCIA中的DHCP</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

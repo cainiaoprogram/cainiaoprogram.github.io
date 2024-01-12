@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【FFMPEG】encoder深入分析 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【FFMPEG】encoder深入分析" />
+<meta property="og:description" content="从前面一篇文章ffmpeg内部组件总结可以知道encoder的具体使用方法:
+char *filename = &#34;/data/record/test.mp4&#34; AVFormatContext *format_ctx = NULL; //通过输入url找到对应的muxer即format_ctx-&gt;oformat并malloc AVFormatContext format_ctx = avformat_alloc_output_context2(&amp;format_ctx, NULL, NULL, filename); //通过url找到并初始化IO模块 avio_open2(&amp;format_ctx-&gt;pb, filename, AVIO_FLAG_WRITE, NULL, NULL); //通过codec找到对应的encoder AVCodec *enc = avcodec_find_encoder(format_ctx-&gt;oformat-&gt;video_codec); AVCodecContext *enc_ctx = avcodec_alloc_context3(enc); //打开encoder avcodec_open2(enc_ctx, enc, NULL); AVStream *stream = avformat_new_stream(format_ctx, enc); avcodec_parameters_from_context(stream-&gt;codecpar, enc_ctx); while(!exit) { //将输入源的数据送到encoder中编码 avcodec_send_frame(enc_ctx, frame); AVPacket *pkt = av_packet_alloc(); //从encoder中获取编码后的数据 avcodec_receive_packet(enc_ctx, pkt); //将编码后的数据送到muxer中 av_write_frame(format_ctx, pkt); } 本篇文章将以struct FFCodec ff_mpeg4_encoder深入分析下，
+encoder需要外部传入什么参数？输入/输出buffer的处理encoder内部是否有数据缓存？
+接下来重点分析下这四个接口: avcodec_open2(…), avcodec_parameters_from_context(…), avcodec_send_frame(…), avcodec_receive_packet(…)分别干了什么。 avcodec_open2 int attribute_align_arg avcodec_open2(AVCodecContext *avctx, const AVCodec *codec, AVDictionary **options) { int ret = 0; AVCodecInternal *avci; const FFCodec *codec2; ." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/5019705056c948c83363e4124466bf19/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-03-20T17:06:11+08:00" />
+<meta property="article:modified_time" content="2023-03-20T17:06:11+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【FFMPEG】encoder深入分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>从前面一篇文章<a href="https://blog.csdn.net/weixin_38537730/article/details/129596079">ffmpeg内部组件总结</a>可以知道encoder的具体使用方法:</p> 
+<pre><code class="prism language-c"><span class="token keyword">char</span> <span class="token operator">*</span>filename <span class="token operator">=</span> <span class="token string">"/data/record/test.mp4"</span>
+AVFormatContext <span class="token operator">*</span>format_ctx <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+<span class="token comment">//通过输入url找到对应的muxer即format_ctx-&gt;oformat并malloc AVFormatContext</span>
+format_ctx <span class="token operator">=</span> <span class="token function">avformat_alloc_output_context2</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>format_ctx<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> filename<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//通过url找到并初始化IO模块</span>
+<span class="token function">avio_open2</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>format_ctx<span class="token operator">-&gt;</span>pb<span class="token punctuation">,</span> filename<span class="token punctuation">,</span> AVIO_FLAG_WRITE<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//通过codec找到对应的encoder</span>
+AVCodec <span class="token operator">*</span>enc <span class="token operator">=</span> <span class="token function">avcodec_find_encoder</span><span class="token punctuation">(</span>format_ctx<span class="token operator">-&gt;</span>oformat<span class="token operator">-&gt;</span>video_codec<span class="token punctuation">)</span><span class="token punctuation">;</span>
+AVCodecContext <span class="token operator">*</span>enc_ctx <span class="token operator">=</span> <span class="token function">avcodec_alloc_context3</span><span class="token punctuation">(</span>enc<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//打开encoder</span>
+<span class="token function">avcodec_open2</span><span class="token punctuation">(</span>enc_ctx<span class="token punctuation">,</span> enc<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+AVStream <span class="token operator">*</span>stream <span class="token operator">=</span> <span class="token function">avformat_new_stream</span><span class="token punctuation">(</span>format_ctx<span class="token punctuation">,</span> enc<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token function">avcodec_parameters_from_context</span><span class="token punctuation">(</span>stream<span class="token operator">-&gt;</span>codecpar<span class="token punctuation">,</span> enc_ctx<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token keyword">while</span><span class="token punctuation">(</span><span class="token operator">!</span>exit<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//将输入源的数据送到encoder中编码</span>
+    <span class="token function">avcodec_send_frame</span><span class="token punctuation">(</span>enc_ctx<span class="token punctuation">,</span> frame<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    AVPacket <span class="token operator">*</span>pkt <span class="token operator">=</span> <span class="token function">av_packet_alloc</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//从encoder中获取编码后的数据</span>
+    <span class="token function">avcodec_receive_packet</span><span class="token punctuation">(</span>enc_ctx<span class="token punctuation">,</span> pkt<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//将编码后的数据送到muxer中</span>
+    <span class="token function">av_write_frame</span><span class="token punctuation">(</span>format_ctx<span class="token punctuation">,</span> pkt<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>本篇文章将以struct FFCodec ff_mpeg4_encoder深入分析下，</p> 
+<ol><li>encoder需要外部传入什么参数？</li><li>输入/输出buffer的处理</li><li>encoder内部是否有数据缓存？<br> 接下来重点分析下这四个接口: avcodec_open2(…), avcodec_parameters_from_context(…), avcodec_send_frame(…), avcodec_receive_packet(…)分别干了什么。</li></ol> 
+<h3><a id="avcodec_open2_32"></a>avcodec_open2</h3> 
+<pre><code class="prism language-c"><span class="token keyword">int</span> attribute_align_arg <span class="token function">avcodec_open2</span><span class="token punctuation">(</span>AVCodecContext <span class="token operator">*</span>avctx<span class="token punctuation">,</span> <span class="token keyword">const</span> AVCodec <span class="token operator">*</span>codec<span class="token punctuation">,</span> AVDictionary <span class="token operator">*</span><span class="token operator">*</span>options<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> ret <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    AVCodecInternal <span class="token operator">*</span>avci<span class="token punctuation">;</span>
+    <span class="token keyword">const</span> FFCodec <span class="token operator">*</span>codec2<span class="token punctuation">;</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>codec<span class="token punctuation">)</span>
+        codec <span class="token operator">=</span> avctx<span class="token operator">-&gt;</span>codec<span class="token punctuation">;</span>
+    <span class="token comment">//将struct AVCodec*转换成struct FFCodec*</span>
+    codec2 <span class="token operator">=</span> <span class="token function">ffcodec</span><span class="token punctuation">(</span>codec<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    avctx<span class="token operator">-&gt;</span>codec_type <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>type<span class="token punctuation">;</span>
+    avctx<span class="token operator">-&gt;</span>codec_id   <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>id<span class="token punctuation">;</span>
+    avctx<span class="token operator">-&gt;</span>codec      <span class="token operator">=</span> codec<span class="token punctuation">;</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">;</span>
+    <span class="token comment">//分配AVCodecInternal并赋值给AVCodecContext.internal</span>
+    avci <span class="token operator">=</span> <span class="token function">av_mallocz</span><span class="token punctuation">(</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token operator">*</span>avci<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    avctx<span class="token operator">-&gt;</span>internal <span class="token operator">=</span> avci<span class="token punctuation">;</span>
+    <span class="token comment">//后面重点关注下这个AVCodecInternal中的buffer_frame和buffer_pkt是干啥的？</span>
+    avci<span class="token operator">-&gt;</span>buffer_frame <span class="token operator">=</span> <span class="token function">av_frame_alloc</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    avci<span class="token operator">-&gt;</span>buffer_pkt <span class="token operator">=</span> <span class="token function">av_packet_alloc</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">;</span>
+    avci<span class="token operator">-&gt;</span>skip_samples_multiplier <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>codec2<span class="token operator">-&gt;</span>priv_data_size <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>avctx<span class="token operator">-&gt;</span>priv_data<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//以FFCodec ff_mpeg4_encoder为例子，这里malloc的codec2-&gt;priv_data_size实际上是struct MpegEncContext</span>
+            <span class="token comment">//const FFCodec ff_mpeg4_encoder = {<!-- --></span>
+            <span class="token comment">//    .p.name         = "mpeg4",</span>
+           <span class="token comment">//     .p.long_name    = NULL_IF_CONFIG_SMALL("MPEG-4 part 2"),</span>
+           <span class="token comment">//     .p.type         = AVMEDIA_TYPE_VIDEO,</span>
+           <span class="token comment">//     .p.id           = AV_CODEC_ID_MPEG4,</span>
+           <span class="token comment">//     .priv_data_size = sizeof(MpegEncContext),</span>
+           <span class="token comment">//     .init           = encode_init,</span>
+           <span class="token comment">//     FF_CODEC_ENCODE_CB(ff_mpv_encode_picture),</span>
+           <span class="token comment">//     .close          = ff_mpv_encode_end,</span>
+           <span class="token comment">//     .p.pix_fmts     = (const enum AVPixelFormat[]) { AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE },</span>
+           <span class="token comment">//     .p.capabilities = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_SLICE_THREADS,</span>
+           <span class="token comment">//     .caps_internal  = FF_CODEC_CAP_INIT_THREADSAFE | FF_CODEC_CAP_INIT_CLEANUP,</span>
+           <span class="token comment">//     .p.priv_class   = &amp;mpeg4enc_class,</span>
+           <span class="token comment">//     };</span>
+            avctx<span class="token operator">-&gt;</span>priv_data <span class="token operator">=</span> <span class="token function">av_mallocz</span><span class="token punctuation">(</span>codec2<span class="token operator">-&gt;</span>priv_data_size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>avctx<span class="token operator">-&gt;</span>priv_data<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                ret <span class="token operator">=</span> <span class="token function">AVERROR</span><span class="token punctuation">(</span>ENOMEM<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">goto</span> free_and_end<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>codec<span class="token operator">-&gt;</span>priv_class<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token operator">*</span><span class="token punctuation">(</span><span class="token keyword">const</span> AVClass <span class="token operator">*</span><span class="token operator">*</span><span class="token punctuation">)</span>avctx<span class="token operator">-&gt;</span>priv_data <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>priv_class<span class="token punctuation">;</span>
+                <span class="token function">av_opt_set_defaults</span><span class="token punctuation">(</span>avctx<span class="token operator">-&gt;</span>priv_data<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>codec<span class="token operator">-&gt;</span>priv_class <span class="token operator">&amp;&amp;</span> <span class="token punctuation">(</span>ret <span class="token operator">=</span> <span class="token function">av_opt_set_dict</span><span class="token punctuation">(</span>avctx<span class="token operator">-&gt;</span>priv_data<span class="token punctuation">,</span> options<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+            <span class="token keyword">goto</span> free_and_end<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        avctx<span class="token operator">-&gt;</span>priv_data <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">;</span>
+    
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">av_codec_is_encoder</span><span class="token punctuation">(</span>avctx<span class="token operator">-&gt;</span>codec<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        ret <span class="token operator">=</span> <span class="token function">ff_encode_preinit</span><span class="token punctuation">(</span>avctx<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">else</span>
+        ret <span class="token operator">=</span> <span class="token function">ff_decode_preinit</span><span class="token punctuation">(</span>avctx<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+        <span class="token keyword">goto</span> free_and_end<span class="token punctuation">;</span>
+
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">;</span>
+    <span class="token comment">//调用codec2-&gt;init为具体encoder的init函数</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token punctuation">(</span>avctx<span class="token operator">-&gt;</span>active_thread_type <span class="token operator">&amp;</span> FF_THREAD_FRAME<span class="token punctuation">)</span> <span class="token operator">||</span>
+        avci<span class="token operator">-&gt;</span>frame_thread_encoder<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>codec2<span class="token operator">-&gt;</span>init<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">lock_avcodec</span><span class="token punctuation">(</span>codec2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            ret <span class="token operator">=</span> codec2<span class="token operator">-&gt;</span><span class="token function">init</span><span class="token punctuation">(</span>avctx<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token function">unlock_avcodec</span><span class="token punctuation">(</span>codec2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                avci<span class="token operator">-&gt;</span>needs_close <span class="token operator">=</span> codec2<span class="token operator">-&gt;</span>caps_internal <span class="token operator">&amp;</span> FF_CODEC_CAP_INIT_CLEANUP<span class="token punctuation">;</span>
+                <span class="token keyword">goto</span> free_and_end<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+        avci<span class="token operator">-&gt;</span>needs_close <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">av_codec_is_decoder</span><span class="token punctuation">(</span>avctx<span class="token operator">-&gt;</span>codec<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>从上面avcodec_open2(…)针对encoder来说主要做了以下4件事情:</p> 
+<ol><li>malloc具体encoder的context</li><li>malloc AVCodecInternal</li><li>调用ff_encode_preinit(…) 即调用encode_preinit_video(…)检查AVPixFmtDescriptor里面的参数并赋值到AVCodecContext中的成员。</li><li>调用具体encoder的init接口</li></ol> 
+<p>有一个全局数组AVPixFmtDescriptor av_pix_fmt_descriptors[] 里面定义了这种像素格式的参数:</p> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">const</span> AVPixFmtDescriptor av_pix_fmt_descriptors<span class="token punctuation">[</span>AV_PIX_FMT_NB<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token punctuation">[</span>AV_PIX_FMT_YUV420P<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token punctuation">.</span>name <span class="token operator">=</span> <span class="token string">"yuv420p"</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>nb_components <span class="token operator">=</span> <span class="token number">3</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>log2_chroma_w <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>log2_chroma_h <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>comp <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token punctuation">{<!-- --></span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">8</span> <span class="token punctuation">}</span><span class="token punctuation">,</span>        <span class="token comment">/* Y */</span>
+            <span class="token punctuation">{<!-- --></span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">8</span> <span class="token punctuation">}</span><span class="token punctuation">,</span>        <span class="token comment">/* U */</span>
+            <span class="token punctuation">{<!-- --></span> <span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">8</span> <span class="token punctuation">}</span><span class="token punctuation">,</span>        <span class="token comment">/* V */</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>flags <span class="token operator">=</span> AV_PIX_FMT_FLAG_PLANAR<span class="token punctuation">,</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">[</span>AV_PIX_FMT_YUYV422<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token punctuation">.</span>name <span class="token operator">=</span> <span class="token string">"yuyv422"</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>nb_components <span class="token operator">=</span> <span class="token number">3</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>log2_chroma_w <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>log2_chroma_h <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>comp <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token punctuation">{<!-- --></span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">8</span> <span class="token punctuation">}</span><span class="token punctuation">,</span>        <span class="token comment">/* Y */</span>
+            <span class="token punctuation">{<!-- --></span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">8</span> <span class="token punctuation">}</span><span class="token punctuation">,</span>        <span class="token comment">/* U */</span>
+            <span class="token punctuation">{<!-- --></span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">8</span> <span class="token punctuation">}</span><span class="token punctuation">,</span>        <span class="token comment">/* V */</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">[</span>AV_PIX_FMT_YVYU422<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token punctuation">.</span>name <span class="token operator">=</span> <span class="token string">"yvyu422"</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>nb_components <span class="token operator">=</span> <span class="token number">3</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>log2_chroma_w <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>log2_chroma_h <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>comp <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token punctuation">{<!-- --></span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">8</span> <span class="token punctuation">}</span><span class="token punctuation">,</span>        <span class="token comment">/* Y */</span>
+            <span class="token punctuation">{<!-- --></span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">8</span> <span class="token punctuation">}</span><span class="token punctuation">,</span>        <span class="token comment">/* U */</span>
+            <span class="token punctuation">{<!-- --></span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">8</span> <span class="token punctuation">}</span><span class="token punctuation">,</span>        <span class="token comment">/* V */</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">;</span>
+ <span class="token punctuation">}</span>
+</code></pre> 
+<p>这里面的具体含义，后面再encode用到的时候再反过来查看。</p> 
+<pre><code class="prism language-c"><span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token class-name">AVPixFmtDescriptor</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">const</span> <span class="token keyword">char</span> <span class="token operator">*</span>name<span class="token punctuation">;</span>
+    <span class="token class-name">uint8_t</span> nb_components<span class="token punctuation">;</span>  <span class="token comment">///&lt; The number of components each pixel has, (1-4)</span>
+
+    <span class="token comment">/**
+     * Amount to shift the luma width right to find the chroma width.
+     * For YV12 this is 1 for example.
+     * chroma_width = AV_CEIL_RSHIFT(luma_width, log2_chroma_w)
+     * The note above is needed to ensure rounding up.
+     * This value only refers to the chroma components.
+     */</span>
+    <span class="token class-name">uint8_t</span> log2_chroma_w<span class="token punctuation">;</span>
+
+    <span class="token comment">/**
+     * Amount to shift the luma height right to find the chroma height.
+     * For YV12 this is 1 for example.
+     * chroma_height= AV_CEIL_RSHIFT(luma_height, log2_chroma_h)
+     * The note above is needed to ensure rounding up.
+     * This value only refers to the chroma components.
+     */</span>
+    <span class="token class-name">uint8_t</span> log2_chroma_h<span class="token punctuation">;</span>
+
+    <span class="token comment">/**
+     * Combination of AV_PIX_FMT_FLAG_... flags.
+     */</span>
+    <span class="token class-name">uint64_t</span> flags<span class="token punctuation">;</span>
+
+    <span class="token comment">/**
+     * Parameters that describe how pixels are packed.
+     * If the format has 1 or 2 components, then luma is 0.
+     * If the format has 3 or 4 components:
+     *   if the RGB flag is set then 0 is red, 1 is green and 2 is blue;
+     *   otherwise 0 is luma, 1 is chroma-U and 2 is chroma-V.
+     *
+     * If present, the Alpha channel is always the last component.
+     */</span>
+    AVComponentDescriptor comp<span class="token punctuation">[</span><span class="token number">4</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/**
+     * Alternative comma-separated names.
+     */</span>
+    <span class="token keyword">const</span> <span class="token keyword">char</span> <span class="token operator">*</span>alias<span class="token punctuation">;</span>
+<span class="token punctuation">}</span> AVPixFmtDescriptor<span class="token punctuation">;</span>
+</code></pre> 
+<pre><code class="prism language-c"><span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token class-name">AVComponentDescriptor</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">/**
+     * Which of the 4 planes contains the component.
+     */</span>
+    <span class="token keyword">int</span> plane<span class="token punctuation">;</span>
+
+    <span class="token comment">/**
+     * Number of elements between 2 horizontally consecutive pixels.
+     * Elements are bits for bitstream formats, bytes otherwise.
+     */</span>
+    <span class="token keyword">int</span> step<span class="token punctuation">;</span>
+
+    <span class="token comment">/**
+     * Number of elements before the component of the first pixel.
+     * Elements are bits for bitstream formats, bytes otherwise.
+     */</span>
+    <span class="token keyword">int</span> offset<span class="token punctuation">;</span>
+
+    <span class="token comment">/**
+     * Number of least significant bits that must be shifted away
+     * to get the value.
+     */</span>
+    <span class="token keyword">int</span> shift<span class="token punctuation">;</span>
+
+    <span class="token comment">/**
+     * Number of bits in the component.
+     */</span>
+    <span class="token keyword">int</span> depth<span class="token punctuation">;</span>
+<span class="token punctuation">}</span> AVComponentDescriptor<span class="token punctuation">;</span>
+
+</code></pre> 
+<h3><a id="avcodec_parameters_from_context_247"></a>avcodec_parameters_from_context</h3> 
+<p>将中AVCodecContext 的参数赋值给AVStream中的AVCodecParameters,这些参数主要是给muxer使用的。</p> 
+<pre><code class="prism language-c"><span class="token keyword">int</span> <span class="token function">avcodec_parameters_from_context</span><span class="token punctuation">(</span>AVCodecParameters <span class="token operator">*</span>par<span class="token punctuation">,</span>
+                                    <span class="token keyword">const</span> AVCodecContext <span class="token operator">*</span>codec<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> ret<span class="token punctuation">;</span>
+
+    <span class="token function">codec_parameters_reset</span><span class="token punctuation">(</span>par<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    par<span class="token operator">-&gt;</span>codec_type <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>codec_type<span class="token punctuation">;</span>
+    par<span class="token operator">-&gt;</span>codec_id   <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>codec_id<span class="token punctuation">;</span>
+    par<span class="token operator">-&gt;</span>codec_tag  <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>codec_tag<span class="token punctuation">;</span>
+
+    par<span class="token operator">-&gt;</span>bit_rate              <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>bit_rate<span class="token punctuation">;</span>
+    par<span class="token operator">-&gt;</span>bits_per_coded_sample <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>bits_per_coded_sample<span class="token punctuation">;</span>
+    par<span class="token operator">-&gt;</span>bits_per_raw_sample   <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>bits_per_raw_sample<span class="token punctuation">;</span>
+    par<span class="token operator">-&gt;</span>profile               <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>profile<span class="token punctuation">;</span>
+    par<span class="token operator">-&gt;</span>level                 <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>level<span class="token punctuation">;</span>
+
+    <span class="token keyword">switch</span> <span class="token punctuation">(</span>par<span class="token operator">-&gt;</span>codec_type<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">case</span> AVMEDIA_TYPE_VIDEO<span class="token operator">:</span>
+        par<span class="token operator">-&gt;</span>format              <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>pix_fmt<span class="token punctuation">;</span>
+        par<span class="token operator">-&gt;</span>width               <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>width<span class="token punctuation">;</span>
+        par<span class="token operator">-&gt;</span>height              <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>height<span class="token punctuation">;</span>
+        par<span class="token operator">-&gt;</span>field_order         <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>field_order<span class="token punctuation">;</span>
+        par<span class="token operator">-&gt;</span>color_range         <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>color_range<span class="token punctuation">;</span>
+        par<span class="token operator">-&gt;</span>color_primaries     <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>color_primaries<span class="token punctuation">;</span>
+        par<span class="token operator">-&gt;</span>color_trc           <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>color_trc<span class="token punctuation">;</span>
+        par<span class="token operator">-&gt;</span>color_space         <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>colorspace<span class="token punctuation">;</span>
+        par<span class="token operator">-&gt;</span>chroma_location     <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>chroma_sample_location<span class="token punctuation">;</span>
+        par<span class="token operator">-&gt;</span>sample_aspect_ratio <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>sample_aspect_ratio<span class="token punctuation">;</span>
+        par<span class="token operator">-&gt;</span>video_delay         <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>has_b_frames<span class="token punctuation">;</span>
+        <span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token keyword">case</span> AVMEDIA_TYPE_AUDIO<span class="token operator">:</span>
+        par<span class="token operator">-&gt;</span>format           <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>sample_fmt<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression">FF_API_OLD_CHANNEL_LAYOUT</span></span>
+FF_DISABLE_DEPRECATION_WARNINGS
+        <span class="token comment">// if the old/new fields are set inconsistently, prefer the old ones</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>codec<span class="token operator">-&gt;</span>channels <span class="token operator">&amp;&amp;</span> codec<span class="token operator">-&gt;</span>channels <span class="token operator">!=</span> codec<span class="token operator">-&gt;</span>ch_layout<span class="token punctuation">.</span>nb_channels<span class="token punctuation">)</span> <span class="token operator">||</span>
+            <span class="token punctuation">(</span>codec<span class="token operator">-&gt;</span>channel_layout <span class="token operator">&amp;&amp;</span> <span class="token punctuation">(</span>codec<span class="token operator">-&gt;</span>ch_layout<span class="token punctuation">.</span>order <span class="token operator">!=</span> AV_CHANNEL_ORDER_NATIVE <span class="token operator">||</span>
+                                       codec<span class="token operator">-&gt;</span>ch_layout<span class="token punctuation">.</span>u<span class="token punctuation">.</span>mask <span class="token operator">!=</span> codec<span class="token operator">-&gt;</span>channel_layout<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>codec<span class="token operator">-&gt;</span>channel_layout<span class="token punctuation">)</span>
+                <span class="token function">av_channel_layout_from_mask</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>par<span class="token operator">-&gt;</span>ch_layout<span class="token punctuation">,</span> codec<span class="token operator">-&gt;</span>channel_layout<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                par<span class="token operator">-&gt;</span>ch_layout<span class="token punctuation">.</span>order       <span class="token operator">=</span> AV_CHANNEL_ORDER_UNSPEC<span class="token punctuation">;</span>
+                par<span class="token operator">-&gt;</span>ch_layout<span class="token punctuation">.</span>nb_channels <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>channels<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+FF_ENABLE_DEPRECATION_WARNINGS
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+        ret <span class="token operator">=</span> <span class="token function">av_channel_layout_copy</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>par<span class="token operator">-&gt;</span>ch_layout<span class="token punctuation">,</span> <span class="token operator">&amp;</span>codec<span class="token operator">-&gt;</span>ch_layout<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+            <span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression">FF_API_OLD_CHANNEL_LAYOUT</span></span>
+FF_DISABLE_DEPRECATION_WARNINGS
+        <span class="token punctuation">}</span>
+        par<span class="token operator">-&gt;</span>channel_layout  <span class="token operator">=</span> par<span class="token operator">-&gt;</span>ch_layout<span class="token punctuation">.</span>order <span class="token operator">==</span> AV_CHANNEL_ORDER_NATIVE <span class="token operator">?</span>
+                               par<span class="token operator">-&gt;</span>ch_layout<span class="token punctuation">.</span>u<span class="token punctuation">.</span>mask <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        par<span class="token operator">-&gt;</span>channels        <span class="token operator">=</span> par<span class="token operator">-&gt;</span>ch_layout<span class="token punctuation">.</span>nb_channels<span class="token punctuation">;</span>
+FF_ENABLE_DEPRECATION_WARNINGS
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+        par<span class="token operator">-&gt;</span>sample_rate      <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>sample_rate<span class="token punctuation">;</span>
+        par<span class="token operator">-&gt;</span>block_align      <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>block_align<span class="token punctuation">;</span>
+        par<span class="token operator">-&gt;</span>frame_size       <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>frame_size<span class="token punctuation">;</span>
+        par<span class="token operator">-&gt;</span>initial_padding  <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>initial_padding<span class="token punctuation">;</span>
+        par<span class="token operator">-&gt;</span>trailing_padding <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>trailing_padding<span class="token punctuation">;</span>
+        par<span class="token operator">-&gt;</span>seek_preroll     <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>seek_preroll<span class="token punctuation">;</span>
+        <span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token keyword">case</span> AVMEDIA_TYPE_SUBTITLE<span class="token operator">:</span>
+        par<span class="token operator">-&gt;</span>width  <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>width<span class="token punctuation">;</span>
+        par<span class="token operator">-&gt;</span>height <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>height<span class="token punctuation">;</span>
+        <span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>codec<span class="token operator">-&gt;</span>extradata<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        par<span class="token operator">-&gt;</span>extradata <span class="token operator">=</span> <span class="token function">av_mallocz</span><span class="token punctuation">(</span>codec<span class="token operator">-&gt;</span>extradata_size <span class="token operator">+</span> AV_INPUT_BUFFER_PADDING_SIZE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>par<span class="token operator">-&gt;</span>extradata<span class="token punctuation">)</span>
+            <span class="token keyword">return</span> <span class="token function">AVERROR</span><span class="token punctuation">(</span>ENOMEM<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">memcpy</span><span class="token punctuation">(</span>par<span class="token operator">-&gt;</span>extradata<span class="token punctuation">,</span> codec<span class="token operator">-&gt;</span>extradata<span class="token punctuation">,</span> codec<span class="token operator">-&gt;</span>extradata_size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        par<span class="token operator">-&gt;</span>extradata_size <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>extradata_size<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="avcodec_send_frame_333"></a>avcodec_send_frame</h3> 
+<p>下面来看看send接口把需要编码的数据送到什么地方了？</p> 
+<pre><code class="prism language-c"><span class="token keyword">int</span> attribute_align_arg <span class="token function">avcodec_send_frame</span><span class="token punctuation">(</span>AVCodecContext <span class="token operator">*</span>avctx<span class="token punctuation">,</span> <span class="token keyword">const</span> AVFrame <span class="token operator">*</span>frame<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    AVCodecInternal <span class="token operator">*</span>avci <span class="token operator">=</span> avctx<span class="token operator">-&gt;</span>internal<span class="token punctuation">;</span>
+    <span class="token keyword">int</span> ret<span class="token punctuation">;</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>frame<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        avci<span class="token operator">-&gt;</span>draining <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//重点看下</span>
+        ret <span class="token operator">=</span> <span class="token function">encode_send_frame_internal</span><span class="token punctuation">(</span>avctx<span class="token punctuation">,</span> frame<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+            <span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">//如果avci-&gt;buffer_pkt-&gt;data为null，执行一次encode动作</span>
+    <span class="token comment">//相当于调用了一次avcodec_receive_packet(.......)</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>avci<span class="token operator">-&gt;</span>buffer_pkt<span class="token operator">-&gt;</span>data <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>avci<span class="token operator">-&gt;</span>buffer_pkt<span class="token operator">-&gt;</span>side_data<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        ret <span class="token operator">=</span> <span class="token function">encode_receive_packet_internal</span><span class="token punctuation">(</span>avctx<span class="token punctuation">,</span> avci<span class="token operator">-&gt;</span>buffer_pkt<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span> <span class="token operator">&amp;&amp;</span> ret <span class="token operator">!=</span> <span class="token function">AVERROR</span><span class="token punctuation">(</span>EAGAIN<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> ret <span class="token operator">!=</span> AVERROR_EOF<span class="token punctuation">)</span>
+            <span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    avctx<span class="token operator">-&gt;</span>frame_number<span class="token operator">++</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">encode_send_frame_internal</span><span class="token punctuation">(</span>AVCodecContext <span class="token operator">*</span>avctx<span class="token punctuation">,</span> <span class="token keyword">const</span> AVFrame <span class="token operator">*</span>src<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    AVCodecInternal <span class="token operator">*</span>avci <span class="token operator">=</span> avctx<span class="token operator">-&gt;</span>internal<span class="token punctuation">;</span>
+    AVFrame <span class="token operator">*</span>dst <span class="token operator">=</span> avci<span class="token operator">-&gt;</span>buffer_frame<span class="token punctuation">;</span>
+    <span class="token keyword">int</span> ret<span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>avctx<span class="token operator">-&gt;</span>codec<span class="token operator">-&gt;</span>type <span class="token operator">==</span> AVMEDIA_TYPE_AUDIO<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+   <span class="token comment">//将src中的buffer 转移到AVCodecInternal.buffer_frame中</span>
+    ret <span class="token operator">=</span> <span class="token function">av_frame_ref</span><span class="token punctuation">(</span>dst<span class="token punctuation">,</span> src<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+        <span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="avcodec_receive_packet_382"></a>avcodec_receive_packet</h3> 
+<pre><code class="prism language-c"><span class="token keyword">int</span> attribute_align_arg <span class="token function">avcodec_receive_packet</span><span class="token punctuation">(</span>AVCodecContext <span class="token operator">*</span>avctx<span class="token punctuation">,</span> AVPacket <span class="token operator">*</span>avpkt<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    AVCodecInternal <span class="token operator">*</span>avci <span class="token operator">=</span> avctx<span class="token operator">-&gt;</span>internal<span class="token punctuation">;</span>
+    <span class="token keyword">int</span> ret<span class="token punctuation">;</span>
+
+    <span class="token function">av_packet_unref</span><span class="token punctuation">(</span>avpkt<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">avcodec_is_open</span><span class="token punctuation">(</span>avctx<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token operator">!</span><span class="token function">av_codec_is_encoder</span><span class="token punctuation">(</span>avctx<span class="token operator">-&gt;</span>codec<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token keyword">return</span> <span class="token function">AVERROR</span><span class="token punctuation">(</span>EINVAL<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>avci<span class="token operator">-&gt;</span>buffer_pkt<span class="token operator">-&gt;</span>data <span class="token operator">||</span> avci<span class="token operator">-&gt;</span>buffer_pkt<span class="token operator">-&gt;</span>side_data<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">av_packet_move_ref</span><span class="token punctuation">(</span>avpkt<span class="token punctuation">,</span> avci<span class="token operator">-&gt;</span>buffer_pkt<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        ret <span class="token operator">=</span> <span class="token function">encode_receive_packet_internal</span><span class="token punctuation">(</span>avctx<span class="token punctuation">,</span> avpkt<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+            <span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">encode_receive_packet_internal</span><span class="token punctuation">(</span>AVCodecContext <span class="token operator">*</span>avctx<span class="token punctuation">,</span> AVPacket <span class="token operator">*</span>avpkt<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    AVCodecInternal <span class="token operator">*</span>avci <span class="token operator">=</span> avctx<span class="token operator">-&gt;</span>internal<span class="token punctuation">;</span>
+    <span class="token keyword">int</span> ret<span class="token punctuation">;</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">ffcodec</span><span class="token punctuation">(</span>avctx<span class="token operator">-&gt;</span>codec<span class="token punctuation">)</span><span class="token operator">-&gt;</span>cb_type <span class="token operator">==</span> FF_CODEC_CB_TYPE_RECEIVE_PACKET<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        ret <span class="token operator">=</span> <span class="token function">ffcodec</span><span class="token punctuation">(</span>avctx<span class="token operator">-&gt;</span>codec<span class="token punctuation">)</span><span class="token operator">-&gt;</span>cb<span class="token punctuation">.</span><span class="token function">receive_packet</span><span class="token punctuation">(</span>avctx<span class="token punctuation">,</span> avpkt<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//这种方式一般没有codec实现</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+            <span class="token function">av_packet_unref</span><span class="token punctuation">(</span>avpkt<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">else</span>
+            <span class="token comment">// Encoders must always return ref-counted buffers.</span>
+            <span class="token comment">// Side-data only packets have no data and can be not ref-counted.</span>
+            <span class="token function">av_assert0</span><span class="token punctuation">(</span><span class="token operator">!</span>avpkt<span class="token operator">-&gt;</span>data <span class="token operator">||</span> avpkt<span class="token operator">-&gt;</span>buf<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span>
+        ret <span class="token operator">=</span> <span class="token function">encode_simple_receive_packet</span><span class="token punctuation">(</span>avctx<span class="token punctuation">,</span> avpkt<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//都走这里</span>
+    <span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">encode_simple_receive_packet</span><span class="token punctuation">(</span>AVCodecContext <span class="token operator">*</span>avctx<span class="token punctuation">,</span> AVPacket <span class="token operator">*</span>avpkt<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> ret<span class="token punctuation">;</span>
+    <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token operator">!</span>avpkt<span class="token operator">-&gt;</span>data <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>avpkt<span class="token operator">-&gt;</span>side_data<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//执行编码动作</span>
+        ret <span class="token operator">=</span> <span class="token function">encode_simple_internal</span><span class="token punctuation">(</span>avctx<span class="token punctuation">,</span> avpkt<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+            <span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-c"><span class="token keyword">int</span> <span class="token function">ff_encode_get_frame</span><span class="token punctuation">(</span>AVCodecContext <span class="token operator">*</span>avctx<span class="token punctuation">,</span> AVFrame <span class="token operator">*</span>frame<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    AVCodecInternal <span class="token operator">*</span>avci <span class="token operator">=</span> avctx<span class="token operator">-&gt;</span>internal<span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>avci<span class="token operator">-&gt;</span>draining<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> AVERROR_EOF<span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>avci<span class="token operator">-&gt;</span>buffer_frame<span class="token operator">-&gt;</span>buf<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+        <span class="token keyword">return</span> <span class="token function">AVERROR</span><span class="token punctuation">(</span>EAGAIN<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token function">av_frame_move_ref</span><span class="token punctuation">(</span>frame<span class="token punctuation">,</span> avci<span class="token operator">-&gt;</span>buffer_frame<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">encode_simple_internal</span><span class="token punctuation">(</span>AVCodecContext <span class="token operator">*</span>avctx<span class="token punctuation">,</span> AVPacket <span class="token operator">*</span>avpkt<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    AVCodecInternal   <span class="token operator">*</span>avci <span class="token operator">=</span> avctx<span class="token operator">-&gt;</span>internal<span class="token punctuation">;</span>
+    AVFrame          <span class="token operator">*</span>frame <span class="token operator">=</span> avci<span class="token operator">-&gt;</span>in_frame<span class="token punctuation">;</span>
+    <span class="token keyword">const</span> FFCodec <span class="token operator">*</span><span class="token keyword">const</span> codec <span class="token operator">=</span> <span class="token function">ffcodec</span><span class="token punctuation">(</span>avctx<span class="token operator">-&gt;</span>codec<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">int</span> got_packet<span class="token punctuation">;</span>
+    <span class="token keyword">int</span> ret<span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>avci<span class="token operator">-&gt;</span>draining_done<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> AVERROR_EOF<span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>frame<span class="token operator">-&gt;</span>buf<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>avci<span class="token operator">-&gt;</span>draining<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">av_frame_unref</span><span class="token punctuation">(</span>frame<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//将avcodec_send_frame下来的frame取出来</span>
+        ret <span class="token operator">=</span> <span class="token function">ff_encode_get_frame</span><span class="token punctuation">(</span>avctx<span class="token punctuation">,</span> frame<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span> <span class="token operator">&amp;&amp;</span> ret <span class="token operator">!=</span> AVERROR_EOF<span class="token punctuation">)</span>
+            <span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>CONFIG_FRAME_THREAD_ENCODER <span class="token operator">&amp;&amp;</span>
+        avci<span class="token operator">-&gt;</span>frame_thread_encoder <span class="token operator">&amp;&amp;</span> <span class="token punctuation">(</span>avctx<span class="token operator">-&gt;</span>active_thread_type <span class="token operator">&amp;</span> FF_THREAD_FRAME<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token comment">/* This might modify frame, but it doesn't matter, because
+         * the frame properties used below are not used for video
+         * (due to the delay inherent in frame threaded encoding, it makes
+         *  no sense to use the properties of the current frame anyway). */</span>
+        ret <span class="token operator">=</span> <span class="token function">ff_thread_video_encode_frame</span><span class="token punctuation">(</span>avctx<span class="token punctuation">,</span> avpkt<span class="token punctuation">,</span> frame<span class="token punctuation">,</span> <span class="token operator">&amp;</span>got_packet<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+         <span class="token comment">//调用具体encoder的编码函数，传入frame，传出编码好的avpkt</span>
+        ret <span class="token operator">=</span> codec<span class="token operator">-&gt;</span>cb<span class="token punctuation">.</span><span class="token function">encode</span><span class="token punctuation">(</span>avctx<span class="token punctuation">,</span> avpkt<span class="token punctuation">,</span> frame<span class="token punctuation">,</span> <span class="token operator">&amp;</span>got_packet<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>avctx<span class="token operator">-&gt;</span>codec<span class="token operator">-&gt;</span>type <span class="token operator">==</span> AVMEDIA_TYPE_VIDEO <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>ret <span class="token operator">&amp;&amp;</span> got_packet <span class="token operator">&amp;&amp;</span>
+            <span class="token operator">!</span><span class="token punctuation">(</span>avctx<span class="token operator">-&gt;</span>codec<span class="token operator">-&gt;</span>capabilities <span class="token operator">&amp;</span> AV_CODEC_CAP_DELAY<span class="token punctuation">)</span><span class="token punctuation">)</span>
+            avpkt<span class="token operator">-&gt;</span>pts <span class="token operator">=</span> avpkt<span class="token operator">-&gt;</span>dts <span class="token operator">=</span> frame<span class="token operator">-&gt;</span>pts<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token function">av_assert0</span><span class="token punctuation">(</span>ret <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token function">emms_c</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>ret <span class="token operator">&amp;&amp;</span> got_packet<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>avpkt<span class="token operator">-&gt;</span>data<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//将pkt-&gt;data里面的数据拷贝到pkt-&gt;buf-&gt;data</span>
+            <span class="token comment">//看起来是encoder只是将数据指向了pkt-&gt;data</span>
+            ret <span class="token operator">=</span> <span class="token function">av_packet_make_refcounted</span><span class="token punctuation">(</span>avpkt<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+                <span class="token keyword">goto</span> end<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>下面来看下FFCodec ff_mpeg4_encoder的encode函数: ff_mpv_encode_picture</p> 
+<pre><code class="prism language-c"><span class="token keyword">int</span> <span class="token function">ff_mpv_encode_picture</span><span class="token punctuation">(</span>AVCodecContext <span class="token operator">*</span>avctx<span class="token punctuation">,</span> AVPacket <span class="token operator">*</span>pkt<span class="token punctuation">,</span>
+                          <span class="token keyword">const</span> AVFrame <span class="token operator">*</span>pic_arg<span class="token punctuation">,</span> <span class="token keyword">int</span> <span class="token operator">*</span>got_packet<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    MpegEncContext <span class="token operator">*</span>s <span class="token operator">=</span> avctx<span class="token operator">-&gt;</span>priv_data<span class="token punctuation">;</span>
+    <span class="token keyword">int</span> i<span class="token punctuation">,</span> stuffing_count<span class="token punctuation">,</span> ret<span class="token punctuation">;</span>
+    <span class="token keyword">int</span> context_count <span class="token operator">=</span> s<span class="token operator">-&gt;</span>slice_context_count<span class="token punctuation">;</span>
+
+    s<span class="token operator">-&gt;</span>vbv_ignore_qmax <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+
+    s<span class="token operator">-&gt;</span>picture_in_gop_number<span class="token operator">++</span><span class="token punctuation">;</span>
+    <span class="token comment">//将AVFrame *pic_arg里面的内容拷贝picture中，然后将picture存放到MpegEncContext.input_picture</span>
+    <span class="token comment">//然后通过reorder后将此picture存放到MpegEncContext.reordered_input_picture</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">load_input_picture</span><span class="token punctuation">(</span>s<span class="token punctuation">,</span> pic_arg<span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+        <span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token comment">//先将MpegEncContext.input_picture中picture按照规则再重排order到MpegEncContext.reordered_input_picture</span>
+    <span class="token comment">//然后选择MpegEncContext.reordered_input_picture中的第一个作为new_picture，即要编码的数据</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">select_input_picture</span><span class="token punctuation">(</span>s<span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">/* output? */</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>s<span class="token operator">-&gt;</span>new_picture<span class="token operator">-&gt;</span>data<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">int</span> growing_buffer <span class="token operator">=</span> context_count <span class="token operator">==</span> <span class="token number">1</span> <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>s<span class="token operator">-&gt;</span>data_partitioning<span class="token punctuation">;</span>
+        <span class="token class-name">size_t</span> pkt_size <span class="token operator">=</span> <span class="token number">10000</span> <span class="token operator">+</span> s<span class="token operator">-&gt;</span>mb_width <span class="token operator">*</span> s<span class="token operator">-&gt;</span>mb_height <span class="token operator">*</span>
+                                  <span class="token punctuation">(</span>growing_buffer <span class="token operator">?</span> <span class="token number">64</span> <span class="token operator">:</span> <span class="token punctuation">(</span>MAX_MB_BYTES <span class="token operator">+</span> <span class="token number">100</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>CONFIG_MJPEG_ENCODER <span class="token operator">&amp;&amp;</span> avctx<span class="token operator">-&gt;</span>codec_id <span class="token operator">==</span> AV_CODEC_ID_MJPEG<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            ret <span class="token operator">=</span> <span class="token function">ff_mjpeg_add_icc_profile_size</span><span class="token punctuation">(</span>avctx<span class="token punctuation">,</span> s<span class="token operator">-&gt;</span>new_picture<span class="token punctuation">,</span> <span class="token operator">&amp;</span>pkt_size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+                <span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//给AVPacket.data分配内存空间</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>ret <span class="token operator">=</span> <span class="token function">ff_alloc_packet</span><span class="token punctuation">(</span>avctx<span class="token punctuation">,</span> pkt<span class="token punctuation">,</span> pkt_size<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+            <span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+        pkt<span class="token operator">-&gt;</span>size <span class="token operator">=</span> avctx<span class="token operator">-&gt;</span>internal<span class="token operator">-&gt;</span>byte_buffer_size <span class="token operator">-</span> AV_INPUT_BUFFER_PADDING_SIZE<span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>s<span class="token operator">-&gt;</span>mb_info<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            s<span class="token operator">-&gt;</span>mb_info_ptr <span class="token operator">=</span> <span class="token function">av_packet_new_side_data</span><span class="token punctuation">(</span>pkt<span class="token punctuation">,</span>
+                                 AV_PKT_DATA_H263_MB_INFO<span class="token punctuation">,</span>
+                                 s<span class="token operator">-&gt;</span>mb_width<span class="token operator">*</span>s<span class="token operator">-&gt;</span>mb_height<span class="token operator">*</span><span class="token number">12</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            s<span class="token operator">-&gt;</span>prev_mb_info <span class="token operator">=</span> s<span class="token operator">-&gt;</span>last_mb_info <span class="token operator">=</span> s<span class="token operator">-&gt;</span>mb_info_size <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token keyword">for</span> <span class="token punctuation">(</span>i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> context_count<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">int</span> start_y <span class="token operator">=</span> s<span class="token operator">-&gt;</span>thread_context<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token operator">-&gt;</span>start_mb_y<span class="token punctuation">;</span>
+            <span class="token keyword">int</span>   end_y <span class="token operator">=</span> s<span class="token operator">-&gt;</span>thread_context<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token operator">-&gt;</span>  end_mb_y<span class="token punctuation">;</span>
+            <span class="token keyword">int</span> h       <span class="token operator">=</span> s<span class="token operator">-&gt;</span>mb_height<span class="token punctuation">;</span>
+            <span class="token class-name">uint8_t</span> <span class="token operator">*</span>start <span class="token operator">=</span> pkt<span class="token operator">-&gt;</span>data <span class="token operator">+</span> <span class="token punctuation">(</span><span class="token class-name">size_t</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token class-name">int64_t</span><span class="token punctuation">)</span> pkt<span class="token operator">-&gt;</span>size<span class="token punctuation">)</span> <span class="token operator">*</span> start_y <span class="token operator">/</span> h<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token class-name">uint8_t</span> <span class="token operator">*</span>end   <span class="token operator">=</span> pkt<span class="token operator">-&gt;</span>data <span class="token operator">+</span> <span class="token punctuation">(</span><span class="token class-name">size_t</span><span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token class-name">int64_t</span><span class="token punctuation">)</span> pkt<span class="token operator">-&gt;</span>size<span class="token punctuation">)</span> <span class="token operator">*</span>   end_y <span class="token operator">/</span> h<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token function">init_put_bits</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>s<span class="token operator">-&gt;</span>thread_context<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token operator">-&gt;</span>pb<span class="token punctuation">,</span> start<span class="token punctuation">,</span> end <span class="token operator">-</span> start<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        s<span class="token operator">-&gt;</span>pict_type <span class="token operator">=</span> s<span class="token operator">-&gt;</span>new_picture<span class="token operator">-&gt;</span>pict_type<span class="token punctuation">;</span>
+        <span class="token comment">//emms_c();</span>
+        ret <span class="token operator">=</span> <span class="token function">frame_start</span><span class="token punctuation">(</span>s<span class="token punctuation">)</span><span class="token punctuation">;</span>
+vbv_retry<span class="token operator">:</span>
+       <span class="token comment">//开始编码</span>
+        ret <span class="token operator">=</span> <span class="token function">encode_picture</span><span class="token punctuation">(</span>s<span class="token punctuation">,</span> s<span class="token operator">-&gt;</span>picture_number<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>growing_buffer<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//pkt-&gt;data在ff_alloc_packet中是指向avctx-&gt;internal-&gt;byte_buffer</span>
+            <span class="token function">av_assert0</span><span class="token punctuation">(</span>s<span class="token operator">-&gt;</span>pb<span class="token punctuation">.</span>buf <span class="token operator">==</span> avctx<span class="token operator">-&gt;</span>internal<span class="token operator">-&gt;</span>byte_buffer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//此处如果buffer size有增长，则重新赋值一下</span>
+            pkt<span class="token operator">-&gt;</span>data <span class="token operator">=</span> s<span class="token operator">-&gt;</span>pb<span class="token punctuation">.</span>buf<span class="token punctuation">;</span>
+            pkt<span class="token operator">-&gt;</span>size <span class="token operator">=</span> avctx<span class="token operator">-&gt;</span>internal<span class="token operator">-&gt;</span>byte_buffer_size<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">;</span>
+        <span class="token function">frame_end</span><span class="token punctuation">(</span>s<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+       <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>CONFIG_MJPEG_ENCODER <span class="token operator">||</span> CONFIG_AMV_ENCODER<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> s<span class="token operator">-&gt;</span>out_format <span class="token operator">==</span> FMT_MJPEG<span class="token punctuation">)</span>
+            <span class="token function">ff_mjpeg_encode_picture_trailer</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>s<span class="token operator">-&gt;</span>pb<span class="token punctuation">,</span> s<span class="token operator">-&gt;</span>header_bits<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">;</span>
+        <span class="token comment">//设置pts 和dts</span>
+        pkt<span class="token operator">-&gt;</span>pts <span class="token operator">=</span> s<span class="token operator">-&gt;</span>current_picture<span class="token punctuation">.</span>f<span class="token operator">-&gt;</span>pts<span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>s<span class="token operator">-&gt;</span>low_delay <span class="token operator">&amp;&amp;</span> s<span class="token operator">-&gt;</span>pict_type <span class="token operator">!=</span> AV_PICTURE_TYPE_B<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>s<span class="token operator">-&gt;</span>current_picture<span class="token punctuation">.</span>f<span class="token operator">-&gt;</span>coded_picture_number<span class="token punctuation">)</span>
+                pkt<span class="token operator">-&gt;</span>dts <span class="token operator">=</span> pkt<span class="token operator">-&gt;</span>pts <span class="token operator">-</span> s<span class="token operator">-&gt;</span>dts_delta<span class="token punctuation">;</span>
+            <span class="token keyword">else</span>
+                pkt<span class="token operator">-&gt;</span>dts <span class="token operator">=</span> s<span class="token operator">-&gt;</span>reordered_pts<span class="token punctuation">;</span>
+            s<span class="token operator">-&gt;</span>reordered_pts <span class="token operator">=</span> pkt<span class="token operator">-&gt;</span>pts<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span>
+            pkt<span class="token operator">-&gt;</span>dts <span class="token operator">=</span> pkt<span class="token operator">-&gt;</span>pts<span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>s<span class="token operator">-&gt;</span>current_picture<span class="token punctuation">.</span>f<span class="token operator">-&gt;</span>key_frame<span class="token punctuation">)</span>
+            pkt<span class="token operator">-&gt;</span>flags <span class="token operator">|=</span> AV_PKT_FLAG_KEY<span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>s<span class="token operator">-&gt;</span>mb_info<span class="token punctuation">)</span>
+            <span class="token function">av_packet_shrink_side_data</span><span class="token punctuation">(</span>pkt<span class="token punctuation">,</span> AV_PKT_DATA_H263_MB_INFO<span class="token punctuation">,</span> s<span class="token operator">-&gt;</span>mb_info_size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        s<span class="token operator">-&gt;</span>frame_bits <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">;</span>
+    pkt<span class="token operator">-&gt;</span>size <span class="token operator">=</span> s<span class="token operator">-&gt;</span>frame_bits <span class="token operator">/</span> <span class="token number">8</span><span class="token punctuation">;</span>
+    <span class="token operator">*</span>got_packet <span class="token operator">=</span> <span class="token operator">!</span><span class="token operator">!</span>pkt<span class="token operator">-&gt;</span>size<span class="token punctuation">;</span>
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<h3><a id="AVFrameAVPacket_604"></a>AVFrame编码之后变成AVPacket过程</h3> 
+<p><img src="https://images2.imgbox.com/cb/15/vdMUuMuE_o.png" alt="没碰g"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/bf0b68f2585407896fce40dbc7683eb2/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">宝塔快速搭建网站</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/0f5ebf7fdd95b2b205e8a8e9a25c64bb/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">uniapp 设置div块内可上下滑动</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

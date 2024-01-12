@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Linux-FrameBuffer双缓冲机制显示图像 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Linux-FrameBuffer双缓冲机制显示图像" />
+<meta property="og:description" content="1. 液晶屏的基本概念 像素：
+屏幕上显示颜色的最小单位，英文叫 pixel。注意，位图（如jpg、bmp等格式的常见图片）也是由一个个的像素点构成的，跟屏幕的像素点的概念一样。原理上讲，将一张位图显示到屏幕上，就是将图片上的像素点一个个复制到屏幕像素点上。 分辨率： 宽、高两个维度上的像素点数目。分辨率越高，所需要的显存越大。 色深： 每个像素所对应的内存字节数，一般有8位、16位、24位或32位GEC6818开发板的屏幕的色深是32位的32位色深的屏幕一般被称为真彩屏，或1600万色屏。 色深决定了一个像素点所能表达的颜色的丰富程度，色深越大，色彩表现力越强。
+2. 内存映射基本原理 虽然LCD设备本质上也可以看作是一个文件，在文件系统中有其对应的设备节点，可以像普通文件一样对其进行读写操作（read/write），但由于对字符设备的读写操作是以字节流的方式进行的，因此除非操作的图像尺寸刚好与屏幕尺寸完全一致，如下图所示，图片的宽高与LCD的宽高完全一致，否则将会画面会乱。
+以下是一段直接写设备节点的“不好”的示例代码：
+void bad_display() { // 打开LCD设备 int lcd = open(&#34;/dev/fb0&#34;, O_RDWR); // 从JPG图片中获取ARGB数据 char *argbbuf; int argbsize; argbsize = jpg2rgb(&#34;dogs.jpg&#34;, &amp;argbbuf); // 将RGB数据直接线性灌入LCD设备节点 write(lcd, argbbuf, argbsize); // ... } 像上述代码这样，直接将数据通过设备节点 /dev/fb0 写入的话，这些数据会自动地从LCD映射内存的入口处（对应LCD屏幕的左上角）开始呈现，并且会以线性的字节流形式逐个字节往后填充，除非图像尺寸与显示器刚好完全一致，否则显示是失败的。
+一般而言，图像的尺寸大小是随机的，因此更方便的做法是为LCD做内存映射，将屏幕的每一个像素点跟映射内存一一对应，而映射内存可以是二维数组，因此就可以非常方便地通过操作二维数组中的任意元素，来操作屏幕中的任意像素点了。这里的映射内存，有时被称为显存。
+如上图所示，将一块内存与LCD的像素一一对应：
+LCD上面显示的图像色彩，由其对应的内存的数据决定映射内存的大小至少得等于LCD的真实尺寸大小映射内存的大小可以大于LCD的真实尺寸，有利于优化动态画面（视频）体验 下面是屏幕显示为红色的示例代码：
+#include &lt;stdio.h&gt; #include &lt;sys/mman.h&gt; #include &lt;string.h&gt; #include &lt;fcntl.h&gt; int main() { // 打开液晶屏文件 int lcd = open(&#34;/dev/fb0&#34;, O_RDWR); // 给LCD设备映射一块内存（或称显存） char *p = mmap(NULL, 800*480*4, PROT_WRITE, MAP_SHARED, lcd, 0); // 通过映射内存，将LCD屏幕的每一个像素点涂成红色 int red = 0x00FF0000; for(int i=0; i&lt;800*480; i&#43;&#43;) memcpy(p&#43;i*4, &amp;red, 4); // 解除映射 munmap(p, 800*480*4); return 0; } 注意，上述代码存在诸多假设，比如屏幕的尺寸是800×480、屏幕色深是4个字节、每个像素内部的颜色分量是ARGB等等，这些信息都是“生搬硬凑”的，只能适用于某一款特定的LCD屏，如果屏幕的这些参数变了，上述代码就无法正常运行了，要想让程序在其他规格尺寸的屏幕下也能正常工作，就得让程序自动获取这些硬件参数信息。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/e4bc0c9495bf5d70a459f785fcbbf6f4/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-04-30T13:31:48+08:00" />
+<meta property="article:modified_time" content="2021-04-30T13:31:48+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Linux-FrameBuffer双缓冲机制显示图像</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="1__0"></a><strong>1. 液晶屏的基本概念</strong></h3> 
+<ul><li>像素：<br> 屏幕上显示颜色的最小单位，英文叫 pixel。注意，位图（如jpg、bmp等格式的常见图片）也是由一个个的像素点构成的，跟屏幕的像素点的概念一样。原理上讲，将一张位图显示到屏幕上，就是将图片上的像素点一个个复制到屏幕像素点上。</li></ul> 
+<p><img src="https://images2.imgbox.com/90/c4/5UOBGxIJ_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>分辨率： 
+  <ul><li>宽、高两个维度上的像素点数目。</li><li>分辨率越高，所需要的显存越大。</li></ul> </li></ul> 
+<p><img src="https://images2.imgbox.com/54/95/vfw9QweO_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>色深： 
+  <ul><li>每个像素所对应的内存字节数，一般有8位、16位、24位或32位</li><li>GEC6818开发板的屏幕的色深是32位的</li><li>32位色深的屏幕一般被称为真彩屏，或1600万色屏。</li></ul> </li></ul> 
+<p>色深决定了一个像素点所能表达的颜色的丰富程度，色深越大，色彩表现力越强。</p> 
+<br> 
+<h3><a id="2__21"></a><strong>2. 内存映射基本原理</strong></h3> 
+<p>虽然LCD设备本质上也可以看作是一个文件，在文件系统中有其对应的设备节点，可以像普通文件一样对其进行读写操作（read/write），但由于对字符设备的读写操作是以字节流的方式进行的，因此除非操作的图像尺寸刚好与屏幕尺寸完全一致，如下图所示，图片的宽高与LCD的宽高完全一致，否则将会画面会乱。<br> <img src="https://images2.imgbox.com/6e/c0/CKIrPYSc_o.png" alt="在这里插入图片描述"></p> 
+<br> 
+<p>以下是一段直接写设备节点的<font color="red">“不好”</font>的示例代码：</p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token function">bad_display</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 打开LCD设备</span>
+    <span class="token keyword">int</span> lcd <span class="token operator">=</span> <span class="token function">open</span><span class="token punctuation">(</span><span class="token string">"/dev/fb0"</span><span class="token punctuation">,</span> O_RDWR<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 从JPG图片中获取ARGB数据</span>
+    <span class="token keyword">char</span> <span class="token operator">*</span>argbbuf<span class="token punctuation">;</span>
+    <span class="token keyword">int</span>   argbsize<span class="token punctuation">;</span>
+    argbsize <span class="token operator">=</span> <span class="token function">jpg2rgb</span><span class="token punctuation">(</span><span class="token string">"dogs.jpg"</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>argbbuf<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 将RGB数据直接线性灌入LCD设备节点</span>
+    <span class="token function">write</span><span class="token punctuation">(</span>lcd<span class="token punctuation">,</span> argbbuf<span class="token punctuation">,</span> argbsize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// ...</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>像上述代码这样，直接将数据通过设备节点 /dev/fb0 写入的话，这些数据会自动地从LCD映射内存的入口处（对应LCD屏幕的左上角）开始呈现，并且会以线性的字节流形式逐个字节往后填充，除非图像尺寸与显示器刚好完全一致，否则显示是失败的。</p> 
+<br> 
+<p>一般而言，图像的尺寸大小是随机的，因此更方便的做法是为LCD做内存映射，将屏幕的每一个像素点跟映射内存一一对应，而映射内存可以是二维数组，因此就可以非常方便地通过操作二维数组中的任意元素，来操作屏幕中的任意像素点了。这里的映射内存，有时被称为显存。</p> 
+<p><img src="https://images2.imgbox.com/da/4f/v3QjEyHH_o.png" alt="在这里插入图片描述"><br> <br></p> 
+<p>如上图所示，将一块内存与LCD的像素一一对应：</p> 
+<ol><li>LCD上面显示的图像色彩，由其对应的内存的数据决定</li><li>映射内存的大小至少得等于LCD的真实尺寸大小</li><li>映射内存的大小可以大于LCD的真实尺寸，有利于优化动态画面（视频）体验</li></ol> 
+<p>下面是屏幕显示为红色的示例代码：</p> 
+<pre><code class="prism language-c"><span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;sys/mman.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;string.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;fcntl.h&gt;</span></span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 打开液晶屏文件</span>
+    <span class="token keyword">int</span> lcd <span class="token operator">=</span> <span class="token function">open</span><span class="token punctuation">(</span><span class="token string">"/dev/fb0"</span><span class="token punctuation">,</span> O_RDWR<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 给LCD设备映射一块内存（或称显存）</span>
+    <span class="token keyword">char</span> <span class="token operator">*</span>p <span class="token operator">=</span> <span class="token function">mmap</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">800</span><span class="token operator">*</span><span class="token number">480</span><span class="token operator">*</span><span class="token number">4</span><span class="token punctuation">,</span> PROT_WRITE<span class="token punctuation">,</span>
+                   MAP_SHARED<span class="token punctuation">,</span> lcd<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 通过映射内存，将LCD屏幕的每一个像素点涂成红色</span>
+    <span class="token keyword">int</span> red <span class="token operator">=</span> <span class="token number">0x00FF0000</span><span class="token punctuation">;</span>
+    <span class="token keyword">for</span><span class="token punctuation">(</span><span class="token keyword">int</span> i<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span> i<span class="token operator">&lt;</span><span class="token number">800</span><span class="token operator">*</span><span class="token number">480</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span>
+        <span class="token function">memcpy</span><span class="token punctuation">(</span>p<span class="token operator">+</span>i<span class="token operator">*</span><span class="token number">4</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>red<span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 解除映射</span>
+    <span class="token function">munmap</span><span class="token punctuation">(</span>p<span class="token punctuation">,</span> <span class="token number">800</span><span class="token operator">*</span><span class="token number">480</span><span class="token operator">*</span><span class="token number">4</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>注意，上述代码存在诸多假设，比如屏幕的尺寸是800×480、屏幕色深是4个字节、每个像素内部的颜色分量是ARGB等等，这些信息都是“生搬硬凑”的，只能适用于某一款特定的LCD屏，如果屏幕的这些参数变了，上述代码就无法正常运行了，要想让程序在其他规格尺寸的屏幕下也能正常工作，就得让程序自动获取这些硬件参数信息。</p> 
+<br> 
+<h3><a id="3__92"></a><strong>3. 屏幕参数设定</strong></h3> 
+<p>首先明确，屏幕的硬件参数，都是由硬件驱动工程师，根据硬件数据手册和内核的相关规定，填入某个固定的地方的，然后再由应用开发工程师，使用特定的函数接口，将这些特定的信息读出来。</p> 
+<p>对于GEC6818开发板而言，上述所谓“某个固定的地方”，指的是如下这些重要的结构体（节选）：</p> 
+<pre><code class="prism language-c"><span class="token keyword">struct</span> fb_fix_screeninfo
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">char</span> id<span class="token punctuation">[</span><span class="token number">16</span><span class="token punctuation">]</span><span class="token punctuation">;</span>              <span class="token comment">/* identification string eg "TT Builtin" */</span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">long</span> smem_start<span class="token punctuation">;</span> <span class="token comment">/* Start of frame buffer mem */</span>
+                              <span class="token comment">/* (physical address) */</span>
+    __u32 smem_len<span class="token punctuation">;</span>           <span class="token comment">/* Length of frame buffer mem */</span>
+    __u32 type<span class="token punctuation">;</span>               <span class="token comment">/* see FB_TYPE_*        */</span>
+    __u32 type_aux<span class="token punctuation">;</span>           <span class="token comment">/* Interleave for interleaved Planes */</span>
+    __u32 visual<span class="token punctuation">;</span>             <span class="token comment">/* see FB_VISUAL_*        */</span> 
+    __u16 xpanstep<span class="token punctuation">;</span>           <span class="token comment">/* zero if no hardware panning  */</span>
+    __u16 ypanstep<span class="token punctuation">;</span>           <span class="token comment">/* zero if no hardware panning  */</span>
+    __u16 ywrapstep<span class="token punctuation">;</span>          <span class="token comment">/* zero if no hardware ywrap    */</span>
+    __u32 line_length<span class="token punctuation">;</span>        <span class="token comment">/* length of a line in bytes    */</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token keyword">struct</span> fb_var_screeninfo
+<span class="token punctuation">{<!-- --></span>
+    __u32 xres<span class="token punctuation">;</span>           <span class="token comment">/* 可见区宽度（单位：像素） */</span>
+    __u32 yres<span class="token punctuation">;</span>           <span class="token comment">/* 可见区高度（单位：像素） */</span>
+    __u32 xres_virtual<span class="token punctuation">;</span>   <span class="token comment">/* 虚拟区宽度（单位：像素） */</span>
+    __u32 yres_virtual<span class="token punctuation">;</span>   <span class="token comment">/* 虚拟区高度（单位：像素） */</span>
+    __u32 xoffset<span class="token punctuation">;</span>        <span class="token comment">/* 虚拟区到可见区x轴偏移量 */</span>
+    __u32 yoffset<span class="token punctuation">;</span>        <span class="token comment">/* 虚拟区到可见区y轴偏移量 */</span>
+
+    __u32 bits_per_pixel<span class="token punctuation">;</span> <span class="token comment">/* 色深 */</span>
+
+    <span class="token comment">// 像素内颜色结构</span>
+    <span class="token keyword">struct</span> fb_bitfield red<span class="token punctuation">;</span>   <span class="token comment">// 红色  </span>
+    <span class="token keyword">struct</span> fb_bitfield green<span class="token punctuation">;</span> <span class="token comment">// 绿色</span>
+    <span class="token keyword">struct</span> fb_bitfield blue<span class="token punctuation">;</span>  <span class="token comment">// 蓝色</span>
+    <span class="token keyword">struct</span> fb_bitfield transp<span class="token punctuation">;</span><span class="token comment">// 透明度</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token keyword">struct</span> fb_bitfield
+<span class="token punctuation">{<!-- --></span>
+    __u32 offset<span class="token punctuation">;</span>   <span class="token comment">/* 颜色在像素内偏移量 */</span>
+    __u32 length<span class="token punctuation">;</span>   <span class="token comment">/* 颜色占用数位长度 */</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>上述结构体的具体定义在系统的如下路径中：</p> 
+<pre><code class="prism language-bash">/usr/include/linux/fb.h
+</code></pre> 
+<p><img src="https://images2.imgbox.com/0d/93/QEo6pcOE_o.png" alt="在这里插入图片描述"><br> <br></p> 
+<p>如上图所示，如果板卡已经具备LCD的驱动程序，那么应用程序就可以通过 ioctl() 来检索LCD的硬件参数信息。以粤嵌GEC6818开发板配套的群创AT070TN92-7英寸液晶显示屏为例，具体代码如下：</p> 
+<pre><code class="prism language-c"><span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;stdlib.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;unistd.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;stdbool.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;errno.h&gt;</span></span>
+
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;sys/types.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;sys/mman.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;sys/ioctl.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;linux/fb.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;fcntl.h&gt;</span></span>
+
+<span class="token keyword">int</span> lcd<span class="token punctuation">;</span>
+<span class="token keyword">struct</span> fb_fix_screeninfo fixinfo<span class="token punctuation">;</span> <span class="token comment">// 固定属性</span>
+<span class="token keyword">struct</span> fb_var_screeninfo varinfo<span class="token punctuation">;</span> <span class="token comment">// 可变属性</span>
+
+<span class="token keyword">void</span> <span class="token function">get_fixinfo</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span><span class="token punctuation">(</span><span class="token function">ioctl</span><span class="token punctuation">(</span>lcd<span class="token punctuation">,</span> FBIOGET_FSCREENINFO<span class="token punctuation">,</span> <span class="token operator">&amp;</span>fixinfo<span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token number">0</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token function">perror</span><span class="token punctuation">(</span><span class="token string">"获取LCD设备固定属性信息失败"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+<span class="token punctuation">}</span>
+
+<span class="token keyword">void</span> <span class="token function">get_varinfo</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span><span class="token punctuation">(</span><span class="token function">ioctl</span><span class="token punctuation">(</span>lcd<span class="token punctuation">,</span> FBIOGET_VSCREENINFO<span class="token punctuation">,</span> <span class="token operator">&amp;</span>varinfo<span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token number">0</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token function">perror</span><span class="token punctuation">(</span><span class="token string">"获取LCD设备可变属性信息失败"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">void</span> <span class="token function">show_info</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 获取LCD设备硬件fix属性</span>
+    <span class="token function">get_fixinfo</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"\n获取LCD设备固定属性信息成功：\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"[ID]: %s\n"</span><span class="token punctuation">,</span> fixinfo<span class="token punctuation">.</span>id<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"[FB类型]: "</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">switch</span><span class="token punctuation">(</span>fixinfo<span class="token punctuation">.</span>type<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">case</span> FB_TYPE_PACKED_PIXELS<span class="token punctuation">:</span>      <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"组合像素\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token keyword">case</span> FB_TYPE_PLANES<span class="token punctuation">:</span>             <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"非交错图层\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token keyword">case</span> FB_TYPE_INTERLEAVED_PLANES<span class="token punctuation">:</span> <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"交错图层\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token keyword">case</span> FB_TYPE_TEXT<span class="token punctuation">:</span>               <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"文本或属性\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token keyword">case</span> FB_TYPE_VGA_PLANES<span class="token punctuation">:</span>         <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"EGA/VGA图层\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"[FB视觉]: "</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">switch</span><span class="token punctuation">(</span>fixinfo<span class="token punctuation">.</span>visual<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">case</span> FB_VISUAL_MONO01<span class="token punctuation">:</span>             <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"灰度. 1=黑;0=白\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token keyword">case</span> FB_VISUAL_MONO10<span class="token punctuation">:</span>             <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"灰度. 0=黑;1=白\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token keyword">case</span> FB_VISUAL_TRUECOLOR<span class="token punctuation">:</span>          <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"真彩色\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token keyword">case</span> FB_VISUAL_PSEUDOCOLOR<span class="token punctuation">:</span>        <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"伪彩色\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token keyword">case</span> FB_VISUAL_DIRECTCOLOR<span class="token punctuation">:</span>        <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"直接彩色\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token keyword">case</span> FB_VISUAL_STATIC_PSEUDOCOLOR<span class="token punctuation">:</span> <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"只读伪彩色\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"[行宽]: %d 字节\n"</span><span class="token punctuation">,</span> fixinfo<span class="token punctuation">.</span>line_length<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 获取LCD设备硬件var属性</span>
+    <span class="token function">get_varinfo</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"\n获取LCD设备可变属性信息成功：\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"[可见区分辨率]: %d×%d\n"</span><span class="token punctuation">,</span> varinfo<span class="token punctuation">.</span>xres<span class="token punctuation">,</span> varinfo<span class="token punctuation">.</span>yres<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"[虚拟区分辨率]: %d×%d\n"</span><span class="token punctuation">,</span> varinfo<span class="token punctuation">.</span>xres_virtual<span class="token punctuation">,</span> varinfo<span class="token punctuation">.</span>yres_virtual<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"[从虚拟区到可见区偏移量]: (%d,%d)\n"</span><span class="token punctuation">,</span> varinfo<span class="token punctuation">.</span>xoffset<span class="token punctuation">,</span> varinfo<span class="token punctuation">.</span>yoffset<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"[色深]: %d bits\n"</span><span class="token punctuation">,</span> varinfo<span class="token punctuation">.</span>bits_per_pixel<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"[像素内颜色结构]:\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"  [红] 偏移量:%d, 长度:%d bits\n"</span><span class="token punctuation">,</span> varinfo<span class="token punctuation">.</span>red<span class="token punctuation">.</span>offset<span class="token punctuation">,</span> varinfo<span class="token punctuation">.</span>red<span class="token punctuation">.</span>length<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"  [绿] 偏移量:%d, 长度:%d bits\n"</span><span class="token punctuation">,</span> varinfo<span class="token punctuation">.</span>green<span class="token punctuation">.</span>offset<span class="token punctuation">,</span> varinfo<span class="token punctuation">.</span>green<span class="token punctuation">.</span>length<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"  [蓝] 偏移量:%d, 长度:%d bits\n"</span><span class="token punctuation">,</span> varinfo<span class="token punctuation">.</span>blue<span class="token punctuation">.</span>offset<span class="token punctuation">,</span> varinfo<span class="token punctuation">.</span>blue<span class="token punctuation">.</span>length<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"  [透明度] 偏移量:%d, 长度:%d bits\n"</span><span class="token punctuation">,</span> varinfo<span class="token punctuation">.</span>transp<span class="token punctuation">.</span>offset<span class="token punctuation">,</span> varinfo<span class="token punctuation">.</span>transp<span class="token punctuation">.</span>length<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    lcd <span class="token operator">=</span> <span class="token function">open</span><span class="token punctuation">(</span><span class="token string">"/dev/fb0"</span><span class="token punctuation">,</span> O_RDWR<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span><span class="token punctuation">(</span>lcd <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token function">perror</span><span class="token punctuation">(</span><span class="token string">"打开 /dev/fb0 失败"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">exit</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">// 显示LCD设备属性信息</span>
+    <span class="token function">show_info</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<br> 
+<h2><a id="center1center_248"></a> 
+ <center>
+   「课堂练习1」 
+ </center></h2> 
+<p>根据以上示例代码，采用自动获取屏幕硬件参数的方式，在开发板上轮流显示红绿蓝三原色。<br> <img src="https://images2.imgbox.com/00/20/3YTcCXUz_o.png" alt="红绿蓝三原色"></p> 
+<br> 
+<br> 
+<h3><a id="4__255"></a><strong>4. 多缓冲机制</strong></h3> 
+<p>仔细观察上述显示单色的程序运行效果，会发现屏幕上的颜色不是一瞬间整体显示的，而是有一个很明显的从上到下刷屏的过程，这实际上是由于我们是一个个像素点从左到右，从上到下刷屏导致的，如果不是速度比较快，我们将会看到屏幕上的点是一个个亮起来的，而不是整屏统一更新，这显然不是最佳的体验。<br> <img src="https://images2.imgbox.com/94/22/PM2GaR2J_o.gif" alt="闪屏"></p> 
+<br> 
+<p>解决这个问题，可以采用多缓冲的办法，首先要搞明白所谓可见区和虚拟区的关系：</p> 
+<ol><li>可见区、虚拟区都是内存区域，可见区是虚拟区的一部分，因此可见区尺寸至少等于虚拟区。</li><li>一般而言，可见区尺寸就是屏幕尺寸，比如800×480；而虚拟区是显示设备能支持的显存大小，比如800×480、800×960等。</li><li>为了提高画面体验，一般先在不可见区操作显存数据，然后在调整可见区位置，使得图像“瞬间”呈现，避免闪屏。<br> <img src="https://images2.imgbox.com/f6/74/bq2ZLCqA_o.png" alt="在这里插入图片描述"><br> <br></li></ol> 
+<p>下面以示例代码的形式，来分析如何使用多缓冲机制提高画面体验。</p> 
+<ul><li><font color="blue"><strong>1. 设定虚拟区</strong></font><br></li></ul> 
+<pre><code class="prism language-c"><span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;sys/mman.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;sys/ioctl.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;string.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;fcntl.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;linux/fb.h&gt;</span></span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 打开LCD设备</span>
+    <span class="token keyword">int</span> lcd <span class="token operator">=</span> <span class="token function">open</span><span class="token punctuation">(</span><span class="token string">"/dev/fb0"</span><span class="token punctuation">,</span> O_RDWR<span class="token operator">|</span>O_EXCL<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">struct</span> fb_var_screeninfo vinfo<span class="token punctuation">;</span> <span class="token comment">// 显卡设备的可变属性结构体</span>
+    <span class="token function">ioctl</span><span class="token punctuation">(</span>lcd<span class="token punctuation">,</span> FBIOGET_VSCREENINFO<span class="token punctuation">,</span> <span class="token operator">&amp;</span>vinfo<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 获取可变属性</span>
+
+    <span class="token comment">// 获得当前显卡所支持的虚拟区显存大小</span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">long</span> VWIDTH  <span class="token operator">=</span> vinfo<span class="token punctuation">.</span>xres_virtual<span class="token punctuation">;</span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">long</span> VHEIGHT <span class="token operator">=</span> vinfo<span class="token punctuation">.</span>yres_virtual<span class="token punctuation">;</span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">long</span> BPP <span class="token operator">=</span> vinfo<span class="token punctuation">.</span>bits_per_pixel<span class="token punctuation">;</span>
+
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"虚拟区显存大小为: %d×%d\n"</span><span class="token punctuation">,</span> VWIDTH<span class="token punctuation">,</span> VHEIGHT<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 申请一块虚拟区大小的映射内存</span>
+    <span class="token keyword">char</span> <span class="token operator">*</span>p <span class="token operator">=</span> <span class="token function">mmap</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> VWIDTH <span class="token operator">*</span> VHEIGHT <span class="token operator">*</span> BPP<span class="token operator">/</span><span class="token number">8</span><span class="token punctuation">,</span>
+                PROT_READ<span class="token operator">|</span>PROT_WRITE<span class="token punctuation">,</span>
+                MAP_SHARED<span class="token punctuation">,</span> lcd<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span> 
+    <span class="token keyword">if</span><span class="token punctuation">(</span>p <span class="token operator">!=</span> MAP_FAILED<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"申请显存成功\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>在开发板运行结果：</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>root@GEC6818 ~<span class="token punctuation">]</span><span class="token comment">#./a.out</span>
+虚拟区显存大小为: 800×1440
+申请显存成功
+<span class="token punctuation">[</span>root@GEC6818 ~<span class="token punctuation">]</span><span class="token comment">#</span>
+</code></pre> 
+<p>从上述执行结果来看，粤嵌GEC6818开发板配套的群创AT070TN92-7英寸液晶显示屏支持三倍与屏幕尺寸的虚拟显存的设定。当然，在实际设定的时候，不一定要三倍，也可以是两倍大小，比如800×960。</p> 
+<br> 
+<ul><li><font color="blue"><strong>2. 显示A区，但在B区作画</strong></font><br><br> 为了方便讨论，假设设定两倍屏幕尺寸的虚拟区内存，上半部分为A区，下半部分为B区。如下图所示：</li></ul> 
+<p><img src="https://images2.imgbox.com/69/f6/u7zayOXB_o.png" alt="在这里插入图片描述"></p> 
+<p>将A区设定为可见区，代码如下：</p> 
+<pre><code class="prism language-c"><span class="token keyword">struct</span> fb_var_screeninfo vinfo<span class="token punctuation">;</span> <span class="token comment">// 显卡设备的可变属性结构体</span>
+<span class="token function">ioctl</span><span class="token punctuation">(</span>lcd<span class="token punctuation">,</span> FBIOGET_VSCREENINFO<span class="token punctuation">,</span> <span class="token operator">&amp;</span>vinfo<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 获取可变属性</span>
+
+<span class="token comment">// 获得当前显卡所支持的虚拟区显存大小</span>
+<span class="token keyword">unsigned</span> <span class="token keyword">long</span> width  <span class="token operator">=</span> vinfo<span class="token punctuation">.</span>xres<span class="token punctuation">;</span>
+<span class="token keyword">unsigned</span> <span class="token keyword">long</span> height <span class="token operator">=</span> vinfo<span class="token punctuation">.</span>yres<span class="token punctuation">;</span>
+<span class="token keyword">unsigned</span> <span class="token keyword">long</span> bpp    <span class="token operator">=</span> vinfo<span class="token punctuation">.</span>bits_per_pixel<span class="token punctuation">;</span>
+<span class="token keyword">unsigned</span> <span class="token keyword">long</span> screen_size <span class="token operator">=</span> width <span class="token operator">*</span> height <span class="token operator">*</span> bpp<span class="token operator">/</span><span class="token number">8</span><span class="token punctuation">;</span>
+
+<span class="token comment">// 申请一块两倍与屏幕的映射内存</span>
+<span class="token keyword">char</span> <span class="token operator">*</span>p <span class="token operator">=</span> <span class="token function">mmap</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">2</span> <span class="token operator">*</span> screen_size<span class="token punctuation">,</span>
+            PROT_READ<span class="token operator">|</span>PROT_WRITE<span class="token punctuation">,</span>
+            MAP_SHARED<span class="token punctuation">,</span> lcd<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span> 
+
+<span class="token comment">// 将可见区设定为A区</span>
+vinfo<span class="token punctuation">.</span>xoffset <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+vinfo<span class="token punctuation">.</span>yoffset <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token function">ioctl</span><span class="token punctuation">(</span>lcd<span class="token punctuation">,</span> FBIOPAN_DISPLAY<span class="token punctuation">,</span> <span class="token operator">&amp;</span>vinfo<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">// 在B区绘图</span>
+<span class="token keyword">int</span> red <span class="token operator">=</span> <span class="token number">0x00FF0000</span><span class="token punctuation">;</span>
+<span class="token keyword">for</span><span class="token punctuation">(</span><span class="token keyword">int</span> i<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span> i<span class="token operator">&lt;</span>width<span class="token operator">*</span>height<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span>
+    <span class="token function">memcpy</span><span class="token punctuation">(</span>p<span class="token operator">+</span>screen_size<span class="token operator">+</span>i<span class="token operator">*</span><span class="token number">4</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>red<span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>执行上述代码，会发现虽然在B区已经填充了某些图像数据，但是屏幕上没有出现任何反应。</p> 
+<br> 
+<ul><li><font color="blue"><strong>3. 将可见区设定为B区，瞬间出现画面，避免了“闪屏”</strong></font><br><br> 为了方便讨论，假设设定两倍屏幕尺寸的虚拟区内存，上半部分为A区，下半部分为B区。如下图所示：<br> <img src="https://images2.imgbox.com/6f/48/KEIOYfrJ_o.png" alt="在这里插入图片描述"></li></ul> 
+<br> 
+<p>将B区设定为可见区，代码如下：</p> 
+<pre><code class="prism language-c">vinfo<span class="token punctuation">.</span>xoffset <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+vinfo<span class="token punctuation">.</span>yoffset <span class="token operator">=</span> <span class="token number">480</span><span class="token punctuation">;</span>
+<span class="token function">ioctl</span><span class="token punctuation">(</span>lcd<span class="token punctuation">,</span> FBIOPAN_DISPLAY<span class="token punctuation">,</span> <span class="token operator">&amp;</span>vinfo<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<br> 
+<p>容易想到，只要交替地改变可见区，使得填充数据的过程对用户不可见，等到数据填充完毕，再通过以上代码瞬间调整可见区区域，用户就能感受到画面流程呈现的体验，避免尴尬的闪屏。</p> 
+<p>下面是完整的使用“双缓冲”机制交替呈现红绿蓝的代码及演示效果图。</p> 
+<pre><code class="prism language-c"><span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;unistd.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;sys/mman.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;sys/ioctl.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;string.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;fcntl.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;linux/fb.h&gt;</span></span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 打开LCD设备</span>
+    <span class="token keyword">int</span> lcd <span class="token operator">=</span> <span class="token function">open</span><span class="token punctuation">(</span><span class="token string">"/dev/fb0"</span><span class="token punctuation">,</span> O_RDWR<span class="token operator">|</span>O_EXCL<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">struct</span> fb_var_screeninfo vinfo<span class="token punctuation">;</span> <span class="token comment">// 显卡设备的可变属性结构体</span>
+    <span class="token function">ioctl</span><span class="token punctuation">(</span>lcd<span class="token punctuation">,</span> FBIOGET_VSCREENINFO<span class="token punctuation">,</span> <span class="token operator">&amp;</span>vinfo<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 获取可变属性</span>
+
+    <span class="token comment">// 获得当前显卡所支持的虚拟区显存大小</span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">long</span> width  <span class="token operator">=</span> vinfo<span class="token punctuation">.</span>xres<span class="token punctuation">;</span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">long</span> height <span class="token operator">=</span> vinfo<span class="token punctuation">.</span>yres<span class="token punctuation">;</span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">long</span> bpp    <span class="token operator">=</span> vinfo<span class="token punctuation">.</span>bits_per_pixel<span class="token punctuation">;</span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">long</span> screen_size <span class="token operator">=</span> width <span class="token operator">*</span> height <span class="token operator">*</span> bpp<span class="token operator">/</span><span class="token number">8</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 申请一块两倍与屏幕的映射内存</span>
+    <span class="token keyword">char</span> <span class="token operator">*</span>p <span class="token operator">=</span> <span class="token function">mmap</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">2</span> <span class="token operator">*</span> screen_size<span class="token punctuation">,</span>
+                PROT_READ<span class="token operator">|</span>PROT_WRITE<span class="token punctuation">,</span>
+                MAP_SHARED<span class="token punctuation">,</span> lcd<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span> 
+
+    <span class="token function">bzero</span><span class="token punctuation">(</span>p<span class="token punctuation">,</span> <span class="token number">2</span><span class="token operator">*</span>screen_size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 将起始可见区设定为B区</span>
+    vinfo<span class="token punctuation">.</span>xoffset <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    vinfo<span class="token punctuation">.</span>yoffset <span class="token operator">=</span> <span class="token number">480</span><span class="token punctuation">;</span>
+    <span class="token function">ioctl</span><span class="token punctuation">(</span>lcd<span class="token punctuation">,</span> FBIOPAN_DISPLAY<span class="token punctuation">,</span> <span class="token operator">&amp;</span>vinfo<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">int</span> colors<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token number">0x00FF0000</span><span class="token punctuation">,</span> <span class="token number">0x0000FF00</span><span class="token punctuation">,</span> <span class="token number">0x000000FF</span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+    <span class="token keyword">for</span><span class="token punctuation">(</span><span class="token keyword">int</span> k<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">,</span>n<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span><span class="token punctuation">;</span> n<span class="token operator">++</span><span class="token punctuation">,</span>k<span class="token operator">++</span><span class="token punctuation">,</span>k<span class="token operator">%</span><span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">for</span><span class="token punctuation">(</span><span class="token keyword">int</span> i<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span> i<span class="token operator">&lt;</span>width<span class="token operator">*</span>height<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span>
+            <span class="token function">memcpy</span><span class="token punctuation">(</span>p<span class="token operator">+</span> screen_size<span class="token operator">*</span><span class="token punctuation">(</span>n<span class="token operator">%</span><span class="token number">2</span><span class="token punctuation">)</span> <span class="token operator">+</span>i<span class="token operator">*</span><span class="token number">4</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>colors<span class="token punctuation">[</span>k<span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        vinfo<span class="token punctuation">.</span>xoffset <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        vinfo<span class="token punctuation">.</span>yoffset <span class="token operator">=</span> <span class="token number">480</span><span class="token operator">*</span><span class="token punctuation">(</span>n<span class="token operator">%</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">ioctl</span><span class="token punctuation">(</span>lcd<span class="token punctuation">,</span> FBIOPAN_DISPLAY<span class="token punctuation">,</span> <span class="token operator">&amp;</span>vinfo<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token function">sleep</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/d9/8d/U4z8CUZt_o.gif" alt="顺滑切换画面"></p> 
+<h3><a id="_421"></a>节选自：粤嵌-嵌入式课堂笔记</h3> 
+<h3><a id="18028569040_422"></a>联系人：18028569040（曾小美老师·微信）</h3>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/2492a4d831ef6277e179c6b8f028804c/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">英特尔® Distribution of OpenVINO™ toolkit 2021 版的发布说明</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/405910905c7fc15bcf7fc4d1d455f246/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">linux内核 helloworld,Linux内核模块编程helloworld小程序问题解决方法</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

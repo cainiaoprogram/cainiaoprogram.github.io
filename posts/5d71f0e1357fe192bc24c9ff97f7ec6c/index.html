@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>ESP-IDF:TCP多线程并发服务器 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="ESP-IDF:TCP多线程并发服务器" />
+<meta property="og:description" content="核心代码： 核心思想就是主线程只处理socket监听功能，把数据处理部分分配到不同的线程中去处理。来了一个客户端连接，就分配新的线程去处理该客户端的数据请求。
+代码： /多线程并发服务器/
+#include &lt;stdio.h&gt;
+#include “sdkconfig.h”
+#include “freertos/semphr.h”
+#include “esp_system.h”
+#include “esp_spi_flash.h”
+#include &lt;string.h&gt;
+#include “freertos/FreeRTOS.h”
+#include “freertos/task.h”
+#include “freertos/event_groups.h”
+#include “esp_system.h”
+#include “esp_wifi.h”
+#include “esp_event.h”
+#include “esp_event_loop.h”
+#include “esp_log.h”
+#include “nvs_flash.h”
+#include “sdkconfig.h”
+#include “lwip/err.h”
+#include “lwip/sys.h”
+#include “mdns.h”
+#include &lt;sys/param.h&gt;
+#include “esp_event.h”
+#include “esp_netif.h”
+//#include “protocol_examples_common.h”
+#include “lwip/sockets.h”
+#include &lt;lwip/netdb.h&gt;
+/* The examples use WiFi configuration that you can set via ‘make menuconfig’.
+If you’d rather not, just change the below entries to strings with" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/5d71f0e1357fe192bc24c9ff97f7ec6c/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-02-15T17:37:00+08:00" />
+<meta property="article:modified_time" content="2023-02-15T17:37:00+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">ESP-IDF:TCP多线程并发服务器</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="_0"></a>核心代码：</h3> 
+<p>核心思想就是主线程只处理socket监听功能，把数据处理部分分配到不同的线程中去处理。来了一个客户端连接，就分配新的线程去处理该客户端的数据请求。<br> <img src="https://images2.imgbox.com/3b/98/6cY1uFtg_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="_4"></a>代码：</h3> 
+<p>/<em>多线程并发服务器</em>/<br> #include &lt;stdio.h&gt;<br> #include “sdkconfig.h”<br> #include “freertos/semphr.h”<br> #include “esp_system.h”<br> #include “esp_spi_flash.h”<br> #include &lt;string.h&gt;<br> #include “freertos/FreeRTOS.h”<br> #include “freertos/task.h”<br> #include “freertos/event_groups.h”<br> #include “esp_system.h”<br> #include “esp_wifi.h”<br> #include “esp_event.h”<br> #include “esp_event_loop.h”<br> #include “esp_log.h”<br> #include “nvs_flash.h”<br> #include “sdkconfig.h”</p> 
+<p>#include “lwip/err.h”<br> #include “lwip/sys.h”</p> 
+<p>#include “mdns.h”</p> 
+<p>#include &lt;sys/param.h&gt;<br> #include “esp_event.h”</p> 
+<p>#include “esp_netif.h”<br> //#include “protocol_examples_common.h”</p> 
+<p>#include “lwip/sockets.h”<br> #include &lt;lwip/netdb.h&gt;</p> 
+<p>/* The examples use WiFi configuration that you can set via ‘make menuconfig’.</p> 
+<p>If you’d rather not, just change the below entries to strings with<br> the config you want - ie #define EXAMPLE_WIFI_SSID “mywifissid”<br> */<br> #define EXAMPLE_ESP_WIFI_SSID CONFIG_ESP_WIFI_SSID<br> #define EXAMPLE_ESP_WIFI_PASS CONFIG_ESP_WIFI_PASSWORD<br> #define EXAMPLE_ESP_MAXIMUM_RETRY CONFIG_ESP_MAXIMUM_RETRY<br> #define EXAMPLE_ESP_WIFI_AP_SSID CONFIG_ESP_WIFI_AP_SSID<br> #define EXAMPLE_ESP_WIFI_AP_PASS CONFIG_ESP_WIFI_AP_PASSWORD<br> #define EXAMPLE_MAX_STA_CONN CONFIG_MAX_STA_CONN<br> #define EXAMPLE_IP_ADDR CONFIG_SERVER_IP<br> #define EXAMPLE_ESP_WIFI_AP_CHANNEL CONFIG_ESP_WIFI_AP_CHANNEL</p> 
+<p>static const char *TAG = “camera wifi”;<br> static const char *TAG1 = “michael add:”;</p> 
+<p>static int s_retry_num = 0;</p> 
+<p>static esp_err_t event_handler(void *ctx, system_event_t *event)<br> {<!-- --><br> switch(event-&gt;event_id) {<!-- --><br> case SYSTEM_EVENT_AP_STACONNECTED:<br> ESP_LOGI(TAG, “station:” MACSTR " join, AID=%d",<br> MAC2STR(event-&gt;event_info.sta_connected.mac),<br> event-&gt;event_info.sta_connected.aid);<br> break;<br> case SYSTEM_EVENT_AP_STADISCONNECTED:<br> ESP_LOGI(TAG, “station:” MACSTR “leave, AID=%d”,<br> MAC2STR(event-&gt;event_info.sta_disconnected.mac),<br> event-&gt;event_info.sta_disconnected.aid);<br> break;<br> case SYSTEM_EVENT_STA_START:<br> esp_wifi_connect();<br> break;<br> case SYSTEM_EVENT_STA_GOT_IP:<br> ESP_LOGI(TAG, “got ip:%s”,<br> ip4addr_ntoa(&amp;event-&gt;event_info.got_ip.ip_info.ip));<br> s_retry_num = 0;<br> break;<br> case SYSTEM_EVENT_STA_DISCONNECTED:<br> {<!-- --><br> if (s_retry_num &lt; EXAMPLE_ESP_MAXIMUM_RETRY) {<!-- --><br> esp_wifi_connect();<br> s_retry_num++;<br> ESP_LOGI(TAG,“retry to connect to the AP”);<br> }<br> ESP_LOGI(TAG,“connect to the AP fail”);<br> break;<br> }<br> default:<br> break;<br> }<br> ESP_LOGI(TAG1,“before mdns_handle_system_event”);<br> mdns_handle_system_event(ctx, event);<br> ESP_LOGI(TAG1,“after mdns_handle_system_event”);<br> return ESP_OK;<br> }</p> 
+<p>void wifi_init_softap()<br> {<!-- --><br> if (strcmp(EXAMPLE_IP_ADDR, “192.168.4.1”))<br> {<!-- --><br> int a, b, c, d;<br> sscanf(EXAMPLE_IP_ADDR, “%d.%d.%d.%d”, &amp;a, &amp;b, &amp;c, &amp;d);<br> tcpip_adapter_ip_info_t ip_info;<br> IP4_ADDR(&amp;ip_info.ip, a, b, c, d);<br> IP4_ADDR(&amp;ip_info.gw, a, b, c, d);<br> IP4_ADDR(&amp;ip_info.netmask, 255, 255, 255, 0);<br> ESP_ERROR_CHECK(tcpip_adapter_dhcps_stop(WIFI_IF_AP));<br> ESP_ERROR_CHECK(tcpip_adapter_set_ip_info(WIFI_IF_AP, &amp;ip_info));<br> ESP_ERROR_CHECK(tcpip_adapter_dhcps_start(WIFI_IF_AP));<br> }<br> wifi_config_t wifi_config;<br> memset(&amp;wifi_config, 0, sizeof(wifi_config_t));<br> snprintf((char*)wifi_config.ap.ssid, 32, “%s”, EXAMPLE_ESP_WIFI_AP_SSID);<br> wifi_config.ap.ssid_len = strlen((char*)wifi_config.ap.ssid);<br> snprintf((char*)wifi_config.ap.password, 64, “%s”, EXAMPLE_ESP_WIFI_AP_PASS);<br> wifi_config.ap.max_connection = EXAMPLE_MAX_STA_CONN;<br> wifi_config.ap.authmode = WIFI_AUTH_WPA_WPA2_PSK;<br> if (strlen(EXAMPLE_ESP_WIFI_AP_PASS) == 0) {<!-- --><br> wifi_config.ap.authmode = WIFI_AUTH_OPEN;<br> }<br> if (strlen(EXAMPLE_ESP_WIFI_AP_CHANNEL)) {<!-- --><br> int channel;<br> sscanf(EXAMPLE_ESP_WIFI_AP_CHANNEL, “%d”, &amp;channel);<br> wifi_config.ap.channel = channel;<br> }</p> 
+<pre><code>ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_AP, &amp;wifi_config));
+
+ESP_LOGI(TAG, "wifi_init_softap finished.SSID:%s password:%s",
+         EXAMPLE_ESP_WIFI_AP_SSID, EXAMPLE_ESP_WIFI_AP_PASS);
+</code></pre> 
+<p>}</p> 
+<p>void wifi_init_sta()<br> {<!-- --><br> wifi_config_t wifi_config;<br> memset(&amp;wifi_config, 0, sizeof(wifi_config_t));<br> snprintf((char*)wifi_config.sta.ssid, 32, “%s”, EXAMPLE_ESP_WIFI_SSID);<br> snprintf((char*)wifi_config.sta.password, 64, “%s”, EXAMPLE_ESP_WIFI_PASS);</p> 
+<pre><code>ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &amp;wifi_config) );
+
+ESP_LOGI(TAG, "wifi_init_sta finished.");
+ESP_LOGI(TAG, "connect to ap SSID:%s password:%s",
+         EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);
+</code></pre> 
+<p>}</p> 
+<p>void app_wifi_main()<br> {<!-- --><br> wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();<br> wifi_mode_t mode = WIFI_MODE_AP;</p> 
+<pre><code>if (strlen(EXAMPLE_ESP_WIFI_AP_SSID) &amp;&amp; strlen(EXAMPLE_ESP_WIFI_SSID)) {
+    mode = WIFI_MODE_APSTA;
+} else if (strlen(EXAMPLE_ESP_WIFI_AP_SSID)) {
+    mode = WIFI_MODE_AP;
+} else if (strlen(EXAMPLE_ESP_WIFI_SSID)) {
+    mode = WIFI_MODE_STA;
+}
+
+esp_err_t ret = nvs_flash_init();
+if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+  ESP_ERROR_CHECK(nvs_flash_erase());
+  ret = nvs_flash_init();
+}
+ESP_ERROR_CHECK(ret);
+
+if (mode == WIFI_MODE_NULL) {
+    ESP_LOGW(TAG,"Neither AP or STA have been configured. WiFi will be off.");
+    return;
+}
+
+tcpip_adapter_init();
+ESP_ERROR_CHECK(esp_event_loop_init(event_handler, NULL));
+ESP_ERROR_CHECK(esp_wifi_init(&amp;cfg));
+ESP_ERROR_CHECK(esp_wifi_set_mode(mode));
+
+if (mode &amp; WIFI_MODE_AP) {
+    wifi_init_softap();
+}
+
+if (mode &amp; WIFI_MODE_STA) {
+    wifi_init_sta();
+}
+ESP_ERROR_CHECK(esp_wifi_start());
+ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+</code></pre> 
+<p>}</p> 
+<p>/* BSD Socket API Example</p> 
+<p>This example code is in the Public Domain (or CC0 licensed, at your option.)</p> 
+<p>Unless required by applicable law or agreed to in writing, this<br> software is distributed on an “AS IS” BASIS, WITHOUT WARRANTIES OR<br> CONDITIONS OF ANY KIND, either express or implied.<br> */</p> 
+<p>#define PORT CONFIG_EXAMPLE_PORT<br> #define KEEPALIVE_IDLE CONFIG_EXAMPLE_KEEPALIVE_IDLE<br> #define KEEPALIVE_INTERVAL CONFIG_EXAMPLE_KEEPALIVE_INTERVAL<br> #define KEEPALIVE_COUNT CONFIG_EXAMPLE_KEEPALIVE_COUNT</p> 
+<p>//static const char *TAG = “example”;</p> 
+<p>//static void do_retransmit(const int sock)<br> static void do_retransmit0(const int sock) //michael change for multitasks server<br> {<!-- --><br> int len;<br> char rx_buffer[128];</p> 
+<pre><code>do {
+    len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
+    if (len &lt; 0) {
+        ESP_LOGE(TAG, "Error occurred during receiving: errno %d", errno);
+    } else if (len == 0) {
+        ESP_LOGW(TAG, "Connection closed");
+    } else {
+        rx_buffer[len] = 0; // Null-terminate whatever is received and treat it like a string
+        ESP_LOGI(TAG, "Received %d bytes: %s", len, rx_buffer);
+
+        // send() can return less bytes than supplied length.
+        // Walk-around for robust implementation.
+        int to_write = len;
+        char data[]="task0 reply";//michael add for multitasks server
+        while (to_write &gt; 0) {
+            int written = send(sock, rx_buffer + (len - to_write), to_write, 0);
+            written += send(sock, data, sizeof(data), 0);//michael add for multitasks server
+            if (written &lt; 0) {
+                ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
+            }
+            to_write -= written;
+        }
+    }
+} while (len &gt; 0);
+shutdown(sock, 0); //michael add for multitasks server
+close(sock);//michael add for multitasks server
+</code></pre> 
+<p>}</p> 
+<p>static void do_retransmit1(const int sock) //michael change for multitasks server<br> {<!-- --><br> int len;<br> char rx_buffer[128];</p> 
+<pre><code>do {
+    len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
+    if (len &lt; 0) {
+        ESP_LOGE(TAG, "Error occurred during receiving: errno %d", errno);
+    } else if (len == 0) {
+        ESP_LOGW(TAG, "Connection closed");
+    } else {
+        rx_buffer[len] = 0; // Null-terminate whatever is received and treat it like a string
+        ESP_LOGI(TAG, "Received %d bytes: %s", len, rx_buffer);
+
+        // send() can return less bytes than supplied length.
+        // Walk-around for robust implementation.
+        int to_write = len;
+        char data[]="task1 reply"; //michael add for multitasks server
+        while (to_write &gt; 0) {
+            int written = send(sock, rx_buffer + (len - to_write), to_write, 0);
+            written += send(sock, data, sizeof(data), 0);//michael add for multitasks server
+            if (written &lt; 0) {
+                ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
+            }
+            to_write -= written;
+        }
+    }
+} while (len &gt; 0);
+shutdown(sock, 0); //michael add for multitasks server
+close(sock);//michael add for multitasks server
+</code></pre> 
+<p>}</p> 
+<p>static void tcp_server_task(void *pvParameters)<br> {<!-- --><br> char addr_str[128];<br> int addr_family = (int)pvParameters;<br> int ip_protocol = 0;<br> int keepAlive = 1;<br> int keepIdle = KEEPALIVE_IDLE;<br> int keepInterval = KEEPALIVE_INTERVAL;<br> int keepCount = KEEPALIVE_COUNT;<br> struct sockaddr_storage dest_addr;</p> 
+<pre><code>if (addr_family == AF_INET) {
+    struct sockaddr_in *dest_addr_ip4 = (struct sockaddr_in *)&amp;dest_addr;
+    dest_addr_ip4-&gt;sin_addr.s_addr = htonl(INADDR_ANY);
+    dest_addr_ip4-&gt;sin_family = AF_INET;
+    dest_addr_ip4-&gt;sin_port = htons(PORT);
+    ip_protocol = IPPROTO_IP;
+}
+</code></pre> 
+<p>#ifdef CONFIG_EXAMPLE_IPV6<br> else if (addr_family == AF_INET6) {<!-- --><br> struct sockaddr_in6 *dest_addr_ip6 = (struct sockaddr_in6 *)&amp;dest_addr;<br> bzero(&amp;dest_addr_ip6-&gt;sin6_addr.un, sizeof(dest_addr_ip6-&gt;sin6_addr.un));<br> dest_addr_ip6-&gt;sin6_family = AF_INET6;<br> dest_addr_ip6-&gt;sin6_port = htons(PORT);<br> ip_protocol = IPPROTO_IPV6;<br> }<br> #endif</p> 
+<pre><code>int listen_sock = socket(addr_family, SOCK_STREAM, ip_protocol);
+if (listen_sock &lt; 0) {
+    ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
+    vTaskDelete(NULL);
+    return;
+}
+int opt = 1;
+setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &amp;opt, sizeof(opt));
+</code></pre> 
+<p>#if defined(CONFIG_EXAMPLE_IPV4) &amp;&amp; defined(CONFIG_EXAMPLE_IPV6)<br> // Note that by default IPV6 binds to both protocols, it is must be disabled<br> // if both protocols used at the same time (used in CI)<br> setsockopt(listen_sock, IPPROTO_IPV6, IPV6_V6ONLY, &amp;opt, sizeof(opt));<br> #endif</p> 
+<pre><code>ESP_LOGI(TAG, "Socket created");
+
+int err = bind(listen_sock, (struct sockaddr *)&amp;dest_addr, sizeof(dest_addr));
+if (err != 0) {
+    ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
+    ESP_LOGE(TAG, "IPPROTO: %d", addr_family);
+    goto CLEAN_UP;
+}
+ESP_LOGI(TAG, "Socket bound, port %d", PORT);
+
+err = listen(listen_sock, 1);
+if (err != 0) {
+    ESP_LOGE(TAG, "Error occurred during listen: errno %d", errno);
+    goto CLEAN_UP;
+}
+
+int sockid[3];//保存主线程收到的sock， michael add for 多线程
+int i=0;//保存主线程收到的sock， michael add for 多线程
+
+while (1) {
+
+    ESP_LOGI(TAG, "Socket listening");
+
+    struct sockaddr_storage source_addr; // Large enough for both IPv4 or IPv6
+    socklen_t addr_len = sizeof(source_addr);
+    ESP_LOGI(TAG, "michael add before accept");
+    int sock = accept(listen_sock, (struct sockaddr *)&amp;source_addr, &amp;addr_len);
+    if (sock &lt; 0) {
+        ESP_LOGE(TAG, "Unable to accept connection: errno %d", errno);
+        break;
+    }
+    ESP_LOGI(TAG, "michael add after accept");
+    // Set tcp keepalive option
+    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &amp;keepAlive, sizeof(int));
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &amp;keepIdle, sizeof(int));
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &amp;keepInterval, sizeof(int));
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &amp;keepCount, sizeof(int));
+    // Convert ip address to string
+    if (source_addr.ss_family == PF_INET) {
+        inet_ntoa_r(((struct sockaddr_in *)&amp;source_addr)-&gt;sin_addr, addr_str, sizeof(addr_str) - 1);
+    }
+</code></pre> 
+<p>#ifdef CONFIG_EXAMPLE_IPV6<br> else if (source_addr.ss_family == PF_INET6) {<!-- --><br> inet6_ntoa_r(((struct sockaddr_in6 <em>)&amp;source_addr)-&gt;sin6_addr, addr_str, sizeof(addr_str) - 1);<br> }<br> #endif<br> ESP_LOGI(TAG, “Socket accepted ip address: %s”, addr_str);<br> //把下面三个操作放到子线程中去处理，实现并行<br> sockid[i] = sock;<br> switch (i)<br> {<!-- --><br> case 0:<br> xTaskCreate(do_retransmit0, “transmit_task0”, 4096, sockid[0], 15, NULL);<br> break;<br> case 1:<br> xTaskCreate(do_retransmit1, “transmit_task1”, 4096, sockid[1], 15, NULL);<br> break;<br> default:<br> ESP_LOGI(TAG1, “only can accept 2 connector”);<br> break;<br> }<br> i++;<br> /</em> 单线程server代码<br> do_retransmit(sock);</p> 
+<pre><code>    shutdown(sock, 0);
+    close(sock);
+    */
+}
+</code></pre> 
+<p>CLEAN_UP:<br> close(listen_sock);<br> vTaskDelete(NULL);<br> }</p> 
+<p>void test25() {<!-- --><br> app_wifi_main();<br> #ifdef CONFIG_EXAMPLE_IPV4<br> xTaskCreate(tcp_server_task, “tcp_server”, 4096, (void*)AF_INET, 15, NULL);<br> #endif<br> #ifdef CONFIG_EXAMPLE_IPV6<br> xTaskCreate(tcp_server_task, “tcp_server”, 4096, (void*)AF_INET6, 5, NULL);<br> #endif<br> }</p> 
+<p>void app_main(void)<br> {<!-- --></p> 
+<pre><code>// /* Print chip information */
+// esp_chip_info_t chip_info;
+// esp_chip_info(&amp;chip_info);
+// printf("This is %s chip with %d CPU core(s), WiFi%s%s, ",
+//        CONFIG_IDF_TARGET,
+//        chip_info.cores,
+//        (chip_info.features &amp; CHIP_FEATURE_BT) ? "/BT" : "",
+//        (chip_info.features &amp; CHIP_FEATURE_BLE) ? "/BLE" : "");
+
+// printf("silicon revision %d, ", chip_info.revision);
+
+// printf("%dMB %s flash\n", spi_flash_get_chip_size() / (1024 * 1024),
+//        (chip_info.features &amp; CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
+
+// printf("Minimum free heap size: %d bytes\n", esp_get_minimum_free_heap_size());
+
+// for (int i = 10; i &gt;= 0; i--)
+// {
+//     printf("Restarting in %d seconds...\n", i);
+//     vTaskDelay(1000 / portTICK_PERIOD_MS);
+// }
+// printf("Restarting now.\n");
+// fflush(stdout);
+// printf("----test 23----\n");
+// test23();
+
+// printf("----test 24 基于计数型信号量的生产者和消费者模型代码----\n");
+// test24();
+
+// esp_restart();
+test25();
+</code></pre> 
+<p>}</p> 
+<h3><a id="_441"></a>结果：</h3> 
+<p>电脑端tcp client向esp server发送数据，server端把数据回传并添加是哪个线程发送的。<br> <img src="https://images2.imgbox.com/c5/6b/Tzk9K9Fn_o.png" alt="在这里插入图片描述"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/5d105d0fbd6e001707bd5f7c8462cd77/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">手机截图如何提取文字？</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/e2a1838f14f34620034c5b29a87e1599/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">CTFHub技能数签到</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

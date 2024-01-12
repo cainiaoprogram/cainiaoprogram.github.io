@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>TCP接入层的负载均衡、高可用、扩展性架构 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="TCP接入层的负载均衡、高可用、扩展性架构" />
+<meta property="og:description" content="一、web-server的负载均衡
+互联网架构中，web-server接入一般使用nginx来做反向代理，实施负载均衡。整个架构分三层：
+上游调用层，一般是browser或者APP
+中间反向代理层，nginx
+下游真实接入集群，web-server，常见web-server的有tomcat，apache
+整个访问过程为：
+browser向daojia.com发起请求
+DNS服务器将daojia.com解析为外网IP(1.2.3.4)
+browser通过外网IP(1.2.3.4)访问nginx
+nginx实施负载均衡策略，常见策略有轮询，随机，IP-hash等
+nginx将请求转发给内网IP(192.168.0.1)的web-server
+由于http短连接，以及web应用无状态的特性，理论上任何一个http请求落在任意一台web-server都应该得到正常处理（如果必须落在一台，说明架构不合理，不能水平扩展）。
+问题来了，tcp是有状态的连接，客户端和服务端一旦建立连接，一个client发起的请求必须落在同一台tcp-server上，此时如何做负载均衡，如何保证水平扩展呢？
+二、单机法tcp-server
+单个tcp-server显然是可以保证请求一致性：
+client向tcp.daojia.com发起tcp请求
+DNS服务器将tcp.daojia.com解析为外网IP(1.2.3.4)
+client通过外网IP(1.2.3.4)向tcp-server发起请求
+方案的缺点？
+无法保证高可用。
+三、集群法tcp-server
+通过搭建tcp-server集群来保证高可用，客户端来实现负载均衡：
+client内配置有tcp1/tcp2/tcp3.daojia.com三个tcp-server的外网IP
+客户端通过“随机”的方式选择tcp-server，假设选择到的是tcp1.daojia.com
+通过DNS解析tcp1.daojia.com
+通过外网IP连接真实的tcp-server
+如何保证高可用呢？
+如果client发现某个tcp-server连接不上，则选择另一个。
+潜在的缺点？
+每次连接前，需要多实施一次DNS访问：
+难以预防DNS劫持
+多一次DNS访问意味着更长的连接时间，这个不足在手机端更为明显
+如何解决DNS的问题？
+直接将IP配置在客户端，可以解决上述两个问题，很多公司也就是这么做的（俗称“IP直通车”）。
+“IP直通车”有什么新问题？
+将IP写死在客户端，在客户端实施负载均衡，扩展性很差：
+如果原有IP发生变化，客户端得不到实时通知
+如果新增IP，即tcp-sever扩容，客户端也得不到实时通知
+如果负载均衡策略变化，需要升级客户端
+四、服务端实施负载均衡
+只有将复杂的策略下沉到服务端，才能根本上解决扩展性的问题。
+增加一个http接口，将客户端的“IP配置”与“均衡策略”放到服务端是一个不错的方案：
+client每次访问tcp-server前，先调用一个新增的get-tcp-ip接口，对于client而言，这个http接口只返回一个tcp-server的IP
+这个http接口，实现的是原client的IP均衡策略
+拿到tcp-server的IP后，和原来一样向tcp-server发起TCP长连接
+这样的话，扩展性问题就解决了：
+如果原有IP发生变化，只需要修改get-tcp-ip接口的配置
+如果新增IP，也是修改get-tcp-ip接口的配置
+如果负载均衡策略变化，需要升级客户端
+然而，新的问题又产生了，如果所有IP放在客户端，当有一个IP挂掉的时候，client可以再换一个IP连接，保证可用性，而get-tcp-ip接口只是维护静态的tcp-server集群IP，对于这些IP对应的tcp-server是否可用，是完全不知情的，怎么办呢？
+五、tcp-server状态上报
+get-tcp-ip接口怎么知道tcp-server集群中各台服务器是否可用呢，tcp-server主动上报是一个潜在方案，如果某一个tcp-server挂了，则会终止上报，对于停止上报状态的tcp-server，get-tcp-ip接口，将不返回给client相应的tcp-server的外网IP。
+该设计的存在的问题？
+诚然，状态上报解决了tcp-server高可用的问题，但这个设计犯了一个“反向依赖”的耦合小错误：使得tcp-server要依赖于一个与本身业务无关的web-server。
+六、tcp-server状态拉取
+更优的方案是：web-server通过“拉”的方式获取各个tcp-server的状态，而不是tcp-server通过“推”的方式上报自己的状态。
+这样的话，每个tcp-server都独立与解耦，只需专注于资深的tcp业务功能即可。
+高可用、负载均衡、扩展性等任务由get-tcp-ip的web-server专注来执行。
+多说一句，将负载均衡实现在服务端，还有一个好处，可以实现异构tcp-server的负载均衡，以及过载保护：
+静态实施：web-server下的多个tcp-server的IP可以配置负载权重，根据tcp-server的机器配置分配负载（nginx也有类似的功能）
+动态实施：web-server可以根据“拉”回来的tcp-server的状态，动态分配负载，并在tcp-server性能极具下降时实施过载保护
+七、总结
+web-server如何实施负载均衡？
+利用nginx反向代理来轮询、随机、ip-hash。
+tcp-server怎么快速保证请求一致性？
+单机。
+如何保证高可用？
+客户配置多个tcp-server的域名。
+如何防止DNS劫持，以及加速？" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/36d1f68c7e655330c8cf995007c83eb2/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2017-05-07T20:25:33+08:00" />
+<meta property="article:modified_time" content="2017-05-07T20:25:33+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">TCP接入层的负载均衡、高可用、扩展性架构</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div id="js_content"> 
+ <p style="text-align: justify"><strong>一、web-server的负载均衡</strong></p> 
+ <p style="text-align: justify"><img src="https://images2.imgbox.com/0c/14/lQ7w4Ccx_o.png"></p> 
+ <p style="text-align: justify">互联网架构中，web-server接入一般使用nginx来做反向代理，实施负载均衡。整个架构分三层：</p> 
+ <ul><li><p style="text-align: justify"><strong>上游调用层</strong>，一般是browser或者APP</p></li><li><p style="text-align: justify"><strong>中间反向代理层</strong>，nginx</p></li><li><p style="text-align: justify"><strong>下游真实接入集群</strong>，web-server，常见web-server的有tomcat，apache</p></li></ul> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify">整个访问过程为：</p> 
+ <ul><li><p style="text-align: justify">browser向daojia.com发起请求</p></li><li><p style="text-align: justify">DNS服务器将daojia.com解析为外网IP(1.2.3.4)</p></li><li><p style="text-align: justify">browser通过外网IP(1.2.3.4)访问nginx</p></li><li><p style="text-align: justify">nginx实施负载均衡策略，常见策略有轮询，随机，IP-hash等</p></li><li><p style="text-align: justify">nginx将请求转发给内网IP(192.168.0.1)的web-server</p></li></ul> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify">由于http短连接，以及web应用无状态的特性，理论上<strong>任何一个http请求落在任意一台web-server都应该得到正常处理</strong>（如果必须落在一台，说明架构不合理，不能水平扩展）。</p> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify">问题来了，tcp是有状态的连接，客户端和服务端一旦建立连接，<strong>一个client发起的请求必须落在同一台tcp-server上</strong>，此时如何做负载均衡，如何保证水平扩展呢？</p> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify"><strong>二、单机法tcp-server</strong></p> 
+ <p style="text-align: justify"><img src="https://images2.imgbox.com/3a/9c/WgiNVKVp_o.png"></p> 
+ <p style="text-align: justify">单个tcp-server显然是可以保证请求一致性：</p> 
+ <ul><li><p style="text-align: justify">client向tcp.daojia.com发起tcp请求</p></li><li><p style="text-align: justify">DNS服务器将tcp.daojia.com解析为外网IP(1.2.3.4)</p></li><li><p style="text-align: justify">client通过外网IP(1.2.3.4)向tcp-server发起请求</p></li></ul> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify"><strong>方案的缺点？</strong></p> 
+ <p style="text-align: justify">无法保证高可用。</p> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify"><strong>三、集群法tcp-server</strong></p> 
+ <p style="text-align: justify"><img src="https://images2.imgbox.com/48/b6/NeIiBIaC_o.png"></p> 
+ <p style="text-align: justify">通过搭建tcp-server集群来保证高可用，<strong>客户端来实现负载均衡</strong>：</p> 
+ <ul><li><p style="text-align: justify">client内配置有tcp1/tcp2/tcp3.daojia.com三个tcp-server的外网IP</p></li><li><p style="text-align: justify">客户端通过“随机”的方式选择tcp-server，假设选择到的是tcp1.daojia.com</p></li><li><p style="text-align: justify">通过DNS解析tcp1.daojia.com</p></li><li><p style="text-align: justify">通过外网IP连接真实的tcp-server</p></li></ul> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify"><strong>如何保证高可用呢？</strong></p> 
+ <p style="text-align: justify">如果client发现某个tcp-server连接不上，则选择另一个。</p> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify"><strong>潜在的缺点？</strong></p> 
+ <p style="text-align: justify">每次连接前，需要多实施一次DNS访问：</p> 
+ <ul><li><p style="text-align: justify">难以预防DNS劫持</p></li><li><p style="text-align: justify">多一次DNS访问意味着更长的连接时间，这个不足在手机端更为明显</p></li></ul> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify"><strong>如何解决DNS的问题？</strong></p> 
+ <p style="text-align: justify">直接将IP配置在客户端，可以解决上述两个问题，很多公司也就是这么做的（俗称“<strong>IP直通车</strong>”）。</p> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify"><strong>“IP直通车”有什么新问题？</strong></p> 
+ <p style="text-align: justify">将IP写死在客户端，在客户端实施负载均衡，扩展性很差：</p> 
+ <ul><li><p style="text-align: justify">如果原有IP发生变化，客户端得不到实时通知</p></li><li><p style="text-align: justify">如果新增IP，即tcp-sever扩容，客户端也得不到实时通知</p></li><li><p style="text-align: justify">如果负载均衡策略变化，需要升级客户端</p></li></ul> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify"><strong>四、服务端实施负载均衡</strong></p> 
+ <p style="text-align: justify">只有将复杂的策略下沉到服务端，才能根本上解决扩展性的问题。</p> 
+ <p style="text-align: justify"><img src="https://images2.imgbox.com/97/d6/lsdQm60m_o.png"></p> 
+ <p style="text-align: justify">增加一个http接口，将客户端的“IP配置”与“均衡策略”放到服务端是一个不错的方案：</p> 
+ <ul><li><p style="text-align: justify">client每次访问tcp-server前，先调用一个<strong>新增的get-tcp-ip接口</strong>，对于client而言，这个http接口只返回一个tcp-server的IP</p></li><li><p style="text-align: justify">这个http接口，实现的是原client的IP均衡策略</p></li><li><p style="text-align: justify">拿到tcp-server的IP后，和原来一样向tcp-server发起TCP长连接</p></li></ul> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify">这样的话，扩展性问题就解决了：</p> 
+ <ul><li><p style="text-align: justify">如果原有IP发生变化，只需要修改get-tcp-ip接口的配置</p></li><li><p style="text-align: justify">如果新增IP，也是修改get-tcp-ip接口的配置</p></li><li><p style="text-align: justify">如果负载均衡策略变化，需要升级客户端</p></li></ul> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify">然而，<strong>新的问题</strong>又产生了，如果所有IP放在客户端，当有一个IP挂掉的时候，client可以再换一个IP连接，保证可用性，而get-tcp-ip接口只是维护静态的tcp-server集群IP，对于这些IP对应的tcp-server是否可用，是完全不知情的，怎么办呢？</p> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify"><strong>五、tcp-server状态上报</strong></p> 
+ <p style="text-align: justify"><img src="https://images2.imgbox.com/a9/68/YQV95qak_o.png"></p> 
+ <p style="text-align: justify">get-tcp-ip接口怎么知道tcp-server集群中各台服务器是否可用呢，tcp-server主动上报是一个潜在方案，如果某一个tcp-server挂了，则会终止上报，对于停止上报状态的tcp-server，get-tcp-ip接口，将不返回给client相应的tcp-server的外网IP。</p> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify"><strong>该设计的存在的问题？</strong></p> 
+ <p style="text-align: justify">诚然，状态上报解决了tcp-server高可用的问题，但这个设计犯了一个“反向依赖”的耦合小错误：使得tcp-server要依赖于一个与本身业务无关的web-server。</p> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify"><strong>六、tcp-server状态拉取</strong></p> 
+ <p style="text-align: justify"><img src="https://images2.imgbox.com/09/db/2k4iEqpo_o.png"></p> 
+ <p style="text-align: justify"><strong>更优的方案</strong>是：web-server通过“拉”的方式获取各个tcp-server的状态，而不是tcp-server通过“推”的方式上报自己的状态。</p> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify">这样的话，每个tcp-server都独立与解耦，只需专注于资深的tcp业务功能即可。</p> 
+ <p style="text-align: justify"><strong>高可用、负载均衡、扩展性</strong>等任务由get-tcp-ip的web-server专注来执行。</p> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify">多说一句，将负载均衡实现在服务端，还有一个<strong>好处</strong>，可以实现异构tcp-server的负载均衡，以及过载保护：</p> 
+ <ul><li><p style="text-align: justify"><strong>静态实施</strong>：web-server下的多个tcp-server的IP可以配置负载权重，根据tcp-server的机器配置分配负载（nginx也有类似的功能）</p></li><li><p style="text-align: justify"><strong>动态实施</strong>：web-server可以根据“拉”回来的tcp-server的状态，动态分配负载，并在tcp-server性能极具下降时实施过载保护</p></li></ul> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify"><strong>七、总结</strong></p> 
+ <p style="text-align: justify"><strong>web-server如何实施负载均衡？</strong></p> 
+ <p style="text-align: justify">利用nginx反向代理来轮询、随机、ip-hash。</p> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify"><strong>tcp-server怎么快速保证请求一致性？</strong></p> 
+ <p style="text-align: justify">单机。</p> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify"><strong>如何保证高可用？</strong></p> 
+ <p style="text-align: justify">客户配置多个tcp-server的域名。</p> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify"><strong>如何防止DNS劫持，以及加速？</strong></p> 
+ <p style="text-align: justify">IP直通车，客户端配置多个tcp-server的IP。</p> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify"><strong>如何保证扩展性？</strong></p> 
+ <p style="text-align: justify">服务端提供get-tcp-ip接口，向client屏屏蔽负载均衡策略，并实施便捷扩容。</p> 
+ <p style="text-align: justify"> </p> 
+ <p style="text-align: justify"><strong>如何保证高可用？</strong></p> 
+ <p style="text-align: justify">tcp-server“推”状态给get-tcp-ip接口，</p> 
+ <p style="text-align: justify">or</p> 
+ <p style="text-align: justify">get-tcp-ip接口“拉”tcp-server状态。</p> 
+ <p style="text-align: justify"><img src="https://images2.imgbox.com/07/3e/PQ7XZvh7_o.png"><br></p> 
+ <p style="text-align: justify">细节重要，思路比细节更重要</p> 
+ <p style="text-align: justify">相关阅读：</p> 
+ <p style="text-align: justify"> <a target="_blank" href="https://blog.csdn.net/shenjian58/article/details/89849748" rel="noopener noreferrer">一分钟了解负载均衡的一切</a></p> 
+ <p style="text-align: justify"><a href="http://mp.weixin.qq.com/s?__biz=MjM5ODYxMDA5OQ%3D%3D&amp;chksm=bd2d072d8a5a8e3b71cef58f313743a6db6f83889748deb7f8f866817511df98adc5e03db39c&amp;idx=1&amp;mid=2651960049&amp;scene=21&amp;sn=2787e73be4ea31f52213a2b934a16e09#wechat_redirect" rel="nofollow">架构设计中的“反向依赖”</a><br></p> 
+ <p style="text-align: justify"><a target="_blank" href="https://blog.csdn.net/shenjian58/article/details/89849751" rel="noopener noreferrer">lvs为何不能完全替代DNS轮询</a><br></p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/80d2c1ec139df4fd1940377352dc62d6/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">经纬度计算两地之间的距离（原理与方法）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/c06e2cb52108cb162549dd48aee80cbf/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">页面引用bootstrap报错Bootstrap&#39;s JavaScript requires jQuery</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

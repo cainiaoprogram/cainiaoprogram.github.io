@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>记一次gorm连接池打满，连接不释放的问题 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="记一次gorm连接池打满，连接不释放的问题" />
+<meta property="og:description" content="概述：使用事务一定要关闭！ 我们golang项目用的gorm，最近pre测试跑脚本时，总会出现504，某个接口不可用。分析了半天pprof，阻塞数量较多的goroutine，某些时候并不能看到真实问题的所在。
+出现504，通过pprof:debug/pprof/goroutine?debug=2 或者debug/pprof/goroutine?debug=1 能看到阻塞的goroutine，处在io wait状态
+检查下pod内，连接数(netstat)，发现http的连接数和mysql的连接数暴增!!!
+导致mysql的连接数暴增常见的有三种： 1、使用事务，没有关闭～！！！！！ （我们小伙伴的错误命中）
+tx:=db.conn后，err判断，直接return，没有进行tx.rollback。这时候mysql的conn_pool会&#43;1，且不可复用。
+错误的请求继续上涨后，就会出现连接数打满，继而新的请求一直阻塞，goroutine也会阻塞住。
+此时杀死连接也没用，因为goroutine锁死在tx.awaitDone()里，也就是在等待done的chan返回。
+只有调用tx.Commit或tx.Rollback才能使awaitDone返回，否则会造成conn闲置，协程溢出。
+tx.Commit或tx.Rollback都会调用Tx.cancel和Tx.releaseConn。
+正确使用：
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+conn, err := mysql.GetConn()
+if err != nil {
+return
+}
+tx := conn.Begin()
+defer func() {
+if r := recover(); r != nil {
+tx.Rollback()
+}
+}()
+......
+......
+if err != nil {
+tx.Rollback()
+return
+}
+tx.Commit()" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/fc7301d6ebe0781864f2f9e8e3288315/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-12-14T14:59:32+08:00" />
+<meta property="article:modified_time" content="2023-12-14T14:59:32+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">记一次gorm连接池打满，连接不释放的问题</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h3>概述：使用事务一定要关闭！</h3> 
+<p></p> 
+<p>　　我们golang项目用的gorm，最近pre测试跑脚本时，总会出现504，某个接口不可用。分析了半天pprof，阻塞数量较多的goroutine，某些时候并不能看到真实问题的所在。</p> 
+<p>　　出现504，通过pprof:debug/pprof/goroutine?debug=2 或者debug/pprof/goroutine?debug=1 能看到阻塞的goroutine，处在io wait状态<br> 　　检查下pod内，连接数(netstat)，发现http的连接数和mysql的连接数暴增!!!</p> 
+<h3><br> 导致mysql的连接数暴增常见的有三种：</h3> 
+<p><br><strong>1、使用事务，没有关闭</strong>～！！！！！ （我们小伙伴的错误命中）</p> 
+<p><br> tx:=db.conn后，err判断，直接return，没有进行tx.rollback。这时候mysql的conn_pool会+1，且不可复用。<br> 错误的请求继续上涨后，就会出现连接数打满，继而新的请求一直阻塞，goroutine也会阻塞住。</p> 
+<p>此时杀死连接也没用，因为goroutine锁死在tx.awaitDone()里，也就是在等待done的chan返回。</p> 
+<p>只有调用tx.Commit或tx.Rollback才能使awaitDone返回，否则会造成conn闲置，协程溢出。</p> 
+<p>tx.Commit或tx.Rollback都会调用Tx.cancel和Tx.releaseConn。<br> 正确使用：</p> 
+<table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td> <p>1</p> <p>2</p> <p>3</p> <p>4</p> <p>5</p> <p>6</p> <p>7</p> <p>8</p> <p>9</p> <p>10</p> <p>11</p> <p>12</p> <p>13</p> <p>14</p> </td><td> <p><code>conn, err := mysql.GetConn()</code></p> <p><code>if</code> <code>err != nil {<!-- --></code></p> <p><code>    </code><code>return</code></p> <p><code>}</code></p> <p><code>tx := conn.Begin()</code></p> <p><code>defer func() {<!-- --></code></p> <p><code>    </code><code>if</code> <code>r := recover(); r != nil {<!-- --></code></p> <p><code>        </code><code>tx.Rollback()</code></p> <p><code>    </code><code>}</code></p> <p><code>}()</code></p> <p><code>......</code></p> <p><code>......</code></p> <p><code>if</code> <code>err != nil {<!-- --></code></p> <p><code>    </code><code>tx.Rollback()</code></p> <p><code>    </code><code>return</code></p> <p><code>}</code></p> <p><code>tx.</code>Commit()</p> </td></tr></tbody></table> 
+<p>　　</p> 
+<p><strong>2、使用rows方法请一定要关闭连接</strong>。rows请一定要在err==nil的情况下使用，不然会导致空指针panic。</p> 
+<p>同样的协程等待Rows.awaitDone返回，需要通过Rows.Close调用Rows.cancel和Rows.releaseConn。</p> 
+<table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td> <p>1</p> <p>2</p> <p>3</p> <p>4</p> <p>5</p> </td><td> <p><code>rows, err := db.rows()</code></p> <p><code>if</code> <code>err != nil {<!-- --></code></p> <p><code>    </code><code>return</code> <code>err</code></p> <p><code>}</code></p> <p><code>defer</code> <code>rows.close()</code></p> </td></tr></tbody></table> 
+<p>　</p> 
+<p><strong>3、使用事务，切记使用新的tx变量</strong></p> 
+<p></p> 
+<table border="0" cellpadding="0" cellspacing="0"><tbody><tr><td> <p>1</p> </td><td> <p><code>tx := conn.Begin()</code></p> <p><code>//下面一定使用tx，不要用conn了！！！！</code></p> </td></tr></tbody></table>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/329a2e5b07eaa588d101dc44287e1941/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">RKE2部署Kubernetes(二) 使用helm部署rancher（适用于生产环境）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/191550e55b42aee5587c0f0dcbe332a8/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">尚硅谷Docker笔记-高级篇</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【mysql】聚簇索引和非聚簇索引（B树和B&#43;树） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【mysql】聚簇索引和非聚簇索引（B树和B&#43;树）" />
+<meta property="og:description" content="博主简介：想进大厂的打工人博主主页：@xyk:所属专栏: mysql 目录
+一、索引分类
+二、索引的数据结构
+2.1 B树：改造二叉树
+2.2 B&#43;树：改造B树
+三、Mysql索引实现—InnoDB引擎
+3.1 主键索引（聚簇索引）
+3.2 辅助索引（非聚簇索引）
+3.3 避免回表
+3.4 覆盖索引
+一、索引分类 索引一般可以分为以下几类：
+主键索引：主键索引是一种特殊的索引类型，它是用于唯一标识每一行数据的索引，每个表只能有一个主键索引，索引列中的值必须是唯一的，不允许有空值。
+复合索引：复合索引也叫多列索引或联合索引，它是包含多个列的索引类型，能够加速多列查询和排序操作。需要遵循最左前缀匹配原则（最左匹配原则）
+普通索引：MySQL中基本索引类型，没有什么限制，允许在定义索引的列中插入重复值和空值。
+唯一索引：唯一索引是用来保证列的唯一性的索引，一个表可以有多个唯一索引。比如说，因为人有可能同名，所以同一个姓名在同一个“员工个人资料”数据表里可能出现两次或更多次。索引列中的值必须是唯一的，但是允许为空值。
+全文索引：全文索引是一种用于全文搜索的索引类型，能够对文本数据进行快速的模糊搜索和关键字搜索。只能在文本类型CHAR,VARCHAR,TEXT类型字段上创建全文索引。
+哈希索引：哈希索引是基于哈希表实现的索引类型，能够对等值查询进行高效的处理，但不支持范围查询和排序，MySQL 中 Memory 引擎中支持哈希索引。
+二、索引的数据结构 Hash表
+Hash表，在Java中的HashMap，TreeMap就是Hash表结构，以键值对的方式存储数据。我们使用Hash表存储表数据Key可以存储索引列，Value可以存储行记录或者行磁盘地址。Hash表在等值查询时效率很高，时间复杂度为O(1)；但是不支持范围快速查找，范围查找时还是只能通过扫描全表方式。
+2.1 B树：改造二叉树 MySQL的数据是存储在磁盘文件中的，查询处理数据时，需要先把磁盘中的数据加载到内存中，磁盘IO操作非常耗时，所以我们优化的重点就是尽量减少磁盘IO操作。访问二叉树的每个结点就会发生一次IO，如果想要减少IO操作，就需要降低树的高度。
+假如key为bigint=8字节，每个节点有两个指针，每个指针为4个字节，一个节点占用的空间16个字节（8&#43;4*2=16）。
+因为在MySQL的InnoDB存储引擎一次IO会读取的一页（默认一页16K）的数据量，而二叉树一次IO有效数据量只有16字节，空间利用率极低。为了最大化利用一次IO空间，一个简单的想法是在每个节点存储多个元素，在每个节点尽可能多的存储数据。每个节点可以存储1000个索引（16k/16=1000），这样就将二叉树改造成了多叉树，通过增加树的叉树，将树从高瘦变为矮胖。构建1百万条数据，树的高度只需要2层就可以（1000*1000=1百万），也就是说只需要2次磁盘IO就可以查询到数据。磁盘IO次数变少了，查询数据的效率也就提高了。
+这种数据结构我们称为B树，B树是一种多叉平衡查找树，如下图主要特点：
+B树的节点中存储着多个元素，每个内节点有多个分叉。节点中的元素包含键值和数据，节点中的键值从大到小排列。也就是说，在所有的节点都储存数据。父节点当中的元素不会出现在子节点中。所有的叶子结点都位于同一层，叶节点具有相同的深度，叶节点之间没有指针连接。 举个例子：
+假如我们查询值等于10的数据。查询路径磁盘块1-&gt;磁盘块2-&gt;磁盘块5。
+第一次磁盘IO：将磁盘块1加载到内存中，在内存中从头遍历比较，10&lt;15，走左路，到磁盘寻址磁盘块2。
+第二次磁盘IO：将磁盘块2加载到内存中，在内存中从头遍历比较，7&lt;10，到磁盘中寻址定位到磁盘块5。
+第三次磁盘IO：将磁盘块5加载到内存中，在内存中从头遍历比较，10=10，找到10，取出data，如果data存储的行记录，取出data，查询结束。如果存储的是磁盘地址，还需要根据磁盘地址到磁盘中取出数据，查询终止。
+相比二叉平衡查找树，在整个查找过程中，虽然数据的比较次数并没有明显减少，但是磁盘IO次数会大大减少。同时，由于我们的比较是在内存中进行的，比较的耗时可以忽略不计。B树的高度一般2至3层就能满足大部分的应用场景，所以使用B树构建索引可以很好的提升查询的效率。
+过程如图：
+看到这里你一定觉得B树很理想了，但是B树不支持范围查询的快速查找，如果我们想查询15-30之间的数据，查到15之后，我们还要返回根节点重新遍历查找下一个数据，直到全部遍历找到。
+如果data存储的是行记录，行的大小随着列数的增多，所占空间会变大。这时，一个页中可存储的数据量就会变少，树相应就会变高，磁盘IO次数就会变大。
+2.2 B&#43;树：改造B树 B&#43;树，作为B树的升级版，在B树基础上，MySQL在B树的基础上继续改造，使用B&#43;树构建索引。B&#43;树和B树最主要的区别在于非叶子节点是否存储数据的问题
+B树：非叶子节点和叶子节点都会存储数据。B&#43;树：只有叶子节点才会存储数据，非叶子节点至存储键值。叶子节点之间使用双向指针连接，最底层的叶子节点形成了一个双向有序链表。 范围查询：
+假如我们想要查找9和26之间的数据。查找路径是磁盘块1-&gt;磁盘块2-&gt;磁盘块6-&gt;磁盘块7。
+首先查找值等于9的数据，将值等于9的数据缓存到结果集。这一步和前面等值查询流程一样，发生了三次磁盘IO。查找到15之后，底层的叶子节点是一个有序列表，我们从磁盘块6，键值9开始向后遍历筛选所有符合筛选条件的数据。第四次磁盘IO：根据磁盘6后继指针到磁盘中寻址定位到磁盘块7，将磁盘7加载到内存中，在内存中从头遍历比较，9&lt;25&lt;26，9&lt;26&lt;=26，将data缓存到结果集。主键具备唯一性（后面不会有&lt;=26的数据），不需再向后查找，查询终止。将结果集返回给用户。 B&#43;树的节点中可存N个key，N个key划分出N个区间，树的高度是相对矮的。所有父节点都会重复出现在子节点中，从左到右依次递增非叶子结点只起索引作用， 叶子结点包含信息。非叶子结点可能在内存中缓存所有的叶子结点都位于最后一层，叶节点之间首尾连接，所有key值都在子节点中存在，且最大为key MySQL的索引就采用了B&#43;树的数据结构。
+三、Mysql索引实现—InnoDB引擎 3.1 主键索引（聚簇索引） 聚集索引：指索引项的排序方式和表中数据记录排序方式一致的索引。聚簇索引并不是一种单独的索引类型，而是一种数据存储方式。
+每个InnoDB表都有一个聚簇索引 ，聚簇索引使用B&#43;树构建，叶子节点存储的数据是整行记录。一般情况下，聚簇索引等同于主键索引，当一个表没有创建主键索引时，InnoDB会自动创建一个ROWID字段来构建聚簇索引。
+除聚簇索引之外的所有索引都称为辅助索引。在中InnoDB，辅助索引中的叶子节点存储的数据是该行的主键值。在检索时，InnoDB使用此主键值在聚簇索引中搜索行记录。
+select * from user_innodb where id = 28; 先在主键树中从根节点开始检索，将根节点加载到内存，比较28&lt;75，走左路。（1次磁盘IO）将左子树节点加载到内存中，比较16&lt;28&lt;47，向下检索。（1次磁盘IO）检索到叶节点，将节点加载到内存中遍历，比较16&lt;28，18&lt;28，28=28。查找到值等于28的索引项，直接可以获取整行数据。将改记录返回给客户端。（1次磁盘IO）" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/154eac2703859628cb6ae35f5a9d766a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-07-21T17:05:53+08:00" />
+<meta property="article:modified_time" content="2023-07-21T17:05:53+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【mysql】聚簇索引和非聚簇索引（B树和B&#43;树）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h2><a id="_0"></a></h2> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/d8/f4/pcBLBAg2_o.png"></p> 
+<p></p> 
+<blockquote> 
+ <ul><li><span style="color:#faa572;"><strong>博主简介：想进大厂的打工人</strong></span></li><li><span style="color:#ed7976;"><strong>博主主页：</strong><a href="https://blog.csdn.net/asad21654864?spm=1000.2115.3001.5343" title="@xyk:">@xyk:</a></span></li><li><strong><span style="color:#98c091;">所属专栏: <a href="https://blog.csdn.net/asad21654864/category_12319265.html?spm=1001.2014.3001.5482" title="mysql">mysql</a></span></strong></li></ul> 
+</blockquote> 
+<hr> 
+<p id="main-toc"><strong>目录</strong></p> 
+<p id="%E4%B8%80%E3%80%81%E7%B4%A2%E5%BC%95%E5%88%86%E7%B1%BB-toc" style="margin-left:0px;"><a href="#%E4%B8%80%E3%80%81%E7%B4%A2%E5%BC%95%E5%88%86%E7%B1%BB" rel="nofollow">一、索引分类</a></p> 
+<p id="%E4%BA%8C%E3%80%81%E7%B4%A2%E5%BC%95%E7%9A%84%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84-toc" style="margin-left:0px;"><a href="#%E4%BA%8C%E3%80%81%E7%B4%A2%E5%BC%95%E7%9A%84%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84" rel="nofollow">二、索引的数据结构</a></p> 
+<p id="2.1%20B%E6%A0%91%EF%BC%9A%E6%94%B9%E9%80%A0%E4%BA%8C%E5%8F%89%E6%A0%91-toc" style="margin-left:40px;"><a href="#2.1%20B%E6%A0%91%EF%BC%9A%E6%94%B9%E9%80%A0%E4%BA%8C%E5%8F%89%E6%A0%91" rel="nofollow">2.1 B树：改造二叉树</a></p> 
+<p id="2.2%20B%2B%E6%A0%91%EF%BC%9A%E6%94%B9%E9%80%A0B%E6%A0%91-toc" style="margin-left:40px;"><a href="#2.2%20B%2B%E6%A0%91%EF%BC%9A%E6%94%B9%E9%80%A0B%E6%A0%91" rel="nofollow">2.2 B+树：改造B树</a></p> 
+<p id="%E4%B8%89%E3%80%81Mysql%E7%B4%A2%E5%BC%95%E5%AE%9E%E7%8E%B0%E2%80%94InnoDB%E5%BC%95%E6%93%8E-toc" style="margin-left:0px;"><a href="#%E4%B8%89%E3%80%81Mysql%E7%B4%A2%E5%BC%95%E5%AE%9E%E7%8E%B0%E2%80%94InnoDB%E5%BC%95%E6%93%8E" rel="nofollow">三、Mysql索引实现—InnoDB引擎</a></p> 
+<p id="3.1%20%E4%B8%BB%E9%94%AE%E7%B4%A2%E5%BC%95%EF%BC%88%E8%81%9A%E7%B0%87%E7%B4%A2%E5%BC%95%EF%BC%89-toc" style="margin-left:40px;"><a href="#3.1%20%E4%B8%BB%E9%94%AE%E7%B4%A2%E5%BC%95%EF%BC%88%E8%81%9A%E7%B0%87%E7%B4%A2%E5%BC%95%EF%BC%89" rel="nofollow">3.1 主键索引（聚簇索引）</a></p> 
+<p id="3.2%20%E8%BE%85%E5%8A%A9%E7%B4%A2%E5%BC%95%EF%BC%88%E9%9D%9E%E8%81%9A%E7%B0%87%E7%B4%A2%E5%BC%95%EF%BC%89-toc" style="margin-left:40px;"><a href="#3.2%20%E8%BE%85%E5%8A%A9%E7%B4%A2%E5%BC%95%EF%BC%88%E9%9D%9E%E8%81%9A%E7%B0%87%E7%B4%A2%E5%BC%95%EF%BC%89" rel="nofollow">3.2 辅助索引（非聚簇索引）</a></p> 
+<p id="3.3%20%E9%81%BF%E5%85%8D%E5%9B%9E%E8%A1%A8-toc" style="margin-left:40px;"><a href="#3.3%20%E9%81%BF%E5%85%8D%E5%9B%9E%E8%A1%A8" rel="nofollow">3.3 避免回表</a></p> 
+<p id="3.4%C2%A0%E8%A6%86%E7%9B%96%E7%B4%A2%E5%BC%95-toc" style="margin-left:40px;"><a href="#3.4%C2%A0%E8%A6%86%E7%9B%96%E7%B4%A2%E5%BC%95" rel="nofollow">3.4 覆盖索引</a></p> 
+<hr id="hr-toc"> 
+<p></p> 
+<h2 id="%E4%B8%80%E3%80%81%E7%B4%A2%E5%BC%95%E5%88%86%E7%B1%BB"><strong>一、索引分类</strong></h2> 
+<p>索引一般可以分为以下几类：</p> 
+<p>主键索引：主键索引是一种特殊的索引类型，它是用于唯一标识每一行数据的索引，每个表只能有一个主键索引，<strong>索引列中的值必须是唯一的，不允许有空值。</strong></p> 
+<p>复合索引：复合索引也叫多列索引或联合索引，它是包含多个列的索引类型，能够加速多列查询和排序操作。需要遵循<strong>最左前缀匹配原则（最左匹配原则）</strong></p> 
+<p>普通索引：MySQL中基本索引类型，没有什么限制，允许在定义索引的列中插入重复值和空值。</p> 
+<p>唯一索引：唯一索引是用来保证列的唯一性的索引，一个表可以有多个唯一索引。比如说，因为人有可能同名，所以同一个姓名在同一个“员工个人资料”数据表里可能出现两次或更多次。<strong>索引列中的值必须是唯一的，但是允许为空值。</strong></p> 
+<p>全文索引：全文索引是一种用于全文搜索的索引类型，能够对文本数据进行快速的模糊搜索和关键字搜索。<strong>只能在文本类型CHAR,VARCHAR,TEXT类型字段上创建全文索引。</strong></p> 
+<p>哈希索引：哈希索引是基于哈希表实现的索引类型，能够对等值查询进行高效的处理，但不支持范围查询和排序，MySQL 中 Memory 引擎中支持哈希索引。</p> 
+<h2 id="%E4%BA%8C%E3%80%81%E7%B4%A2%E5%BC%95%E7%9A%84%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84">二、索引的数据结构</h2> 
+<p>Hash表</p> 
+<p>Hash表，在Java中的HashMap，TreeMap就是Hash表结构，以键值对的方式存储数据。我们使用Hash表存储表数据Key可以存储索引列，Value可以存储行记录或者行磁盘地址。Hash表在等值查询时效率很高，时间复杂度为O(1)；但是不支持范围快速查找，范围查找时还是只能通过扫描全表方式。</p> 
+<h3 id="2.1%20B%E6%A0%91%EF%BC%9A%E6%94%B9%E9%80%A0%E4%BA%8C%E5%8F%89%E6%A0%91">2.1 B树：改造二叉树</h3> 
+<p>MySQL的数据是存储在磁盘文件中的，查询处理数据时，需要先把磁盘中的数据加载到内存中，磁盘IO操作非常耗时，所以我们优化的重点就是尽量减少磁盘IO操作。访问二叉树的每个结点就会发生一次IO，如果想要减少IO操作，就需要降低树的高度。</p> 
+<p>假如key为bigint=8字节，每个节点有两个指针，每个指针为4个字节，一个节点占用的空间16个字节（8+4*2=16）。</p> 
+<p>因为在MySQL的InnoDB存储引擎一次IO会读取的一页（默认一页16K）的数据量，而二叉树一次IO有效数据量只有16字节，空间利用率极低。为了最大化利用一次IO空间，一个简单的想法是在每个节点存储多个元素，在每个节点尽可能多的存储数据。每个节点可以存储1000个索引（16k/16=1000），这样就将二叉树改造成了多叉树，通过增加树的叉树，将树从高瘦变为矮胖。构建1百万条数据，树的高度只需要2层就可以（1000*1000=1百万），也就是说只需要2次磁盘IO就可以查询到数据。磁盘IO次数变少了，查询数据的效率也就提高了。</p> 
+<p>这种数据结构我们称为B树，B树是一种多叉平衡查找树，<span style="color:#fe2c24;">如下图主要特点：</span></p> 
+<ol><li>B树的节点中存储着多个元素，每个内节点有多个分叉。</li><li>节点中的元素包含键值和数据，节点中的键值从大到小排列。<span style="color:#fe2c24;">也就是说，在所有的节点都储存数据。</span></li><li><span style="color:#fe2c24;">父节点当中的元素不会出现在子节点中。</span></li><li>所有的叶子结点都位于同一层，叶节点具有相同的深度，<span style="color:#fe2c24;">叶节点之间没有指针连接。</span></li></ol> 
+<p><img alt="在这里插入图片描述" src="https://images2.imgbox.com/fd/0a/qYc40gD9_o.png"></p> 
+<p> 举个例子：</p> 
+<blockquote> 
+ <p>假如我们查询值等于10的数据。查询路径磁盘块1-&gt;磁盘块2-&gt;磁盘块5。</p> 
+ <p>第一次磁盘IO：将磁盘块1加载到内存中，在内存中从头遍历比较，10&lt;15，走左路，到磁盘寻址磁盘块2。</p> 
+ <p>第二次磁盘IO：将磁盘块2加载到内存中，在内存中从头遍历比较，7&lt;10，到磁盘中寻址定位到磁盘块5。</p> 
+ <p>第三次磁盘IO：将磁盘块5加载到内存中，在内存中从头遍历比较，10=10，找到10，取出data，如果data存储的行记录，取出data，查询结束。如果存储的是磁盘地址，还需要根据磁盘地址到磁盘中取出数据，查询终止。</p> 
+ <p>相比二叉平衡查找树，在整个查找过程中，虽然数据的比较次数并没有明显减少，但是磁盘IO次数会大大减少。同时，由于我们的比较是在内存中进行的，比较的耗时可以忽略不计。B树的高度一般2至3层就能满足大部分的应用场景，所以使用B树构建索引可以很好的提升查询的效率。</p> 
+</blockquote> 
+<p>过程如图：</p> 
+<p><img alt="在这里插入图片描述" src="https://images2.imgbox.com/c8/b7/WAsqYQBH_o.png"></p> 
+<p>看到这里你一定觉得B树很理想了，但是B树不支持范围查询的快速查找，如果我们想查询15-30之间的数据，查到15之后，我们还要返回根节点重新遍历查找下一个数据，直到全部遍历找到。</p> 
+<p>如果data存储的是行记录，行的大小随着列数的增多，所占空间会变大。这时，一个页中可存储的数据量就会变少，树相应就会变高，磁盘IO次数就会变大。</p> 
+<h3 id="2.2%20B%2B%E6%A0%91%EF%BC%9A%E6%94%B9%E9%80%A0B%E6%A0%91">2.2 B+树：改造B树</h3> 
+<p>B+树，作为B树的升级版，在B树基础上，MySQL在B树的基础上继续改造，使用B+树构建索引。B+树和B树最主要的区别在于<strong>非叶子节点是否存储数据</strong>的问题</p> 
+<blockquote> 
+ <ul><li>B树：非叶子节点和叶子节点都会存储数据。</li><li>B+树：<span style="color:#fe2c24;"><strong>只有叶子节点才会存储数据，非叶子节点至存储键值。叶子节点之间使用双向指针连接，最底层的叶子节点形成了一个双向有序链表。</strong></span></li></ul> 
+</blockquote> 
+<p><img alt="在这里插入图片描述" src="https://images2.imgbox.com/c2/2a/ev6zRPvM_o.png"></p> 
+<blockquote> 
+ <p>范围查询：<br> 假如我们想要查找9和26之间的数据。查找路径是磁盘块1-&gt;磁盘块2-&gt;磁盘块6-&gt;磁盘块7。</p> 
+ <ol><li>首先查找值等于9的数据，将值等于9的数据缓存到结果集。这一步和前面等值查询流程一样，发生了三次磁盘IO。</li><li>查找到15之后，底层的叶子节点是一个有序列表，我们从磁盘块6，键值9开始向后遍历筛选所有符合筛选条件的数据。</li><li>第四次磁盘IO：根据磁盘6后继指针到磁盘中寻址定位到磁盘块7，将磁盘7加载到内存中，在内存中从头遍历比较，9&lt;25&lt;26，9&lt;26&lt;=26，将data缓存到结果集。</li><li>主键具备唯一性（后面不会有&lt;=26的数据），不需再向后查找，查询终止。将结果集返回给用户。</li></ol> 
+ <p><img alt="在这里插入图片描述" src="https://images2.imgbox.com/95/42/q2jmxFVl_o.png"></p> 
+</blockquote> 
+<blockquote> 
+ <ol><li><span style="color:#0d0016;">B+树的节点中可存N个key，N个key划分出N个区间，树的高度是相对矮的。</span></li><li><span style="color:#0d0016;">所有父节点都会重复出现在子节点中，从左到右依次递增</span></li><li><span style="color:#0d0016;">非叶子结点只起索引作用， 叶子结点包含信息。</span></li><li><span style="color:#0d0016;">非叶子结点可能在内存中缓存</span></li><li><span style="color:#0d0016;">所有的叶子结点都位于最后一层，叶节点之间首尾连接，所有key值都在子节点中存在，且最大为key</span></li></ol> 
+</blockquote> 
+<p><strong>MySQL的索引就采用了B+树的数据结构。</strong></p> 
+<h2 id="%E4%B8%89%E3%80%81Mysql%E7%B4%A2%E5%BC%95%E5%AE%9E%E7%8E%B0%E2%80%94InnoDB%E5%BC%95%E6%93%8E">三、Mysql索引实现—InnoDB引擎</h2> 
+<h3 id="3.1%20%E4%B8%BB%E9%94%AE%E7%B4%A2%E5%BC%95%EF%BC%88%E8%81%9A%E7%B0%87%E7%B4%A2%E5%BC%95%EF%BC%89">3.1 主键索引（聚簇索引）</h3> 
+<p><strong>聚集索引</strong>：指索引项的排序方式和表中数据记录排序方式一致的索引。<a href="https://so.csdn.net/so/search?q=%E8%81%9A%E7%B0%87%E7%B4%A2%E5%BC%95&amp;spm=1001.2101.3001.7020" title="聚簇索引">聚簇索引</a>并不是一种单独的索引类型，而是一种数据存储方式。</p> 
+<p>每个InnoDB表都有一个聚簇索引 ，聚簇索引使用B+树构建，叶子节点存储的数据是整行记录。一般情况下，聚簇索引等同于主键索引，当一个表没有创建主键索引时，InnoDB会自动创建一个ROWID字段来构建聚簇索引。</p> 
+<p>除聚簇索引之外的所有索引都称为辅助索引。在中InnoDB，辅助索引中的叶子节点存储的数据是该行的主键值。在检索时，InnoDB使用此主键值在聚簇索引中搜索行记录。</p> 
+<p><img alt="在这里插入图片描述" src="https://images2.imgbox.com/61/0b/vxrTuYjb_o.png"></p> 
+<pre><code class="language-java">select * from user_innodb where id = 28;</code></pre> 
+<p><img alt="在这里插入图片描述" src="https://images2.imgbox.com/86/10/Wa5hJQUZ_o.png"></p> 
+<ol><li>先在主键树中从根节点开始检索，将根节点加载到内存，比较28&lt;75，走左路。（1次磁盘IO）</li><li>将左子树节点加载到内存中，比较16&lt;28&lt;47，向下检索。（1次磁盘IO）</li><li>检索到叶节点，将节点加载到内存中遍历，比较16&lt;28，18&lt;28，28=28。查找到值等于28的索引项，直接可以获取整行数据。将改记录返回给客户端。（1次磁盘IO）<br>  </li></ol> 
+<p><strong>磁盘IO数量：3次。</strong></p> 
+<h3 id="3.2%20%E8%BE%85%E5%8A%A9%E7%B4%A2%E5%BC%95%EF%BC%88%E9%9D%9E%E8%81%9A%E7%B0%87%E7%B4%A2%E5%BC%95%EF%BC%89">3.2 辅助索引（非聚簇索引）</h3> 
+<p><strong>非聚集索引</strong>： 索引顺序与物理存储顺序不同</p> 
+<p><img alt="在这里插入图片描述" src="https://images2.imgbox.com/77/f7/Y1TQCzkc_o.png"></p> 
+<p>除聚簇索引之外的所有索引都称为辅助索引，InnoDB的辅助索引只会存储主键值而非磁盘地址.</p> 
+<p><img alt="在这里插入图片描述" src="https://images2.imgbox.com/37/8b/qTCyKGWW_o.png"></p> 
+<p>使用辅助索引需要检索两遍索引：首先检索辅助索引获得主键，然后使用主键到主索引中检索获得记录。</p> 
+<pre><code class="language-java">select * from t_user_innodb where age=19;</code></pre> 
+<p><img alt="在这里插入图片描述" src="https://images2.imgbox.com/c1/7a/mR9I2IhM_o.png"></p> 
+<p>根据在辅助索引树中获取的主键id，到主键索引树检索数据的过程称为<strong>回表</strong>查询。</p> 
+<p><strong>磁盘IO数：辅助索引3次+获取记录回表3次</strong></p> 
+<h3 id="3.3%20%E9%81%BF%E5%85%8D%E5%9B%9E%E8%A1%A8">3.3 避免回表</h3> 
+<p>在InnoDB的存储引擎中，使用辅助索引查询的时候，因为辅助索引叶子节点保存的数据不是当前记录的数据而是当前记录的主键索引，索引如果需要获取当前记录完整数据就必然需要根据主键值从主键索引继续查询。这个过程我们成位回表。想想回表必然是会消耗性能影响性能。那如何避免呢？</p> 
+<p>使用索引覆盖，举个例子：现有User表（id(PK),name(key),sex,address,hobby…）</p> 
+<p>如果在一个场景下，<span style="background-color:#fbd4d0;">select id,name,sex from user where name ='zhangsan';</span>这个语句在业务上频繁使用到，而user表的其他字段使用频率远低于它，在这种情况下，如果我们在建立 name 字段的索引的时候，不是使用单一索引，<span style="background-color:#fbd4d0;">而是使用联合索引（name，sex）这样的话再执行这个查询语句是根据辅助索引查询到的结果就可以获取当前语句的完整数据。这样就可以有效地避免了回表再获取sex的数据。</span></p> 
+<h3 id="3.4%C2%A0%E8%A6%86%E7%9B%96%E7%B4%A2%E5%BC%95">3.4 覆盖索引</h3> 
+<p>覆盖索引并不是说是索引结构，覆盖索引是一种很常用的优化手段。因为在使用辅助索引的时候，我们只可以拿到主键值，相当于获取数据还需要再根据主键查询主键索引再获取到数据。但是试想下这么一种情况，在上面abc_innodb表中的组合索引查询时，如果我只需要abc字段的，那是不是意味着我们查询到组合索引的叶子节点就可以直接返回了，而不需要回表。这种情况就是覆盖索引。</p> 
+<p><strong>覆盖索引的情况：</strong><br><img alt="在这里插入图片描述" src="https://images2.imgbox.com/07/23/9Mm0A7Yw_o.png"></p> 
+<p><strong>未使用到覆盖索引：</strong></p> 
+<p><img alt="在这里插入图片描述" src="https://images2.imgbox.com/dc/37/knCbH0ld_o.png"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/7fcf9fd374024d66225fb3467ff047bf/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【MATLAB 】 VMD-ARIMA联合时序预测算法，科研创新优选算法</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/ab0b3fe756f813e5cef009bffc6cbb3d/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">基于Python的简易评论区抽奖</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>中文维基百科数据爬取与预处理 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="中文维基百科数据爬取与预处理" />
+<meta property="og:description" content="中文维基百科数据爬取与预处理 前言：阅读本篇博文，您将学会如何使用scrapy框架并基于层次优先队列的网页爬虫以及维基页面的结构与半结构数据自动抽取。项目已经开源于GitHub地址：https://github.com/wjn1996/scrapy_for_zh_wiki，欢迎Star或提出PR。
+维基百科（wikipedia） 是目前最大的开放式开放领域百科网站之一，包含包括英文、中文等多种语言。现如今在众多人工智能自然语言处理任务中均取自于维基百科，例如斯坦福大学开源的机器阅读理解评测数据集SQuAD1.1和SQuAD2.0的问答语料直接取自于维基百科；FreeBase世界知识库也直接由维基百科构建而成。维基百科之所以能够收到自然语言处理研究者们的关注，主要得益于维基百科的知识的齐全、丰富，且其来自于世界的各个专家、大众一同编辑而成，知识的准确率和细粒度得到一致的认可。
+现阶段绝大多数的语料构建均为英文维基百科，而在英文语料上实现的功能或算法通常并不能完全兼容中文，同时调研了当前的已有方法也没有系统地同时对维基百科的页面爬取和处理两个关键步骤，本篇文章将提供一个中文维基百科的数据获取和预处理。
+当然维基百科提供了wiki dumps开源语料库（https://dumps.wikimedia.org/zhwiki/），但事实上其包含的语料只有非结构化文本，而且不同领域的数据混杂在一起不适用于一些具体的任务应用上，因此本文决定以爬虫来获取数据。
+本文的主要有以下三个部分
+中文维基百科网页分析基于scrapy框架和层次优先队列的维基百科数据爬取维基页面的结构与半结构数据自动抽取 完成整个过程你需要拥有的配置包括：
+编译环境需要有：python3&#43;scrapy&#43;numpy&#43;tqdm&#43;lxml需要能够访问中文维基百科（zh.wikipedia.org），如果无法完成访问的可以使用VPN或SSR工具；中文繁简转化包langconv 1、中文维基百科网页分析 维基百科网站页面除了一些网站必有的功能外，百科类的界面主要有两种，分别是：
+分类页面： 对应的URL请求则属于分类请求；内容页面： 对应的URL请求则属于内容请求； 以计算机科学为例，其分类页面如图所示：
+分类页面只会存在与该分类相关的关键词实体（下统一称作实体）的超链接URL请求，这些请求也主要分为分类请求和内容请求。对于分类请求则是下一个子类，而内容请求则是该对应实体的详细讲解页面。
+分类请求的URL格式为
+https://zh.wikipedia.org/wiki/Category:xxx 例如实体“计算机学科”的分类请求URL为：
+https://zh.wikipedia.org/wiki/Category:计算机学科 可以发现，其请求链接中包含“Category:”子串，则在后期可以通过该子串来判断请求类型是否是分类请求；
+内容请求则是显示实体的具体内容的页面，其URL请求格式为：
+https://zh.wikipedia.org/wiki/xxx 例如实体“计算机学科”的内容请求URL为：
+https://zh.wikipedia.org/wiki/计算机学科 如图所示，此时不是显示分类目录，而是具体的内容。
+因此，本文主要以这两种请求，来实现对中文维基百科的爬取
+2、基于scrapy框架和层次优先队列的维基百科数据爬取 维基百科收录的实体数量是百万千万级别的，我们不可能也无须全部爬取，因此如何从维基百科中爬取我们所需要的内容？现阶段有的GitHub提供的维基百科爬虫存在一些问题：
+（1）爬虫完全开放式无约束：我们希望爬虫能够爬取我们需要的内容，而不是乱爬。例如如果我们爬取与计算机学科有关的内容，则爬虫不应该去花费时间和资源去爬取其他学科或领域的内容；
+（2）大多数是基于深度优先搜素：深搜往往存在一个问题就是容易使得爬虫爬取到无关的页面，而且深搜往往是到终点（相当于树中的叶子结点）后才回溯，一旦错爬则越陷越深；
+（3）在实际爬取中我们会发现爬虫很容易爬取到一些包括游戏、娱乐，或者是维基百科自带的一些用户中心、使用文档指南等等我们不希望获取的内容；
+（4）有些没有优化的爬虫程序，可能忽略了同一请求的重复爬取问题。对于一些使用外网收费的渠道来访问维基百科的，是需要耗费大量的流量资金；
+本文则从上面提到的分类请求和内容请求两个请求为切入点进行，通过维基百科天然的分类索引来约束我们目标爬取的内容；为了避免请求的重复爬取，以及传统深搜面临的问题，本文使用scrapy框架自主实现了层次优先队列的爬虫方法。也许有的读者会想scrapy或其他框架可能提供了自带的队列机制，为什么要自己实现？因为在具体爬取时，我们更希望能够随时初始化队列，且能够保存到本地，在下次爬取时则直接将保存的队列再次初始化，避免再次爬取已爬取的页面。
+2.1 创建队列 python创建一个Queue类，该类用于保存候选请求队列（candidates）、已爬取的请求队列（has_viewd），
+候选队列（candidates）：爬虫程序运行初期，需要手动在里面添加一个爬虫入口请求（建议只放一个）。如果放置的请求时分类请求，则爬虫会根据子分类依次进行层次遍历；如果放置的是内容请求，则程序只爬取该内容页面后自动终止；本文的scrapy程序中设定对candidates队列的检测，如果为空则停止爬虫程序；已爬取队列（has_viewd）：每次处理一个请求后（不论是分类请求还是内容请求），都会将这个请求加入到已爬取队列中，每次在处理一个请求时都会判断当前的请求是否在这个队列中，如果已存在则不再执行爬取，减少重复的流量资源和时间消耗； 队列类的源程序如下：
+import numpy as np import os # made by wjn # homepage:www.wjn1996.cn class Queue(): candidates = [] # 保存候选的请求列表 has_viewd = [] # 保存已经被处理过的请求 save_every = 100 # has_viewd每100次执行一次保存 # 初始化时需要添加若干个入口请求 candidates." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/c5345b24709a32453c046c622ffa547a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-11-26T22:42:59+08:00" />
+<meta property="article:modified_time" content="2020-11-26T22:42:59+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">中文维基百科数据爬取与预处理</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="_0"></a>中文维基百科数据爬取与预处理</h2> 
+<p>  <strong>前言</strong>：阅读本篇博文，您将学会如何<strong>使用scrapy框架并基于层次优先队列的网页爬虫</strong>以及<strong>维基页面的结构与半结构数据自动抽取</strong>。项目已经开源于GitHub地址：<a href="https://github.com/wjn1996/scrapy_for_zh_wiki">https://github.com/wjn1996/scrapy_for_zh_wiki</a>，欢迎Star或提出PR。</p> 
+<hr> 
+<p>  <strong>维基百科（wikipedia）</strong> 是目前最大的开放式开放领域百科网站之一，包含包括英文、中文等多种语言。现如今在众多人工智能自然语言处理任务中均取自于维基百科，例如斯坦福大学开源的机器阅读理解评测数据集SQuAD1.1和SQuAD2.0的问答语料直接取自于维基百科；FreeBase世界知识库也直接由维基百科构建而成。维基百科之所以能够收到自然语言处理研究者们的关注，主要得益于维基百科的知识的齐全、丰富，且其来自于世界的各个专家、大众一同编辑而成，知识的准确率和细粒度得到一致的认可。</p> 
+<p>  现阶段绝大多数的语料构建均为英文维基百科，而在英文语料上实现的功能或算法通常并不能完全兼容中文，同时调研了当前的已有方法也没有系统地同时对维基百科的页面<strong>爬取</strong>和<strong>处理</strong>两个关键步骤，<strong>本篇文章将提供一个中文维基百科的数据获取和预处理</strong>。</p> 
+<p>  当然维基百科提供了<strong>wiki dumps开源语料库</strong>（<a href="https://dumps.wikimedia.org/zhwiki/" rel="nofollow">https://dumps.wikimedia.org/zhwiki/</a>），但事实上其包含的语料只有非结构化文本，而且不同领域的数据混杂在一起不适用于一些具体的任务应用上，因此本文决定以爬虫来获取数据。</p> 
+<p>  本文的主要有以下三个部分</p> 
+<ul><li>中文维基百科网页分析</li><li>基于scrapy框架和层次优先队列的维基百科数据爬取</li><li>维基页面的结构与半结构数据自动抽取</li></ul> 
+<p>  完成整个过程你需要拥有的配置包括：</p> 
+<ul><li>编译环境需要有：python3+scrapy+numpy+tqdm+lxml</li><li>需要能够访问中文维基百科（<a href="https://zh.wikipedia.org" rel="nofollow">zh.wikipedia.org</a>），如果无法完成访问的可以使用VPN或SSR工具；</li><li>中文繁简转化包langconv</li></ul> 
+<hr> 
+<h4><a id="1_25"></a>1、中文维基百科网页分析</h4> 
+<p>  维基百科网站页面除了一些网站必有的功能外，百科类的界面主要有两种，分别是：</p> 
+<ul><li><strong>分类页面：</strong> 对应的URL请求则属于<strong>分类请求</strong>；</li><li><strong>内容页面：</strong> 对应的URL请求则属于<strong>内容请求</strong>；</li></ul> 
+<p>  以计算机科学为例，其分类页面如图所示：</p> 
+<p><img src="https://images2.imgbox.com/cf/24/taQJqS54_o.png" alt="在这里插入图片描述"><br>   分类页面只会存在与该分类相关的关键词实体（下统一称作实体）的超链接URL请求，这些请求也主要分为分类请求和内容请求。对于分类请求则是下一个子类，而内容请求则是该对应实体的详细讲解页面。<br>   分类请求的URL格式为</p> 
+<pre><code class="prism language-python">https<span class="token punctuation">:</span><span class="token operator">//</span>zh<span class="token punctuation">.</span>wikipedia<span class="token punctuation">.</span>org<span class="token operator">/</span>wiki<span class="token operator">/</span>Category<span class="token punctuation">:</span>xxx
+</code></pre> 
+<p>例如实体“计算机学科”的分类请求URL为：</p> 
+<pre><code class="prism language-python">https<span class="token punctuation">:</span><span class="token operator">//</span>zh<span class="token punctuation">.</span>wikipedia<span class="token punctuation">.</span>org<span class="token operator">/</span>wiki<span class="token operator">/</span>Category<span class="token punctuation">:</span>计算机学科
+</code></pre> 
+<p>可以发现，其请求链接中包含“Category:”子串，则在后期可以通过该子串来判断请求类型是否是分类请求；</p> 
+<p>  内容请求则是显示实体的具体内容的页面，其URL请求格式为：</p> 
+<pre><code class="prism language-python">https<span class="token punctuation">:</span><span class="token operator">//</span>zh<span class="token punctuation">.</span>wikipedia<span class="token punctuation">.</span>org<span class="token operator">/</span>wiki<span class="token operator">/</span>xxx
+</code></pre> 
+<p>例如实体“计算机学科”的内容请求URL为：</p> 
+<pre><code class="prism language-python">https<span class="token punctuation">:</span><span class="token operator">//</span>zh<span class="token punctuation">.</span>wikipedia<span class="token punctuation">.</span>org<span class="token operator">/</span>wiki<span class="token operator">/</span>计算机学科
+</code></pre> 
+<p>如图所示，此时不是显示分类目录，而是具体的内容。</p> 
+<p><img src="https://images2.imgbox.com/61/9f/4SsGPJ87_o.png" alt="在这里插入图片描述"><br> 因此，本文主要以这两种请求，来实现对中文维基百科的爬取</p> 
+<h4><a id="2scrapy_64"></a>2、基于scrapy框架和层次优先队列的维基百科数据爬取</h4> 
+<p>  维基百科收录的实体数量是百万千万级别的，我们不可能也无须全部爬取，因此如何从维基百科中爬取我们所需要的内容？现阶段有的GitHub提供的维基百科爬虫存在一些问题：<br> （1）<strong>爬虫完全开放式无约束</strong>：我们希望爬虫能够爬取我们需要的内容，而不是乱爬。例如如果我们爬取与计算机学科有关的内容，则爬虫不应该去花费时间和资源去爬取其他学科或领域的内容；<br> （2）<strong>大多数是基于深度优先搜素</strong>：深搜往往存在一个问题就是容易使得爬虫爬取到无关的页面，而且深搜往往是到终点（相当于树中的叶子结点）后才回溯，一旦错爬则越陷越深；<br> （3）在实际爬取中我们会发现爬虫很容易爬取到一些包括游戏、娱乐，或者是维基百科自带的一些用户中心、使用文档指南等等我们不希望获取的内容；<br> （4）有些没有优化的爬虫程序，可能忽略了同一请求的重复爬取问题。对于一些使用外网收费的渠道来访问维基百科的，是需要耗费大量的流量资金；</p> 
+<p>  本文则从上面提到的分类请求和内容请求两个请求为切入点进行，通过维基百科天然的分类索引来约束我们目标爬取的内容；为了避免请求的重复爬取，以及传统深搜面临的问题，本文使用scrapy框架自主实现了层次优先队列的爬虫方法。也许有的读者会想scrapy或其他框架可能提供了自带的队列机制，为什么要自己实现？因为在具体爬取时，我们更希望能够随时初始化队列，且能够保存到本地，在下次爬取时则直接将保存的队列再次初始化，避免再次爬取已爬取的页面。</p> 
+<h5><a id="21__74"></a>2.1 创建队列</h5> 
+<p>  python创建一个Queue类，该类用于<strong>保存候选请求队列（candidates）</strong>、<strong>已爬取的请求队列（has_viewd）</strong>，</p> 
+<ul><li><strong>候选队列（candidates）</strong>：爬虫程序运行初期，需要手动在里面添加一个爬虫入口请求（建议只放一个）。如果放置的请求时分类请求，则爬虫会根据子分类依次进行层次遍历；如果放置的是内容请求，则程序只爬取该内容页面后自动终止；本文的scrapy程序中设定对candidates队列的检测，如果为空则停止爬虫程序；</li><li><strong>已爬取队列（has_viewd）</strong>：每次处理一个请求后（不论是分类请求还是内容请求），都会将这个请求加入到已爬取队列中，每次在处理一个请求时都会判断当前的请求是否在这个队列中，如果已存在则不再执行爬取，减少重复的流量资源和时间消耗；</li></ul> 
+<p>  队列类的源程序如下：</p> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> numpy <span class="token keyword">as</span> np
+<span class="token keyword">import</span> os
+<span class="token comment"># made by wjn</span>
+<span class="token comment"># homepage:www.wjn1996.cn</span>
+
+<span class="token keyword">class</span> <span class="token class-name">Queue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    candidates <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token comment"># 保存候选的请求列表</span>
+    has_viewd <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token comment"># 保存已经被处理过的请求</span>
+    save_every <span class="token operator">=</span> <span class="token number">100</span> <span class="token comment"># has_viewd每100次执行一次保存</span>
+    <span class="token comment"># 初始化时需要添加若干个入口请求</span>
+    candidates<span class="token punctuation">.</span>append<span class="token punctuation">(</span><span class="token string">'https://zh.wikipedia.org/wiki/Category:%E8%AE%A1%E7%AE%97%E6%9C%BA%E7%BC%96%E7%A8%8B'</span><span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">load_npy</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span> <span class="token comment"># 用于加载保存在本地的已爬取请求队列</span>
+        <span class="token keyword">if</span> os<span class="token punctuation">.</span>path<span class="token punctuation">.</span>exists<span class="token punctuation">(</span><span class="token string">'../orgin_page/has_viewd.npy'</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+            self<span class="token punctuation">.</span>has_viewd <span class="token operator">=</span> np<span class="token punctuation">.</span>load<span class="token punctuation">(</span><span class="token string">'../orgin_page/has_viewd.npy'</span><span class="token punctuation">)</span><span class="token punctuation">.</span>tolist<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">save_has_viewd</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span> <span class="token comment"># 保存已经访问过的请求队列</span>
+        np<span class="token punctuation">.</span>save<span class="token punctuation">(</span><span class="token string">'../orgin_page/has_viewd.npy'</span><span class="token punctuation">,</span>self<span class="token punctuation">.</span>has_viewd<span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">add_candidate</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> url<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment"># 注意，执行该函数说明获得了一个新的请求，需要待处理（从分类或内容页面解析得到的链接）</span>
+        <span class="token keyword">if</span> url <span class="token operator">not</span> <span class="token keyword">in</span> self<span class="token punctuation">.</span>candidates <span class="token operator">and</span> url <span class="token operator">not</span> <span class="token keyword">in</span> self<span class="token punctuation">.</span>has_viewd<span class="token punctuation">:</span>
+            self<span class="token punctuation">.</span>candidates<span class="token punctuation">.</span>append<span class="token punctuation">(</span>url<span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">add_candidates</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> url_list<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment"># 批量添加注意，执行该函数说明获得了一个新的请求，需要待处理（从分类或内容页面解析得到的链接）</span>
+        <span class="token keyword">for</span> url <span class="token keyword">in</span> url_list<span class="token punctuation">:</span>
+            self<span class="token punctuation">.</span>add_candidate<span class="token punctuation">(</span>url<span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">delete_candidate</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> url<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment"># 注意，执行该函数时，说明有进程已经收到该请求，在处理前需要将候选列表中该请求删除，表示已有进程已经拿到该请求</span>
+        <span class="token keyword">if</span> url <span class="token keyword">in</span> self<span class="token punctuation">.</span>candidates<span class="token punctuation">:</span>
+            self<span class="token punctuation">.</span>candidates<span class="token punctuation">.</span>remove<span class="token punctuation">(</span>url<span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">add_has_viewd</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> url<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment"># 注意，执行该函数时，说明有进程已经收到请求，并进行了相关处理，现需要更新队列状态</span>
+        <span class="token keyword">if</span> url <span class="token operator">not</span> <span class="token keyword">in</span> self<span class="token punctuation">.</span>candidates <span class="token operator">and</span> url <span class="token operator">not</span> <span class="token keyword">in</span> self<span class="token punctuation">.</span>has_viewd<span class="token punctuation">:</span>
+            <span class="token comment"># 如果当前请求既不在候选列表，也不在已爬列表，则加入</span>
+            self<span class="token punctuation">.</span>has_viewd<span class="token punctuation">.</span>append<span class="token punctuation">(</span>url<span class="token punctuation">)</span>
+        <span class="token keyword">elif</span> url <span class="token keyword">in</span> self<span class="token punctuation">.</span>candidates <span class="token operator">and</span> url <span class="token operator">not</span> <span class="token keyword">in</span> self<span class="token punctuation">.</span>has_viewd<span class="token punctuation">:</span>
+            <span class="token comment"># 如果当前请求在候选列表中，且不在已爬列表，则说明有进程提前读取该页面，但候选列表还没更新，则加入</span>
+            <span class="token comment"># 并将候选列表对应的请求删除</span>
+            self<span class="token punctuation">.</span>has_viewd<span class="token punctuation">.</span>append<span class="token punctuation">(</span>url<span class="token punctuation">)</span>
+            self<span class="token punctuation">.</span>delete_candidate<span class="token punctuation">(</span>url<span class="token punctuation">)</span>
+        <span class="token keyword">elif</span> url <span class="token keyword">in</span> self<span class="token punctuation">.</span>candidates <span class="token operator">and</span> url <span class="token keyword">in</span> self<span class="token punctuation">.</span>has_viewd<span class="token punctuation">:</span>
+            <span class="token comment"># 如果当前请求在候选列表中，也在已爬列表中，则说明有进程已经完成了爬取，但候选列表没更新，则直接</span>
+            <span class="token comment"># 删掉候选列表中指定的请求</span>
+            self<span class="token punctuation">.</span>delete_candidate<span class="token punctuation">(</span>url<span class="token punctuation">)</span>
+            <span class="token comment"># 最后一种情况是当前请求不在候选列表，但在已爬列表，而还能遇到该请求，说明该请求属于滞后请求，无视即可</span>
+
+</code></pre> 
+<h5><a id="22_Scrapy_135"></a>2.2 Scrapy爬虫</h5> 
+<p>  scrapy是基于python语言设计的可支持并行分布式的爬虫框架，本文并不适用爬虫框架自带的访问队列机制，而结合上面给出的Queue类来实现爬取，主要思路是：</p> 
+<ol><li>定义一个WikiSpider类并继承scrapy.Spider，初始化Queue类对象，并将其candidates请求队列初始化到scrapy默认的启动列表（start_urls），注意scrapy框架的start_urls只会被处理一次，即便在程序运行中动态更新也不会影响爬虫的爬取，因此我们只使用start_urls作为启动的请求队列，后期爬虫获取的新请求全部来自于Queue类中的candidates；</li><li>重写sparse方法，该方法只会被执行一次，因此主要用于对start_urls的请求进行处理：如果当前请求URL包含“Category:”，则认为是分类请求，其将被转发至分类请求的处理函数；否则将视为内容请求，并转发至内容请求处理函数；</li><li>创建分类请求处理函数parse_category和内容请求处理函数parse_content。对于parse_category方法中，爬取该分类页面，并获取对应的子分类请求和内容请求，加入到candidates中；对于parse_content，则只有内容，返回给pipelines执行页面数据的保存工作；所有处理的页面后都将加入到has_viewd已爬取队列中；</li></ol> 
+<p>  下面给出scrapy关键的两个代码：</p> 
+<p>（1）<strong>wiki.py（主要为爬虫类文件）</strong></p> 
+<pre><code class="prism language-python"><span class="token comment"># -*- coding: utf-8 -*-</span>
+<span class="token keyword">import</span> scrapy
+<span class="token keyword">from</span> scrapy<span class="token punctuation">.</span>selector <span class="token keyword">import</span> Selector
+<span class="token keyword">from</span> items <span class="token keyword">import</span> ContentItem
+<span class="token keyword">from</span> queue <span class="token keyword">import</span> Queue
+<span class="token keyword">import</span> time
+<span class="token keyword">from</span> langconv <span class="token keyword">import</span> <span class="token operator">*</span>
+<span class="token keyword">from</span> filter_words <span class="token keyword">import</span> filter_url
+<span class="token comment"># made by wjn</span>
+<span class="token comment"># homepage:www.wjn1996.cn</span>
+
+<span class="token keyword">def</span> <span class="token function">Traditional2Simplified</span><span class="token punctuation">(</span>sentence<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token triple-quoted-string string">'''
+    将sentence中的繁体字转为简体字
+    :param sentence: 待转换的句子
+    :return: 将句子中繁体字转换为简体字之后的句子
+    '''</span>
+    sentence <span class="token operator">=</span> Converter<span class="token punctuation">(</span><span class="token string">'zh-hans'</span><span class="token punctuation">)</span><span class="token punctuation">.</span>convert<span class="token punctuation">(</span>sentence<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> sentence
+
+<span class="token keyword">def</span> <span class="token function">split</span><span class="token punctuation">(</span>url_list<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token triple-quoted-string string">'''
+    分离两种不同的请求类型（分类/内容）
+    :return:
+    '''</span>
+    cates_url<span class="token punctuation">,</span> content_url <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    <span class="token keyword">for</span> url <span class="token keyword">in</span> url_list<span class="token punctuation">:</span>
+        <span class="token keyword">if</span> <span class="token string">'Category:'</span> <span class="token keyword">in</span> url<span class="token punctuation">:</span>
+            cates_url<span class="token punctuation">.</span>append<span class="token punctuation">(</span>url<span class="token punctuation">)</span>
+        <span class="token keyword">else</span><span class="token punctuation">:</span>
+            content_url<span class="token punctuation">.</span>append<span class="token punctuation">(</span>url<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> cates_url<span class="token punctuation">,</span> content_url
+
+<span class="token keyword">def</span> <span class="token function">filter</span><span class="token punctuation">(</span>url<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment"># 如果字符串url中包含要过滤的词，则为True</span>
+    <span class="token comment"># filter_url = ['游戏', '%E6%B8%B8%E6%88%8F', '维基', '%E7%BB%B4%E5%9F%BA', '幻想', '我的世界', '魔兽']</span>
+    <span class="token keyword">for</span> i <span class="token keyword">in</span> filter_url<span class="token punctuation">:</span>
+        <span class="token keyword">if</span> i <span class="token keyword">in</span> url<span class="token punctuation">:</span>
+            <span class="token keyword">return</span> <span class="token boolean">True</span>
+    <span class="token keyword">return</span> <span class="token boolean">False</span>
+
+<span class="token keyword">class</span> <span class="token class-name">WiKiSpider</span><span class="token punctuation">(</span>scrapy<span class="token punctuation">.</span>Spider<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    urlQueue <span class="token operator">=</span> Queue<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    name <span class="token operator">=</span> <span class="token string">'wikipieda_spider'</span>
+    allowed_domains <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token string">'zh.wikipedia.org'</span><span class="token punctuation">]</span>
+    start_urls <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token string">'https://zh.wikipedia.org/wiki/Category:%E8%AE%A1%E7%AE%97%E6%9C%BA%E7%BC%96%E7%A8%8B'</span><span class="token punctuation">]</span>
+    custom_settings <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token string">'ITEM_PIPELINES'</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span><span class="token string">'counselor.pipelines.WikiPipeline'</span><span class="token punctuation">:</span> <span class="token number">800</span><span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment"># scrapy默认启动的用于处理start_urls的方法</span>
+    <span class="token keyword">def</span> <span class="token function">parse</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> response<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token triple-quoted-string string">'''
+        在维基百科中，页面有两种类型，分别是分类页面，链接中包含Category，否则是百科页面，例如：
+        分类页面：https://zh.wikipedia.org/wiki/Category:计算机科学
+        百科页面：https://zh.wikipedia.org/wiki/计算机科学
+        本方法用于对请求的链接进行处理，如果是分类型的请求，则交给函数1处理，否则交给函数2处理
+        :param response: 候选列表中的某个请求
+        :return:
+        '''</span>
+        <span class="token comment"># 获得一个新请求</span>
+        this_url <span class="token operator">=</span> response<span class="token punctuation">.</span>url
+        <span class="token comment"># self.urlQueue.delete_candidate(this_url)</span>
+        <span class="token comment"># self.start_urls = self.urlQueue.candidates</span>
+        <span class="token comment"># 说明该请求时一个分类</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'this_url='</span><span class="token punctuation">,</span> this_url<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>urlQueue<span class="token punctuation">.</span>load_npy<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token keyword">if</span> <span class="token string">'Category:'</span> <span class="token keyword">in</span> this_url<span class="token punctuation">:</span>
+            <span class="token keyword">yield</span> scrapy<span class="token punctuation">.</span>Request<span class="token punctuation">(</span>this_url<span class="token punctuation">,</span> callback<span class="token operator">=</span>self<span class="token punctuation">.</span>parse_category<span class="token punctuation">,</span> dont_filter<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+        <span class="token keyword">else</span><span class="token punctuation">:</span>
+            <span class="token keyword">yield</span> scrapy<span class="token punctuation">.</span>Request<span class="token punctuation">(</span>this_url<span class="token punctuation">,</span> callback<span class="token operator">=</span>self<span class="token punctuation">.</span>parse_content<span class="token punctuation">,</span> dont_filter<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">parse_category</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> response<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token triple-quoted-string string">'''
+        处理分类页面的请求
+        :param response:
+        :return:
+        '''</span>
+        counselor_item <span class="token operator">=</span> ContentItem<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        sel <span class="token operator">=</span> Selector<span class="token punctuation">(</span>response<span class="token punctuation">)</span>
+        this_url <span class="token operator">=</span> response<span class="token punctuation">.</span>url
+        self<span class="token punctuation">.</span>urlQueue<span class="token punctuation">.</span>delete_candidate<span class="token punctuation">(</span>this_url<span class="token punctuation">)</span>
+        search <span class="token operator">=</span> sel<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">"//div[@id='content']"</span><span class="token punctuation">)</span>
+        category_entity <span class="token operator">=</span> search<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">"//h1[@id='firstHeading']/text()"</span><span class="token punctuation">)</span><span class="token punctuation">.</span>extract_first<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        candidate_lists_ <span class="token operator">=</span> search<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">"//div[@class='mw-category-generated']//a/@href"</span><span class="token punctuation">)</span><span class="token punctuation">.</span>extract<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        candidate_lists <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+        <span class="token comment"># 百科页面有许多超链接是锚链接，需要过滤掉</span>
+        <span class="token keyword">for</span> url <span class="token keyword">in</span> candidate_lists_<span class="token punctuation">:</span>
+            <span class="token keyword">if</span> <span class="token builtin">filter</span><span class="token punctuation">(</span>url<span class="token punctuation">)</span><span class="token punctuation">:</span> <span class="token comment"># 分类请求中过滤掉一些不符合的请求（例如明显包含游戏的关键词都不要爬取）</span>
+                <span class="token keyword">continue</span>
+            <span class="token keyword">if</span> <span class="token string">'/wiki'</span> <span class="token keyword">in</span> url <span class="token operator">and</span> <span class="token string">'https://zh.wikipedia.org'</span> <span class="token operator">not</span> <span class="token keyword">in</span> url<span class="token punctuation">:</span>
+                <span class="token keyword">if</span> <span class="token string">':'</span> <span class="token operator">not</span> <span class="token keyword">in</span> url <span class="token operator">or</span> <span class="token punctuation">(</span><span class="token string">':'</span> <span class="token keyword">in</span> url <span class="token operator">and</span> <span class="token string">'Category:'</span> <span class="token keyword">in</span> url<span class="token punctuation">)</span><span class="token punctuation">:</span>
+                    candidate_lists<span class="token punctuation">.</span>append<span class="token punctuation">(</span><span class="token string">'https://zh.wikipedia.org'</span> <span class="token operator">+</span> url<span class="token punctuation">)</span>
+        <span class="token comment"># self.start_urls = self.urlQueue.candidates</span>
+        cates_url<span class="token punctuation">,</span> content_url <span class="token operator">=</span> split<span class="token punctuation">(</span>candidate_lists<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>urlQueue<span class="token punctuation">.</span>add_has_viewd<span class="token punctuation">(</span>this_url<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>urlQueue<span class="token punctuation">.</span>add_candidates<span class="token punctuation">(</span>content_url<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>urlQueue<span class="token punctuation">.</span>add_candidates<span class="token punctuation">(</span>cates_url<span class="token punctuation">)</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'候选请求数='</span><span class="token punctuation">,</span> <span class="token builtin">len</span><span class="token punctuation">(</span>self<span class="token punctuation">.</span>urlQueue<span class="token punctuation">.</span>candidates<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'已处理请求数='</span><span class="token punctuation">,</span> <span class="token builtin">len</span><span class="token punctuation">(</span>self<span class="token punctuation">.</span>urlQueue<span class="token punctuation">.</span>has_viewd<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token comment"># 处理完分类页面后，将所有可能的内容请求链接直接提交处理队列处理</span>
+        <span class="token keyword">if</span> <span class="token builtin">len</span><span class="token punctuation">(</span>self<span class="token punctuation">.</span>urlQueue<span class="token punctuation">.</span>candidates<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">:</span>
+            <span class="token comment"># print(111111)</span>
+            self<span class="token punctuation">.</span>crawler<span class="token punctuation">.</span>engine<span class="token punctuation">.</span>close_spider<span class="token punctuation">(</span>self<span class="token punctuation">)</span>
+        <span class="token keyword">for</span> url <span class="token keyword">in</span> self<span class="token punctuation">.</span>urlQueue<span class="token punctuation">.</span>candidates<span class="token punctuation">:</span>
+            <span class="token keyword">if</span> url <span class="token keyword">in</span> self<span class="token punctuation">.</span>urlQueue<span class="token punctuation">.</span>has_viewd<span class="token punctuation">:</span>
+                <span class="token keyword">continue</span>
+            <span class="token keyword">if</span> <span class="token string">'Category:'</span> <span class="token keyword">in</span> url<span class="token punctuation">:</span>
+                <span class="token comment"># print(url)</span>
+                <span class="token keyword">yield</span> scrapy<span class="token punctuation">.</span>Request<span class="token punctuation">(</span>url<span class="token punctuation">,</span> callback<span class="token operator">=</span>self<span class="token punctuation">.</span>parse_category<span class="token punctuation">,</span> dont_filter<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+                <span class="token comment"># pass</span>
+            <span class="token keyword">else</span><span class="token punctuation">:</span>
+                <span class="token keyword">yield</span> scrapy<span class="token punctuation">.</span>Request<span class="token punctuation">(</span>url<span class="token punctuation">,</span> callback<span class="token operator">=</span>self<span class="token punctuation">.</span>parse_content<span class="token punctuation">,</span> dont_filter<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">parse_content</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> response<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token triple-quoted-string string">'''
+        处理百科页面请求
+        :param response:
+        :return:
+        '''</span>
+        counselor_item <span class="token operator">=</span> ContentItem<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        sel <span class="token operator">=</span> Selector<span class="token punctuation">(</span>response<span class="token punctuation">)</span>
+        this_url <span class="token operator">=</span> response<span class="token punctuation">.</span>url
+        self<span class="token punctuation">.</span>urlQueue<span class="token punctuation">.</span>delete_candidate<span class="token punctuation">(</span>this_url<span class="token punctuation">)</span>
+        <span class="token comment"># print('this_url=', this_url)</span>
+        search <span class="token operator">=</span> sel<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">"//div[@id='content']"</span><span class="token punctuation">)</span>
+        content_entity <span class="token operator">=</span> search<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">"//h1[@id='firstHeading']/text()"</span><span class="token punctuation">)</span><span class="token punctuation">.</span>extract_first<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        content_entity <span class="token operator">=</span> Traditional2Simplified<span class="token punctuation">(</span>content_entity<span class="token punctuation">)</span>
+        content_page <span class="token operator">=</span> search<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">"//div[@id='bodyContent']//div[@id='mw-content-text']//div[@class='mw-parser-output']"</span><span class="token punctuation">)</span><span class="token punctuation">.</span>extract_first<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token comment"># 将带有html的标签的整个数据拿下，后期做处理</span>
+        cates <span class="token operator">=</span> search<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">"//div[@id='catlinks']//ul//a/text()"</span><span class="token punctuation">)</span><span class="token punctuation">.</span>extract<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>urlQueue<span class="token punctuation">.</span>add_has_viewd<span class="token punctuation">(</span>this_url<span class="token punctuation">)</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'候选请求数='</span><span class="token punctuation">,</span> <span class="token builtin">len</span><span class="token punctuation">(</span>self<span class="token punctuation">.</span>urlQueue<span class="token punctuation">.</span>candidates<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'已处理请求数='</span><span class="token punctuation">,</span> <span class="token builtin">len</span><span class="token punctuation">(</span>self<span class="token punctuation">.</span>urlQueue<span class="token punctuation">.</span>has_viewd<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>urlQueue<span class="token punctuation">.</span>save_has_viewd<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token comment"># 将当前页面的信息保存下来</span>
+        <span class="token comment"># 如果当前的content的标题或分类属于需要过滤的词（例如我们不想爬取跟游戏有关的，所以包含游戏的请求或分类都不保存）</span>
+        is_url_filter <span class="token operator">=</span> <span class="token builtin">filter</span><span class="token punctuation">(</span>content_entity<span class="token punctuation">)</span>
+        is_cates_filter <span class="token operator">=</span> <span class="token boolean">False</span>
+        <span class="token keyword">for</span> cate <span class="token keyword">in</span> cates<span class="token punctuation">:</span>
+            cate <span class="token operator">=</span> Traditional2Simplified<span class="token punctuation">(</span>cate<span class="token punctuation">)</span>
+            <span class="token keyword">if</span> <span class="token builtin">filter</span><span class="token punctuation">(</span>cate<span class="token punctuation">)</span><span class="token punctuation">:</span>
+                is_cates_filter <span class="token operator">=</span> <span class="token boolean">True</span>
+                <span class="token keyword">break</span>
+        <span class="token keyword">if</span> is_url_filter <span class="token operator">==</span> <span class="token boolean">False</span> <span class="token operator">and</span> is_cates_filter <span class="token operator">==</span> <span class="token boolean">False</span><span class="token punctuation">:</span>
+            counselor_item<span class="token punctuation">[</span><span class="token string">'content_entity'</span><span class="token punctuation">]</span> <span class="token operator">=</span> content_entity<span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">':Category'</span><span class="token punctuation">,</span> <span class="token string">''</span><span class="token punctuation">)</span>
+            counselor_item<span class="token punctuation">[</span><span class="token string">'category'</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">'\t'</span><span class="token punctuation">.</span>join<span class="token punctuation">(</span>cates<span class="token punctuation">)</span>
+            counselor_item<span class="token punctuation">[</span><span class="token string">'time'</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token builtin">str</span><span class="token punctuation">(</span>time<span class="token punctuation">.</span>time<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+            counselor_item<span class="token punctuation">[</span><span class="token string">'url'</span><span class="token punctuation">]</span> <span class="token operator">=</span> this_url
+            counselor_item<span class="token punctuation">[</span><span class="token string">'content'</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token builtin">str</span><span class="token punctuation">(</span>content_page<span class="token punctuation">)</span>
+            <span class="token keyword">return</span> counselor_item
+
+</code></pre> 
+<p>（2）pipelines.py（对页面内容的保存）</p> 
+<pre><code class="prism language-python"><span class="token comment"># made by wjn</span>
+<span class="token comment"># homepage:www.wjn1996.cn</span>
+
+<span class="token keyword">class</span> <span class="token class-name">WikiPipeline</span><span class="token punctuation">(</span><span class="token builtin">object</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">process_item</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> item<span class="token punctuation">,</span> spider<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        data <span class="token operator">=</span> <span class="token builtin">dict</span><span class="token punctuation">(</span>item<span class="token punctuation">)</span><span class="token punctuation">[</span>添加链接描述<span class="token punctuation">]</span><span class="token punctuation">(</span>langconv<span class="token punctuation">.</span>py<span class="token punctuation">:</span>https<span class="token punctuation">:</span><span class="token operator">//</span>github<span class="token punctuation">.</span>com<span class="token operator">/</span>skydark<span class="token operator">/</span>nstools<span class="token operator">/</span>blob<span class="token operator">/</span>master<span class="token operator">/</span>zhtools<span class="token operator">/</span>langconv<span class="token punctuation">.</span>py<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>writeFile<span class="token punctuation">(</span>data<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> item
+    <span class="token keyword">def</span> <span class="token function">writeFile</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> data<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment"># print('========',len(data),'=========')</span>
+        <span class="token builtin">dir</span> <span class="token operator">=</span> <span class="token string">'../data_process/origin_page/'</span>
+        <span class="token keyword">with</span> <span class="token builtin">open</span><span class="token punctuation">(</span><span class="token builtin">dir</span> <span class="token operator">+</span> data<span class="token punctuation">[</span><span class="token string">'content_entity'</span><span class="token punctuation">]</span> <span class="token operator">+</span> <span class="token string">'.txt'</span><span class="token punctuation">,</span> <span class="token string">'w'</span><span class="token punctuation">,</span> encoding<span class="token operator">=</span><span class="token string">'utf-8'</span><span class="token punctuation">)</span> <span class="token keyword">as</span> fw<span class="token punctuation">:</span>
+            fw<span class="token punctuation">.</span>write<span class="token punctuation">(</span><span class="token string">'标题：'</span> <span class="token operator">+</span> data<span class="token punctuation">[</span><span class="token string">'content_entity'</span><span class="token punctuation">]</span> <span class="token operator">+</span> <span class="token string">'\n'</span><span class="token punctuation">)</span>
+            fw<span class="token punctuation">.</span>write<span class="token punctuation">(</span><span class="token string">'分类：'</span> <span class="token operator">+</span> data<span class="token punctuation">[</span><span class="token string">'category'</span><span class="token punctuation">]</span> <span class="token operator">+</span> <span class="token string">'\n'</span><span class="token punctuation">)</span>
+            fw<span class="token punctuation">.</span>write<span class="token punctuation">(</span><span class="token string">'原文地址：'</span> <span class="token operator">+</span> data<span class="token punctuation">[</span><span class="token string">'url'</span><span class="token punctuation">]</span> <span class="token operator">+</span> <span class="token string">'\n'</span><span class="token punctuation">)</span>
+            fw<span class="token punctuation">.</span>write<span class="token punctuation">(</span><span class="token string">'爬取时间：'</span> <span class="token operator">+</span> data<span class="token punctuation">[</span><span class="token string">'time'</span><span class="token punctuation">]</span> <span class="token operator">+</span> <span class="token string">'\n\n'</span><span class="token punctuation">)</span>
+            fw<span class="token punctuation">.</span>write<span class="token punctuation">(</span>data<span class="token punctuation">[</span><span class="token string">'content'</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>  另外还要使用繁转简的langconv工具，可直接下载，并放入到程序的根目录即可：<br> zh_wiki.py:https://github.com/skydark/nstools/blob/master/zhtools/zh_wiki.py<br> langconv.py:https://github.com/skydark/nstools/blob/master/zhtools/langconv.py</p> 
+<p>  另外，在爬取时，我们发现爬虫依然会爬取到一些奇怪的页面，比如我们希望爬取“人工智能”分类下的内容，爬虫会爬取到许多游戏的介绍，注意，这并不是因为我们的爬虫方法出了问题，而是因为“人工智能”分类下存在“人工智能游戏”这种类，而游戏又会划分到其他页面上。像这种类似的情况维基百科普遍存在。为了避免这种问题出现，本文在爬虫数据处理中加入了filter_words，其是一个列表，存放一些我们不希望爬取的实体或所属的分类中包含的关键词，这样可以进一步约束爬虫不去爬取那部分的分类页面和内容页面。</p> 
+<h4><a id="3_327"></a>3、维基页面的结构与半结构数据自动抽取</h4> 
+<p>  我们在爬取过程中，并不花费时间处理维基百科内容页面里的具体内容，以提升爬取的速度和效率，而在爬取结束后统一处理。本文爬取内容页面html的“mw-parser-output”类的div标签，该标签内所有内容均与所爬去的实体有关，其余部分的标签则可以不保存。对应的xpath路径是：</p> 
+<pre><code class="prism language-python"><span class="token operator">//</span>div<span class="token punctuation">[</span>@<span class="token builtin">id</span><span class="token operator">=</span><span class="token string">'bodyContent'</span><span class="token punctuation">]</span><span class="token operator">//</span>div<span class="token punctuation">[</span>@<span class="token builtin">id</span><span class="token operator">=</span><span class="token string">'mw-content-text'</span><span class="token punctuation">]</span><span class="token operator">//</span>div<span class="token punctuation">[</span>@<span class="token keyword">class</span><span class="token operator">=</span><span class="token string">'mw-parser-output'</span><span class="token punctuation">]</span>
+</code></pre> 
+<p>调试的效果如图所示：<br> <img src="https://images2.imgbox.com/eb/21/mKhsTODf_o.png" alt="在这里插入图片描述"><br>   对爬取后的数据直接保存在本地，随后使用lxml类库中的etree模块来实现xpath解析。我们从三个方面来提取保存的内容：</p> 
+<ul><li>结构化的数据：对应于维基百科中class="infobox"的table标签，其直接保存的是与当前实体有关的属性，例如在“快速排序”实体页面中，其结构化信息如下图：<br> <img src="https://images2.imgbox.com/72/f8/JyHK9pkL_o.png" alt="在这里插入图片描述"><br> 这一部分数据则可以直接取来作为“快速排序”的结构知识，可以构建知识图谱的初级版本</li><li>相关实体：维基百科的最末尾一般会列出与当前实体有关的其他实体及层次关系，其对应的标签为class="navbox"的table，如图所示：<br> <img src="https://images2.imgbox.com/07/e4/vXtJBEgl_o.png" alt="在这里插入图片描述"><br> 这个表完全可以直接提取作为“算法”和“排序算法”等实体的图谱，是天然的构建知识图谱的结构化资源。当然这个表结构相对比较复杂，本文也只处理存在两层嵌套的表格属性提取，使用字典数据结构来保存；</li><li>段落处理：这部分是半结构化数据，依然使用字典数据结构来保存。维基百科的每个段落都会有子标题，使用子标题来作为键，而段落的文字、公式和代码片段作为文本来保存。需要具体说明的是，我们不保存图片（维基百科的图片都存在单独的div标签中，不会完全与文字嵌入在一起，这是维基百科的一个好处）；对于公式，维基百科则在页面上保存了latex字符，本文将公式的latex字符保存下来；对于代码片段其基本保存在pre标签中，因此直接将pre内的代码保存即可；</li></ul> 
+<p>  具体的处理process.py如下所示，功能细节详见代码注释：</p> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> numpy <span class="token keyword">as</span> np
+<span class="token keyword">import</span> os
+<span class="token keyword">import</span> random <span class="token keyword">as</span> rd
+<span class="token keyword">import</span> json
+<span class="token keyword">from</span> tqdm <span class="token keyword">import</span> tqdm
+<span class="token keyword">from</span> lxml <span class="token keyword">import</span> etree
+<span class="token keyword">from</span> langconv <span class="token keyword">import</span> <span class="token operator">*</span>
+<span class="token keyword">from</span> filter_words <span class="token keyword">import</span> filter_url
+<span class="token comment"># made by wjn</span>
+<span class="token comment"># homepage:www.wjn1996.cn</span>
+
+<span class="token keyword">def</span> <span class="token function">Traditional2Simplified</span><span class="token punctuation">(</span>sentence<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token triple-quoted-string string">'''
+    将sentence中的繁体字转为简体字
+    :param sentence: 待转换的句子
+    :return: 将句子中繁体字转换为简体字之后的句子
+    '''</span>
+    <span class="token keyword">if</span> <span class="token builtin">type</span><span class="token punctuation">(</span>sentence<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token builtin">str</span> <span class="token operator">or</span> <span class="token builtin">str</span><span class="token punctuation">(</span><span class="token builtin">type</span><span class="token punctuation">(</span>sentence<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token string">"&lt;class 'lxml.etree._ElementUnicodeResult'&gt;"</span><span class="token punctuation">:</span>
+        sentence <span class="token operator">=</span> Converter<span class="token punctuation">(</span><span class="token string">'zh-hans'</span><span class="token punctuation">)</span><span class="token punctuation">.</span>convert<span class="token punctuation">(</span>sentence<span class="token punctuation">)</span>
+    <span class="token keyword">elif</span> <span class="token builtin">type</span><span class="token punctuation">(</span>sentence<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token builtin">list</span><span class="token punctuation">:</span>
+        sentence <span class="token operator">=</span> <span class="token punctuation">[</span>Converter<span class="token punctuation">(</span><span class="token string">'zh-hans'</span><span class="token punctuation">)</span><span class="token punctuation">.</span>convert<span class="token punctuation">(</span>i<span class="token punctuation">)</span> <span class="token keyword">for</span> i <span class="token keyword">in</span> sentence<span class="token punctuation">]</span>
+    <span class="token keyword">return</span> sentence
+
+<span class="token keyword">def</span> <span class="token function">filter</span><span class="token punctuation">(</span>entity_title<span class="token punctuation">,</span> category_list<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment"># entity_title:string, category_list:list</span>
+    <span class="token comment"># filter_url = ['游戏', '%E6%B8%B8%E6%88%8F', '维基', '%E7%BB%B4%E5%9F%BA', '幻想', '我的世界', '魔兽']</span>
+    <span class="token keyword">for</span> i <span class="token keyword">in</span> filter_url<span class="token punctuation">:</span>
+        <span class="token keyword">if</span> i <span class="token keyword">in</span> entity_title<span class="token punctuation">:</span>
+            <span class="token keyword">return</span> <span class="token boolean">True</span>
+        <span class="token keyword">for</span> j <span class="token keyword">in</span> category_list<span class="token punctuation">:</span>
+            <span class="token keyword">if</span> i <span class="token keyword">in</span> j<span class="token punctuation">:</span>
+                <span class="token keyword">return</span> <span class="token boolean">True</span>
+    <span class="token keyword">return</span> <span class="token boolean">False</span>
+
+<span class="token keyword">def</span> <span class="token function">unified_string</span><span class="token punctuation">(</span><span class="token builtin">object</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment"># 如果是一个列表，则转换为字符串，如果是字符串则直接返回</span>
+    <span class="token keyword">if</span> <span class="token builtin">type</span><span class="token punctuation">(</span><span class="token builtin">object</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token builtin">list</span><span class="token punctuation">:</span>
+        <span class="token keyword">return</span> <span class="token string">''</span><span class="token punctuation">.</span>join<span class="token punctuation">(</span><span class="token builtin">object</span><span class="token punctuation">)</span>
+    <span class="token keyword">if</span> <span class="token builtin">type</span><span class="token punctuation">(</span><span class="token builtin">object</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token builtin">str</span><span class="token punctuation">:</span>
+        <span class="token keyword">return</span> <span class="token builtin">object</span>
+
+<span class="token keyword">def</span> <span class="token function">extract_infobox</span><span class="token punctuation">(</span>content<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token triple-quoted-string string">'''
+    维基百科页面中的侧边栏中有一些结构化的表，table表的class="infobox"，可以直接取来作为结构化的数据，作为当前实体的结构化信息
+    :param infobox:
+    :return:
+    '''</span>
+    infobox <span class="token operator">=</span> content<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//table[contains(@class,'infobox')]//tr"</span><span class="token punctuation">)</span>
+    knowledge <span class="token operator">=</span> <span class="token builtin">dict</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token keyword">for</span> ei<span class="token punctuation">,</span> i <span class="token keyword">in</span> <span class="token builtin">enumerate</span><span class="token punctuation">(</span>infobox<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        th_text <span class="token operator">=</span> i<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//th//text()"</span><span class="token punctuation">)</span>  <span class="token comment"># 在infobox中，属性都是用粗体表示的，对应于th标签，维基百科比较好处理</span>
+        <span class="token keyword">if</span> <span class="token builtin">len</span><span class="token punctuation">(</span>th_text<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">:</span>
+            <span class="token keyword">continue</span>
+        th_text <span class="token operator">=</span> th_text<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>
+        td_text <span class="token operator">=</span> <span class="token string">'\t'</span><span class="token punctuation">.</span>join<span class="token punctuation">(</span><span class="token punctuation">[</span>unified_string<span class="token punctuation">(</span>tdi<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//text()"</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token keyword">for</span> tdi <span class="token keyword">in</span> i<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//td"</span><span class="token punctuation">)</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+        <span class="token keyword">if</span> th_text <span class="token keyword">is</span> <span class="token operator">not</span> <span class="token boolean">None</span> <span class="token operator">and</span> th_text <span class="token operator">!=</span> <span class="token string">''</span> <span class="token operator">and</span> td_text <span class="token keyword">is</span> <span class="token operator">not</span> <span class="token boolean">None</span> <span class="token operator">and</span> td_text <span class="token operator">!=</span> <span class="token string">''</span><span class="token punctuation">:</span>  <span class="token comment"># 说明当前行没有属性值，或者不是属性</span>
+            th_text <span class="token operator">=</span> Traditional2Simplified<span class="token punctuation">(</span>th_text<span class="token punctuation">)</span>
+            td_text <span class="token operator">=</span> Traditional2Simplified<span class="token punctuation">(</span>td_text<span class="token punctuation">)</span>
+            knowledge<span class="token punctuation">[</span>th_text<span class="token punctuation">]</span> <span class="token operator">=</span> td_text<span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">' '</span><span class="token punctuation">,</span> <span class="token string">''</span><span class="token punctuation">)</span>
+    <span class="token keyword">return</span> knowledge
+
+<span class="token keyword">def</span> <span class="token function">extract_navbox</span><span class="token punctuation">(</span>content<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token triple-quoted-string string">'''
+    维基百科的每个内容最后一栏叫做相关条目（查，论，编）（如果存在的话）一般会列出与当前实体有关的其他实体。表头一般是整个大类，表格
+    # 下面每一行左侧浅蓝色为一类，右侧罗列的是属于该类的相关实体，这个结构是天然的结构化图谱资源。
+    该表格对应的class="navbox".
+    （1）表头class="navbox-title"，且内部信息全部包含超链接（维基百科中包含超链接的一定是一个实体）
+    （2）每一行，左边表示一个类组，class="navbox-group"；
+    （3）每一行右边表示类组内的内容，class="navbox-list"，所有内容都由超链接组成
+    :param navbox:
+    :return:
+    '''</span>
+    navbox <span class="token operator">=</span> content<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//table[@class='navbox']"</span><span class="token punctuation">)</span>
+    knowledge <span class="token operator">=</span> <span class="token builtin">list</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token keyword">for</span> ei<span class="token punctuation">,</span> i <span class="token keyword">in</span> <span class="token builtin">enumerate</span><span class="token punctuation">(</span>navbox<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        know <span class="token operator">=</span> <span class="token builtin">dict</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        groups <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+        <span class="token keyword">if</span> <span class="token builtin">len</span><span class="token punctuation">(</span>i<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//th[@class='navbox-title']//div"</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">2</span><span class="token punctuation">:</span>
+            <span class="token keyword">continue</span>
+        navbox_title <span class="token operator">=</span> <span class="token punctuation">(</span>i<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//th[@class='navbox-title']//div"</span><span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//a//text()"</span><span class="token punctuation">)</span>
+        <span class="token keyword">if</span> <span class="token builtin">len</span><span class="token punctuation">(</span>navbox_title<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">:</span>
+            <span class="token keyword">continue</span>
+        root <span class="token operator">=</span> Traditional2Simplified<span class="token punctuation">(</span>navbox_title<span class="token punctuation">[</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+        navbox_tr <span class="token operator">=</span> i<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//table[contains(@class,'navbox-inner')]/tbody/tr"</span><span class="token punctuation">)</span>
+        <span class="token keyword">for</span> j <span class="token keyword">in</span> navbox_tr<span class="token punctuation">:</span>
+            sub_table <span class="token operator">=</span> j<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//table//tr"</span><span class="token punctuation">)</span>
+            <span class="token keyword">if</span> <span class="token builtin">len</span><span class="token punctuation">(</span>sub_table<span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">:</span> <span class="token comment"># 存在表格嵌套</span>
+                <span class="token keyword">for</span> k <span class="token keyword">in</span> sub_table<span class="token punctuation">:</span>
+                    navbox_group <span class="token operator">=</span> Traditional2Simplified<span class="token punctuation">(</span><span class="token string">''</span><span class="token punctuation">.</span>join<span class="token punctuation">(</span>k<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//th[@class='navbox-group']//text()"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                    navbox_list <span class="token operator">=</span> k<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//td[contains(@class,'navbox-list')]//a//text()"</span><span class="token punctuation">)</span>
+                    <span class="token keyword">if</span> <span class="token builtin">len</span><span class="token punctuation">(</span>navbox_list<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">:</span>
+                        <span class="token keyword">continue</span>
+                    group <span class="token operator">=</span> <span class="token builtin">dict</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+                    group<span class="token punctuation">[</span>navbox_group<span class="token punctuation">]</span> <span class="token operator">=</span> Traditional2Simplified<span class="token punctuation">(</span><span class="token builtin">list</span><span class="token punctuation">(</span><span class="token builtin">set</span><span class="token punctuation">(</span>navbox_list<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                    groups<span class="token punctuation">.</span>append<span class="token punctuation">(</span>group<span class="token punctuation">)</span>
+            <span class="token keyword">else</span><span class="token punctuation">:</span>
+                navbox_group <span class="token operator">=</span> Traditional2Simplified<span class="token punctuation">(</span><span class="token string">''</span><span class="token punctuation">.</span>join<span class="token punctuation">(</span>j<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//th[@class='navbox-group']//text()"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                navbox_list <span class="token operator">=</span> j<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//td[contains(@class,'navbox-list')]//a//text()"</span><span class="token punctuation">)</span>
+                <span class="token keyword">if</span> <span class="token builtin">len</span><span class="token punctuation">(</span>navbox_list<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">:</span>
+                    <span class="token keyword">continue</span>
+                group <span class="token operator">=</span> <span class="token builtin">dict</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+                group<span class="token punctuation">[</span>navbox_group<span class="token punctuation">]</span> <span class="token operator">=</span> Traditional2Simplified<span class="token punctuation">(</span><span class="token builtin">list</span><span class="token punctuation">(</span><span class="token builtin">set</span><span class="token punctuation">(</span>navbox_list<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                groups<span class="token punctuation">.</span>append<span class="token punctuation">(</span>group<span class="token punctuation">)</span>
+        know<span class="token punctuation">[</span>root<span class="token punctuation">]</span> <span class="token operator">=</span> groups
+        knowledge<span class="token punctuation">.</span>append<span class="token punctuation">(</span>know<span class="token punctuation">)</span>
+    <span class="token comment"># print(knowledge)</span>
+    <span class="token keyword">return</span> knowledge
+
+<span class="token keyword">def</span> <span class="token function">extract_paragraph</span><span class="token punctuation">(</span>content<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment"># 抽取段落</span>
+    <span class="token triple-quoted-string string">'''
+    维基百科页面的主要内容为段落文本（部分会有插图，暂时忽略图片，对存在latex的公式则保存）；
+    维基百科一开始是一个摘要，然后是目录，下面则是根据目录中的子标题分别展示相应的文本内容。我们只取标签为&lt;h3&gt;对应为子标题，p等作为文本
+    :param paragraph:
+    :return:
+    '''</span>
+
+    <span class="token keyword">def</span> <span class="token function">process_text</span><span class="token punctuation">(</span>text<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment"># xpath提取了每个段落中夹在公式的文本，现需要对该文本进行处理</span>
+        <span class="token comment"># text是一个列表，其中字符串类为纯文本，直接添加即可，而对于xpath对象，则需要做处理，并对其后续的一些多余字符进行删除</span>
+        <span class="token comment"># 文本中以超链接为主的词一定是一个实体</span>
+        text_process <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+        frag_i <span class="token operator">=</span> <span class="token number">0</span>
+        <span class="token keyword">while</span> frag_i <span class="token operator">&lt;</span> <span class="token builtin">len</span><span class="token punctuation">(</span>text<span class="token punctuation">)</span><span class="token punctuation">:</span>
+            <span class="token comment"># print('type=', str(type(text[frag_i])) == "&lt;class 'lxml.etree._ElementUnicodeResult'&gt;")</span>
+            <span class="token keyword">if</span> <span class="token builtin">str</span><span class="token punctuation">(</span><span class="token builtin">type</span><span class="token punctuation">(</span>text<span class="token punctuation">[</span>frag_i<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token string">"&lt;class 'lxml.etree._ElementUnicodeResult'&gt;"</span><span class="token punctuation">:</span>
+                <span class="token keyword">if</span> text<span class="token punctuation">[</span>frag_i<span class="token punctuation">]</span><span class="token punctuation">.</span>strip<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token string">''</span><span class="token punctuation">:</span>
+                    text_process<span class="token punctuation">.</span>append<span class="token punctuation">(</span>Traditional2Simplified<span class="token punctuation">(</span>text<span class="token punctuation">[</span>frag_i<span class="token punctuation">]</span><span class="token punctuation">.</span>strip<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                frag_i <span class="token operator">+=</span> <span class="token number">1</span>
+            <span class="token keyword">else</span><span class="token punctuation">:</span>
+                <span class="token comment"># xpath对象，要抽取公式对应的latex字符串</span>
+                latex <span class="token operator">=</span> text<span class="token punctuation">[</span>frag_i<span class="token punctuation">]</span><span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//img//@alt"</span><span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>
+                text_process<span class="token punctuation">.</span>append<span class="token punctuation">(</span><span class="token string">'_latex_:'</span> <span class="token operator">+</span> latex<span class="token punctuation">)</span>
+                frag_i <span class="token operator">+=</span> <span class="token number">1</span>
+                <span class="token keyword">while</span><span class="token punctuation">(</span><span class="token boolean">True</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+                    <span class="token keyword">if</span> frag_i <span class="token operator">&gt;=</span> <span class="token builtin">len</span><span class="token punctuation">(</span>text<span class="token punctuation">)</span><span class="token punctuation">:</span>
+                        <span class="token keyword">break</span>
+                    <span class="token keyword">if</span> <span class="token string">'displaystyle'</span> <span class="token keyword">in</span> text<span class="token punctuation">[</span>frag_i<span class="token punctuation">]</span><span class="token punctuation">:</span>
+                        <span class="token keyword">break</span>
+                    <span class="token keyword">else</span><span class="token punctuation">:</span>
+                        frag_i <span class="token operator">+=</span> <span class="token number">1</span>
+                frag_i <span class="token operator">+=</span> <span class="token number">1</span>
+        <span class="token keyword">return</span> text_process
+
+    paragraph <span class="token operator">=</span> content<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">"./p|./h2|./h3|./ul|./ol|./dl|./pre"</span><span class="token punctuation">)</span>
+    passage <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">'abstract'</span><span class="token punctuation">:</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">}</span> <span class="token comment"># 整个文章所有文本，。维基百科的文本部分一开始默认是摘要</span>
+    sub_content <span class="token operator">=</span> <span class="token builtin">dict</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token comment"># 保存每个子标题下的文本</span>
+    entities <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token comment"># 保存所有实体</span>
+    sub_title <span class="token operator">=</span> <span class="token string">''</span> <span class="token comment"># 保存当前的子标题，一开始先是p标签，则视为摘要，后面出现一次h3则视为子标题，在下一次h3出现之前都视为该子标题下的内容</span>
+    <span class="token keyword">for</span> ei<span class="token punctuation">,</span> i <span class="token keyword">in</span> <span class="token builtin">enumerate</span><span class="token punctuation">(</span>paragraph<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        tag <span class="token operator">=</span> i<span class="token punctuation">.</span>tag <span class="token comment"># 获得当前是什么标签</span>
+        text_process <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+        <span class="token keyword">if</span> tag <span class="token keyword">in</span> <span class="token punctuation">[</span><span class="token string">'h2'</span><span class="token punctuation">,</span> <span class="token string">'h3'</span><span class="token punctuation">]</span><span class="token punctuation">:</span> <span class="token comment"># 说明当前是一个子标题</span>
+            sub_title <span class="token operator">=</span> Traditional2Simplified<span class="token punctuation">(</span><span class="token string">''</span><span class="token punctuation">.</span>join<span class="token punctuation">(</span>i<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//text()"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span>strip<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">"[编辑]"</span><span class="token punctuation">,</span> <span class="token string">""</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+            <span class="token keyword">continue</span>
+        <span class="token keyword">if</span> tag <span class="token keyword">in</span> <span class="token punctuation">[</span><span class="token string">'p'</span><span class="token punctuation">,</span> <span class="token string">'ul'</span><span class="token punctuation">,</span> <span class="token string">'ol'</span><span class="token punctuation">,</span> <span class="token string">'dl'</span><span class="token punctuation">]</span><span class="token punctuation">:</span> <span class="token comment"># 夹在公式的文本</span>
+            text <span class="token operator">=</span> i<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//text() | ./span[@class='mwe-math-element']"</span><span class="token punctuation">)</span>
+            <span class="token comment"># print(text)</span>
+            text_process <span class="token operator">=</span> process_text<span class="token punctuation">(</span>text<span class="token punctuation">)</span>
+            entities <span class="token operator">+=</span> Traditional2Simplified<span class="token punctuation">(</span>i<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//a/@title"</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+            <span class="token comment"># print(text_process)</span>
+        <span class="token keyword">if</span> tag <span class="token operator">==</span> <span class="token string">'pre'</span><span class="token punctuation">:</span> <span class="token comment"># 包含代码片段</span>
+            text_process <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token string">'_code_:'</span> <span class="token operator">+</span> <span class="token string">''</span><span class="token punctuation">.</span>join<span class="token punctuation">(</span>i<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">".//text()"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">]</span>
+        <span class="token keyword">if</span> sub_title <span class="token operator">==</span> <span class="token string">''</span><span class="token punctuation">:</span> <span class="token comment"># 说明当前抽取的段落都属于摘要</span>
+            passage<span class="token punctuation">[</span><span class="token string">'abstract'</span><span class="token punctuation">]</span><span class="token punctuation">.</span>append<span class="token punctuation">(</span>text_process<span class="token punctuation">)</span>
+        <span class="token keyword">else</span><span class="token punctuation">:</span> <span class="token comment">#说明当前属于某个子标题</span>
+            <span class="token keyword">if</span> <span class="token builtin">len</span><span class="token punctuation">(</span>text_process<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">:</span>
+                <span class="token keyword">continue</span>
+            <span class="token keyword">if</span> sub_title <span class="token operator">not</span> <span class="token keyword">in</span> sub_content<span class="token punctuation">.</span>keys<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+                sub_content<span class="token punctuation">[</span>sub_title<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+            sub_content<span class="token punctuation">[</span>sub_title<span class="token punctuation">]</span><span class="token punctuation">.</span>append<span class="token punctuation">(</span>text_process<span class="token punctuation">)</span>
+    passage<span class="token punctuation">[</span><span class="token string">'paragraphs'</span><span class="token punctuation">]</span> <span class="token operator">=</span> sub_content
+    passage<span class="token punctuation">[</span><span class="token string">'entities'</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token builtin">set</span><span class="token punctuation">(</span>entities<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> passage
+
+<span class="token keyword">def</span> <span class="token function">process_html</span><span class="token punctuation">(</span>content<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    content <span class="token operator">=</span> etree<span class="token punctuation">.</span>HTML<span class="token punctuation">(</span>content<span class="token punctuation">)</span> <span class="token comment"># lxml的etree类的HTML可以补全html标签，并生成python对象</span>
+    content <span class="token operator">=</span> content<span class="token punctuation">.</span>xpath<span class="token punctuation">(</span><span class="token string">"//div[@class='mw-parser-output']"</span><span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>
+    <span class="token comment">##### 维基百科页面中的侧边栏中有一些结构化的表，table表的class="infobox"，可以直接取来作为结构化的数据，用于知识图谱</span>
+    infobox_know <span class="token operator">=</span> extract_infobox<span class="token punctuation">(</span>content<span class="token punctuation">)</span>
+    <span class="token comment">##### 维基百科的每个内容最后一栏叫做相关条目（查，论，编）（如果存在的话）一般会列出与当前实体有关的其他实体。表头一般是整个大类，表格</span>
+    <span class="token comment"># 下面每一行左侧浅蓝色为一类，右侧罗列的是属于该类的相关实体，这个结构是天然的结构化图谱资源。</span>
+    navbox_know <span class="token operator">=</span> extract_navbox<span class="token punctuation">(</span>content<span class="token punctuation">)</span>
+    <span class="token comment">##### 段落抽取</span>
+    passage <span class="token operator">=</span> extract_paragraph<span class="token punctuation">(</span>content<span class="token punctuation">)</span>
+    <span class="token comment"># print('infobox_know=', infobox_know)</span>
+    <span class="token comment"># print('navbox_know=', navbox_know)</span>
+    <span class="token comment"># print('passage=', passage)</span>
+
+    <span class="token keyword">return</span> infobox_know<span class="token punctuation">,</span> navbox_know<span class="token punctuation">,</span> passage
+
+<span class="token keyword">def</span> <span class="token function">read_files</span><span class="token punctuation">(</span>orgin_page<span class="token punctuation">,</span> save_path<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment"># 读取所有处理的数据集</span>
+    <span class="token keyword">if</span> <span class="token operator">not</span> os<span class="token punctuation">.</span>path<span class="token punctuation">.</span>isdir<span class="token punctuation">(</span>orgin_page<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">raise</span> Exception<span class="token punctuation">(</span><span class="token string">"请给出合法的目录"</span><span class="token punctuation">)</span>
+    wiki_knowledge <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    <span class="token keyword">if</span> os<span class="token punctuation">.</span>path<span class="token punctuation">.</span>exists<span class="token punctuation">(</span>save_path <span class="token operator">+</span> <span class="token string">'wiki_knowledge.npy'</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment"># wiki_knowledge = (np.load('wiki_knowledge.npy')[()]).tolist()</span>
+        <span class="token keyword">pass</span>
+    files <span class="token operator">=</span> os<span class="token punctuation">.</span>listdir<span class="token punctuation">(</span>orgin_page<span class="token punctuation">)</span>
+    <span class="token comment"># files = ['快速排序.txt']</span>
+    num <span class="token operator">=</span> <span class="token number">0</span>
+    <span class="token keyword">for</span> <span class="token builtin">file</span> <span class="token keyword">in</span> tqdm<span class="token punctuation">(</span>files<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">if</span> <span class="token builtin">file</span><span class="token punctuation">[</span><span class="token operator">-</span><span class="token number">4</span><span class="token punctuation">:</span><span class="token punctuation">]</span> <span class="token operator">!=</span> <span class="token string">'.txt'</span><span class="token punctuation">:</span>
+            <span class="token keyword">continue</span>
+        <span class="token keyword">with</span> <span class="token builtin">open</span><span class="token punctuation">(</span>orgin_page <span class="token operator">+</span> <span class="token builtin">file</span><span class="token punctuation">,</span> <span class="token string">'r'</span><span class="token punctuation">,</span> encoding<span class="token operator">=</span><span class="token string">'utf-8'</span><span class="token punctuation">)</span> <span class="token keyword">as</span> fr<span class="token punctuation">:</span>
+            lines <span class="token operator">=</span> fr<span class="token punctuation">.</span>readlines<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        entity_title <span class="token operator">=</span> Traditional2Simplified<span class="token punctuation">(</span>lines<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">:</span><span class="token punctuation">]</span><span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">'\n'</span><span class="token punctuation">,</span> <span class="token string">''</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        category_list <span class="token operator">=</span> Traditional2Simplified<span class="token punctuation">(</span>lines<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">:</span><span class="token punctuation">]</span><span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">'\n'</span><span class="token punctuation">,</span> <span class="token string">''</span><span class="token punctuation">)</span><span class="token punctuation">.</span>split<span class="token punctuation">(</span><span class="token string">'\t'</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+        <span class="token keyword">if</span> <span class="token builtin">filter</span><span class="token punctuation">(</span>entity_title<span class="token punctuation">,</span> category_list<span class="token punctuation">)</span><span class="token punctuation">:</span> <span class="token comment"># 如果实体标题或分类中包含一些过滤词，则不再处理当前文本</span>
+            <span class="token keyword">continue</span>
+        url <span class="token operator">=</span> lines<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">5</span><span class="token punctuation">:</span><span class="token punctuation">]</span><span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">'\n'</span><span class="token punctuation">,</span> <span class="token string">''</span><span class="token punctuation">)</span>
+        time <span class="token operator">=</span> lines<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">5</span><span class="token punctuation">:</span><span class="token punctuation">]</span><span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">'\n'</span><span class="token punctuation">,</span> <span class="token string">''</span><span class="token punctuation">)</span>
+        content <span class="token operator">=</span> <span class="token string">''</span><span class="token punctuation">.</span>join<span class="token punctuation">(</span>lines<span class="token punctuation">[</span><span class="token number">5</span><span class="token punctuation">:</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">'\n'</span><span class="token punctuation">,</span> <span class="token string">''</span><span class="token punctuation">)</span>
+        infobox_know<span class="token punctuation">,</span> navbox_know<span class="token punctuation">,</span> passage <span class="token operator">=</span> process_html<span class="token punctuation">(</span>content<span class="token punctuation">)</span>
+        knowledge <span class="token operator">=</span> <span class="token builtin">dict</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        knowledge<span class="token punctuation">[</span><span class="token string">'entity'</span><span class="token punctuation">]</span> <span class="token operator">=</span> entity_title
+        knowledge<span class="token punctuation">[</span><span class="token string">'category'</span><span class="token punctuation">]</span> <span class="token operator">=</span> category_list
+        knowledge<span class="token punctuation">[</span><span class="token string">'url'</span><span class="token punctuation">]</span> <span class="token operator">=</span> url
+        knowledge<span class="token punctuation">[</span><span class="token string">'time'</span><span class="token punctuation">]</span> <span class="token operator">=</span> time
+        knowledge<span class="token punctuation">[</span><span class="token string">'structure_know'</span><span class="token punctuation">]</span> <span class="token operator">=</span> infobox_know <span class="token comment"># 维基百科中的infobox最终定义为该实体的结构化知识</span>
+        knowledge<span class="token punctuation">[</span><span class="token string">'corrseponding_know'</span><span class="token punctuation">]</span> <span class="token operator">=</span> navbox_know <span class="token comment"># 维基百科中的navbox最终定义与该实体有关的实体的结构化知识</span>
+        knowledge<span class="token punctuation">[</span><span class="token string">'smi-structure_know'</span><span class="token punctuation">]</span> <span class="token operator">=</span> passage <span class="token comment"># 维基百科中的段落被定位为该实体的半结构化知识</span>
+        wiki_knowledge<span class="token punctuation">.</span>append<span class="token punctuation">(</span>knowledge<span class="token punctuation">)</span>
+        num <span class="token operator">+=</span> <span class="token number">1</span>
+        <span class="token keyword">if</span> num<span class="token operator">%</span><span class="token number">500</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">:</span> <span class="token comment"># 每隔一段时间保存一次防止中途报错而导致前面的数据丧失</span>
+            np<span class="token punctuation">.</span>save<span class="token punctuation">(</span>save_path <span class="token operator">+</span> <span class="token string">"wiki_knowledge.npy"</span><span class="token punctuation">,</span> wiki_knowledge<span class="token punctuation">)</span>
+    np<span class="token punctuation">.</span>save<span class="token punctuation">(</span>save_path <span class="token operator">+</span> <span class="token string">"wiki_knowledge.npy"</span><span class="token punctuation">,</span> wiki_knowledge<span class="token punctuation">)</span>
+    <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"已完成处理所有维基百科知识，总数量为{}"</span><span class="token punctuation">.</span><span class="token builtin">format</span><span class="token punctuation">(</span><span class="token builtin">len</span><span class="token punctuation">(</span>wiki_knowledge<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+<span class="token keyword">if</span> __name__ <span class="token operator">==</span> <span class="token string">'__main__'</span><span class="token punctuation">:</span>
+    orgin_page <span class="token operator">=</span> <span class="token string">'./origin_page/'</span>
+    save_path <span class="token operator">=</span> <span class="token string">'./process/'</span>
+    <span class="token keyword">if</span> <span class="token operator">not</span> os<span class="token punctuation">.</span>path<span class="token punctuation">.</span>exists<span class="token punctuation">(</span>save_path<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        os<span class="token punctuation">.</span>makedirs<span class="token punctuation">(</span>save_path<span class="token punctuation">)</span>
+    read_files<span class="token punctuation">(</span>orgin_page<span class="token punctuation">,</span> save_path<span class="token punctuation">)</span>
+</code></pre> 
+<p>  本文的整个源程序开源在GitHub（<a href="https://github.com/wjn1996/scrapy_for_zh_wiki">https://github.com/wjn1996/scrapy_for_zh_wiki</a>）上，可fork或download到本地具体查看细节。该源程序可能并非能够完全处理维基百科千变万化的标签结构（例如在后期我们发现爬取结构化的属性表时，当用table[@class=“infobox”]）时无法爬取，查看后发现其标签会出现 &lt;table class=“infobox xxx xxx”&gt; （多个类），因此xpath路径应改为 “table[contains(@class, infobox)]” 。但基本可以满足绝大多数页面的处理。</p> 
+<p>  本文爬取的语料包含结构化和半结构化数据。结构化数据可以直接作为知识图谱，也可以借助定义好的实体进行实体识别和消歧、远程监督关系抽取，同时半结构数据使用其运用到中文自然语言处理任务中，包括中文预训练、信息检索、问答系统、语义推理等。</p> 
+<hr> 
+<p>  如若本程序对您的工程或科研上有帮助，或相关程序直接使用在您的项目中，请引用本博文或GitHub（<a href="https://github.com/wjn1996/scrapy_for_zh_wiki">https://github.com/wjn1996/scrapy_for_zh_wiki</a>）。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/097e6950d11ac12a6cf52aed6a9aea26/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Thread：线程顺序执行的四种方式</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/664a393c7378df488a58f7ad714d5b0c/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">使用google的bert结合哈工大预训练模型进行中文/英文文本二分类，基于pytorch和transformer</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>ShardingSphere之Sharding-JDBC整合XA模式、Saga模式、Seata原理介绍以及代码演示 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="ShardingSphere之Sharding-JDBC整合XA模式、Saga模式、Seata原理介绍以及代码演示" />
+<meta property="og:description" content="一、XA整合原理 Java通过定义TA接口实现了XA的模型，JTA接口里的ResourceManager需要数据库厂商提供XA的驱动实现，而transactionManager则需要事务管理器的厂商实现，传统的事务管理器需要同应用服务器绑定，因此使用的成本很高。而嵌入式的事务管器可以以jar包的形式提供服务，同ShardingSphere集成后，可保证分片后跨库事务强一致性。
+ShardingSphere支持以下功能：
+支持数据分片后的跨库XA事务两阶段提交保证操作的原子性和数据的强一致性服务宕机重启后，提交/回滚中的事务可自动恢复SPI机制整合主流的XA事务管理器，默认Atomikos同时支持XA和非×A的连接池提供spring-boot和namespace的接入端
+Shardingsphere整合XA事务时，分离了XA事务管理和连接池管理，这样接入A时，可以做到对业务的零侵入。 Begin（开启XA全局事务）XAShardingTransactionManager会调用具体的XA事务管理器开启XA的全局事务。执行物理SQL ShardingSphere进行解析/优化/路由后会生成SQL操作，执行引擎为每个物理SQL创建连接的同时，物理连接所对应的XAResource也会被注册到当前XA事务中。事务管理器会在此阶段发送XAResource.start命令给数据库，数据库在收到XAResource.end命令之前的所有SQL操作，会被标记为XA事务。
+例如：
+这里sql1和sql2被标记为XA事务
+·Commit/rollback（提交XA事务）XASharding TransactionManager收到接入端的提交命令后，会委托实际的XA事务管理进行提交动作，这时事务管理器会收集当前线程里所有注册的XAResource，首先发送XAResource.end指令，用以标记此XA事务的边界。接着会依次发送prepare指令，收集所有参与XAResource投票，如果所有XAResource的反馈结果都是OK，则会再次调用commit指令进行最终提交，如果有一个XAResource的反馈结果为No，则会调用rolback指令进行回滚。在事务管理器发出提交指令后，任何XAResource产生的异常都会通过recovery日志进行重试，来保证提交阶段的操作原子性，和数据强一致性。
+例如：
+二、Saga整合原理 ShardingSphere的柔性事务已通过第三方servicecomb-saga组件实现的，通过SPl机制注入使用。
+ShardingSphere是基于反向SQL技术实现的反向补偿操作，它将对数据库进行更新操作的SQL自动生成反向SQL，并交由Saga-actuator引擎执行。使用方则无需再关注如何实现补偿方法，将柔性事务管理器的应用范畴成功的定位回了事务的本源——数据库层面。Shardingsphere支持以下功能：
+完全支持跨库事务支持失败SQL重试及最大努力送达支持反向SQL、自动生成更新快照以及自动补偿默认使用关系型数据库进行快照及事务日志的持久化，支持使用SPl的方式加载其他类型的持久化 Saga柔性事务的实现类为SagaSharding TransactionMananger，Shardingsphere通过Hook的方式拦截逻辑SQL的解析和路由结果，这样，在分片物理SQL执行前，可以生成逆向SQL，在事务提交阶段再把SQL调用链交给Saga引擎处理。
+lnit（Saga引擎初始化）包含Saga柔性事务的应用启动时，saga-actuator引擎会根据saga.properties的配置进行初始化的流程。Begin（开启Saga全局事务）每次开启Saga全局事务时，将会生成本次全局事务的上下文（SagaTransactionContext），事务上下文记录了所有子事务的正向SQL和逆向SQL，作为生成事务调用链的元数据使用。执行物理SQL在物理SQL执行前，Shardingsphere根据SQL的类型生成逆向SQL，这里是通过Hook的方式拦截Parser的解析结果进行实现。Commit/rollback（提交Saga事务）提交阶段会生成Saga执行引擎所需的调用链路图，commit操作产生ForwardRecovery（正向SQL补偿）任务，rollback操作产生BackwardRecovery任务（逆向SQL补偿）。 三、整合Seata原理 分布式事务的实现目前主要分为两阶段的XA强事务和BASE柔性事务。
+Seata AT事务作为BASE柔性事务的一种实现，可以无缝接入到Shardingsphere生态中。在整合SeataAT事务时，需要把TM，RM，TC的模型融入到ShardingSphere 分布式事务的SPI的生态中。在数据库资源上，Seata通过对接DataSource接口，让DBC操作可以同TC进行RPC通信。同样，ShardingSphere也是面向DataSource接口对用户配置的物理DataSource进行了聚合，因此把物理DataSource二次包装为Seata 的DataSource后，就可以把Seata AT事务融入到ShardingSphere的分片中。
+Init（Seata引擎初始化）包含Seata柔性事务的应用启动时，用户配置的数据源会按seata.conf的配置，适配成Seata事务所需的DataSourceProxy，并且注册到RM中。Begin（开启Seata全局事务）TM控制全局事务的边界，TM通过向TC发送Begin指令，获取全局事务ID，所有分支事务通过此全局事务ID，参与到全局事务中；全局事务ID的上下文存放在当前线程变量中。执行分片物理SQL处于Seata全局事务中的分片SQL通过RM生成undo快照，并且发送participate指令到TC，加入到全局事务中。ShardingSphere的分片物理SQL是按多线程方式执行，因此整合Seata AT事务时，需要在主线程和子线程间进行全局事务ID的上下文传递，这同服务间的上下文传递思路完全相同。Commit/rollback（提交Seata事务）提交Seata事务时，TM会向TC发送全局事务的commit和rollback指令，TC根据全局事务ID协调所有分支事务进行commit和rollback。 四、代码演示 ShardingSphere整合了XA、Saga和Seata模式后，为分布式事务控制提供了极大的便利，我们可以在应用程序编程时，采用以下统一模式进行使用。
+引入依赖 //XA模式 &lt;dependency&gt; &lt;groupId&gt;org.apache.shardingsphere&lt;/groupId&gt; &lt;artifactId&gt;sharding-transaction-xa-core&lt;/artifactId&gt; &lt;version&gt;${shardingsphere.version}&lt;/version&gt; &lt;/dependency&gt; //Saga模式 &lt;dependency&gt; &lt;groupId&gt;io.shardingsphere&lt;/groupId&gt; &lt;artifactId&gt;sharding-transaction-base-saga&lt;/artifactId&gt; &lt;version&gt;${shardingsphere-spi-impl.version}&lt;/version&gt; &lt;/dependency&gt; //Seata模式 &lt;dependency&gt; &lt;groupId&gt;org.apache.shardingsphere&lt;/groupId&gt; &lt;artifactId&gt;sharding-transaction-base-seata-at&lt;/artifactId&gt; &lt;version&gt;${sharding-sphere.version}&lt;/version&gt; &lt;/dependency&gt; Java编码方式设置事务类型 TransactionTypeHolder.set(TransactionType.XA); TransactionTypeHolder.set(TransactionType.BASE); 参数配置
+ShardingSphere默认的XA事务管理器为Atomikos，通过在项目的classpath中添加ita.properties来定制化Atomikos配置项。具体的配置规则如下： #指定是否启动磁盘日志，默认为true。在生产环境下一定要保证为true，否则数据的完整性无法保证com.atomikos.icatch.enable_1ogging=true #JTA/XA资源是否应该自动注册 com.atomikos.icatch.automatic_resource_registration=true #]TA事务的默认超时时间，默认为10000ms com.atomikos.icatch.default_jta_timeout=10000 #事务的最大超时时间，默认为300000ms。这表示事务超时时间由 UserTransaction.setTransactionTimeout（）较大者决定。4.x版本之后，指定为0的话则表示不设置超时时间 com.atomikos.icatch.max_timeout=300000 #指定在两阶段提交时，是否使用不同的线程（意味着并行）。3.7版本之后默认为false，更早的版本默认为true。 如果为false，则提交将按照事务中访问资源的顺序进行。 com.atomikos.icatch.threaded_2pc=false #指定最多可以同时运行的事务数量，默认值为50，负数表示没有数量限制。在调用UserTransaction.begin（）方法时，可能会抛出一个”Max number of active transactions reached”异常信息，表示超出最大事务数限制 com." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/2eca9a6c7d600b2c67fd1bc6365194cc/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-03-06T20:55:34+08:00" />
+<meta property="article:modified_time" content="2022-03-06T20:55:34+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">ShardingSphere之Sharding-JDBC整合XA模式、Saga模式、Seata原理介绍以及代码演示</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="XA_0"></a>一、XA整合原理</h3> 
+<p>Java通过定义TA接口实现了XA的模型，JTA接口里的ResourceManager需要数据库厂商提供XA的驱动实现，而transactionManager则需要事务管理器的厂商实现，传统的事务管理器需要同应用服务器绑定，因此使用的成本很高。而嵌入式的事务管器可以以jar包的形式提供服务，同ShardingSphere集成后，可保证分片后跨库事务强一致性。</p> 
+<p>ShardingSphere支持以下功能：</p> 
+<ul><li>支持数据分片后的跨库XA事务</li><li>两阶段提交保证操作的原子性和数据的强一致性</li><li>服务宕机重启后，提交/回滚中的事务可自动恢复</li><li>SPI机制整合主流的XA事务管理器，默认Atomikos</li><li>同时支持XA和非×A的连接池</li><li>提供spring-boot和namespace的接入端<br> Shardingsphere整合XA事务时，分离了XA事务管理和连接池管理，这样接入A时，可以做到对业务的零侵入。</li></ul> 
+<p><img src="https://images2.imgbox.com/57/08/UqMw7LvN_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>Begin（开启XA全局事务）XAShardingTransactionManager会调用具体的XA事务管理器开启XA的全局事务。</li><li>执行物理SQL ShardingSphere进行解析/优化/路由后会生成SQL操作，执行引擎为每个物理SQL创建连接的同时，物理连接所对应的XAResource也会被注册到当前XA事务中。事务管理器会在此阶段发送XAResource.start命令给数据库，数据库在收到XAResource.end命令之前的所有SQL操作，会被标记为XA事务。<br> 例如：<br> <img src="https://images2.imgbox.com/18/49/Q9m454xO_o.png" alt="在这里插入图片描述"></li></ul> 
+<p>这里sql1和sql2被标记为XA事务</p> 
+<ul><li>·Commit/rollback（提交XA事务）XASharding TransactionManager收到接入端的提交命令后，会委托实际的XA事务管理进行提交动作，这时事务管理器会收集当前线程里所有注册的XAResource，首先发送XAResource.end指令，用以标记此XA事务的边界。接着会依次发送prepare指令，收集所有参与XAResource投票，如果所有XAResource的反馈结果都是OK，则会再次调用commit指令进行最终提交，如果有一个XAResource的反馈结果为No，则会调用rolback指令进行回滚。在事务管理器发出提交指令后，任何XAResource产生的异常都会通过recovery日志进行重试，来保证提交阶段的操作原子性，和数据强一致性。<br> 例如：<br> <img src="https://images2.imgbox.com/48/88/Ch5F5Uyi_o.png" alt="在这里插入图片描述"></li></ul> 
+<h3><a id="Saga_25"></a>二、Saga整合原理</h3> 
+<p>ShardingSphere的柔性事务已通过第三方servicecomb-saga组件实现的，通过SPl机制注入使用。<br> ShardingSphere是基于反向SQL技术实现的反向补偿操作，它将对数据库进行更新操作的SQL自动生成反向SQL，并交由Saga-actuator引擎执行。使用方则无需再关注如何实现补偿方法，将柔性事务管理器的应用范畴成功的定位回了事务的本源——数据库层面。Shardingsphere支持以下功能：</p> 
+<ul><li>完全支持跨库事务</li><li>支持失败SQL重试及最大努力送达</li><li>支持反向SQL、自动生成更新快照以及自动补偿</li><li>默认使用关系型数据库进行快照及事务日志的持久化，支持使用SPl的方式加载其他类型的持久化</li></ul> 
+<p>Saga柔性事务的实现类为SagaSharding TransactionMananger，Shardingsphere通过Hook的方式拦截逻辑SQL的解析和路由结果，这样，在分片物理SQL执行前，可以生成逆向SQL，在事务提交阶段再把SQL调用链交给Saga引擎处理。</p> 
+<p><img src="https://images2.imgbox.com/78/89/ti1lSytA_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>lnit（Saga引擎初始化）包含Saga柔性事务的应用启动时，saga-actuator引擎会根据saga.properties的配置进行初始化的流程。</li><li>Begin（开启Saga全局事务）每次开启Saga全局事务时，将会生成本次全局事务的上下文（SagaTransactionContext），事务上下文记录了所有子事务的正向SQL和逆向SQL，作为生成事务调用链的元数据使用。</li><li>执行物理SQL在物理SQL执行前，Shardingsphere根据SQL的类型生成逆向SQL，这里是通过Hook的方式拦截Parser的解析结果进行实现。</li><li>Commit/rollback（提交Saga事务）提交阶段会生成Saga执行引擎所需的调用链路图，commit操作产生ForwardRecovery（正向SQL补偿）任务，rollback操作产生BackwardRecovery任务（逆向SQL补偿）。</li></ul> 
+<h3><a id="Seata_42"></a>三、整合Seata原理</h3> 
+<p>分布式事务的实现目前主要分为两阶段的XA强事务和BASE柔性事务。<br> <img src="https://images2.imgbox.com/80/ab/z8pGmTV0_o.png" alt="在这里插入图片描述"></p> 
+<p>Seata AT事务作为BASE柔性事务的一种实现，可以无缝接入到Shardingsphere生态中。在整合SeataAT事务时，需要把TM，RM，TC的模型融入到ShardingSphere 分布式事务的SPI的生态中。在数据库资源上，Seata通过对接DataSource接口，让DBC操作可以同TC进行RPC通信。同样，ShardingSphere也是面向DataSource接口对用户配置的物理DataSource进行了聚合，因此把物理DataSource二次包装为Seata 的DataSource后，就可以把Seata AT事务融入到ShardingSphere的分片中。</p> 
+<p><img src="https://images2.imgbox.com/7c/9a/VKTHvmaT_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>Init（Seata引擎初始化）包含Seata柔性事务的应用启动时，用户配置的数据源会按seata.conf的配置，适配成Seata事务所需的DataSourceProxy，并且注册到RM中。</li><li>Begin（开启Seata全局事务）TM控制全局事务的边界，TM通过向TC发送Begin指令，获取全局事务ID，所有分支事务通过此全局事务ID，参与到全局事务中；全局事务ID的上下文存放在当前线程变量中。</li><li>执行分片物理SQL处于Seata全局事务中的分片SQL通过RM生成undo快照，并且发送participate指令到TC，加入到全局事务中。ShardingSphere的分片物理SQL是按多线程方式执行，因此整合Seata AT事务时，需要在主线程和子线程间进行全局事务ID的上下文传递，这同服务间的上下文传递思路完全相同。</li><li>Commit/rollback（提交Seata事务）提交Seata事务时，TM会向TC发送全局事务的commit和rollback指令，TC根据全局事务ID协调所有分支事务进行commit和rollback。</li></ul> 
+<h3><a id="_56"></a>四、代码演示</h3> 
+<p>ShardingSphere整合了XA、Saga和Seata模式后，为分布式事务控制提供了极大的便利，我们可以在应用程序编程时，采用以下统一模式进行使用。</p> 
+<ol><li>引入依赖</li></ol> 
+<pre><code class="prism language-java"><span class="token comment">//XA模式</span>
+<span class="token generics function"><span class="token punctuation">&lt;</span>dependency<span class="token punctuation">&gt;</span></span>
+	<span class="token generics function"><span class="token punctuation">&lt;</span>groupId<span class="token punctuation">&gt;</span></span>org<span class="token punctuation">.</span>apache<span class="token punctuation">.</span>shardingsphere<span class="token operator">&lt;</span><span class="token operator">/</span>groupId<span class="token operator">&gt;</span>
+	<span class="token generics function"><span class="token punctuation">&lt;</span>artifactId<span class="token punctuation">&gt;</span></span>sharding<span class="token operator">-</span>transaction<span class="token operator">-</span>xa<span class="token operator">-</span>core<span class="token operator">&lt;</span><span class="token operator">/</span>artifactId<span class="token operator">&gt;</span>
+	<span class="token generics function"><span class="token punctuation">&lt;</span>version<span class="token punctuation">&gt;</span></span>$<span class="token punctuation">{<!-- --></span>shardingsphere<span class="token punctuation">.</span>version<span class="token punctuation">}</span><span class="token operator">&lt;</span><span class="token operator">/</span>version<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>dependency<span class="token operator">&gt;</span>
+<span class="token comment">//Saga模式</span>
+<span class="token generics function"><span class="token punctuation">&lt;</span>dependency<span class="token punctuation">&gt;</span></span>
+	<span class="token generics function"><span class="token punctuation">&lt;</span>groupId<span class="token punctuation">&gt;</span></span>io<span class="token punctuation">.</span>shardingsphere<span class="token operator">&lt;</span><span class="token operator">/</span>groupId<span class="token operator">&gt;</span>
+	<span class="token generics function"><span class="token punctuation">&lt;</span>artifactId<span class="token punctuation">&gt;</span></span>sharding<span class="token operator">-</span>transaction<span class="token operator">-</span>base<span class="token operator">-</span>saga<span class="token operator">&lt;</span><span class="token operator">/</span>artifactId<span class="token operator">&gt;</span>
+	<span class="token generics function"><span class="token punctuation">&lt;</span>version<span class="token punctuation">&gt;</span></span>$<span class="token punctuation">{<!-- --></span>shardingsphere<span class="token operator">-</span>spi<span class="token operator">-</span>impl<span class="token punctuation">.</span>version<span class="token punctuation">}</span><span class="token operator">&lt;</span><span class="token operator">/</span>version<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>dependency<span class="token operator">&gt;</span>
+<span class="token comment">//Seata模式</span>
+<span class="token generics function"><span class="token punctuation">&lt;</span>dependency<span class="token punctuation">&gt;</span></span>
+	<span class="token generics function"><span class="token punctuation">&lt;</span>groupId<span class="token punctuation">&gt;</span></span>org<span class="token punctuation">.</span>apache<span class="token punctuation">.</span>shardingsphere<span class="token operator">&lt;</span><span class="token operator">/</span>groupId<span class="token operator">&gt;</span>
+	<span class="token generics function"><span class="token punctuation">&lt;</span>artifactId<span class="token punctuation">&gt;</span></span>sharding<span class="token operator">-</span>transaction<span class="token operator">-</span>base<span class="token operator">-</span>seata<span class="token operator">-</span>at<span class="token operator">&lt;</span><span class="token operator">/</span>artifactId<span class="token operator">&gt;</span>
+	<span class="token generics function"><span class="token punctuation">&lt;</span>version<span class="token punctuation">&gt;</span></span>$<span class="token punctuation">{<!-- --></span>sharding<span class="token operator">-</span>sphere<span class="token punctuation">.</span>version<span class="token punctuation">}</span><span class="token operator">&lt;</span><span class="token operator">/</span>version<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>dependency<span class="token operator">&gt;</span>
+</code></pre> 
+<ol start="2"><li>Java编码方式设置事务类型</li></ol> 
+<pre><code class="prism language-java">TransactionTypeHolder<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>TransactionType<span class="token punctuation">.</span>XA<span class="token punctuation">)</span><span class="token punctuation">;</span>
+TransactionTypeHolder<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>TransactionType<span class="token punctuation">.</span>BASE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<ol start="3"><li>参数配置<br> ShardingSphere默认的XA事务管理器为Atomikos，通过在项目的classpath中添加ita.properties来定制化Atomikos配置项。具体的配置规则如下：</li></ol> 
+<pre><code class="prism language-java">#指定是否启动磁盘日志，默认为<span class="token boolean">true</span>。在生产环境下一定要保证为<span class="token boolean">true</span>，否则数据的完整性无法保证com<span class="token punctuation">.</span>atomikos<span class="token punctuation">.</span>icatch<span class="token punctuation">.</span>enable_1ogging<span class="token operator">=</span><span class="token boolean">true</span>
+#JTA<span class="token operator">/</span>XA资源是否应该自动注册
+com<span class="token punctuation">.</span>atomikos<span class="token punctuation">.</span>icatch<span class="token punctuation">.</span>automatic_resource_registration<span class="token operator">=</span><span class="token boolean">true</span>
+#<span class="token punctuation">]</span>TA事务的默认超时时间，默认为<span class="token number">10000</span>ms 
+com<span class="token punctuation">.</span>atomikos<span class="token punctuation">.</span>icatch<span class="token punctuation">.</span>default_jta_timeout<span class="token operator">=</span><span class="token number">10000</span>
+#事务的最大超时时间，默认为<span class="token number">300000</span>ms。这表示事务超时时间由
+UserTransaction<span class="token punctuation">.</span>setTransactionTimeout（）较大者决定。<span class="token number">4.</span>x版本之后，指定为<span class="token number">0</span>的话则表示不设置超时时间
+com<span class="token punctuation">.</span>atomikos<span class="token punctuation">.</span>icatch<span class="token punctuation">.</span>max_timeout<span class="token operator">=</span><span class="token number">300000</span>
+#指定在两阶段提交时，是否使用不同的线程（意味着并行）。<span class="token number">3.7</span>版本之后默认为<span class="token boolean">false</span>，更早的版本默认为<span class="token boolean">true</span>。
+如果为<span class="token boolean">false</span>，则提交将按照事务中访问资源的顺序进行。
+com<span class="token punctuation">.</span>atomikos<span class="token punctuation">.</span>icatch<span class="token punctuation">.</span>threaded_2pc<span class="token operator">=</span><span class="token boolean">false</span>
+#指定最多可以同时运行的事务数量，默认值为<span class="token number">50</span>，负数表示没有数量限制。在调用UserTransaction<span class="token punctuation">.</span>begin（）方法时，可能会抛出一个”Max number of active transactions reached”异常信息，表示超出最大事务数限制
+com<span class="token punctuation">.</span>atomikos<span class="token punctuation">.</span>icatch<span class="token punctuation">.</span>max_actives<span class="token operator">=</span><span class="token number">50</span>
+#是否支持subtransaction，默认为<span class="token boolean">true</span> 
+com<span class="token punctuation">.</span>atomikos<span class="token punctuation">.</span>icatch<span class="token punctuation">.</span>allow_subtransactions<span class="token operator">=</span><span class="token boolean">true</span>
+#指定在可能的情况下，否应该join子事务（subtransactions），默认值为<span class="token boolean">true</span>。如果设置为<span class="token boolean">false</span>，对于有关联的不同subtransactions，不会调用XAResource<span class="token punctuation">.</span>start（TML_J0IN）
+com<span class="token punctuation">.</span>atomikos<span class="token punctuation">.</span>icatch<span class="token punctuation">.</span>serial_jta_transactions<span class="token operator">=</span><span class="token boolean">true</span>
+#指定<span class="token punctuation">]</span>VM关闭时是否强制（force）关闭事务管理器，默认为<span class="token boolean">false</span> com<span class="token punctuation">.</span>atomikos<span class="token punctuation">.</span>icatch<span class="token punctuation">.</span>force_shutdown_on_Vm_exit<span class="token operator">=</span><span class="token boolean">false</span>
+#在正常关闭（no<span class="token operator">-</span>force）的情况下，应该等待事务执行完成的时间，默认为Long<span class="token punctuation">.</span>MAX_VALUE com<span class="token punctuation">.</span>atomikos<span class="token punctuation">.</span>icatch<span class="token punctuation">.</span>default_max_wait_time_on_shutdown<span class="token operator">=</span><span class="token number">9223372036854775807</span>
+<span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">=</span>日志恢复配置<span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">=</span>
+#指定在多长时间后可以清空无法恢复的事务日志（orphaned），默认<span class="token number">86400000</span>ms com<span class="token punctuation">.</span>atomikos<span class="token punctuation">.</span>icatch<span class="token punctuation">.</span>forget_orphaned_log_entries_delay<span class="token operator">=</span><span class="token number">86400000</span>
+#指定两次恢复扫描之间的延迟时间。默认值为与com<span class="token punctuation">.</span>atomikos<span class="token punctuation">.</span>icatch<span class="token punctuation">.</span>default_jta_timeout相同com<span class="token punctuation">.</span>atomikos<span class="token punctuation">.</span>icatch<span class="token punctuation">.</span>recovery_delay<span class="token operator">=</span>$<span class="token punctuation">{<!-- --></span>com<span class="token punctuation">.</span>atomikos<span class="token punctuation">.</span>icatch<span class="token punctuation">.</span>default_jta_timeout<span class="token punctuation">}</span>
+#提交失败时，再抛出一个异常之前，最多可以重试几次，默认值为<span class="token number">5</span>
+com<span class="token punctuation">.</span>atomikos<span class="token punctuation">.</span>icatch<span class="token punctuation">.</span>oltp_max_retries<span class="token operator">=</span><span class="token number">5</span>
+#提交失败时，每次重试的时间间隔，默认<span class="token number">10000</span>ms com<span class="token punctuation">.</span>atomikos<span class="token punctuation">.</span>icatch<span class="token punctuation">.</span>oltp_retry_interval<span class="token operator">=</span><span class="token number">10000</span>
+</code></pre> 
+<p>Saga可以通过在项目的classpath中添加saga.propertief来定制化Saga事务的配置项。配置项的属性及说明如下：<br> <img src="https://images2.imgbox.com/50/e5/OAl76ZIA_o.png" alt="在这里插入图片描述"></p> 
+<ol start="4"><li>测试<br> Sharding-JDBC分库分表配置 看以往篇都有详细配置</li></ol> 
+<p>启动类添加注解</p> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@EnableTransactionManagement</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Test</span>
+    <span class="token annotation punctuation">@Transactional</span>
+    <span class="token annotation punctuation">@ShardingTransactionType</span><span class="token punctuation">(</span>TransactionType<span class="token punctuation">.</span>XA<span class="token punctuation">)</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">test9</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+<span class="token comment">//        TransactionTypeHolder.set(TransactionType.XA);</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;=</span> <span class="token number">2</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        PositionEntity position <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">PositionEntity</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        position<span class="token punctuation">.</span><span class="token function">setName</span><span class="token punctuation">(</span><span class="token string">"ckw11"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        position<span class="token punctuation">.</span><span class="token function">setSalary</span><span class="token punctuation">(</span><span class="token string">"10011"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        position<span class="token punctuation">.</span><span class="token function">setCity</span><span class="token punctuation">(</span><span class="token string">"北京11"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        positionRepository<span class="token punctuation">.</span><span class="token function">save</span><span class="token punctuation">(</span>position<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">if</span><span class="token punctuation">(</span>i <span class="token operator">==</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">RuntimeException</span><span class="token punctuation">(</span><span class="token string">"自造异常"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        PositionDetailEntity positionDetail <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">PositionDetailEntity</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        positionDetail<span class="token punctuation">.</span><span class="token function">setPid</span><span class="token punctuation">(</span>position<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        positionDetail<span class="token punctuation">.</span><span class="token function">setDescription</span><span class="token punctuation">(</span><span class="token string">"-------------111&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        positionDetailReposition<span class="token punctuation">.</span><span class="token function">save</span><span class="token punctuation">(</span>positionDetail<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/9be083c9e1e52c296ccdb3caf8397792/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">DataFrame的创建</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/018968b61ac33ab64f17430ec705e579/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">常用技术的原理简单介绍 kafka、docker、seata等</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

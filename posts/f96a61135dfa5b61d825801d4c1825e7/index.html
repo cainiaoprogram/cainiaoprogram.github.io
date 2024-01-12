@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>RabbitMQ学习笔记（二）消息确认机制 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="RabbitMQ学习笔记（二）消息确认机制" />
+<meta property="og:description" content="前言 1、我的另一篇文章中介绍了RabbitMQ的交换机类型、消费类型，经过一系列的demo测试时，我们在RabbitMQ的后台监控中可以发现一个现象，就是消息在被成功消费后，队列中就没有这个消息了，也就是删除了，那么疑问来了，RabbitMQ是怎么知道这个消息该不该被删除？什么时候删除？
+2、除了消费者，那么生产者怎么知道自己消息是否发送成功到RabbitMQ中了？
+解决这个疑问的方式就是：RabbitMQ消息确认机制
+RabbitMQ有两种解决消息丢失的方案，一种是事务机制，一种是消息确认（confirm机制），这里主要介绍消息确认
+1、为什么要进行消息确认 通过RabbitMQ的原理图可知，生产者和消费者并没有直接进行通信，中间要使用RabbitMQ传递消息，所以生产者只需要把消息发送到Rabbit，而消费者只需要从队列获取消息就可以了
+生产者：生产者发布消息后，并不知道消息发送成功没，但是生产者需要知道，所以这里会有一个消息确认机制，帮助生产者确认消息发送成功消费者：消费者拿到消息后，在队列中这个消息还在，队列并不知道怎么处理这个消息，是删除还是死信，所以队列需要消费者给一个ACK确认，也就是消费者处理完消息后的反馈，队列根据反馈来选择处理方式 上述两种就是消息确认机制
+二、消息确认的基本逻辑（源于官网） RabbitMQ是基于AMQP协议的，从官网给出的解释来说，会有两种建议：
+当消息代理（broker）将消息发送给应用后立即删除。（使用AMQP方法：basic.deliver或basic.get-ok）待应用（application）发送一个确认回执（acknowledgement）后再删除消息。（使用AMQP方法：basic.ack） 前者被称作自动确认模式（automatic acknowledgement model），后者被称作显式确认模式（explicit acknowledgement model）。在显式模式下，由消费者应用来选择什么时候发送确认回执（acknowledgement）。应用可以在收到消息后立即发送，或将未处理的消息存储后发送，或等到消息被处理完毕后再发送确认回执（例如，成功获取一个网页内容并将其存储之后）。
+如果一个消费者在尚未发送确认回执的情况下挂掉了，那AMQP代理会将消息重新投递给另一个消费者。如果当时没有可用的消费者了，消息代理会等下一个注册到此队列的消费者，然后再次尝试投递。
+三、生产者确认 生产者端可通过两个callback接口来确认消息的是否传递到Broker，但是两个接口默认都是不开启的
+3.1 ConfirmCallback方法 ConfirmCallback方法：消息成功从生产者到Broker（RabbitMQ主机）后触发的回调，只用来确认是否正确到达了Exchange（交换机），发布者确认默认是不开启的，开启发布者确认需要添加如下配置
+// springboot配置 spring.rabbitmq.publisher-confirm-type=correlated # 新版本 spring.rabbitmq.publisher-confirms=true # 老版本 3.2 ReturnCallback方法 ReturnCallback方法：消息从Exchange到queue投递失败，则会触发的回调，但是这个方法被触发的概率很小，因为交换机和队列的绑定是在代码中显式完成的，只要代码正确这个方法出发的概率就会很小，即便触发了也大概率是代码的问题，而这个方法也需要通过配置来开启
+// springboot配置 spring.rabbitmq.publisher-returns=true 以上两种配置适用于springboot项目，如果没有使用springboot的话可以使用如下代码来进行配置
+几种方法都在channel类中
+四、消费者确认（重点） 消费者确认有两种方式：自动、手动
+4.1 消息自动确认 消息自动确认是指消息发出后就认为消息消费成功，消息就会被RabbitMQ从队列中删除掉，并不会在意消费者处理业务的成功与否，也就是“发送即成功”，这种模式是一种非常不安全的方式，因为业务存在处理失败的情况，这样的话数据就会丢失
+如下代码中的第二个参数，就是设定为自动确认模式（autoAck：true）
+4.2 消息手动确认 手动应答提供三种接口
+basic.ack(deliveryTag,multiple) 用来确认成功消息(positive acknowledgements)basic.nack(deliveryTag,requeue,multiple) 用来确认失败的消息(negative acknowledgements)basic.reject(deliveryTa,requeue) 用来确认失败的消息 4.2.1 成功确认：basic.ack(deliveryTag，multiple) deliveryTag：消息传递标签，格式为序列号，必须使用这个标签，不然信道会关闭，详情下面会说到multiple：为true则表示序号deliverTag之前的消息均被确认或拒绝（basicNack），false表示当前消息。为true的时候就可以做到批量确认 channel.basicAck(message.getEnvelope().getDeliveryTag(), false); 4.2.2 失败确认：basic.nack(deliveryTag，multiple，requeue) requeue：为true表示，失败的消息将会重新排队，不会丢弃或者死信（下篇文章描述），为false则表示丢弃 channel.basicNack(message.getEnvelope().getDeliveryTag(),false, true); 4.2.3 失败确认：basic.basicReject(deliveryTag，requeue) 相比nack方法，reject没有multiple参数，所以reject只能处理单个消息
+channel.basicReject(message.getEnvelope().getDeliveryTag(), true); 4." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/f96a61135dfa5b61d825801d4c1825e7/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-07-14T16:53:35+08:00" />
+<meta property="article:modified_time" content="2023-07-14T16:53:35+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">RabbitMQ学习笔记（二）消息确认机制</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="_0"></a>前言</h2> 
+<p>1、我的另一篇文章中介绍了RabbitMQ的交换机类型、消费类型，经过一系列的demo测试时，我们在RabbitMQ的后台监控中可以发现一个现象，就是消息在被成功消费后，队列中就没有这个消息了，也就是删除了，那么疑问来了，RabbitMQ是怎么知道这个消息该不该被删除？什么时候删除？<br> 2、除了消费者，那么生产者怎么知道自己消息是否发送成功到RabbitMQ中了？</p> 
+<p>解决这个疑问的方式就是：RabbitMQ消息确认机制</p> 
+<p>RabbitMQ有两种解决消息丢失的方案，一种是事务机制，一种是消息确认（confirm机制），这里主要介绍消息确认</p> 
+<h2><a id="1_7"></a>1、为什么要进行消息确认</h2> 
+<p><img src="https://images2.imgbox.com/90/fb/qK1WpZBs_o.png" alt="在这里插入图片描述"></p> 
+<p>通过RabbitMQ的原理图可知，生产者和消费者并没有直接进行通信，中间要使用RabbitMQ传递消息，所以生产者只需要把消息发送到Rabbit，而消费者只需要从队列获取消息就可以了</p> 
+<ul><li>生产者：生产者发布消息后，并不知道消息发送成功没，但是生产者需要知道，所以这里会有一个消息确认机制，帮助生产者确认消息发送成功</li><li>消费者：消费者拿到消息后，在队列中这个消息还在，队列并不知道怎么处理这个消息，是删除还是死信，所以队列需要消费者给一个ACK确认，也就是消费者处理完消息后的反馈，队列根据反馈来选择处理方式</li></ul> 
+<p>上述两种就是消息确认机制</p> 
+<h2><a id="_18"></a>二、消息确认的基本逻辑（源于官网）</h2> 
+<p>RabbitMQ是基于AMQP协议的，从官网给出的解释来说，会有两种建议：</p> 
+<ul><li>当消息代理（broker）将消息发送给应用后立即删除。（使用AMQP方法：basic.deliver或basic.get-ok）</li><li>待应用（application）发送一个确认回执（acknowledgement）后再删除消息。（使用AMQP方法：basic.ack）</li></ul> 
+<p>前者被称作自动确认模式（automatic acknowledgement model），后者被称作显式确认模式（explicit acknowledgement model）。在显式模式下，由消费者应用来选择什么时候发送确认回执（acknowledgement）。应用可以在收到消息后立即发送，或将未处理的消息存储后发送，或等到消息被处理完毕后再发送确认回执（例如，成功获取一个网页内容并将其存储之后）。</p> 
+<p>如果一个消费者在尚未发送确认回执的情况下挂掉了，那AMQP代理会将消息重新投递给另一个消费者。如果当时没有可用的消费者了，消息代理会等下一个注册到此队列的消费者，然后再次尝试投递。</p> 
+<h2><a id="_27"></a>三、生产者确认</h2> 
+<p>生产者端可通过两个callback接口来确认消息的是否传递到Broker，但是两个接口默认都是不开启的</p> 
+<h3><a id="31_ConfirmCallback_29"></a>3.1 ConfirmCallback方法</h3> 
+<p>ConfirmCallback方法：消息成功从生产者到Broker（RabbitMQ主机）后触发的回调，只用来确认是否正确到达了Exchange（交换机），发布者确认默认是不开启的，开启发布者确认需要添加如下配置</p> 
+<pre><code class="prism language-java"><span class="token comment">// springboot配置</span>
+spring<span class="token punctuation">.</span>rabbitmq<span class="token punctuation">.</span>publisher<span class="token operator">-</span>confirm<span class="token operator">-</span>type<span class="token operator">=</span>correlated # 新版本
+spring<span class="token punctuation">.</span>rabbitmq<span class="token punctuation">.</span>publisher<span class="token operator">-</span>confirms<span class="token operator">=</span><span class="token boolean">true</span> # 老版本
+</code></pre> 
+<h3><a id="32_ReturnCallback_36"></a>3.2 ReturnCallback方法</h3> 
+<p>ReturnCallback方法：消息从Exchange到queue投递失败，则会触发的回调，但是这个方法被触发的概率很小，因为交换机和队列的绑定是在代码中显式完成的，只要代码正确这个方法出发的概率就会很小，即便触发了也大概率是代码的问题，而这个方法也需要通过配置来开启</p> 
+<pre><code class="prism language-java"><span class="token comment">// springboot配置</span>
+spring<span class="token punctuation">.</span>rabbitmq<span class="token punctuation">.</span>publisher<span class="token operator">-</span>returns<span class="token operator">=</span><span class="token boolean">true</span>
+</code></pre> 
+<p>以上两种配置适用于springboot项目，如果没有使用springboot的话可以使用如下代码来进行配置</p> 
+<ul><li>几种方法都在channel类中<br> <img src="https://images2.imgbox.com/2b/20/SgEZBNZH_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/bf/bd/v548z9Y6_o.png" alt="在这里插入图片描述"></li></ul> 
+<h2><a id="_48"></a>四、消费者确认（重点）</h2> 
+<p>消费者确认有两种方式：自动、手动</p> 
+<h3><a id="41__50"></a>4.1 消息自动确认</h3> 
+<p>消息自动确认是指消息发出后就认为消息消费成功，消息就会被RabbitMQ从队列中删除掉，并不会在意消费者处理业务的成功与否，也就是“发送即成功”，这种模式是一种非常不安全的方式，因为业务存在处理失败的情况，这样的话数据就会丢失<br> 如下代码中的第二个参数，就是设定为自动确认模式（autoAck：true）<br> <img src="https://images2.imgbox.com/2d/2c/LdqdSyFK_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="42__54"></a>4.2 消息手动确认</h3> 
+<p>手动应答提供三种接口</p> 
+<ul><li>basic.ack(deliveryTag,multiple) 用来确认成功消息(positive acknowledgements)</li><li>basic.nack(deliveryTag,requeue,multiple) 用来确认失败的消息(negative acknowledgements)</li><li>basic.reject(deliveryTa,requeue) 用来确认失败的消息</li></ul> 
+<h4><a id="421_basicackdeliveryTagmultiple_59"></a>4.2.1 成功确认：basic.ack(deliveryTag，multiple)</h4> 
+<ul><li>deliveryTag：消息传递标签，格式为序列号，必须使用这个标签，不然信道会关闭，详情下面会说到</li><li>multiple：为true则表示序号deliverTag之前的消息均被确认或拒绝（basicNack），false表示当前消息。为true的时候就可以做到批量确认</li></ul> 
+<pre><code class="prism language-java">channel<span class="token punctuation">.</span><span class="token function">basicAck</span><span class="token punctuation">(</span>message<span class="token punctuation">.</span><span class="token function">getEnvelope</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getDeliveryTag</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<h4><a id="422_basicnackdeliveryTagmultiplerequeue_65"></a>4.2.2 失败确认：basic.nack(deliveryTag，multiple，requeue)</h4> 
+<ul><li>requeue：为true表示，失败的消息将会重新排队，不会丢弃或者死信（下篇文章描述），为false则表示丢弃</li></ul> 
+<pre><code class="prism language-java">channel<span class="token punctuation">.</span><span class="token function">basicNack</span><span class="token punctuation">(</span>message<span class="token punctuation">.</span><span class="token function">getEnvelope</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getDeliveryTag</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span><span class="token boolean">false</span><span class="token punctuation">,</span> <span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<h4><a id="423_basicbasicRejectdeliveryTagrequeue_70"></a>4.2.3 失败确认：basic.basicReject(deliveryTag，requeue)</h4> 
+<p>相比nack方法，reject没有multiple参数，所以reject只能处理单个消息</p> 
+<pre><code class="prism language-java">channel<span class="token punctuation">.</span><span class="token function">basicReject</span><span class="token punctuation">(</span>message<span class="token punctuation">.</span><span class="token function">getEnvelope</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getDeliveryTag</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<h3><a id="43_delivery_tags_75"></a>4.3 消息传递标签(delivery tags)</h3> 
+<p>RabbitMQ在通过队列以及信道（channel）传递消息给消费者的时候，都会带一个传递标签，每个channel给每条消息分配一个标签，一个channel对应一个传递标签。<br> 这个标签是一个Long类型的序列号，从1 开始到 9223372036854775807，理论上这个范围非常大，按照每秒一百万的数据量来算的话，大概需要292年才能用完。<br> 通过Delivery.getEnvelope().getDeliveryTag()可以获取当前消息的传递标签<br> <img src="https://images2.imgbox.com/7b/9f/WJ1zNuC8_o.png" alt="在这里插入图片描述"><br> 代码示例中查看这个传递标签的值为22，这表示这个消息是这个channel传递的第22条<br> <img src="https://images2.imgbox.com/fd/74/psc7eRLS_o.png" alt="在这里插入图片描述"><br> RabbitMQ就是通过传递标签确认消费者返回的是哪条消息的结果，从而进行处理</p> 
+<h4><a id="431__84"></a>4.3.1 如果使用错误的传递标签</h4> 
+<p>这里是指，在做消息确认的时候，并没有传递正确的传递标签，那么会出现什么情况？<br> 经过测试如下</p> 
+<ul><li>生产者代码：</li></ul> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">Producer</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token class-name">String</span> <span class="token constant">QUEUE_NAME</span> <span class="token operator">=</span> <span class="token string">"q_test_01"</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token class-name">String</span><span class="token punctuation">[</span><span class="token punctuation">]</span> args<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">Connection</span> connection <span class="token operator">=</span> <span class="token function">getConnection</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">Channel</span> channel <span class="token operator">=</span> connection<span class="token punctuation">.</span><span class="token function">createChannel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">String</span> msg <span class="token operator">=</span> <span class="token string">"测试消息一"</span><span class="token punctuation">;</span>
+        channel<span class="token punctuation">.</span><span class="token function">queueDeclare</span><span class="token punctuation">(</span><span class="token constant">QUEUE_NAME</span><span class="token punctuation">,</span> <span class="token boolean">true</span><span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">,</span> <span class="token keyword">null</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> <span class="token number">10</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            channel<span class="token punctuation">.</span><span class="token function">basicPublish</span><span class="token punctuation">(</span><span class="token string">""</span><span class="token punctuation">,</span> <span class="token constant">QUEUE_NAME</span><span class="token punctuation">,</span> <span class="token keyword">null</span><span class="token punctuation">,</span> <span class="token punctuation">(</span>msg <span class="token operator">+</span> i<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getBytes</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+
+        <span class="token comment">//关闭通道和连接</span>
+        channel<span class="token punctuation">.</span><span class="token function">close</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        connection<span class="token punctuation">.</span><span class="token function">close</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token class-name">Connection</span> <span class="token function">getConnection</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//定义连接工厂</span>
+        <span class="token class-name">ConnectionFactory</span> factory <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ConnectionFactory</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//设置服务地址</span>
+        factory<span class="token punctuation">.</span><span class="token function">setHost</span><span class="token punctuation">(</span><span class="token string">"localhost"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//端口</span>
+        factory<span class="token punctuation">.</span><span class="token function">setPort</span><span class="token punctuation">(</span><span class="token number">5672</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//设置账号信息，用户名、密码、vhost</span>
+        factory<span class="token punctuation">.</span><span class="token function">setVirtualHost</span><span class="token punctuation">(</span><span class="token string">"testhost"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        factory<span class="token punctuation">.</span><span class="token function">setUsername</span><span class="token punctuation">(</span><span class="token string">"admin"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        factory<span class="token punctuation">.</span><span class="token function">setPassword</span><span class="token punctuation">(</span><span class="token string">"1111"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 通过工程获取连接</span>
+        <span class="token class-name">Connection</span> connection <span class="token operator">=</span> factory<span class="token punctuation">.</span><span class="token function">newConnection</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> connection<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>消费者代码：注意代码中的channel.basicAck</li></ul> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">ConsumerClient</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token class-name">String</span><span class="token punctuation">[</span><span class="token punctuation">]</span> args<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">Connection</span> connection <span class="token operator">=</span> <span class="token class-name">Producer</span><span class="token punctuation">.</span><span class="token function">getConnection</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">Channel</span> channel <span class="token operator">=</span> connection<span class="token punctuation">.</span><span class="token function">createChannel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token class-name">DeliverCallback</span> deliverCallback <span class="token operator">=</span> <span class="token punctuation">(</span>consumerTag<span class="token punctuation">,</span> message<span class="token punctuation">)</span> <span class="token operator">-&gt;</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">String</span> message1 <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">String</span><span class="token punctuation">(</span>message<span class="token punctuation">.</span><span class="token function">getBody</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token class-name">System</span><span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"DeliverCallback:"</span> <span class="token operator">+</span> consumerTag <span class="token operator">+</span> <span class="token string">"-"</span> <span class="token operator">+</span> message1<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 注意这里message.getEnvelope().getDeliveryTag()就是获取正确的传递标签</span>
+            <span class="token comment">// 然后我在后面 +9999 改变正确的值</span>
+            channel<span class="token punctuation">.</span><span class="token function">basicAck</span><span class="token punctuation">(</span>message<span class="token punctuation">.</span><span class="token function">getEnvelope</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getDeliveryTag</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">+</span><span class="token number">99999</span><span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+        <span class="token class-name">CancelCallback</span> cancelCallback <span class="token operator">=</span> consumerTag <span class="token operator">-&gt;</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">System</span><span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"CancelCallback:"</span> <span class="token operator">+</span> consumerTag<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+        channel<span class="token punctuation">.</span><span class="token function">basicConsume</span><span class="token punctuation">(</span><span class="token class-name">Producer</span><span class="token punctuation">.</span><span class="token constant">QUEUE_NAME</span><span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">,</span> deliverCallback<span class="token punctuation">,</span> cancelCallback<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>结果如下： 
+  <ul><li>生产者启动后：队列成功创建，消息成功发送，通过RabbitMQ后台可以看到队列q_test_01中有10个消息<br> <img src="https://images2.imgbox.com/5c/f8/cOKen8lz_o.png" alt=""></li><li>消费者启动：成功获取到10条消息，在控制台可以正确的输出打印<br> <img src="https://images2.imgbox.com/65/c0/yOoLM4aH_o.png" alt="在这里插入图片描述"><br> 我们回到RabbitMQ的后台中看一下，如下图<br> <img src="https://images2.imgbox.com/58/71/k2w4yYRS_o.png" alt="在这里插入图片描述"><br> 可以发现队列中的消息依然存在，并没有删除掉，我们在手动消息确认的时候，没有使用正确的传递标签，RabbitMQ根据错误的传递标签是找不到消息的，那我们将传递标签修改为正确的，再来看结果<br> <img src="https://images2.imgbox.com/f2/24/RmmPDQSY_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/20/df/erqdhx1f_o.png" alt="在这里插入图片描述"><br> 启动后，我们发现之前消费过10条消息，又被重新消费了，而且回到RabbitMQ后台可以发现队列中的消息已经被删除了。<br> 消息被重新消费是因为之前使用了错误的传递标签，原有的消息没有被删除，这样就相当于消息没有被消费过，并且处于待消费的一个状态，那么在消费者重新启动连接后，队列会把原有的消息直接发送给新连接的消费者，这个新的消费者就是我们正确使用了传递标签的消费者，所以消息被正确的确认，队列就将其删除</li></ul> </li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/48c0b3b3fb6023946dc9ef80cb6fa2c8/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">使用canvas生成二维码</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/7279a7201a99aaeab76873d1ad556141/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">在 K8s 环境上 DIY 部署雷池社区版</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

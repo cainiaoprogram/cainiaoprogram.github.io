@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>7.5.tensorRT高级(2)-RAII接口模式下的生产者消费者多batch实现 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="7.5.tensorRT高级(2)-RAII接口模式下的生产者消费者多batch实现" />
+<meta property="og:description" content="目录 前言1. RAII接口模式封装生产者消费者2. 问答环节总结 前言 杜老师推出的 tensorRT从零起步高性能部署 课程，之前有看过一遍，但是没有做笔记，很多东西也忘了。这次重新撸一遍，顺便记记笔记。
+本次课程学习 tensorRT 高级-RAII 接口模式下的生产者消费者多 batch 实现
+课程大纲可看下面的思维导图
+1. RAII接口模式封装生产者消费者 这节课我们利用上节课学到的 RAII &#43; 接口模式对我们的消费者生产者进行封装
+我们来看代码
+infer.hpp
+#ifndef INFER_HPP #define INFER_HPP #include &lt;memory&gt; #include &lt;string&gt; #include &lt;future&gt; class InferInterface{ public: virtual std::shared_future&lt;std::string&gt; forward(std::string pic) = 0; }; std::shared_ptr&lt;InferInterface&gt; create_infer(const std::string&amp; file); #endif // INFER_HPP infer.cpp
+#include &#34;infer.hpp&#34; #include &lt;thread&gt; #include &lt;queue&gt; #include &lt;mutex&gt; #include &lt;future&gt; using namespace std; struct Job{ shared_ptr&lt;promise&lt;string&gt;&gt; pro; string input; }; class InferImpl : public InferInterface{ public: virtual ~InferImpl(){ worker_running_ = false; cv_notify_one(); if(worker_thread_." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/84c66c24c1827938c74a28f6e30c2a90/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-08-13T21:52:30+08:00" />
+<meta property="article:modified_time" content="2023-08-13T21:52:30+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">7.5.tensorRT高级(2)-RAII接口模式下的生产者消费者多batch实现</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>目录</h4> 
+ <ul><li><ul><li><a href="#_1" rel="nofollow">前言</a></li><li><a href="#1_RAII_12" rel="nofollow">1. RAII接口模式封装生产者消费者</a></li><li><a href="#2__224" rel="nofollow">2. 问答环节</a></li><li><a href="#_266" rel="nofollow">总结</a></li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h3><a id="_1"></a>前言</h3> 
+<blockquote> 
+ <p>杜老师推出的 <a href="https://ke.qq.com/course/4993141#term_id=105165326" rel="nofollow">tensorRT从零起步高性能部署</a> 课程，之前有看过一遍，但是没有做笔记，很多东西也忘了。这次重新撸一遍，顺便记记笔记。</p> 
+ <p>本次课程学习 tensorRT 高级-RAII 接口模式下的生产者消费者多 batch 实现</p> 
+ <p>课程大纲可看下面的思维导图</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/6b/f3/tyh1NRdX_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="1_RAII_12"></a>1. RAII接口模式封装生产者消费者</h3> 
+<blockquote> 
+ <p>这节课我们利用上节课学到的 RAII + 接口模式对我们的消费者生产者进行封装</p> 
+</blockquote> 
+<p>我们来看代码</p> 
+<p><strong>infer.hpp</strong></p> 
+<pre><code class="prism language-cpp"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifndef</span> <span class="token expression">INFER_HPP</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">INFER_HPP</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;memory&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;string&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;future&gt;</span></span>
+
+<span class="token keyword">class</span> <span class="token class-name">InferInterface</span><span class="token punctuation">{<!-- --></span>
+<span class="token keyword">public</span><span class="token operator">:</span>
+    <span class="token keyword">virtual</span> std<span class="token double-colon punctuation">::</span>shared_future<span class="token operator">&lt;</span>std<span class="token double-colon punctuation">::</span>string<span class="token operator">&gt;</span> <span class="token function">forward</span><span class="token punctuation">(</span>std<span class="token double-colon punctuation">::</span>string pic<span class="token punctuation">)</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+std<span class="token double-colon punctuation">::</span>shared_ptr<span class="token operator">&lt;</span>InferInterface<span class="token operator">&gt;</span> <span class="token function">create_infer</span><span class="token punctuation">(</span><span class="token keyword">const</span> std<span class="token double-colon punctuation">::</span>string<span class="token operator">&amp;</span> file<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span> <span class="token comment">// INFER_HPP</span></span>
+</code></pre> 
+<p><strong>infer.cpp</strong></p> 
+<pre><code class="prism language-cpp"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"infer.hpp"</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;thread&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;queue&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;mutex&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;future&gt;</span></span>
+
+<span class="token keyword">using</span> <span class="token keyword">namespace</span> std<span class="token punctuation">;</span>
+
+<span class="token keyword">struct</span> <span class="token class-name">Job</span><span class="token punctuation">{<!-- --></span>
+    shared_ptr<span class="token operator">&lt;</span>promise<span class="token operator">&lt;</span>string<span class="token operator">&gt;&gt;</span> pro<span class="token punctuation">;</span>
+    string input<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token keyword">class</span> <span class="token class-name">InferImpl</span> <span class="token operator">:</span> <span class="token base-clause"><span class="token keyword">public</span> <span class="token class-name">InferInterface</span></span><span class="token punctuation">{<!-- --></span>
+<span class="token keyword">public</span><span class="token operator">:</span>
+
+    <span class="token keyword">virtual</span> <span class="token operator">~</span><span class="token function">InferImpl</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+        worker_running_ <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+        <span class="token function">cv_notify_one</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">if</span><span class="token punctuation">(</span>worker_thread_<span class="token punctuation">.</span><span class="token function">joinable</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+            worker_thread_<span class="token punctuation">.</span><span class="token function">join</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">bool</span> <span class="token function">load_model</span><span class="token punctuation">(</span><span class="token keyword">const</span> string<span class="token operator">&amp;</span> file<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+        
+        <span class="token comment">// 尽量保证资源哪里分配哪里释放，哪里使用，这样使得程序足够简单，而不是太乱</span>
+        <span class="token comment">// 线程内传回返回值的问题</span>
+        promise<span class="token operator">&lt;</span><span class="token keyword">bool</span><span class="token operator">&gt;</span> pro<span class="token punctuation">;</span>
+        worker_running_ <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+        worker_thread_ <span class="token operator">=</span> <span class="token function">thread</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>InferImpl<span class="token double-colon punctuation">::</span>worker<span class="token punctuation">,</span> <span class="token keyword">this</span><span class="token punctuation">,</span> file<span class="token punctuation">,</span> std<span class="token double-colon punctuation">::</span><span class="token function">ref</span><span class="token punctuation">(</span>pro<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> pro<span class="token punctuation">.</span><span class="token function">get_future</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token punctuation">}</span>
+
+     <span class="token keyword">virtual</span> shared_future<span class="token operator">&lt;</span>string<span class="token operator">&gt;</span> <span class="token function">forward</span><span class="token punctuation">(</span>string pic<span class="token punctuation">)</span> <span class="token keyword">override</span><span class="token punctuation">{<!-- --></span>
+
+        <span class="token comment">// printf("使用 %s 进行推理\n", context_.c_str());</span>
+        <span class="token comment">// 往队列抛任务</span>
+        Job job<span class="token punctuation">;</span>
+        job<span class="token punctuation">.</span>pro<span class="token punctuation">.</span><span class="token function">reset</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token generic-function"><span class="token function">promise</span><span class="token generic class-name"><span class="token operator">&lt;</span>string<span class="token operator">&gt;</span></span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        job<span class="token punctuation">.</span>input <span class="token operator">=</span> pic<span class="token punctuation">;</span>
+
+        lock_guard<span class="token operator">&lt;</span>mutex<span class="token operator">&gt;</span> <span class="token function">l</span><span class="token punctuation">(</span>job_lock_<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        qjobs_<span class="token punctuation">.</span><span class="token function">push</span><span class="token punctuation">(</span>job<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// 被动通知，一旦有新的任务需要推理，通知我即可</span>
+        <span class="token comment">// 发生通知的家伙</span>
+        cv_<span class="token punctuation">.</span><span class="token function">notify_one</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> job<span class="token punctuation">.</span>pro<span class="token operator">-&gt;</span><span class="token function">get_future</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">// 实际执行模型推理的部分</span>
+    <span class="token keyword">void</span> <span class="token function">worker</span><span class="token punctuation">(</span>string file<span class="token punctuation">,</span> promise<span class="token operator">&lt;</span><span class="token keyword">bool</span><span class="token operator">&gt;</span><span class="token operator">&amp;</span> pro<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// worker内实现，模型的加载，使用，释放</span>
+        string context <span class="token operator">=</span> file<span class="token punctuation">;</span>
+        <span class="token keyword">if</span><span class="token punctuation">(</span>context<span class="token punctuation">.</span><span class="token function">empty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+            pro<span class="token punctuation">.</span><span class="token function">set_value</span><span class="token punctuation">(</span><span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span><span class="token keyword">else</span><span class="token punctuation">{<!-- --></span>
+            pro<span class="token punctuation">.</span><span class="token function">set_value</span><span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token keyword">int</span> max_batch_size <span class="token operator">=</span> <span class="token number">5</span><span class="token punctuation">;</span>
+        vector<span class="token operator">&lt;</span>Job<span class="token operator">&gt;</span> jobs<span class="token punctuation">;</span>
+        <span class="token keyword">int</span> batch_id <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        <span class="token keyword">while</span><span class="token punctuation">(</span>worker_running_<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// 等待接受的家伙</span>
+            <span class="token comment">// 在队列取任务并执行的过程</span>
+            unique_lock<span class="token operator">&lt;</span>mutex<span class="token operator">&gt;</span> <span class="token function">l</span><span class="token punctuation">(</span>job_lock_<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            cv_<span class="token punctuation">.</span><span class="token function">wait</span><span class="token punctuation">(</span>job_lock_<span class="token punctuation">,</span> <span class="token punctuation">[</span><span class="token operator">&amp;</span><span class="token punctuation">]</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// true 退出等待</span>
+                <span class="token comment">// false 继续等待</span>
+                <span class="token keyword">return</span> <span class="token operator">!</span>qjobs_<span class="token punctuation">.</span><span class="token function">empty</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token operator">!</span>worker_running_<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token comment">// 程序发送终止信号</span>
+            <span class="token keyword">if</span><span class="token punctuation">(</span><span class="token operator">!</span>worker_running_<span class="token punctuation">)</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+
+            <span class="token keyword">while</span><span class="token punctuation">(</span>jobs<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&lt;</span> max_batch_size <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>qjobs_<span class="token punctuation">.</span><span class="token function">empty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+                jobs<span class="token punctuation">.</span><span class="token function">emplace_back</span><span class="token punctuation">(</span>qjobs_<span class="token punctuation">.</span><span class="token function">front</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                qjobs<span class="token punctuation">.</span><span class="token function">pop</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">// 可以在这里一次拿一批出来，最大拿 maxbatchsize 个 job 进行一次性处理</span>
+            <span class="token comment">// jobs inference -&gt; batch inference</span>
+
+            <span class="token comment">// 执行 batch 推理</span>
+            <span class="token keyword">for</span><span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> jobs<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+                
+                <span class="token keyword">auto</span><span class="token operator">&amp;</span> job <span class="token operator">=</span> jobs<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">;</span>
+                <span class="token keyword">char</span> result<span class="token punctuation">[</span><span class="token number">100</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+                <span class="token function">sprintf</span><span class="token punctuation">(</span>result<span class="token punctuation">,</span> <span class="token string">"%s : batch-&gt; %d[%d]"</span><span class="token punctuation">,</span> job<span class="token punctuation">.</span>input<span class="token punctuation">.</span><span class="token function">c_str</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> batch_id<span class="token punctuation">,</span> jobs<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                
+                job<span class="token punctuation">.</span>pro<span class="token operator">-&gt;</span><span class="token function">set_value</span><span class="token punctuation">(</span>result<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            batch_id<span class="token operator">++</span><span class="token punctuation">;</span>
+            jobs<span class="token punctuation">.</span><span class="token function">clear</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 模拟推理耗时</span>
+            this_thread<span class="token double-colon punctuation">::</span><span class="token function">sleep_for</span><span class="token punctuation">(</span>chrono<span class="token double-colon punctuation">::</span><span class="token function">milliseconds</span><span class="token punctuation">(</span><span class="token number">1000</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">// 释放模型</span>
+        <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"释放: %s\n"</span><span class="token punctuation">,</span> context<span class="token punctuation">.</span><span class="token function">c_str</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        context<span class="token punctuation">.</span><span class="token function">clear</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"Worker done.\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token keyword">private</span><span class="token operator">:</span>
+    atomic<span class="token operator">&lt;</span><span class="token keyword">bool</span><span class="token operator">&gt;</span> worker_running_<span class="token punctuation">{<!-- --></span><span class="token boolean">false</span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+    thread worker_thread_<span class="token punctuation">;</span>
+    queue<span class="token operator">&lt;</span>Job<span class="token operator">&gt;</span> qjobs_<span class="token punctuation">;</span>
+    mutex job_lock_<span class="token punctuation">;</span>
+    condition_variable cv_<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+shared_ptr<span class="token operator">&lt;</span>InferInterface<span class="token operator">&gt;</span> <span class="token function">create_infer</span><span class="token punctuation">(</span><span class="token keyword">const</span> string<span class="token operator">&amp;</span> file<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+    
+    shared_ptr<span class="token operator">&lt;</span>InferImpl<span class="token operator">&gt;</span> <span class="token function">instance</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token function">Infer</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span><span class="token punctuation">(</span><span class="token operator">!</span>instance<span class="token operator">-&gt;</span><span class="token function">load_model</span><span class="token punctuation">(</span>file<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        instance<span class="token punctuation">.</span><span class="token function">reset</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> instance<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>main.cpp</strong></p> 
+<pre><code class="prism language-cpp"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"infer.hpp"</span></span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+    
+    <span class="token keyword">auto</span> infer <span class="token operator">=</span> <span class="token function">create_infer</span><span class="token punctuation">(</span><span class="token string">"a"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span><span class="token punctuation">(</span>infer <span class="token operator">==</span> <span class="token keyword">nullptr</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+        <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"failed.\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">// 串行</span>
+    <span class="token comment">// auto fa = infer-&gt;forward("A").get();</span>
+    <span class="token comment">// auto fb = infer-&gt;forward("B").get();</span>
+    <span class="token comment">// auto fc = infer-&gt;forward("C").get();</span>
+    <span class="token comment">// printf("%s\n", fa.c_str());</span>
+    <span class="token comment">// printf("%s\n", fb.c_str());</span>
+    <span class="token comment">// printf("%s\n", fc.c_str());</span>
+    
+    <span class="token comment">// 并行</span>
+    <span class="token keyword">auto</span> fa <span class="token operator">=</span> infer<span class="token operator">-&gt;</span><span class="token function">forward</span><span class="token punctuation">(</span><span class="token string">"A"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">auto</span> fb <span class="token operator">=</span> infer<span class="token operator">-&gt;</span><span class="token function">forward</span><span class="token punctuation">(</span><span class="token string">"B"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">auto</span> fc <span class="token operator">=</span> infer<span class="token operator">-&gt;</span><span class="token function">forward</span><span class="token punctuation">(</span><span class="token string">"C"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"%s\n"</span><span class="token punctuation">,</span> fa<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">c_str</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"%s\n"</span><span class="token punctuation">,</span> fb<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">c_str</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"%s\n"</span><span class="token punctuation">,</span> fc<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">c_str</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>    
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"Program done.\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>上述示例代码相对复杂，结合了 RAII 和接口模式来实现模拟模型推理，具体是一个消费者-生产者模式的异步批处理机制，我们来简单解读下 <strong>infer.cpp</strong> 中具体干了些啥（<strong>form chatGPT</strong>）</p> 
+<p><strong>1.</strong> <strong>数据结构和类定义</strong></p> 
+<ul><li><strong>Job</strong> 结构体：这是一个任务结构，包含了一个 <strong>promise</strong> 对象（用于在工作线程中设置结果）和输入数据，<strong>promise</strong> 又通过 <strong>shared_ptr</strong> 封装了一层，可以让结构体传递效率更高</li><li><strong>InferImpl</strong> 类，这是 <strong>InferInterface</strong> 的实现类，包含了异步处理的核心逻辑</li></ul> 
+<p><strong>2.</strong> <strong>InferImpl 类的方法和成员</strong></p> 
+<ul><li><strong>析构函数</strong>：在对象销毁时，将 <strong>worker_running_</strong> 标志设置为 false，并通过条件变量唤醒工作线程。然后等待工作线程结束</li><li><strong>load_model 方法</strong>：模型加载函数，它实际上启动了工作线程，并传递了一个 promise 对象来设置是否成功加载了模型</li><li><strong>forward 方法</strong>：这是暴露给使用者的接口，用于提交一个新的推理任务。这个方法将任务添加到队列中，并通过条件变量唤醒工作线程</li><li><strong>worker 方法</strong>：这是工作线程的核心函数，它从队列中取出任务并批量处理它们，然后使用 promise 设置结果</li><li><strong>私有成员</strong>： 
+  <ul><li><strong>worker_running_</strong>：一个原子布尔标志，表示工作线程是否正在运行</li><li><strong>worker_thread_</strong>：工作线程对象</li><li><strong>qjobs_</strong>：包含待处理任务的队列</li><li><strong>job_lock_</strong>：保护任务队列的互斥锁</li><li><strong>cv_</strong>：条件变量，用于在有新任务到来或工作线程需要停止时唤醒工作线程</li></ul> </li></ul> 
+<p><strong>3.</strong> <strong>工厂函数</strong></p> 
+<ul><li><strong>create_infer 函数</strong>：RAII 的体现，这个函数创建了一个 <strong>InferImpl</strong> 的实例，并尝试加载模型。如果加载失败，它将返回一个空的智能指针。</li></ul> 
+<p>这个示例清晰地展示了如何使用 RAII 和接口模式来实现一个异步批处理机制，同时也展示了如何使用 C++11 的并发特性（如 <strong>thread</strong>、<strong>promise</strong>、<strong>condition_variable</strong> 等）来实现这种机制。</p> 
+<h3><a id="2__224"></a>2. 问答环节</h3> 
+<blockquote> 
+ <p>博主对多线程相关的知识不怎么了解，因此疯狂询问 chatGPT，故此做个记录方便下次查看，以下内容来自于博主和 chatGPT 之间的对话</p> 
+</blockquote> 
+<blockquote> 
+ <p><strong>问题1</strong>：work_running_ 为什么是 atomic&lt;boll&gt; 类型，为什么不直接使用 bool 类型？什么是 atomic&lt;bool&gt; 类型？🤔</p> 
+</blockquote> 
+<blockquote> 
+ <p><strong>回答</strong>：<strong>atomic&lt;bool&gt;</strong> 是 C++11 引入的原子类型，它是为了支持多线程环境中无锁的线程安全操作。使用原子类型可以确保对该类型的读写操作是原子的，即它们不会被其他线程中的操作中断。</p> 
+ <p>当多个线程可能同时访问和修改一个变量时，直接使用基本数据类型（如 <strong>bool</strong>）可能会导致不确定的行为或数据竞态（race conditions）。数据竞态通常是多线程编程中的一个问题，当两个或更多的线程同时访问同一资源，并至少有一个线程修改该资源时，结果是不确定的。</p> 
+ <p>使用 <strong>atomic&lt;bool&gt;</strong> 的好处：</p> 
+ <p><strong>1.</strong> <strong>原子操作</strong>：<strong>atomic&lt;bool&gt;</strong> 保证了对其的读写操作是原子的，这意味着每个读或写操作都是不可中断的。</p> 
+ <p><strong>2.</strong> <strong>内存顺序</strong>：原子操作还提供了内存顺序语义，这确保了在多线程环境中的操作顺序。</p> 
+ <p><strong>3.</strong> <strong>无锁操作</strong>：与使用互斥锁相比，原子操作通常更快，因为它们通常是无锁的。</p> 
+ <p>在示例中，<strong>atomic&lt;bool&gt;</strong> 可能会在主线程中被设置，并在工作线程中被检查。为了确保这种跨线程的通信是线程安全的，使用 <strong>atomic&lt;bool&gt;</strong> 是合适的。如果只使用普通的 <strong>bool</strong>，可能会导致数据竞态，从而引起不可预测的行为。</p> 
+ <p>总之，<strong>atomic&lt;bool&gt;</strong> 提供了一种线程安全的方式来读取和修改一个布尔值，特别是在无需使用互斥锁的情况下。</p> 
+</blockquote> 
+<blockquote> 
+ <p><strong>问题2</strong>：我在 CUDA 编程中也听过原子操作，就是 GPU 中多个线程对同一个变量进行修改时要使用原子操作，这跟你提到的原子类型是不是类似的呢？🤔</p> 
+</blockquote> 
+<blockquote> 
+ <p><strong>回答</strong>：是的，CUDA 中的原子操作和 C++ 中的原子类型在概念上是非常相似的。两者都是为了确保在并发环境中对数据的访问和修改是线程安全的。</p> 
+ <p><strong>1.</strong> <strong>CUDA 中的原子操作</strong>：</p> 
+ <ul><li>CUDA 提供了一系列原子函数，如 <strong>atomicAdd</strong>, <strong>atomicSub</strong> 等，这些函数可以确保在多个线程可能同时访问同一内存位置时，这些操作是原子的。</li><li>这在 GPU 编程中尤为重要，因为 GPU 具有大量的并行执行单元，这使得多个线程可能会同时访问同一个内存位置。</li><li>使用原子操作可以避免数据竞态，并确保正确的结果。</li></ul> 
+ <p><strong>2.</strong> <strong>C++ 中的原子类型</strong>：</p> 
+ <ul><li>C++ 的 <strong>std::atomic</strong> 类模板提供了一系列原子操作，这些操作确保在多线程环境中对数据的读取和写入是线程安全的，而无需使用互斥锁。</li><li>这对于 CPU 的多</li><li> 
+   <ul><li>线程编程非常有用，因为多个线程可能会并发地运行，并尝试访问和修改同一块内存。</li></ul> </li></ul> 
+ <p>两者的共同点是它们都提供了一种线程安全的方式来处理并发的数据访问和修改。不同之处在于它们分别是为 GPU 和 CPU 设计的，并具有各自的特定语境和使用场景。</p> 
+ <p>总的来说，无论是 CUDA 的原子操作还是 C++ 的原子类型，其核心目的都是为了提供一种在并发环境中安全访问和修改数据的机制。</p> 
+</blockquote> 
+<h3><a id="_266"></a>总结</h3> 
+<blockquote> 
+ <p>本次课程学习了 RAII 接口模式下的生产者消费者多 batch 实现。把前面学的知识全都串起来了，首先通过 create_infer 创建 infer 资源并对模型进行加载，这是 RAII 体现，其次该函数返回的是接口类的智能指针，因此用户只能看到 forward 这一个接口，这是接口模式的应用</p> 
+ <p>在 InferImpl 具体实现类中，我们通过 forward 函数不断向队列中添加数据，而 worker 函数则会判断队列中的数据是否为空，若不为空则进行推理，若为空则继续等待，是否等待是通过条件变量 condition_variable 的 wait 和 notify_one 来实现的，另外 worker 线程将推理结果返回到 forward 中是通过 promise 和 future 来实现，值得注意的是我们在 forward 中返回的并不是 future.get() 而是直接返回的一个 future 对象，具体什么时候 get 拿结果用使用者决定</p> 
+ <p>这个示例把生产者和消费者模式、RAII接口模式以及异步机制等都结合起来，有点像 tensorRT_Pro 中推理实现部分的雏形😂</p> 
+</blockquote>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/4d052ab4b4bd624b10a46481f4e4a077/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【解决】E:无法获取dpkg前端锁(/var/lib/dpkg/lock-frontend)，请查看您是否正以root用户运行？</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/9a02e8bce7fda187e1659e4f6309b979/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">连接不上手机，adb devices为空：</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

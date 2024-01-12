@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>2022-05-18 Druid源码阅读——removeAbandoned参数(一) - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="2022-05-18 Druid源码阅读——removeAbandoned参数(一)" />
+<meta property="og:description" content="1.removeAbandoned removeAbandoned功能常用来进行连接泄露检查，该功能共有三个参数进行组合配置。
+参数类型默认值含义removeAbandonedBooleanfalse是否开启removeAbandoned功能removeAbandonedTimeoutLong300000活动时间超过该参数值的连接将被自动回收logAbandonedBooleanfalse是否开启日志打印回收信息 2.removeAbandoned功能如何实现自动回收长链接 removeAbandoned功能是由DruidDataSource#removeAbandoned方法进行处理，该方法将对存储于activeConnections中的连接进行遍历，通过对DruidPooledConnection中的相关状态进行跟踪来判断是否满足回收条件。
+public int removeAbandoned() { //驱逐计数 int removeCount = 0; //得到当前时间 long currrentNanos = System.nanoTime(); //创建List，用于记录需要被驱逐的连接 List&lt;DruidPooledConnection&gt; abandonedList = new ArrayList&lt;DruidPooledConnection&gt;(); //加锁，避免出现线程问题 activeConnectionLock.lock(); try { //以迭代器的形式获得activeConnections的所有Key(即连接对象) Iterator&lt;DruidPooledConnection&gt; iter = activeConnections.keySet().iterator(); //遍历迭代器 for (; iter.hasNext();) { //获得当前连接 DruidPooledConnection pooledConnection = iter.next(); //如果当前连接正在执行中，则暂不处理 if (pooledConnection.isRunning()) { continue; } //判断该连接存在时间，取值为当前时间-创建连接时间/1000*1000(将纳秒转为毫秒) long timeMillis = (currrentNanos - pooledConnection.getConnectedTimeNano()) / (1000 * 1000); //如果连接存在时间超过了指定值 if (timeMillis &gt;= removeAbandonedTimeoutMillis) { //移除该连接 iter.remove(); //取消对该连接的跟踪 pooledConnection." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/536124360f462482f49aad26f43755bd/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-05-18T23:42:44+08:00" />
+<meta property="article:modified_time" content="2022-05-18T23:42:44+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">2022-05-18 Druid源码阅读——removeAbandoned参数(一)</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="1removeAbandoned_0"></a>1.removeAbandoned</h2> 
+<p><code>removeAbandoned</code>功能常用来进行连接泄露检查，该功能共有三个参数进行组合配置。</p> 
+<table><thead><tr><th>参数</th><th>类型</th><th>默认值</th><th>含义</th></tr></thead><tbody><tr><td>removeAbandoned</td><td>Boolean</td><td>false</td><td>是否开启removeAbandoned功能</td></tr><tr><td>removeAbandonedTimeout</td><td>Long</td><td>300000</td><td>活动时间超过该参数值的连接将被自动回收</td></tr><tr><td>logAbandoned</td><td>Boolean</td><td>false</td><td>是否开启日志打印回收信息</td></tr></tbody></table> 
+<h2><a id="2removeAbandoned_7"></a>2.removeAbandoned功能如何实现自动回收长链接</h2> 
+<p><code>removeAbandoned</code>功能是由<code>DruidDataSource#removeAbandoned</code>方法进行处理，该方法将对存储于<code>activeConnections</code>中的连接进行遍历，通过对<code>DruidPooledConnection</code>中的相关状态进行跟踪来判断是否满足回收条件。</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">int</span> <span class="token function">removeAbandoned</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//驱逐计数</span>
+    <span class="token keyword">int</span> removeCount <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token comment">//得到当前时间</span>
+    <span class="token keyword">long</span> currrentNanos <span class="token operator">=</span> <span class="token class-name">System</span><span class="token punctuation">.</span><span class="token function">nanoTime</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//创建List，用于记录需要被驱逐的连接</span>
+    <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">DruidPooledConnection</span><span class="token punctuation">&gt;</span></span> abandonedList <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">DruidPooledConnection</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//加锁，避免出现线程问题</span>
+    activeConnectionLock<span class="token punctuation">.</span><span class="token function">lock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//以迭代器的形式获得activeConnections的所有Key(即连接对象)</span>
+        <span class="token class-name">Iterator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">DruidPooledConnection</span><span class="token punctuation">&gt;</span></span> iter <span class="token operator">=</span> activeConnections<span class="token punctuation">.</span><span class="token function">keySet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">iterator</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//遍历迭代器</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token punctuation">;</span> iter<span class="token punctuation">.</span><span class="token function">hasNext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//获得当前连接</span>
+            <span class="token class-name">DruidPooledConnection</span> pooledConnection <span class="token operator">=</span> iter<span class="token punctuation">.</span><span class="token function">next</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//如果当前连接正在执行中，则暂不处理</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>pooledConnection<span class="token punctuation">.</span><span class="token function">isRunning</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">continue</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">//判断该连接存在时间，取值为当前时间-创建连接时间/1000*1000(将纳秒转为毫秒)</span>
+            <span class="token keyword">long</span> timeMillis <span class="token operator">=</span> <span class="token punctuation">(</span>currrentNanos <span class="token operator">-</span> pooledConnection<span class="token punctuation">.</span><span class="token function">getConnectedTimeNano</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token punctuation">(</span><span class="token number">1000</span> <span class="token operator">*</span> <span class="token number">1000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//如果连接存在时间超过了指定值</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>timeMillis <span class="token operator">&gt;=</span> removeAbandonedTimeoutMillis<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//移除该连接</span>
+                iter<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">//取消对该连接的跟踪</span>
+                pooledConnection<span class="token punctuation">.</span><span class="token function">setTraceEnable</span><span class="token punctuation">(</span><span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">//添加被驱逐的连接</span>
+                abandonedList<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>pooledConnection<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//解锁</span>
+        activeConnectionLock<span class="token punctuation">.</span><span class="token function">unlock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">//如果存在被驱逐(待回收)的连接</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>abandonedList<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//遍历列表</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">DruidPooledConnection</span> pooledConnection <span class="token operator">:</span> abandonedList<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//连接加锁</span>
+            <span class="token keyword">final</span> <span class="token class-name">ReentrantLock</span> lock <span class="token operator">=</span> pooledConnection<span class="token punctuation">.</span>lock<span class="token punctuation">;</span>
+            lock<span class="token punctuation">.</span><span class="token function">lock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//判断连接是否被禁用，被禁用的连接将被其他线程回收，这里不处理</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>pooledConnection<span class="token punctuation">.</span><span class="token function">isDisable</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token keyword">continue</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//解锁</span>
+                lock<span class="token punctuation">.</span><span class="token function">unlock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">//关闭与数据库的连接</span>
+            <span class="token class-name">JdbcUtils</span><span class="token punctuation">.</span><span class="token function">close</span><span class="token punctuation">(</span>pooledConnection<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//设置状态</span>
+            pooledConnection<span class="token punctuation">.</span><span class="token function">abandond</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//全局自动回收计数自增</span>
+            removeAbandonedCount<span class="token operator">++</span><span class="token punctuation">;</span>
+            <span class="token comment">//本次自动回收计数自增</span>
+            removeCount<span class="token operator">++</span><span class="token punctuation">;</span>
+            <span class="token comment">//如果开启了logAbandoned，则拼接日志并进行输出</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">isLogAbandoned</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token class-name">StringBuilder</span> buf <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">StringBuilder</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                buf<span class="token punctuation">.</span><span class="token function">append</span><span class="token punctuation">(</span><span class="token string">"abandon connection, owner thread: "</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                buf<span class="token punctuation">.</span><span class="token function">append</span><span class="token punctuation">(</span>pooledConnection<span class="token punctuation">.</span><span class="token function">getOwnerThread</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                buf<span class="token punctuation">.</span><span class="token function">append</span><span class="token punctuation">(</span><span class="token string">", connected at : "</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                buf<span class="token punctuation">.</span><span class="token function">append</span><span class="token punctuation">(</span>pooledConnection<span class="token punctuation">.</span><span class="token function">getConnectedTimeMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                buf<span class="token punctuation">.</span><span class="token function">append</span><span class="token punctuation">(</span><span class="token string">", open stackTrace\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                <span class="token class-name">StackTraceElement</span><span class="token punctuation">[</span><span class="token punctuation">]</span> trace <span class="token operator">=</span> pooledConnection<span class="token punctuation">.</span><span class="token function">getConnectStackTrace</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> trace<span class="token punctuation">.</span>length<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    buf<span class="token punctuation">.</span><span class="token function">append</span><span class="token punctuation">(</span><span class="token string">"\tat "</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    buf<span class="token punctuation">.</span><span class="token function">append</span><span class="token punctuation">(</span>trace<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span><span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    buf<span class="token punctuation">.</span><span class="token function">append</span><span class="token punctuation">(</span><span class="token string">"\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+
+                buf<span class="token punctuation">.</span><span class="token function">append</span><span class="token punctuation">(</span><span class="token string">"ownerThread current state is "</span> <span class="token operator">+</span> pooledConnection<span class="token punctuation">.</span><span class="token function">getOwnerThread</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getState</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+                           <span class="token operator">+</span> <span class="token string">", current stackTrace\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                trace <span class="token operator">=</span> pooledConnection<span class="token punctuation">.</span><span class="token function">getOwnerThread</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getStackTrace</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> trace<span class="token punctuation">.</span>length<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    buf<span class="token punctuation">.</span><span class="token function">append</span><span class="token punctuation">(</span><span class="token string">"\tat "</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    buf<span class="token punctuation">.</span><span class="token function">append</span><span class="token punctuation">(</span>trace<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span><span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    buf<span class="token punctuation">.</span><span class="token function">append</span><span class="token punctuation">(</span><span class="token string">"\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+
+                LOG<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span>buf<span class="token punctuation">.</span><span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">//返回本次回收连接数</span>
+    <span class="token keyword">return</span> removeCount<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="21_removeAbandoned_103"></a>2.1 removeAbandoned如何判断连接正在执行中</h3> 
+<p>在<code>removeAbandoned()</code>方法中，存在<code>pooledConnection.isRunning()</code>判断用于判断连接是否正在执行中，该方法取值为连接对象中的一个内部状态，该状态标记了当前连接是否正在执行，这里以<code>DruidPooledPreparedStatement#executeQuery()</code>执行进行分析。</p> 
+<pre><code class="prism language-java">
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token class-name">ResultSet</span> <span class="token function">executeQuery</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">SQLException</span> <span class="token punctuation">{<!-- --></span>
+		···省略部分代码···
+		<span class="token comment">//此处调用连接对象的beforeExecute()方法</span>
+        conn<span class="token punctuation">.</span><span class="token function">beforeExecute</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">ResultSet</span> rs <span class="token operator">=</span> stmt<span class="token punctuation">.</span><span class="token function">executeQuery</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>rs <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">return</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token class-name">DruidPooledResultSet</span> poolableResultSet <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">DruidPooledResultSet</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">,</span> rs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token function">addResultSetTrace</span><span class="token punctuation">(</span>poolableResultSet<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token keyword">return</span> poolableResultSet<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Throwable</span> t<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">errorCheck</span><span class="token punctuation">(</span>t<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token keyword">throw</span> <span class="token function">checkException</span><span class="token punctuation">(</span>t<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+	        <span class="token comment">//调用连接对象的afterExecute()方法</span>
+            conn<span class="token punctuation">.</span><span class="token function">afterExecute</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        ···省略部分代码···
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>此时，推测有关<code>running</code>状态跟踪是通过<code>beforeExecute()</code>与<code>afterExecute()</code>进行跟踪。</p> 
+<pre><code class="prism language-java">    <span class="token keyword">final</span> <span class="token keyword">void</span> <span class="token function">beforeExecute</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//得到当前连接的持有者</span>
+        <span class="token keyword">final</span> <span class="token class-name">DruidConnectionHolder</span> holder <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>holder<span class="token punctuation">;</span>
+        <span class="token comment">//持有者非空并且开启了removeAbandoned功能</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>holder <span class="token operator">!=</span> <span class="token keyword">null</span> <span class="token operator">&amp;&amp;</span> holder<span class="token punctuation">.</span>dataSource<span class="token punctuation">.</span>removeAbandoned<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//设置当前连接正在执行中</span>
+            running <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">final</span> <span class="token keyword">void</span> <span class="token function">afterExecute</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//得到当前连接的持有者</span>
+        <span class="token keyword">final</span> <span class="token class-name">DruidConnectionHolder</span> holder <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>holder<span class="token punctuation">;</span>
+        <span class="token comment">//持有者非空</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>holder <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//获得连接池对象</span>
+            <span class="token class-name">DruidAbstractDataSource</span> dataSource <span class="token operator">=</span> holder<span class="token punctuation">.</span>dataSource<span class="token punctuation">;</span>
+            <span class="token comment">//判断是否开启removeAbandoned</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>dataSource<span class="token punctuation">.</span>removeAbandoned<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//设置当前连接不在执行中</span>
+                running <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+                <span class="token comment">//设置最后活跃时间</span>
+                holder<span class="token punctuation">.</span>lastActiveTimeMillis <span class="token operator">=</span> <span class="token class-name">System</span><span class="token punctuation">.</span><span class="token function">currentTimeMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">//更新连接池onFatalError状态</span>
+            dataSource<span class="token punctuation">.</span>onFatalError <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>由此可知，开启<code>removeAbandoned</code>后，连接将在执行前后对<code>running</code>状态进行变更，以确定当前SQL是否正在执行中。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/9828c4ceb190ed6c33bc64fc04c483c8/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">chrome浏览器添加crx插件</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/e13c59d61a868d3a88986f7bbbe7b32f/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Javascript中Json的使用</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

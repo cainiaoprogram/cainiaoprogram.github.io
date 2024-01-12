@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>延迟块清理介绍(select也会产生redo的原因) - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="延迟块清理介绍(select也会产生redo的原因)" />
+<meta property="og:description" content="在Oracle中数据锁（这里主要指TX类型行锁）实际上是数据的属性，存储在块首部，称之为事务槽(ITL)。
+COMMIT操作的职责包括释放块上的锁，实际的释放方式即清除块上相应的事务槽，但这里存在一个性能的考量：
+设想一个UPDATE大量数据的操作，因为执行时间较长，一部分已修改的块已被缓冲池flush out写至磁盘，当UPDATE操作完成执行COMMIT操作时，则需要将那些已写至磁盘的数据块重新读入，这将消耗大量I/O，并使COMMIT操作十分缓慢。
+下面说说我关于上面那句话的理解：
+假设有100个块在进行update，但是还没有进行commit操作，由于buffer cache快被占满了，就先将前20个块从缓冲池写到了磁盘(对应一部分已修改的块已被缓冲池flush out写至磁盘)，此时这20个块的记录的状态信息是不对的还是未commit，因此在真正commit期间，还需要将这些状态信息不对的块重新读入到buffer cache里进行状态信息的修改(对应需要将那些已写至磁盘的数据块重新读入)，因此会造成许多无用的I/O，而且使得commit缓慢。
+因此伟大的Oracle在这里引入了延迟段清理的概念(文档号40689.1)。
+它留给访问受更新影响的任何块的下一个事务(select、update、delete、insert都可以)来“整理”该块，也就是修改块的状态信息（因此称为“延迟块清理”）。
+对待存在以下情况的块COMMIT操作不做块清除(而是转为延迟清除)：
+1、在更新过程中，被缓冲池flush out写至磁盘的块 若更新操作涉及的块超过了块缓冲区缓存的10%时，超出的部分块
+2、被其他事务被顺带着从buffer刷到了磁盘上的块(buffer cache是一个整体，不会看你是哪个事务来分开来去刷到磁盘上)
+虽然COMMIT放弃对这些块的块清除(block cleanout)操作，但COMMIT操作仍会修改回滚段的段头，回滚段的段头包括了段中的事务的字典，COMMIT操作将本事务转化为非ACTIVE状态。当下一次操作(事务)如SELECT,UPDATE,INSERT或DELETE访问到这些块时可能需要在读入后完成块清除，这样的操作称之为块延迟清除（deferred block cleanout）。
+块延迟清除通过事务槽上的回滚段号，槽号等信息访问回滚段头的事务字典，若事务不再活跃或事务过期则完成清除块上的事务槽，事务槽清除后继续执行相应的操作。
+总结来说块延迟清除是COMMIT操作的一个延续，始终是一种十分轻微的操作，且该种操作是行级的，不会使段(Segment)的属性有所改变。
+块延迟清除的影响在SELECT操作过程中体现的最为明显。在select时若发生了延迟块清除，就会去修改块的状态信息，因此会产生redo。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/4aee9ce5ab9c3b673eabd0e27dc5855f/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-01-20T16:28:01+08:00" />
+<meta property="article:modified_time" content="2022-01-20T16:28:01+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">延迟块清理介绍(select也会产生redo的原因)</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p style="margin-left:0;">        在Oracle中数据锁（这里主要指TX类型行锁）实际上是数据的属性，存储在块首部，称之为事务槽(ITL)。</p> 
+<p style="margin-left:0;">        COMMIT操作的职责包括释放块上的锁，实际的释放方式即清除块上相应的事务槽，但这里存在一个性能的考量：</p> 
+<p style="margin-left:0;">        设想一个UPDATE大量数据的操作，因为执行时间较长，<span style="color:#FF0000;">一部分已修改的块已被缓冲池</span><span style="color:#FF0000;">flush out</span><span style="color:#FF0000;">写至磁盘</span>，当UPDATE操作完成执行COMMIT操作时，则需要将那些已写至磁盘的数据块重新读入，这将消耗大量I/O，并使COMMIT操作十分缓慢。</p> 
+<p style="margin-left:0;">下面说说我关于上面那句话的理解：</p> 
+<p style="margin-left:0;">        假设有100个块在进行update，但是还没有进行commit操作，由于buffer cache快被占满了，就先将前20个块从缓冲池写到了磁盘(对应一<span style="color:#FF0000;">部分已修改的块已被缓冲池</span><span style="color:#FF0000;">flush out</span><span style="color:#FF0000;">写至磁盘</span>)，此时这20个块的记录的状态信息是不对的还是未commit，因此在真正commit期间，还需要将这些状态信息不对的块重新读入到buffer cache里进行状态信息的修改(对应<span style="color:#FF0000;">需要将那些已写至磁盘的数据块重新读入</span>)，因此会造成许多无用的I/O，而且使得commit缓慢。</p> 
+<p style="margin-left:0;">因此伟大的Oracle在这里引入了延迟段清理的概念(文档号40689.1)。</p> 
+<p style="margin-left:0;">        它留给访问受更新影响的任何块的下一个事务(select、update、delete、insert都可以)来“整理”该块，也就是修改块的状态信息（因此称为“延迟块清理”）。</p> 
+<p style="margin-left:0;">对待存在以下情况的块COMMIT操作不做块清除(而是转为延迟清除)：</p> 
+<p style="margin-left:0;">1、在更新过程中，被缓冲池flush out写至磁盘的块 若更新操作涉及的块超过了块缓冲区缓存的10%时，超出的部分块</p> 
+<p style="margin-left:0;">2、被其他事务被顺带着从buffer刷到了磁盘上的块(buffer cache是一个整体，不会看你是哪个事务来分开来去刷到磁盘上)</p> 
+<p style="margin-left:0;">          虽然COMMIT放弃对这些块的块清除(block cleanout)操作，但COMMIT操作仍会修改回滚段的段头，回滚段的段头包括了段中的事务的字典，COMMIT操作将本事务转化为非ACTIVE状态。当下一次操作(事务)如SELECT,UPDATE,INSERT或DELETE访问到这些块时可能需要在读入后完成块清除，这样的操作称之为块延迟清除（deferred block cleanout）。</p> 
+<p style="margin-left:0;">         块延迟清除通过事务槽上的回滚段号，槽号等信息访问回滚段头的事务字典，若事务不再活跃或事务过期则完成清除块上的事务槽，事务槽清除后继续执行相应的操作。</p> 
+<p style="margin-left:0;">         总结来说块延迟清除是COMMIT操作的一个延续，始终是一种十分轻微的操作，且该种操作是行级的，不会使段(Segment)的属性有所改变。</p> 
+<p style="margin-left:0;">        块延迟清除的影响在SELECT操作过程中体现的最为明显。在select时若发生了延迟块清除，就会去修改块的状态信息，<span style="color:#FF0000;">因此会产生</span><span style="color:#FF0000;">redo</span>。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/c480de28193ad8fdc59c239985359b3c/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">windows2012通过本地安全策略限制远程登录的IP地址</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/c8a1bebf7692f7054849ddf6bdb21bc8/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">【洛谷 P3957】【NOIP 2017 普及组】【单调队列】跳房子</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

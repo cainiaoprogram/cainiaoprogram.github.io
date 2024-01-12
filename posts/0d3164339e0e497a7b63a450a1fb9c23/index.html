@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>TensorRT 系列 （2）动态shape - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="TensorRT 系列 （2）动态shape" />
+<meta property="og:description" content="TensorRT支持输入动态shape的推理，在编译模型时可以指定shape的动态范围为[L, H]，推理时允许L &lt;= shape &lt;= H，输入动态shape可通过createOptimizationProfile优化配置文件，来指定输入的shape可以变换的范围，当然也可以通过ONNX导出模型时进行指定，本次只演示前一种。
+示例代码：
+// tensorRT include #include &lt;NvInfer.h&gt; #include &lt;NvInferRuntime.h&gt; // cuda include #include &lt;cuda_runtime.h&gt; // system include #include &lt;stdio.h&gt; #include &lt;math.h&gt; #include &lt;iostream&gt; #include &lt;fstream&gt; // 后面要用到ios这个库 #include &lt;vector&gt; using namespace std; class TRTLogger : public nvinfer1::ILogger { public: virtual void log(Severity severity, nvinfer1::AsciiChar const* msg) noexcept override { if(severity &lt;= Severity::kINFO) { printf(&#34;%d: %s\n&#34;, severity, msg); } } } logger; nvinfer1::Weights make_weights(float* ptr, int n) { nvinfer1::Weights w; w." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/0d3164339e0e497a7b63a450a1fb9c23/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-05-29T19:13:15+08:00" />
+<meta property="article:modified_time" content="2022-05-29T19:13:15+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">TensorRT 系列 （2）动态shape</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>TensorRT支持输入动态shape的推理，在编译模型时可以指定shape的动态范围为[L, H]，推理时允许L &lt;= shape &lt;= H，输入动态shape可通过createOptimizationProfile优化配置文件，来指定输入的shape可以变换的范围，当然也可以通过ONNX导出模型时进行指定，本次只演示前一种。</p> 
+<p>示例代码：</p> 
+<pre><code>
+// tensorRT include
+#include &lt;NvInfer.h&gt;
+#include &lt;NvInferRuntime.h&gt;
+
+// cuda include
+#include &lt;cuda_runtime.h&gt;
+
+// system include
+#include &lt;stdio.h&gt;
+#include &lt;math.h&gt;
+
+#include &lt;iostream&gt; 
+#include &lt;fstream&gt; // 后面要用到ios这个库
+#include &lt;vector&gt;
+
+using namespace std;
+
+class TRTLogger : public nvinfer1::ILogger
+{
+public:
+    virtual void log(Severity severity, nvinfer1::AsciiChar const* msg) noexcept override
+    {
+        if(severity &lt;= Severity::kINFO)
+        {
+            printf("%d: %s\n", severity, msg);
+        }
+    }
+} logger;
+
+nvinfer1::Weights make_weights(float* ptr, int n)
+{
+    nvinfer1::Weights w;
+    w.count = n;
+    w.type = nvinfer1::DataType::kFLOAT;
+    w.values = ptr;
+    return w;
+}
+
+bool build_model()
+{
+    TRTLogger logger;
+
+    // ----------------------------- 1. 定义 builder, config 和network -----------------------------
+    nvinfer1::IBuilder* builder = nvinfer1::createInferBuilder(logger);
+    nvinfer1::IBuilderConfig* config = builder-&gt;createBuilderConfig();
+    nvinfer1::INetworkDefinition* network = builder-&gt;createNetworkV2(1);
+
+    // 构建一个模型
+    /*
+        Network definition:
+
+        image
+          |
+        conv(3x3, pad=1)  input = 1, output = 1, bias = True     w=[[1.0, 2.0, 0.5], [0.1, 0.2, 0.5], [0.2, 0.2, 0.1]], b=0.0
+          |
+        relu
+          |
+        prob
+    */
+
+
+    // ----------------------------- 2. 输入，模型结构和输出的基本信息 -----------------------------
+    const int num_input = 1;
+    const int num_output = 1;
+    float layer1_weight_values[] = {
+        1.0, 2.0, 3.1, 
+        0.1, 0.1, 0.1, 
+        0.2, 0.2, 0.2
+    }; // 行优先
+    float layer1_bias_values[]   = {0.0};
+
+    // 如果要使用动态shape，必须让NetworkDefinition的维度定义为-1，in_channel是固定的
+    nvinfer1::ITensor* input = network-&gt;addInput("image", nvinfer1::DataType::kFLOAT, nvinfer1::Dims4(-1, num_input, -1, -1));
+    nvinfer1::Weights layer1_weight = make_weights(layer1_weight_values, 9);
+    nvinfer1::Weights layer1_bias   = make_weights(layer1_bias_values, 1);
+    auto layer1 = network-&gt;addConvolution(*input, num_output, nvinfer1::DimsHW(3, 3), layer1_weight, layer1_bias);
+    layer1-&gt;setPadding(nvinfer1::DimsHW(1, 1));
+
+    auto prob = network-&gt;addActivation(*layer1-&gt;getOutput(0), nvinfer1::ActivationType::kRELU); // *(layer1-&gt;getOutput(0))
+     
+    // 将我们需要的prob标记为输出
+    network-&gt;markOutput(*prob-&gt;getOutput(0));
+
+    int maxBatchSize = 10;
+    printf("Workspace Size = %.2f MB\n", (1 &lt;&lt; 28) / 1024.0f / 1024.0f);
+    // 配置暂存存储器，用于layer实现的临时存储，也用于保存中间激活值
+    config-&gt;setMaxWorkspaceSize(1 &lt;&lt; 28);
+
+    // --------------------------------- 2.1 关于profile ----------------------------------
+    // 如果模型有多个输入，则必须多个profile
+    auto profile = builder-&gt;createOptimizationProfile();
+
+    // 配置最小允许1 x 1 x 3 x 3
+    profile-&gt;setDimensions(input-&gt;getName(), nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4(1, num_input, 3, 3));
+
+    // 配置最优配置允许1 x 1 x 3 x 3
+    profile-&gt;setDimensions(input-&gt;getName(), nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4(1, num_input, 3, 3));
+
+    // 配置最大允许10 x 1 x 5 x 5
+    profile-&gt;setDimensions(input-&gt;getName(), nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4(maxBatchSize, num_input, 5, 5));
+
+    config-&gt;addOptimizationProfile(profile);
+
+    nvinfer1::ICudaEngine* engine = builder-&gt;buildEngineWithConfig(*network, *config);
+    if(engine == nullptr)
+    {
+        printf("Build engine failed.\n");
+        return false;
+    }
+
+    // -------------------------- 3. 序列化 ----------------------------------
+    // 将模型序列化，并储存为文件
+    nvinfer1::IHostMemory* model_data = engine-&gt;serialize();
+    FILE* f = fopen("engine.trtmodel", "wb");
+    fwrite(model_data-&gt;data(), 1, model_data-&gt;size(), f);
+    fclose(f);
+
+    // 卸载顺序按照构建顺序倒序
+    model_data-&gt;destroy();
+    engine-&gt;destroy();
+    network-&gt;destroy();
+    config-&gt;destroy();
+    builder-&gt;destroy();
+    printf("Done.\n");
+    return true;
+}
+
+vector&lt;unsigned char&gt; load_file(const string&amp; file)
+{
+    ifstream in(file, ios::in | ios::binary);
+    if (!in.is_open())
+        return {};
+
+    in.seekg(0, ios::end);
+    size_t length = in.tellg();
+
+    std::vector&lt;uint8_t&gt; data;
+    if (length &gt; 0)
+    {
+        in.seekg(0, ios::beg);
+        data.resize(length);
+
+        in.read((char*)&amp;data[0], length);
+    }
+    in.close();
+    return data;
+}
+
+void inference()
+{
+    // ------------------------------- 1. 加载model并反序列化 -------------------------------
+    TRTLogger logger;
+    auto engine_data = load_file("engine.trtmodel");
+    nvinfer1::IRuntime* runtime   = nvinfer1::createInferRuntime(logger);
+    nvinfer1::ICudaEngine* engine = runtime-&gt;deserializeCudaEngine(engine_data.data(), engine_data.size());
+    if(engine == nullptr)
+    {
+        printf("Deserialize cuda engine failed.\n");
+        runtime-&gt;destroy();
+        return;
+    }
+
+    nvinfer1::IExecutionContext* execution_context = engine-&gt;createExecutionContext();
+    cudaStream_t stream = nullptr;
+    cudaStreamCreate(&amp;stream);
+
+    /*
+        Network definition:
+
+        image
+          |
+        conv(3x3, pad=1)  input = 1, output = 1, bias = True     w=[[1.0, 2.0, 0.5], [0.1, 0.2, 0.5], [0.2, 0.2, 0.1]], b=0.0
+          |
+        relu
+          |
+        prob
+    */
+
+    // ------------------------------- 2. 输入与输出 -------------------------------
+    float input_data_host[] = {
+        // batch 0
+        1,   1,   1,
+        1,   1,   1,
+        1,   1,   1,
+
+        // batch 1
+        -1,   1,   1,
+        1,   0,   1,
+        1,   1,   -1
+    };
+    float* input_data_device = nullptr;
+
+    // 3x3输入，对应3x3输出
+    int ib = 2;
+    int iw = 3;
+    int ih = 3;
+    float output_data_host[ib * iw * ih];
+    float* output_data_device = nullptr;
+    cudaMalloc(&amp;input_data_device, sizeof(input_data_host));
+    cudaMalloc(&amp;output_data_device, sizeof(output_data_host));
+    cudaMemcpyAsync(input_data_device, input_data_host, sizeof(input_data_host), cudaMemcpyHostToDevice, stream);
+
+
+    // ------------------------------- 3. 推理 -------------------------------
+    // 明确当前推理时，使用的数据输入大小
+    execution_context-&gt;setBindingDimensions(0, nvinfer1::Dims4(ib, 1, ih, iw));
+    float* bindings[] = {input_data_device, output_data_device};
+    bool success = execution_context-&gt;enqueueV2((void**)bindings, stream, nullptr);
+    cudaMemcpyAsync(output_data_host, output_data_device, sizeof(output_data_host), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
+
+    // ------------------------------- 4. 输出结果 -------------------------------
+    for(int b = 0; b &lt; ib; ++b)
+    {
+        printf("batch %d. output_data_host = \n", b);
+        for(int i = 0; i &lt; iw * ih; ++i)
+        {
+            printf("%f, ", output_data_host[b * iw * ih + i]);
+            if((i + 1) % iw == 0)
+                printf("\n");
+        }
+    }
+
+    printf("Clean memory\n");
+    cudaStreamDestroy(stream);
+    cudaFree(input_data_device);
+    cudaFree(output_data_device);
+    execution_context-&gt;destroy();
+    engine-&gt;destroy();
+    runtime-&gt;destroy();
+}
+
+int main(){
+
+    if(!build_model())
+    {
+        return -1;
+    }
+    inference();
+    return 0;
+}</code></pre> 
+<p> Makefile:</p> 
+<pre><code>cc        := g++
+name      := pro
+workdir   := workspace
+srcdir    := src
+objdir    := objs
+stdcpp    := c++11
+cuda_home := /home/liuhongyuan/miniconda3/envs/trtpy/lib/python3.8/site-packages//trtpy/trt8cuda112cudnn8
+syslib    := /home/liuhongyuan/miniconda3/envs/trtpy/lib/python3.8/site-packages//trtpy/lib
+cpp_pkg   := /home/liuhongyuan/miniconda3/envs/trtpy/lib/python3.8/site-packages//trtpy/cpp-packages
+cuda_arch := 
+nvcc      := $(cuda_home)/bin/nvcc -ccbin=$(cc)
+
+# 定义cpp的路径查找和依赖项mk文件
+cpp_srcs := $(shell find $(srcdir) -name "*.cpp")
+cpp_objs := $(cpp_srcs:.cpp=.cpp.o)
+cpp_objs := $(cpp_objs:$(srcdir)/%=$(objdir)/%)
+cpp_mk   := $(cpp_objs:.cpp.o=.cpp.mk)
+
+# 定义cu文件的路径查找和依赖项mk文件
+cu_srcs := $(shell find $(srcdir) -name "*.cu")
+cu_objs := $(cu_srcs:.cu=.cu.o)
+cu_objs := $(cu_objs:$(srcdir)/%=$(objdir)/%)
+cu_mk   := $(cu_objs:.cu.o=.cu.mk)
+
+# 定义opencv和cuda需要用到的库文件
+link_cuda      := cudart cudnn
+link_trtpro    := 
+link_tensorRT  := nvinfer
+link_opencv    := 
+link_sys       := stdc++ dl
+link_librarys  := $(link_cuda) $(link_tensorRT) $(link_sys) $(link_opencv)
+
+# 定义头文件路径，请注意斜杠后边不能有空格
+# 只需要写路径，不需要写-I
+include_paths := src              \
+    $(cuda_home)/include/cuda     \
+	$(cuda_home)/include/tensorRT \
+	$(cpp_pkg)/opencv4.2/include
+
+# 定义库文件路径，只需要写路径，不需要写-L
+library_paths := $(cuda_home)/lib64 $(syslib) $(cpp_pkg)/opencv4.2/lib
+
+# 把library path给拼接为一个字符串，例如a b c =&gt; a:b:c
+# 然后使得LD_LIBRARY_PATH=a:b:c
+empty := 
+library_path_export := $(subst $(empty) $(empty),:,$(library_paths))
+
+# 把库路径和头文件路径拼接起来成一个，批量自动加-I、-L、-l
+run_paths     := $(foreach item,$(library_paths),-Wl,-rpath=$(item))
+include_paths := $(foreach item,$(include_paths),-I$(item))
+library_paths := $(foreach item,$(library_paths),-L$(item))
+link_librarys := $(foreach item,$(link_librarys),-l$(item))
+
+# 如果是其他显卡，请修改-gencode=arch=compute_75,code=sm_75为对应显卡的能力
+# 显卡对应的号码参考这里：https://developer.nvidia.com/zh-cn/cuda-gpus#compute
+# 如果是 jetson nano，提示找不到-m64指令，请删掉 -m64选项。不影响结果
+cpp_compile_flags := -std=$(stdcpp) -w -g -O0 -m64 -fPIC -fopenmp -pthread
+cu_compile_flags  := -std=$(stdcpp) -w -g -O0 -m64 $(cuda_arch) -Xcompiler "$(cpp_compile_flags)"
+link_flags        := -pthread -fopenmp -Wl,-rpath='$$ORIGIN'
+
+cpp_compile_flags += $(include_paths)
+cu_compile_flags  += $(include_paths)
+link_flags        += $(library_paths) $(link_librarys) $(run_paths)
+
+# 如果头文件修改了，这里的指令可以让他自动编译依赖的cpp或者cu文件
+ifneq ($(MAKECMDGOALS), clean)
+-include $(cpp_mk) $(cu_mk)
+endif
+
+$(name)   : $(workdir)/$(name)
+
+all       : $(name)
+run       : $(name)
+	@cd $(workdir) &amp;&amp; ./$(name) $(run_args)
+
+$(workdir)/$(name) : $(cpp_objs) $(cu_objs)
+	@echo Link $@
+	@mkdir -p $(dir $@)
+	@$(cc) $^ -o $@ $(link_flags)
+
+$(objdir)/%.cpp.o : $(srcdir)/%.cpp
+	@echo Compile CXX $&lt;
+	@mkdir -p $(dir $@)
+	@$(cc) -c $&lt; -o $@ $(cpp_compile_flags)
+
+$(objdir)/%.cu.o : $(srcdir)/%.cu
+	@echo Compile CUDA $&lt;
+	@mkdir -p $(dir $@)
+	@$(nvcc) -c $&lt; -o $@ $(cu_compile_flags)
+
+# 编译cpp依赖项，生成mk文件
+$(objdir)/%.cpp.mk : $(srcdir)/%.cpp
+	@echo Compile depends C++ $&lt;
+	@mkdir -p $(dir $@)
+	@$(cc) -M $&lt; -MF $@ -MT $(@:.cpp.mk=.cpp.o) $(cpp_compile_flags)
+    
+# 编译cu文件的依赖项，生成cumk文件
+$(objdir)/%.cu.mk : $(srcdir)/%.cu
+	@echo Compile depends CUDA $&lt;
+	@mkdir -p $(dir $@)
+	@$(nvcc) -M $&lt; -MF $@ -MT $(@:.cu.mk=.cu.o) $(cu_compile_flags)
+
+# 定义清理指令
+clean :
+	@rm -rf $(objdir) $(workdir)/$(name) $(workdir)/*.trtmodel
+
+# 防止符号被当做文件
+.PHONY : clean run $(name)
+
+# 导出依赖库路径，使得能够运行起来
+export LD_LIBRARY_PATH:=$(library_path_export)</code></pre> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/4d8295521afd0198d9d039b26a9ecb0b/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Autosar Time Sync 时间同步</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/29c9eb4f17fa5e358d5b9b9464c84d35/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">打印菱形（C语言）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

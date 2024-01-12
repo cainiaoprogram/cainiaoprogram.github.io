@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>go语言 ｜ grpc原理介绍（三） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="go语言 ｜ grpc原理介绍（三）" />
+<meta property="og:description" content="了解 gRPC 通信模式中的消息流 gRPC 支持四种通信模式，分别是简单 RPC、服务端流式 RPC、客户端流式 RPC 和双向流式 RPC。
+简单 RPC 在gRPC中，一个简单的RPC调用遵循请求-响应模型，通常涉及以下几个关键步骤和组件：
+请求头（Request Header）: 客户端（Client）发起请求时，首先发送一个请求头，其中包含元数据，如目标服务、方法等。长度前缀消息（Length-Prefixed Message）:在请求头后面，客户端发送实际的RPC消息。这个消息一般会有一个长度前缀，以便服务端（Server）可以准确地解析它。数据帧（Data Frames）: 一个消息可能会分成多个数据帧进行传输，这取决于消息的大小和底层传输协议的限制。流结束标志（EOS, End Of Stream）:客户端在发送完所有数据帧后会设置一个EOS标志。这标志着客户端对该请求的“半关闭”状态，意味着客户端将不再发送更多数据，但仍然可以接收来自服务端的响应。响应头（Response Header）: 服务端在收到并解析完整的请求消息后，首先发送一个响应头。响应消息（Response Message）: 随后，服务端发送实际的响应消息，该消息也是一个长度前缀的格式。Trailers: 最后，服务端通过发送一个带有状态详细信息的Trailers头来结束通信。
+服务端流式 RPC 从 client 端的角度来看，简单 RPC 和服务端流式 RPC 具有相同的请求消息流。在这两种情况下，我们都会发送一条请求消息。主要区别在于 server 端。server 端会发送多条消息，而不是向 client 端发送一条响应消息。server 端一直等待，直到收到完整的请求消息，之后发送响应头和多个带长度前缀的消息。一旦 server 端发送带有状态详细信息的 Trailers 标头，通信就会结束。
+客户端流式 RPC 在客户端流式 RPC 中，client 端向 server 端发送多条消息，server 端发送一条响应消息作为回复。client 端首先通过发送请求头帧建立与 server 端的连接。建立连接后，client 端会向 server 端发送多个长度前缀消息作为数据帧。最后，client 端通过在最后一个数据帧中发送一个 EOS 标志来半关闭连接。同时，server 端读取从 client 端接收到的消息。一旦接收到所有消息，server 端就会发送响应消息以及 Trailers 标头并关闭连接。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/7ce171dc3bf2cd4bba143201c9ec30ec/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-11-05T00:32:12+08:00" />
+<meta property="article:modified_time" content="2023-11-05T00:32:12+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">go语言 ｜ grpc原理介绍（三）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-dracula">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="_gRPC__0"></a>了解 gRPC 通信模式中的消息流</h2> 
+<p>gRPC 支持四种通信模式，分别是简单 RPC、服务端流式 RPC、客户端流式 RPC 和双向流式 RPC。</p> 
+<h3><a id="_RPC_3"></a>简单 RPC</h3> 
+<p>在gRPC中，一个简单的RPC调用遵循请求-响应模型，通常涉及以下几个关键步骤和组件：</p> 
+<ol><li>请求头（Request Header）: 客户端（Client）发起请求时，首先发送一个请求头，其中包含元数据，如目标服务、方法等。</li><li>长度前缀消息（Length-Prefixed Message）:在请求头后面，客户端发送实际的RPC消息。这个消息一般会有一个长度前缀，以便服务端（Server）可以准确地解析它。</li><li>数据帧（Data Frames）: 一个消息可能会分成多个数据帧进行传输，这取决于消息的大小和底层传输协议的限制。</li><li>流结束标志（EOS, End Of Stream）:客户端在发送完所有数据帧后会设置一个EOS标志。这标志着客户端对该请求的“半关闭”状态，意味着客户端将不再发送更多数据，但仍然可以接收来自服务端的响应。</li><li>响应头（Response Header）: 服务端在收到并解析完整的请求消息后，首先发送一个响应头。</li><li>响应消息（Response Message）: 随后，服务端发送实际的响应消息，该消息也是一个长度前缀的格式。</li><li>Trailers: 最后，服务端通过发送一个带有状态详细信息的Trailers头来结束通信。<br> <img src="https://images2.imgbox.com/a1/22/41KZVgye_o.png" alt="在这里插入图片描述"></li></ol> 
+<h3><a id="_RPC_14"></a>服务端流式 RPC</h3> 
+<p>从 client 端的角度来看，简单 RPC 和服务端流式 RPC 具有相同的请求消息流。在这两种情况下，我们都会发送一条请求消息。主要区别在于 server 端。server 端会发送多条消息，而不是向 client 端发送一条响应消息。server 端一直等待，直到收到完整的请求消息，之后发送响应头和多个带长度前缀的消息。一旦 server 端发送带有状态详细信息的 Trailers 标头，通信就会结束。</p> 
+<p><img src="https://images2.imgbox.com/98/27/bAEosgub_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="_RPC_18"></a>客户端流式 RPC</h3> 
+<p>在客户端流式 RPC 中，client 端向 server 端发送多条消息，server 端发送一条响应消息作为回复。client 端首先通过发送请求头帧建立与 server 端的连接。建立连接后，client 端会向 server 端发送多个长度前缀消息作为数据帧。最后，client 端通过在最后一个数据帧中发送一个 EOS 标志来半关闭连接。同时，server 端读取从 client 端接收到的消息。一旦接收到所有消息，server 端就会发送响应消息以及 Trailers 标头并关闭连接。<br> <img src="https://images2.imgbox.com/e2/a1/h0nKJtg8_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="_RPC_21"></a>双向流式 RPC</h3> 
+<p>在此模式中，client 端通过发送请求头帧来建立连接。一旦建立连接，client 端和 server 端都可以直接发送多个长度前缀消息，而无需等待对方完成。双方都可以自主结束连接，这意味着他们不能再发送任何消息。</p> 
+<h2><a id="gRPC__24"></a>gRPC 实现架构</h2> 
+<p>如下图所示，gRPC 采用分层架构实现。</p> 
+<p><img src="https://images2.imgbox.com/00/69/pMs5yJFo_o.png" alt="在这里插入图片描述"><br> 在gRPC的架构中，核心组件分为以下几层：</p> 
+<ol><li>gRPC Core 层: 这是gRPC架构中的底层，负责网络操作的所有底层细节。它提供了一组核心API和功能，如流控制、安全认证、以及其他低级网络操作。</li><li>语言绑定（Language Bindings）: gRPC原生支持C/C++、Go和Java，但也提供了多种流行编程语言的语言绑定，包括Python，Ruby、PHP等。这些绑定通常是对gRPC Core层的C API的高级包装，使得在特定语言中使用gRPC更加方便。</li><li>应用层（Application Layer）: 这一层位于语言绑定之上，处理应用逻辑和数据编码逻辑。开发人员通常使用IDL（接口定义语言）编译器，如Protocol Buffers编译器，为特定的数据结构生成源代码。这些生成的代码会被集成到应用层逻辑中，用于序列化和反序列化消息。</li></ol> 
+<p>通过这种层次结构，gRPC实现了从底层网络操作到高级应用逻辑的完全抽象，允许开发人员集中精力在RPC逻辑的实现上，而无需担心底层的网络细节。这种架构不仅使得代码更易于管理和扩展，还支持跨语言和跨平台的通信，大大提高了开发效率。</p> 
+<hr> 
+<h2><a id="QA_39"></a>Q&amp;A</h2> 
+<h3><a id="gRPC_Metadata__41"></a>gRPC Metadata 是通过什么传输？</h3> 
+<p><img src="https://images2.imgbox.com/ca/5e/Sc3uBrdp_o.png" alt="在这里插入图片描述"><br> 在gRPC中，Metadata是通过HTTP/2 headers和trailers来传输的。Metadata是键值对的集合，用于传递与请求或响应相关的附加信息。这些信息可能包括诸如认证令牌、自定义消息头、请求ID等。</p> 
+<ol><li>请求头（Request Headers）: 在一个gRPC调用开始时，客户端会发送HTTP/2 headers，其中可以包括初始化该调用所需的Metadata。例如，这里可能包含身份验证相关的令牌。</li><li>响应头（Response Headers）: 与之类似，服务端在响应开始时也会发送HTTP/2 headers，这些也可以携带Metadata。这通常用于传递关于请求状态或其他重要信息的指示。</li><li>Trailers: 在请求或响应完成时，可以通过HTTP/2 trailers发送额外的Metadata。这常用于携带状态信息，例如gRPC的状态码和错误消息。</li></ol> 
+<p>在一个典型的gRPC调用中，客户端会首先发送包含Metadata的HTTP/2 headers，然后发送编码后的RPC message。服务端在接收到这些信息后，会解析Metadata和RPC message，并根据这些执行相应的操作，然后返回响应和响应的Metadata。</p> 
+<h3><a id="_grpcDial__50"></a>调用 grpc.Dial 会真正的去连接服务端吗？</h3> 
+<p>会，但是是异步连接的，连接状态为正在连接。但如果你设置了 grpc.WithBlock 选项，就会阻塞等待（等待握手成功）。另外你需要注意，当未设置 grpc.WithBlock 时，ctx 超时控制对其无任何效果。</p> 
+<h3><a id="_ClientConn__Close__53"></a>调用 ClientConn 不 Close 会导致泄露吗？</h3> 
+<p>会，除非你的客户端不是常驻进程，那么在应用结束时会被动地回收资源。但如果是常驻进程，你又真的忘记执行 Close 语句，会造成的泄露。如下图：</p> 
+<h3><a id="_56"></a>不控制超时调用的话，会出现什么问题？</h3> 
+<p>短时间内不会出现问题，但是会不断积蓄泄露，积蓄到最后当然就是服务无法提供响应了。如下图：<br> <img src="https://images2.imgbox.com/95/28/cxbEr96I_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="_59"></a>为什么默认的拦截器不可以传多个？</h3> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">chainUnaryClientInterceptors</span><span class="token punctuation">(</span>cc <span class="token operator">*</span>ClientConn<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    interceptors <span class="token operator">:=</span> cc<span class="token punctuation">.</span>dopts<span class="token punctuation">.</span>chainUnaryInts
+    <span class="token keyword">if</span> cc<span class="token punctuation">.</span>dopts<span class="token punctuation">.</span>unaryInt <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+        interceptors <span class="token operator">=</span> <span class="token function">append</span><span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token punctuation">]</span>UnaryClientInterceptor<span class="token punctuation">{<!-- --></span>cc<span class="token punctuation">.</span>dopts<span class="token punctuation">.</span>unaryInt<span class="token punctuation">}</span><span class="token punctuation">,</span> interceptors<span class="token operator">...</span><span class="token punctuation">)</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">var</span> chainedInt UnaryClientInterceptor
+    <span class="token keyword">if</span> <span class="token function">len</span><span class="token punctuation">(</span>interceptors<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+        chainedInt <span class="token operator">=</span> <span class="token boolean">nil</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token function">len</span><span class="token punctuation">(</span>interceptors<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">1</span> <span class="token punctuation">{<!-- --></span>
+        chainedInt <span class="token operator">=</span> interceptors<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        chainedInt <span class="token operator">=</span> <span class="token keyword">func</span><span class="token punctuation">(</span>ctx context<span class="token punctuation">.</span>Context<span class="token punctuation">,</span> method <span class="token builtin">string</span><span class="token punctuation">,</span> req<span class="token punctuation">,</span> reply <span class="token keyword">interface</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">,</span> cc <span class="token operator">*</span>ClientConn<span class="token punctuation">,</span> invoker UnaryInvoker<span class="token punctuation">,</span> opts <span class="token operator">...</span>CallOption<span class="token punctuation">)</span> <span class="token builtin">error</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span> interceptors<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">(</span>ctx<span class="token punctuation">,</span> method<span class="token punctuation">,</span> req<span class="token punctuation">,</span> reply<span class="token punctuation">,</span> cc<span class="token punctuation">,</span> <span class="token function">getChainUnaryInvoker</span><span class="token punctuation">(</span>interceptors<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> invoker<span class="token punctuation">)</span><span class="token punctuation">,</span> opts<span class="token operator">...</span><span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    cc<span class="token punctuation">.</span>dopts<span class="token punctuation">.</span>unaryInt <span class="token operator">=</span> chainedInt
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>当存在多个拦截器时，取的就是第一个拦截器。因此结论是允许传多个，但并没有用。</p> 
+<h3><a id="_83"></a>真的需要用到多个拦截器的话，怎么办？</h3> 
+<p>可以使用 go-grpc-middleware 提供的 grpc.UnaryInterceptor 和 grpc.StreamInterceptor 链式方法，方便快捷省心。</p> 
+<h3><a id="_ClientConn__86"></a>频繁创建 ClientConn 有什么问题？</h3> 
+<p>这个问题我们可以反向验证一下，假设不共用 ClientConn 看看会怎么样？如下:</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">BenchmarkSearch</span><span class="token punctuation">(</span>b <span class="token operator">*</span>testing<span class="token punctuation">.</span>B<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">for</span> i <span class="token operator">:=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> b<span class="token punctuation">.</span>N<span class="token punctuation">;</span> i<span class="token operator">++</span> <span class="token punctuation">{<!-- --></span>
+        conn<span class="token punctuation">,</span> err <span class="token operator">:=</span> <span class="token function">GetClientConn</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+            b<span class="token punctuation">.</span><span class="token function">Errorf</span><span class="token punctuation">(</span><span class="token string">"GetClientConn err: %v"</span><span class="token punctuation">,</span> err<span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+        <span class="token boolean">_</span><span class="token punctuation">,</span> err <span class="token operator">=</span> <span class="token function">Search</span><span class="token punctuation">(</span>context<span class="token punctuation">.</span><span class="token function">Background</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> conn<span class="token punctuation">)</span>
+        <span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+            b<span class="token punctuation">.</span><span class="token function">Errorf</span><span class="token punctuation">(</span><span class="token string">"Search err: %v"</span><span class="token punctuation">,</span> err<span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>输出结果</p> 
+<pre><code class="prism language-go">    <span class="token operator">...</span> connection <span class="token builtin">error</span><span class="token punctuation">:</span> desc <span class="token operator">=</span> <span class="token string">"transport: Error while dialing dial tcp :10001: socket: too many open files"</span>
+    <span class="token operator">...</span> connection <span class="token builtin">error</span><span class="token punctuation">:</span> desc <span class="token operator">=</span> <span class="token string">"transport: Error while dialing dial tcp :10001: socket: too many open files"</span>
+    <span class="token operator">...</span> connection <span class="token builtin">error</span><span class="token punctuation">:</span> desc <span class="token operator">=</span> <span class="token string">"transport: Error while dialing dial tcp :10001: socket: too many open files"</span>
+    <span class="token operator">...</span> connection <span class="token builtin">error</span><span class="token punctuation">:</span> desc <span class="token operator">=</span> <span class="token string">"transport: Error while dialing dial tcp :10001: socket: too many open files"</span>
+FAIL
+exit status <span class="token number">1</span>
+</code></pre> 
+<p>当你的应用场景是存在高频次同时生成/调用 ClientConn 时，可能会导致系统的文件句柄占用过多。这种情况下你可以变更应用程序生成/调用 ClientConn 的模式，又或是池化它，这块可以参考 grpc-go-pool 项目。</p> 
+<h3><a id="_115"></a>客户端请求失败后会默认重试吗？</h3> 
+<p>会不断地进行重试，直到上下文取消。而重试时间方面采用 backoff 算法作为的重连机制，默认的最大重试时间间隔是 120s。</p> 
+<h3><a id="_HTTP2__118"></a>为什么要用 HTTP/2 作为传输协议？</h3> 
+<p>许多客户端要通过 HTTP 代理来访问网络，gRPC 全部用 HTTP/2 实现，等到代理开始支持 HTTP/2 就能透明转发 gRPC 的数据。不光如此，负责负载均衡、访问控制等等的反向代理都能无缝兼容 gRPC，比起自己设计 wire protocol 的 Thrift，这样做科学不少。</p> 
+<hr> 
+<h2><a id="_123"></a>总结</h2> 
+<p>gRPC 是一个高性能的远程过程调用（RPC）框架，它主要依赖于两个关键技术：Protocol Buffers和HTTP/2。</p> 
+<ol><li>Protocol Buffers:这是一个高效的数据序列化协议，用于编码和解码消息。由于其二进制格式和强类型定义，它通常比传统的JSON或XML更高效，具有更小的数据尺寸和更快的序列化/反序列化速度。这种优化的数据表达方式在网络传输中起到了至关重要的作用，尤其是在需要低延迟和高吞吐量的场景中。</li><li>HTTP/2: 相较于其前身HTTP/1.x，HTTP/2提供了多路复用（Multiplexing）功能，使得多个请求和响应可以在单一的TCP连接上并行传输。这减少了网络延迟，并允许更高效的资源利用。此外，HTTP/2还支持其他高级特性，如头部压缩、优先级设置等，进一步优化了网络性能。</li></ol> 
+<p>结合这两个高效的协议，gRPC能够提供低延迟、高吞吐量和高可扩展性，使其成为一个理想的选择用于构建分布式系统和微服务架构。同时，多路复用和高效的数据序列化也使得gRPC非常适用于移动应用、IoT设备以及其他网络受限的场景。</p> 
+<hr> 
+<h2><a id="_132"></a>参考</h2> 
+<p>https://segmentfault.com/a/1190000019608421</p> 
+<p>https://learnku.com/articles/72847</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/8e00a14db20dfffbab89e83a7c6d2ccd/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">MATLAB算法实战应用案例精讲-【图像处理】目标检测</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/b127b4b1c266aa8af3e8f05e3fc7b187/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">一、网络测试命令——命令行</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

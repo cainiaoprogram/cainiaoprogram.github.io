@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>用python自行开发的流星监控系统meteor_monitor（第一篇） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="用python自行开发的流星监控系统meteor_monitor（第一篇）" />
+<meta property="og:description" content="代码：
+https://github.com/xingxinghuo1000/meteor_monitor_scripts.git
+由于代码做了较大调整，废弃了sikuli部分。本篇文章为旧的，不要看了，最新文章请看：
+用python自行开发的流星监控系统meteor_monitor（第二篇）-CSDN博客
+背景 著名的流星监控软件ufocapturehd2有几个缺陷，不能忍
+1、吃性能，我的工控电脑2.4GHz的4核心CPU，发现流星后，录制出来的视频，会严重丢帧
+2、收费。还相当的贵。大概700多元？ 用破解版当然也可以，这里不推荐
+调研过程 1、解决如何录制的问题
+我发现win10自身的相机app，可以以非常低的cpu消耗，录制720p，50fps的视频，非常流畅。如果能够写个脚本。离线分析录制出来的mp4文件，把录制和分析解耦，就整体搞定了性能的问题。
+调研过其他几个软件，都不如win10自带的app好用
+2、如何自动化录制视频，并分段
+视频必须得分段，如果不分段，录制一个晚上，一个视频文件40GB，中途如果不小心断电了，整个晚上录制的文件，就变得不可读，这是不能接受的
+曾经尝试过，使用pywinauto库，做自动化，发现相机这个app，没有具体按钮的句柄，spyxx工具无法探查出来。
+那就上万能工具sikuliX吧，这个工具是使用模式识别方式，点击按钮，不论这个按钮在屏幕哪里，只要匹配到了，就能点。
+参考资料： sikulix自动化测试 - 简书
+3、如何存储视频
+首先为了节省cpu消耗，必须保存到本地硬盘中。但工控的本地硬盘，一般不会很大
+所以视频可以通过一个脚本，定时同步到nfs上，或者samba服务中，
+这样就解决了性能和容量的两难问题
+同步脚本和录制时间，需要一个标记，来表示为视频录制已完成，这里采用了大数据里常用的.done文件。每一个mp4文件，都对应一个.done文件，没有.done文件，就代表没有录制完
+4、离线分析
+由于视频存储在了nas中（可能是nfs或者samba）。分析端，可以是多机共同参与的，即分布式分析。这样可以提升分析的效率，尽早拿到结果
+需要对视频做一个文件锁的功能，防止多机冲突。
+每一个mp4。都对应一个.lock文件，如果发现了.lock文件锁，则看看里面的内容，是不是自己锁定的，如果是，就处理，如果是其他机器锁定的，则跳过这个文件
+分析思路：使用帧差法，通过python&#43;opencv来实现这个算法，不算难
+参考资料：python&#43;opencv实现移动侦测（帧差法） - 杰晶网络,每天都更新的互联网资源网！ 更新日期：2022/6/15
+part1-视频自动录制部分 先上代码
+具体代码如下： https://github.com/xingxinghuo1000/meteor_monitor_scripts/tree/master/sikuli_open_camera.sikuli
+如何使用：
+1、把相机的应用，固定到任务栏，必须的，否则sikuli没法启动相机
+2、安装JDK，下载sikuliX的jar包，放在D盘根目录
+3、仅支持windows，双击start_camera_record_by_sikuli.bat文件，即可运行
+开发过程和踩坑记录
+1、先做最小的Demo，实现点击录制按钮，和停止录制的按钮
+2、再做基本的控制，比如启动相机app，关闭相机app。 启动相机，无法通过cmd命令启动（python中是 os.popen方式执行cmd），必须通过点击任务栏按钮才行。不知道为什么，如果有大神知道，可以告知
+3、判断何时开始录制，何时停止录制，这需要获取当地的日出和日落时间，我写了一个比较简单的实现，直接写死在代码里，如果您有需要，可以修改代码，修改为您当地的时间，然后再运行
+4、稳定性：对于停止按钮和录制按钮的判断，sikulix支持设置阈值，调整了一下，才准确搞定。按照默认的参数，会有误判，非常坑人
+5、调整参数，比如视频分段的时间间隔，多久停止一下，再重新录制。我设置的是200多秒。不要太长，免得保存视频时造成卡顿
+效果 进程常驻内存，定时判断时间，是否该录制视频。每隔一段时间，自动停止录制，再开始录制
+part2-视频定时同步功能 脚本代码：https://github.com/xingxinghuo1000/meteor_monitor_scripts/tree/master/video_sync
+执行过程：
+1、扫描目标目录，视频是否已超过100GB，如果超过则删除老的文件，
+2、轮训查看源视频目录，找出所有mp4文件
+3、检查mp4文件是否有对应的.done文件，
+4、如果有则复制到目标目录，复制完，在目标目录写入.done文件，同时删除源目录的视频文件
+5、不断循环
+注意：
+为了防止网络问题，对于传输了一半的文件，删掉重新同步
+如果出了网络问题，程序会进入exception逻辑，sleep一段时间后重试
+会不会出现传输了一半的文件，被下游处理呢？
+答：不会，没有.done文件，下游是不会处理这个视频文件的
+后续可以扩展的地方
+1、目标路径，可以是一个ftp地址，
+不过这次，没有支持这个功能，没太大必要。大多数windows都支持samba服务，直接挂载到本地，作为本地路径使用即可" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/3cce2c6e9f7e4400525c3402e0aa3954/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-11-27T14:15:06+08:00" />
+<meta property="article:modified_time" content="2023-11-27T14:15:06+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">用python自行开发的流星监控系统meteor_monitor（第一篇）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>代码：</p> 
+<p><a href="https://github.com/xingxinghuo1000/meteor_monitor_scripts.git" title="https://github.com/xingxinghuo1000/meteor_monitor_scripts.git">https://github.com/xingxinghuo1000/meteor_monitor_scripts.git</a></p> 
+<p></p> 
+<p>由于代码做了较大调整，废弃了sikuli部分。本篇文章为旧的，不要看了，最新文章请看：</p> 
+<p><a href="https://blog.csdn.net/delacroix_xu/article/details/134643979" title="用python自行开发的流星监控系统meteor_monitor（第二篇）-CSDN博客">用python自行开发的流星监控系统meteor_monitor（第二篇）-CSDN博客</a></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<h3>背景</h3> 
+<p></p> 
+<p>著名的流星监控软件ufocapturehd2有几个缺陷，不能忍</p> 
+<p>1、吃性能，我的工控电脑2.4GHz的4核心CPU，发现流星后，录制出来的视频，会严重丢帧</p> 
+<p>2、收费。还相当的贵。大概700多元？ 用破解版当然也可以，这里不推荐</p> 
+<p></p> 
+<h3>调研过程</h3> 
+<p></p> 
+<p>1、解决如何录制的问题</p> 
+<p>我发现win10自身的相机app，可以以非常低的cpu消耗，录制720p，50fps的视频，非常流畅。如果能够写个脚本。离线分析录制出来的mp4文件，把录制和分析解耦，就整体搞定了性能的问题。</p> 
+<p>调研过其他几个软件，都不如win10自带的app好用</p> 
+<p></p> 
+<p>2、如何自动化录制视频，并分段</p> 
+<p>视频必须得分段，如果不分段，录制一个晚上，一个视频文件40GB，中途如果不小心断电了，整个晚上录制的文件，就变得不可读，这是不能接受的</p> 
+<p>曾经尝试过，使用pywinauto库，做自动化，发现相机这个app，没有具体按钮的句柄，spyxx工具无法探查出来。</p> 
+<p>那就上万能工具sikuliX吧，这个工具是使用模式识别方式，点击按钮，不论这个按钮在屏幕哪里，只要匹配到了，就能点。<br> 参考资料： <a href="https://www.jianshu.com/p/33fa7001f827" rel="nofollow" title="sikulix自动化测试 - 简书">sikulix自动化测试 - 简书</a></p> 
+<p></p> 
+<p>3、如何存储视频</p> 
+<p>首先为了节省cpu消耗，必须保存到本地硬盘中。但工控的本地硬盘，一般不会很大</p> 
+<p>所以视频可以通过一个脚本，定时同步到nfs上，或者samba服务中，</p> 
+<p>这样就解决了性能和容量的两难问题</p> 
+<p>同步脚本和录制时间，需要一个标记，来表示为视频录制已完成，这里采用了大数据里常用的.done文件。每一个mp4文件，都对应一个.done文件，没有.done文件，就代表没有录制完</p> 
+<p></p> 
+<p>4、离线分析</p> 
+<p>由于视频存储在了nas中（可能是nfs或者samba）。分析端，可以是多机共同参与的，即分布式分析。这样可以提升分析的效率，尽早拿到结果</p> 
+<p>需要对视频做一个文件锁的功能，防止多机冲突。</p> 
+<p>每一个mp4。都对应一个.lock文件，如果发现了.lock文件锁，则看看里面的内容，是不是自己锁定的，如果是，就处理，如果是其他机器锁定的，则跳过这个文件</p> 
+<p></p> 
+<p>分析思路：使用帧差法，通过python+opencv来实现这个算法，不算难</p> 
+<p>参考资料：<a href="http://www.imxmx.com/Item/1/175567.html" rel="nofollow" title="python+opencv实现移动侦测（帧差法） - 杰晶网络,每天都更新的互联网资源网！ 更新日期：2022/6/15">python+opencv实现移动侦测（帧差法） - 杰晶网络,每天都更新的互联网资源网！ 更新日期：2022/6/15</a></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<h3>part1-视频自动录制部分</h3> 
+<p></p> 
+<p>先上代码</p> 
+<p>具体代码如下： <a href="https://github.com/xingxinghuo1000/meteor_monitor_scripts/tree/master/sikuli_open_camera.sikuli" title="https://github.com/xingxinghuo1000/meteor_monitor_scripts/tree/master/sikuli_open_camera.sikuli">https://github.com/xingxinghuo1000/meteor_monitor_scripts/tree/master/sikuli_open_camera.sikuli</a></p> 
+<p></p> 
+<p>如何使用：</p> 
+<p>1、把相机的应用，固定到任务栏，必须的，否则sikuli没法启动相机</p> 
+<p>2、安装JDK，下载sikuliX的jar包，放在D盘根目录</p> 
+<p>3、仅支持windows，双击<a href="https://github.com/xingxinghuo1000/meteor_monitor_scripts/blob/master/start_camera_record_by_sikuli.bat" title="start_camera_record_by_sikuli.bat">start_camera_record_by_sikuli.bat</a>文件，即可运行</p> 
+<p></p> 
+<p>开发过程和踩坑记录</p> 
+<p></p> 
+<p>1、先做最小的Demo，实现点击录制按钮，和停止录制的按钮</p> 
+<p>2、再做基本的控制，比如启动相机app，关闭相机app。 启动相机，无法通过cmd命令启动（python中是 os.popen方式执行cmd），必须通过点击任务栏按钮才行。不知道为什么，如果有大神知道，可以告知</p> 
+<p>3、判断何时开始录制，何时停止录制，这需要获取当地的日出和日落时间，我写了一个比较简单的实现，直接写死在代码里，如果您有需要，可以修改代码，修改为您当地的时间，然后再运行</p> 
+<p>4、稳定性：对于停止按钮和录制按钮的判断，sikulix支持设置阈值，调整了一下，才准确搞定。按照默认的参数，会有误判，非常坑人</p> 
+<p>5、调整参数，比如视频分段的时间间隔，多久停止一下，再重新录制。我设置的是200多秒。不要太长，免得保存视频时造成卡顿</p> 
+<p></p> 
+<h4>效果</h4> 
+<p>进程常驻内存，定时判断时间，是否该录制视频。每隔一段时间，自动停止录制，再开始录制</p> 
+<p></p> 
+<h3>part2-视频定时同步功能</h3> 
+<p></p> 
+<p>脚本代码：<a href="https://github.com/xingxinghuo1000/meteor_monitor_scripts/tree/master/video_sync" title="https://github.com/xingxinghuo1000/meteor_monitor_scripts/tree/master/video_sync">https://github.com/xingxinghuo1000/meteor_monitor_scripts/tree/master/video_sync</a></p> 
+<p></p> 
+<p>执行过程：</p> 
+<p>1、扫描目标目录，视频是否已超过100GB，如果超过则删除老的文件，</p> 
+<p>2、轮训查看源视频目录，找出所有mp4文件</p> 
+<p>3、检查mp4文件是否有对应的.done文件，</p> 
+<p>4、如果有则复制到目标目录，复制完，在目标目录写入.done文件，同时删除源目录的视频文件</p> 
+<p>5、不断循环</p> 
+<p></p> 
+<p>注意：</p> 
+<p>为了防止网络问题，对于传输了一半的文件，删掉重新同步</p> 
+<p>如果出了网络问题，程序会进入exception逻辑，sleep一段时间后重试</p> 
+<p></p> 
+<p>会不会出现传输了一半的文件，被下游处理呢？</p> 
+<p>答：不会，没有.done文件，下游是不会处理这个视频文件的</p> 
+<p></p> 
+<p>后续可以扩展的地方</p> 
+<p>1、目标路径，可以是一个ftp地址，</p> 
+<p>不过这次，没有支持这个功能，没太大必要。大多数windows都支持samba服务，直接挂载到本地，作为本地路径使用即可</p> 
+<p></p> 
+<p></p> 
+<h3>part3-离线分析脚本</h3> 
+<p></p> 
+<p>代码：<a href="https://github.com/xingxinghuo1000/meteor_monitor_scripts/tree/master/detect_meteor" title="meteor_monitor_scripts/detect_meteor at master · xingxinghuo1000/meteor_monitor_scripts · GitHub">meteor_monitor_scripts/detect_meteor at master · xingxinghuo1000/meteor_monitor_scripts · GitHub</a></p> 
+<p></p> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/ef1dc2e03e70fb042186fcbddfa19f17/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">用python自行开发的流星监控系统meteor_monitor（第二篇）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/5e1a338226ec6136e1c8b8d22e6a2e54/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">开源编译器LLVM-源码编译</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

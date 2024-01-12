@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>长文详解 MySQL redo log 原理 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="长文详解 MySQL redo log 原理" />
+<meta property="og:description" content="文章目录 redo 日志格式简单的 redo 日志类型复杂的 redo 日志格式举个例子 redo 日志格式小结 Mini-Transcation以组的形式写入 redo 日志Mini-Transaction 的概念 redo 日志写入过程redo log blocklog block headerlog block trailer redo 日志缓冲区redo 日志写入 log buffer redo 日志文件刷盘时机redo 日志文件组redo 日志文件格式特殊 block log sequence numberflushed_to_disk_lsnIsn 值和 redo 日志文件组中的偏移量的对应关系flush 链表中的 lsn checkpoint执行一次 checkpoint 用户线程批量从 flush 链表中刷出脏页查看系统的各种 lsn 值innodb_flush_log_at_trx_commit崩溃恢复确定恢复的起点确定恢复的终点 恢复过程使用哈希表跳过己经刷新到磁盘中的页面 LOCS_BLOCK_HDR_NO 是如何计算的 redo 日志是为了在系统因奔溃而重启时恢复奔溃前的状态而提出的。 lnnoDB 存储引擎是以页为单位来管理存储空间的，我们进行的增删改查操作从本质上来说都是在访问页面（包括读页面、写页面、创建新页面等操作）。在真正访问页面之前，需要先把在磁盘中的页加载到内存中的[[Buffer Pool]] 中，之后才可以访问。事务的持久性的特征要求对于一个己经提交的事务，在事务提交后即使系统发生了崩溃，这个事务对数据库所做的更改也不能丢失。 如果我们只在内存的 Buffer Pool 中修改了页面，假设在事务提交后突然发生了某个故障，导致内存中的数据都失效了，那么这个已经提交的事务在数据库中所做的更改也就跟着丢失了，这是我们所不能忍受的。那么，如何保证这个持久性呢？一个很简单的做法就是在事务提交完成之前，把该事务修改的所有页面都刷新到磁盘。不过这个简单粗暴的做法存在下面这些问题： 刷新一个完整的数据页太浪费了。有时我们仅仅修改了某个页面中的一个字节，但是由于 InnoDB 是以页为单位来进行磁盘 I/O 的，也就是说在该事务提交时不得不将一个完整的页面从内存中刷新到磁盘。一个页面的默认大小是 16 KB，因为修改了一个字节就要刷新 16KB 的数据到磁盘上，显然太浪费了。随机 I/O 刷新起来比较慢。一个事务可能包含很多语句，即使是一条语句也可能修改许多页面，而且该事务修改的这些页面可能并不相邻。这就意味着在将某个事务修改的 Buffer Pool 中的页面刷新到磁盘时，需要进行很多的随机 I/O。随机 I/O 比顺序 I/O 要慢，尤其是对于传统的机械硬盘。 我们只是想让已经提交了的事务对数据库中的数据所做的修改能永久生效，即使后来系统崩溃，在重启后也能把这种修改恢复过来。所以，其实没有必" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/8cb37865d533a2fd1cee142fd9cf406b/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-04-10T23:09:24+08:00" />
+<meta property="article:modified_time" content="2022-04-10T23:09:24+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">长文详解 MySQL redo log 原理</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-github-gist">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><ul><li><a href="#redo__20" rel="nofollow">redo 日志格式</a></li><li><ul><li><a href="#_redo__27" rel="nofollow">简单的 redo 日志类型</a></li><li><a href="#_redo__46" rel="nofollow">复杂的 redo 日志格式</a></li><li><ul><li><a href="#_60" rel="nofollow">举个例子</a></li></ul> 
+    </li><li><a href="#redo__69" rel="nofollow">redo 日志格式小结</a></li></ul> 
+   </li><li><a href="#MiniTranscation_71" rel="nofollow">Mini-Transcation</a></li><li><ul><li><a href="#_redo__72" rel="nofollow">以组的形式写入 redo 日志</a></li><li><a href="#MiniTransaction__94" rel="nofollow">Mini-Transaction 的概念</a></li></ul> 
+   </li><li><a href="#redo__99" rel="nofollow">redo 日志写入过程</a></li><li><ul><li><a href="#redo_log_block_100" rel="nofollow">redo log block</a></li><li><ul><li><a href="#log_block_header_105" rel="nofollow">log block header</a></li><li><a href="#log_block_trailer_112" rel="nofollow">log block trailer</a></li></ul> 
+    </li><li><a href="#redo__114" rel="nofollow">redo 日志缓冲区</a></li><li><ul><li><a href="#redo__log_buffer_118" rel="nofollow">redo 日志写入 log buffer</a></li></ul> 
+   </li></ul> 
+   </li><li><a href="#redo__123" rel="nofollow">redo 日志文件</a></li><li><ul><li><a href="#_124" rel="nofollow">刷盘时机</a></li><li><a href="#redo__133" rel="nofollow">redo 日志文件组</a></li><li><a href="#redo__142" rel="nofollow">redo 日志文件格式</a></li><li><ul><li><a href="#_block_150" rel="nofollow">特殊 block</a></li></ul> 
+   </li></ul> 
+   </li><li><a href="#log_sequence_number_159" rel="nofollow">log sequence number</a></li><li><ul><li><a href="#flushed_to_disk_lsn_162" rel="nofollow">flushed_to_disk_lsn</a></li><li><a href="#Isn__redo__166" rel="nofollow">Isn 值和 redo 日志文件组中的偏移量的对应关系</a></li><li><a href="#flush__lsn_171" rel="nofollow">flush 链表中的 lsn</a></li></ul> 
+   </li><li><a href="#checkpoint_179" rel="nofollow">checkpoint</a></li><li><ul><li><a href="#_checkpoint_187" rel="nofollow">执行一次 checkpoint</a></li></ul> 
+   </li><li><a href="#_flush__196" rel="nofollow">用户线程批量从 flush 链表中刷出脏页</a></li><li><a href="#_lsn__198" rel="nofollow">查看系统的各种 lsn 值</a></li><li><a href="#innodb_flush_log_at_trx_commit_206" rel="nofollow">innodb_flush_log_at_trx_commit</a></li><li><a href="#_211" rel="nofollow">崩溃恢复</a></li><li><ul><li><a href="#_213" rel="nofollow">确定恢复的起点</a></li><li><a href="#_218" rel="nofollow">确定恢复的终点</a></li></ul> 
+   </li><li><a href="#_223" rel="nofollow">恢复过程</a></li><li><ul><li><a href="#_227" rel="nofollow">使用哈希表</a></li><li><a href="#_232" rel="nofollow">跳过己经刷新到磁盘中的页面</a></li></ul> 
+   </li><li><a href="#LOCS_BLOCK_HDR_NO__235" rel="nofollow">LOCS_BLOCK_HDR_NO 是如何计算的</a></li></ul> 
+ </li></ul> 
+</div> 
+<br> redo 日志是为了在系统因奔溃而重启时恢复奔溃前的状态而提出的。 
+<br> lnnoDB 存储引擎是以页为单位来管理存储空间的，我们进行的增删改查操作从本质上来说都是在访问页面（包括读页面、写页面、创建新页面等操作）。在真正访问页面之前，需要先把在磁盘中的页加载到内存中的[[Buffer Pool]] 中，之后才可以访问。事务的持久性的特征要求对于一个己经提交的事务，在事务提交后即使系统发生了崩溃，这个事务对数据库所做的更改也不能丢失。 
+<br> 如果我们只在内存的 Buffer Pool 中修改了页面，假设在事务提交后突然发生了某个故障，导致内存中的数据都失效了，那么这个已经提交的事务在数据库中所做的更改也就跟着丢失了，这是我们所不能忍受的。那么，如何保证这个持久性呢？一个很简单的做法就是在事务提交完成之前，把该事务修改的所有页面都刷新到磁盘。不过这个简单粗暴的做法存在下面这些问题： 
+<p></p> 
+<ul><li>刷新一个完整的数据页太浪费了。有时我们仅仅修改了某个页面中的一个字节，但是由于 InnoDB 是以页为单位来进行磁盘 I/O 的，也就是说在该事务提交时不得不将一个完整的页面从内存中刷新到磁盘。一个页面的默认大小是 16 KB，因为修改了一个字节就要刷新 16KB 的数据到磁盘上，显然太浪费了。</li><li>随机 I/O 刷新起来比较慢。一个事务可能包含很多语句，即使是一条语句也可能修改许多页面，而且该事务修改的这些页面可能并不相邻。这就意味着在将某个事务修改的 Buffer Pool 中的页面刷新到磁盘时，需要进行很多的随机 I/O。随机 I/O 比顺序 I/O 要慢，尤其是对于传统的机械硬盘。</li></ul> 
+<p>我们只是想让已经提交了的事务对数据库中的数据所做的修改能永久生效，即使后来系统崩溃，在重启后也能把这种修改恢复过来。所以，其实没有必<br> 要在每次提交事务时就把该事务在内存中修改过的全部页面刷新到磁盘，只需要把修改的内容记录一下就好。比如，某个事务将系统表空间第 100 号页面中偏移量为 1000 处的那个字节的值从 1 改成 2，我们只需要进行如下记录 :</p> 
+<pre><code>将第 0 号表空间第 100 号页面中偏移量为 1000 处的值更新为 2。
+</code></pre> 
+<p>这样在事务提交时，就会把上述内容刷新到磁盘中。即使之后系统崩溃了，重启之后只要按照上述内容所记录的步骤重新更新一下数据页，那么该事务对数据库中所做的修改就可以被恢复出来，这样也就意味着满足持久性的要求。<br> 因为在系统因崩溃而重启时需要按照上述内容所记录的步骤重新更新一下数据页，所以上述内容也称为重做日志 （redo log）。 我们也可以将它称为 redo 日志。相较于在事务提交时将所有修改过的内存中的页面刷新到磁盘中，只将该事务执行过程中产生的 redo 日志刷新到磁盘具有下面这些好处：</p> 
+<ul><li>redo 日志占用的空间非常小 
+  <ul><li>在存储表空间 ID、页号、偏移量以及需要更新的值时，需要的存储空间很小。</li></ul> </li><li>redo 日志是顺序写入磁盘的 
+  <ul><li>在执行事务的过程中，每执行一条语句，就可能产生若干条 redo 日志，这些日志是按照产生的顺序写入磁盘的，也就是使用顺序 I/O。</li></ul> </li></ul> 
+<p>redo 日志的原理和 redis 的数据持久化机制 [[Redis 数据持久化机制 aof 和 rdb#面试中常见问题：AOF|aof]] 的原理有异曲同工之妙。</p> 
+<h3><a id="redo__20"></a>redo 日志格式</h3> 
+<p>redo 日志本质上只是记录了一下事务对数据库进行了哪些修改。InnoDB 针对事务对数据库的不同修改场景，定义了多种类型的 redo 日志，但是绝大部分类型的 redo 日志都有如下图所示的这种通用结构。<br> <img src="https://images2.imgbox.com/99/c1/8axBAo4B_o.png" alt="redo 日志通用结构"></p> 
+<ul><li>type：这条 redo 日志的类型。</li><li>space ID：表空间 ID。</li><li>page number：页号。</li><li>data：这条 redo 日志的具体内容。</li></ul> 
+<h4><a id="_redo__27"></a>简单的 redo 日志类型</h4> 
+<p>如果没有为某个表显式地定义主键，并且表中也没有定义不允许存储 NULL 值的 UNIQUE 键，那么 InnoDB 会自动为表添加一个名为 row_id 的隐藏列作为主键。为这个 row_id 隐藏列进行赋值的方式如下：</p> 
+<ul><li>服务器会在内存中维护一个全局变量，每当向某个包含 row_id 隐藏列的表中插入一条记录时，就会把这个全局变量的值当作新记录的 row_id 列的值，并且把这个全局变量自增 1。</li><li>每当这个全局变量的值为 256 的倍数时，就会将该变量的值刷新到系统表空间页号为 7 的页面中一个名为 Max Row ID 的属性中 （之所以不是每次自增该全局变量时就将该值刷新到磁盘，是为了避免频繁刷盘）。</li><li>当系统启动时， 会将这个 Max Row ID 属性加载到内存中，并将该值加上 256 之后赋值给前面提到的全局变量（因为在系统上次关机时，该全局变量的值可能大于磁盘页面中 Max Row ID 属性的值）。</li></ul> 
+<p>这个 Max Row ID 属性占用的存储空间是 8 字节。当某个事务向某个包含 row id 隐藏列的<br> 表插入一条记录，并且为该记录分配的 row_id 值为 256 的倍数时，就会向系统表空间页号为<br> 7 的页面的相应偏移量处写入 8 字节的值。这个写入操作实际上是在 Buffer Pool 中完成的，我们需要把这次对这个页面的修改以 redo 日志的形式记录下来。这样在事务提交之后，即使系统崩溃了，也可以将该页面恢复成崩溃前的状态。在这种对页面的修改是极其简单的情况下，redo 日志中只需要记录一下在某个页面的某个偏移量处修改了几个字节的值、具体修改后的内容是啥就好了。InnoDB 把这种极其简单的 redo 日志称为物理日志，并且根据在页面中写入数据的多少划分了几种不同的 redo 日志类型。</p> 
+<ul><li>MLOG_1BYTE（type 字段对应的十进制数字为 1）：表示在页面的某个偏移量处写入 1 字节的 redo 日志类型。</li><li>MLOG_2BYTE（type 字段对应的十进制数字为 2）：表示在页面的某个偏移量处写入 2 字节的 redo 日志类型。</li><li>MLOG_4BYTE（type 字段对应的十进制数字为 4）：表示在页面的某个偏移量处写入 4 字节的 redo 日志类型。</li><li>MLOG_8BYTE（type 字段对应的十进制数字为 8）：表示在页面的某个偏移量处写入 8 字节的 redo 日志类型。</li><li>MLOG_WRITE_STRlNG（type 字段对应的十进制数字为 30）：表示在页面的某个偏移处写入一个字节序列。</li></ul> 
+<p>Max Row ID 属性实际占用 8 字节的存储空间，所以在修改页面中的这个属性时，会记录一条类型为 MLOG_8BYTE 的 redo 日志。<br> <img src="https://images2.imgbox.com/54/5a/wipb1gVz_o.png" alt="MLOG_8BYTE 类型的 redo 日志结构"><br> 其余的 MLOG_1BYTE、MLOG_2BYTE、MLOG_4BYTE 类型的 redo 日志结构与 MLOG_8BYTE 的日志结构类似，只不过具体数据中包含的字节数量不同罢了。MLOG_WRITE_STRlNG 类型的 redo 日志表示写入一个字节序列，但是因为不能确定写入的具体数据占用多少字节，所以需要在日志结构中添加一个 len 字段。<br> <img src="https://images2.imgbox.com/9f/e6/WVpDoSfV_o.png" alt="MLOG_WRITE_STRlNG 类型的 redo 日志结构"></p> 
+<h4><a id="_redo__46"></a>复杂的 redo 日志格式</h4> 
+<p>一些新的 redo 日志类型：</p> 
+<ul><li>MLOG_REC_INSERT（type 字段对应的十进制数字为 9）：表示在插入一条使用非紧凑行格式 （REDUNDANT）的记录时，redo 日志的类型。</li><li>MLOG_COMP_REC_INSERT（ type 字段对应的十进制数字为 38） ：表示在插入一条使用紧凑行格式 （COMPACT、DYNAMIC、COMPRESSED ） 的记录时，redo 日志的类型。</li><li>MLOG_COMP_PAGE_CREATE（type 字段对应的十进制数字为 58）：表示在创建一个存储紧凑行格式记录的页面时，redo 日志的类型。</li><li>MLOG_COMP_REC_DELETE（type 字段对应的十进制数字为 42 ）：表示在删除一条使用紧凑行格式记录时，redo 日志的类型。</li><li>MLOG_COMP_LIST_START_DELETE（type 字段对应的十进制数字为 44）：表示在从某条给定记录开始删除页面中一系列使用紧凑行格式的记录时，redo 日志的类型。</li><li>MLOG_COMP_LIST_END_DELETE（type 字段对应的十进制数字为 43）：与 MLOG_COMP_LIST_START_DELETE 类型的 redo 日志呼应，表示删除一系列记录，直到 MLOG_COMP_LIST_END_DELETE 类型的 redo 日志对应的记录为止。 
+  <ul><li>数据页中的记录按照索引列大小的顺序组成单向链表。有时，我们需要删除索引列的值在某个区间内的所有记录，这时如果每删除一条记录就写一条 redo 日志，效率可能有点低。MLOG_COMP_LUST_START_DELETE 和 MLOG_COMP_LIST_END_DELETE 类型的 redo 日志可以很大程度上减少 redo 日志的条数。</li></ul> </li><li>MLOG_ZlP_PAGE_COMPRESS（type 字段对应的十进制数字为 51）:表示在压缩一个数据页时， redo 日志的类型。</li></ul> 
+<p>这些类型的 redo 日志既包含物理层面的意思，也包含逻辑层面的意思：</p> 
+<ul><li>从物理层面看，这些日志都指明了对哪个表空间的哪个页进行修改；</li><li>从逻辑层面看，在系统崩溃后重启时，并不能直接根据这些日志中的记载，在页面内的某个偏移量处恢复某个数据，而是需要调用一些事先准备好的函数，在执行完这些函数后才可以将页面恢复成系统崩溃前的样子。</li></ul> 
+<h5><a id="_60"></a>举个例子</h5> 
+<p>下图是一个 MLOG_COMP_REC_INSERT 类型的 redo 日志的结构：<br> <img src="https://images2.imgbox.com/51/be/cBZ0kjNs_o.png" alt="MLOG_COMP_REC_INSERT 类型的 redo 日志的结构"></p> 
+<ul><li>在一个数据页中，无论是叶子节点还是非叶子节点，记录都是按照索引列的值从小到大的顺序排序的。对于二级索引来说，当索引列的值相同时，记录还需要按照主键值进行排。n_uniques 的含义是在一条记录中，需要几个字段的值才能确保记录的唯一位，这样在插入一条记录时，就可以按照记录的前 n_uniques 个字段进行排序。对于聚簇索引来说，n_uniques 的值为主键的列数；对于二级索引来说，该值为索引列中包含的列数+主键列数。这里需要注意的是，唯一二级索引的值可能为 NULL，所以该值仍然为索引列中包含的列数+主键列数。</li><li>field1_len ～ fieldn_len 代表该记录若干个字段占用存储空间的大小。需要注意的是，这里无论该字段的类型是固定长度类型（比如 INT），还是可变长度类型（比如 VARCHAR（M），该字段占用的存储空间大小始终要写入 redo 日志中。</li><li>offset 代表该记录的前一条记录在页面中的地址。记录前一条记录的地址是因为每向数据页插入一条记录，都需要修改该页面中维护的记录链表。每条记录的记录头信息中都包含一个名为 next_record 的属性，所以在插入新记录时，需要修改前一条记录的 next_record 属性。</li><li>一条记录其实由额外信息和其实数据这两部分组成，这两个部分的总大小就是一条记录占用存储空间的总大小。通过 end_seg_len 的值可以间接地计算出一条记录占用存储空间的总大小。</li></ul> 
+<p>这个 MLOG_COMP_REC_INSERT 类型的 redo 日志并没有记录 PAGE_N_DIR_SLOTS、PAGE_HEAP_TOP、PAGE_N_HEAP 等的值被修改成什么，而只是把在本页面中插入一条记录所有必备的要素记了下来。之后系统因崩溃而重启后，服务器会调用向某个页面插入一条记录的相关函数，而 redo 日志中的那些数据就可以当成调用这个函数所需的参数。在调用完该函数后，页面中的 PAGE_N_DIR_SLOTS 、 PAGE_HEAP_TOP、PAGE_N_HEAP 等的值也就都被恢复到系统崩溃前的样子了。这就是「逻辑层面」的意思。</p> 
+<h4><a id="redo__69"></a>redo 日志格式小结</h4> 
+<p>redo 日志会把事务在执行过程中对数据库所做的所有修改都记录下来，在之后系统因崩溃而重启后可以把事务所做的任何修改都恢复过来。</p> 
+<h3><a id="MiniTranscation_71"></a>Mini-Transcation</h3> 
+<h4><a id="_redo__72"></a>以组的形式写入 redo 日志</h4> 
+<p>SQL 语句在执行过程中可能会修改若干个页面。一条的 INSERT 语句可能修改系统表空间页号为 7 的页面的 Max Row ID 属性（当然也可能更新别的系统页面，只不过没有都列举出来而已），还会更新聚簇索引和二级索引对应的 B+ 树中的页面。由于对这些页面的更改都发生在 [[Buffer Pool]] 中，所以在修改完页面之后，需要记录相应的 redo 日志。在执行语句的过程中产生的 redo 日志，被 lnnoDB 划分成了若干个不可分割的组，比如：</p> 
+<ul><li>更新 Max Row ID 属性时产生的 redo 日志为一组，是不可分割的；</li><li>向聚簇索引对应 B+ 树的页面中插入一条记录时产生的 redo 日志是一组，是不可分割的；</li><li>向某个二级索引对应 B+ 树的页面中插入一条记录时产生的 redo 日志是一组，是不可分割的。</li><li>有其他的一些不可分割的组。</li></ul> 
+<p>向 B+ 树中插入这条记录之前，需要先定位这条记录应该被插入到哪个叶子节点代表的数据页中。在定位到具体的数据页之后，有两种可能的情况。</p> 
+<ul><li>乐观插入：该数据页剩余的空闲空间相当充足，足够容纳这一条待插入记录。直接把记录插入到这个数据页中，然后记录一条 MLOG_COMP_REC_INSERT 类型的 redo 日志就好了。这种情况称为乐观插入。</li><li>悲观插入：该数据页剩余空闲空间不足，遇到这种情况时要进行页分裂操作，也就是新建一个叶子节点，把原先数据页中的一部分记录复制到这个新的数据页中，然后再把记录插入进去；再把这个叶子节点插入到叶子节点链表中，最后砸在内节点中添加一条目录项记录来指向这个新创建的页面。很显然，这个过程需要对多个页面进行修改，这意味着会产生多条 redo 日志。这种情况称为悲观插入。</li></ul> 
+<p>在进行恢复时，针对某个组中的 redo 日志，要么把全部的日志都恢复，要么一条也不恢复。</p> 
+<ul><li>有些需要保证原子性的操作会生成多条 redo 日志（比如向某个索引对应的 B+ 树中进行一次悲观插入时，就需要生成许多条 redo 日志）。 
+  <ul><li>InnoDB 会在该组中的最后一条 redo 日志后面加上一条特殊类型的 redo 日志。该类型的 redo 日志的名称为 MLOG_MULTI_REC_END，结构很简单，只有一个 type 字段（对应的十进制数字为 31）。如下图所示：</li><li><img src="https://images2.imgbox.com/31/6f/Sjeyw9OP_o.png" alt="MLOG_MULTI_REC_END 类型的 redo 日志"></li><li>所以某个需要保证原子性的操作所产生的一系列 redo 日志，必须以一条类型为 MLOG_MULTI_REC_END 的 redo 日志结尾，如下图所示：</li><li><img src="https://images2.imgbox.com/6c/93/DXxSeEc2_o.png" alt="以 MLOG_MULTI_REC_END 类型的 redo 日志结尾的一组 redo 日志"></li><li>这样在系统因崩溃而重启恢复时，只有解析到类型为 MLOG_MULTI_REC_END 的 redo 日志时，才认为解析到了一组完整的 redo 日志，才会进行恢复;否则直接放弃前面解析到的 redo 日志。</li></ul> </li><li>有些需要保证原子性的操作只生成一条 redo 日志（比如更新 Max Row ID 属性的操作就只会生成一条 redo 日志）。 
+  <ul><li>redo 日志的类型比较多，但也是小于 127 的。所以我们用 7 个比特就足以包括所有的 redo 日志类型，而 type 字段其实占用了 1 字节，也就是说可以省出来一个比特，用来表示这个需要保证原子性的操作只产生一条单一的 redo 日志，如下图所示：</li><li><img src="https://images2.imgbox.com/ca/7a/N4OZeXb7_o.png" alt="type 字段的作用划分"></li><li>如果 type 字段的第 1 个比特为 1，代表这个需要保证原子性的操作只产生了一条单一的 redo 日志，否则就表示这个需要保证原子性的操作产生了一系列的 redo 日志。</li></ul> </li></ul> 
+<h4><a id="MiniTransaction__94"></a>Mini-Transaction 的概念</h4> 
+<p>MySQL 把对底层页面进行一次原子访问的过程称为一个 Mini-Transaction(MTR)。比如前文所说的修改一次 Max Row ID 的值算是一个 Mini-Transaction。向某个索引对应的 B+ 树中插入一条记录的过程也算是一个 Mini-Transaction。一个 MTR 可以包含一组 redo 日志，在进行崩溃恢复时，需要把这一组 redo 日志作为一个不可分割的整体来处理。<br> 一个事务可以包含若干条语句，每一条语句又包含若干个 MTR， 每一个 MTR 又可以包<br> 含若干条 redo 日志。<br> <img src="https://images2.imgbox.com/0f/c4/l11ExVBJ_o.png" alt="事务、语句、MTR、redo 日志之间的关系"></p> 
+<h3><a id="redo__99"></a>redo 日志写入过程</h3> 
+<h4><a id="redo_log_block_100"></a>redo log block</h4> 
+<p>为了更好地管理 redo 日志，InnoDB 把通过 MTR 生成的 redo 日志都放在了大小为 512 字节的页中。我们把用来存储 redo 日志的页称为 block。一个 redo log block 的示意图如下所示：<br> <img src="https://images2.imgbox.com/a6/b4/XZ1Hep44_o.png" alt="redo log block 示意图"><br> 真正的 redo 日志都是存储到占用 496 字节的 log block body 中，log block header 和 log block trailer 存储的是一些管理信息。如下图所示：<br> <img src="https://images2.imgbox.com/df/e1/ZNgaYoTy_o.png" alt="管理信息"></p> 
+<h5><a id="log_block_header_105"></a>log block header</h5> 
+<ul><li>LOG_BLOCK_HDR_NO：每一个 block 都有一个大于 0 的唯一编号，该属性就表示该<br> 编号值。</li><li>LOG_BLOCK_HDR_DATA_LEN：表示 block 中已经使用了多少字节，初始值为 12（因为<br> log block body 从第 12 个字节处开始）。随着往 block 中写入的 redo 日志越来越多，该属性值也跟着增长。如果 log block body 已经被全部写满，那么该属性的值被设置为 512。</li><li>LOG_BLOCK_FIRST_REC_GROUP：一条 redo 日志也可以称为一条 redo 日志记录（redo log record）。一个 MTR 会生成多条 redo 日志记录，这个 MTR 生成的这些 redo 日志记录被称为一个 redo 日志记录组（redo log record group）。LOG_BLOCK_FIRST_REC_GROUP 就代表该 block 中第一个 MTR 生成的第一条 redo 日志记录组的偏移量，其实也就是这个 block 中第一个 MTR 生成的第一条 redo 日志记录的偏移量（如果一个 MTR 生成的 redo 日志横跨了好多个 block，那么最后一个 block 中的 LOG_BLOCK_FIRST_REC_GROUP 属性就表示这个 MTR 对应的 redo 日志结束的地方，也就是下一个 MTR 生成的 redo 日志开始的地方）。</li><li>LOG_BLOCK_CHECKPOINT_NO：表示 checkpoint 的序号；</li></ul> 
+<h5><a id="log_block_trailer_112"></a>log block trailer</h5> 
+<ul><li>LOG_BLOCK_CHECKSUM：表示该 block 的校验值，用于正确性校验；</li></ul> 
+<h4><a id="redo__114"></a>redo 日志缓冲区</h4> 
+<p>InnoDB 为了解决磁盘速度过慢的问题而引入了 Buffer Pool。写入 redo 日志时也不能直接写到磁盘中，实际上在服务器启动时就向操作系统申请了一大片称为 redo log buffer（redo 日志缓冲区）的连续内存空间，也可以将其简称为 log buffer。这片内存空间被划分为若干个连续的 redo log block，如下图所示：<br> <img src="https://images2.imgbox.com/8c/e2/JXoKQJQv_o.png" alt="log buffer"><br> 我们可以通过启动选项 innodb_log_buffer_size 来指定 log buffer 的大小。在 MySQL 5.7.22 版本中，该启动选项的默认值为 16MB。</p> 
+<h5><a id="redo__log_buffer_118"></a>redo 日志写入 log buffer</h5> 
+<p>向 log buffer 中写入 redo 日志的过程是顺序写入的，也就是先往前面的 block 中写，当该 block 的空闲空间用完之后再往下一个 block 中写。 lnnoDB 提供了一个称为 buf_free 的全局变量，该变量指明后续写入的 redo 日志应该写到 log buffer 中的哪个位置。<br> <img src="https://images2.imgbox.com/6a/e5/JV1MIUOW_o.png" alt="log buffer"><br> 一个 MTR 执行过程中可能产生若干条 redo 日志，这些 redo 日志是一个不可分割的组，所以并不是每生成一条 redo 日志就将其插入到 log buffer 中，而是将每个 MTR 运行过程中产生的日志先暂时存到一个地方；当该 MTR 结束的时候，再将过程中产生的一组 redo 日志全部复制到 log buffer 中。</p> 
+<h3><a id="redo__123"></a>redo 日志文件</h3> 
+<h4><a id="_124"></a>刷盘时机</h4> 
+<p>MTR 运行过程中产生的一组 redo 日志在 MTR 结束时会被复制到 log buffer 中。在一些情况下它们会被刷新到磁盘中：</p> 
+<ul><li>log buffer 空间不足时。 
+  <ul><li>log buffer 大小是有限的（通过系统变量 innodb_log_buffer_size 指定），如果不停地向这个有限大小的 log buffer 中塞入日志，很快就会将它填满。如果当前写入 log buffer 的 redo 日志量已经占满了 log buffer 总容量的 50% 左右，就需要把这些日志刷新到磁盘中。</li></ul> </li><li>事务提交时。 
+  <ul><li>之所以提出 redo 日志的概念，主要是因为它占用的空间少， 而且可以将其顺序写入磁盘。引入 redo 日志后， 虽然在事务提交时可以不把修改过的 Buffer Pool 页面立即刷新到磁盘，但是为了保证持久性，必须要把页面修改时所对应的 redo 日志刷新到磁盘；否则系统崩溃后，无法将该事务对页面所做的修改恢复过来。</li></ul> </li><li>后台有一个线程，大约以每秒一次的频率将 log buffer 中的 redo 日志刷新到磁盘。</li><li>正常关闭服务器时。</li><li>做 checkpoint 时。</li></ul> 
+<h4><a id="redo__133"></a>redo 日志文件组</h4> 
+<p>MySQL 的数据目录（使用 SHOW VARIABLES like ‘datadir’ 命令查看）下默认有名为<br> ib_logfile0 和 ib_logfile1 的两个文件，log buffer 中的日志在默认情况下就是刷新到这两个磁盘文件中。如果对默认的 redo 日志文件不满意，可以通过下面几个启动选项来调节。</p> 
+<ul><li>innodb_log_group_home_dir：指定 redo 日志文件所在的目录，默认值就是当前数据目录。</li><li>innodb_log_file_size：指定了每个 redo 日志文件的大小，在 MySQL 5.7.22 版本中的默认值为 48MB。</li><li>innodb_log_files_in_group：指定了 redo 日志文件的个数，默认值为 2，最大值为 100。</li></ul> 
+<p>从上面的描述中可以看到，磁盘上的 redo 日志文件不止一个，而是以一个日志文件组的形式出现的。这些文件以"ib_logfile[数字]"（数字可以是 0、1、2…）的形式进行命名。在将 redo 日志写入日志文件组时，从 ib_Iogfile0 开始写起；如果 ib_Iogfile0 写满了，就接着 ib_logfile1 写；以此类推，直到最后一个文件写满了就重新转到 ib_logfile0 继续写，整体成一个环状。<br> redo 日志文件的总大小其实就是 innodb_log_file_size x innodb_log_files_in_group。</p> 
+<h4><a id="redo__142"></a>redo 日志文件格式</h4> 
+<p>log buffer 本质上是一片连续的内存空间，被划分成若干个 512 字节大小的 block。将 log buffer 中的 redo 日志刷新到磁盘的本质就是把 block 的镜像写入日志文件中，所以 redo 日志文件其实也是由若干个 512 字节大小的 block 组成。<br> 在 redo 日志文件组中，每个文件的大小都一样，格式也一样，都是由下面两部分组成的：</p> 
+<ul><li>前 2048 个字节(也就是前 4 个 block) 用来存储一些管理信息；</li><li>从第 2048 字节往后的字节用来存储 log buffer 中的 block 镜像。</li></ul> 
+<p><img src="https://images2.imgbox.com/a3/dc/dtQiALo9_o.png" alt="redo 日志文件组"></p> 
+<h5><a id="_block_150"></a>特殊 block</h5> 
+<p>每个 redo 日志文件的前 2048 个字节（前 4 个特殊的 block）的格式如下图所示：</p> 
+<p><img src="https://images2.imgbox.com/b5/fc/y5Km4qC7_o.png" alt="redo 日志文件前 4 个 block"></p> 
+<ul><li>log file header：描述该 redo 日志文件的一些整体属性。</li><li>checkpoint1：记录关于 checkpoint 的一些属性。</li><li>第三个 block 未使用。</li><li>checkpoint2：结构同 checkpoint1。</li></ul> 
+<h3><a id="log_sequence_number_159"></a>log sequence number</h3> 
+<p>自系统开始运行，就在不时地修改页面，这也就意味着会不断地生成 redo 日志。redo 日志的量在不断递增。InnoDB 设计了一个名为 Isn(Iog sequence number)的全局变量，用来记录当前总共已经写入的 redo 日志量。InnoDB 规定初始的 Isn 值为 8704 (也就是一条 redo 日志也没写入时，lsn 的值就是 8704)。<br> 在向 log buffer 中写入 redo 日志时并不是一条一条写入的，而是以 MTR 生成的一组 redo 日志为单位写入 log block body 处。但是在统计 Isn 的增长量时，是按照实际写入的日志量加上占用的 log block header 和 log block trailer 来计算的。<strong>每一组由 MTR 生成的 redo 日志都有一个唯一的 Isn 值与其对应； Isn 值越小，说明 redo 日志产生得越早。</strong></p> 
+<h4><a id="flushed_to_disk_lsn_162"></a>flushed_to_disk_lsn</h4> 
+<p>redo 日志是先写到 log buffer 中，之后才会被刷新到磁盘的 redo 日志文件中。lnnoDB 提出了一个名为 buf_next_to_write 的全局变量，用来标记当前 log buffer 中已经有哪些日志被刷新到磁盘中了。<br> <img src="https://images2.imgbox.com/9e/54/QF69DTYA_o.png" alt="buf_next_to_write"><br> lsn 表示当前系统中写入的 redo 日志量，这包括了写到 log buffer 但没有刷新到磁盘的 redo 日志。相应地，lnnoDB 提出了一个表示刷新到磁盘中的 redo 日志的全局变量，名为 flushed_to_disk_lsn。系统在第一次启动时，该变量的值与初始的 Isn 值是相同的，都是 8704。随着系统的运行，redo 日志被不断写入 log buffer，但是并不会立即刷新到磁盘， lsn 的值就与 flushed_to_disk_Isn 的值拉开了差距。</p> 
+<h4><a id="Isn__redo__166"></a>Isn 值和 redo 日志文件组中的偏移量的对应关系</h4> 
+<p>因为 Isn 的值代表系统写入的 redo 日志量的一个总和。一个 MTR 中产生多少 redo 日志，lsn 的值就增加多少（当然，有时还要加上 log block header 和 log block trailer 的大小）。这样 MTR 产生的 redo 日志写到磁盘中时， 很容易计算某一个 Isn 值在 redo 日志文件组中的偏移量。<br> <img src="https://images2.imgbox.com/7b/49/z8FgZQ6J_o.png" alt="simSMx"><br> 初始时的 Isn 值是 8704，对应的 redo 日志文件组偏移量是 2048，之后每个 MTR 向磁盘<br> 中写入多少字节 redo 日志，lsn 的值就增长多少。</p> 
+<h4><a id="flush__lsn_171"></a>flush 链表中的 lsn</h4> 
+<p>一个 MTR 代表对底层页面的一次原子访问，在访问过程中可能会产生一组不可分割的 redo 日志；在 MTR 结束时，会把这一组 redo 日志写入到 log buffer 中。除此之外，在 MTR 结束时还有一件非常重要的事情要做，就是把在 MTR 执行过程中修改过的页面加入到 [[Buffer Pool]] 的 flush 链表中。<br> <img src="https://images2.imgbox.com/e7/ec/6LFgYFuE_o.png" alt="agAqqr"><br> 当第一次修改某个已经加载到 [[Buffer Pool]] 中的页面时， 就会把这个页面对应的控制块插入到 flush 链表的头部；之后再修改该页面时，由于它已经在 flush 链表中，所以就不再次插入了。flush 链表中的脏页是按照页面的第一次修改时间进行排序的。在这个过程中，会在缓冲页对应的控制块中记录两个关于页面何时修改的属性。</p> 
+<ul><li>oldest_modification：第一次修改 [[Buffer Pool]]中的某个缓冲页时， 就将修改该页面的 MTR 开始时对应的 Isn 值写入这个属性。</li><li>newest_modification：每修改一次页面，都会将修改该页面的 MTR 结束时对应的 Isn 值写入这个属性。该属性表示页面最近一次修改后对应的 Isn 值。<br> flush 链表中的脏页按照第一次修改发生的时间顺序进行排序，也就是按照 oldest_modification 代表的 Isn 值进行排序；被多次更新的页面不会重复<br> 插入到 flush 链表中，但是会更新 newest_modification 属性的值。</li></ul> 
+<h3><a id="checkpoint_179"></a>checkpoint</h3> 
+<p>因为 redo 日志文件组的容量是有限的，我们不得不选择循环使用 redo 日志文件组中的文件，但是这会造成最后写入的 redo 日志会覆盖最开始写入的 redo 日志。redo 日志只是为了在系统崩溃后恢复脏页用的，如果对应的脏页已经刷新到磁盘中，那么即使现在系统崩溃，在重启后也用不着使用 redo 日志恢复该页面了。所以该 redo 日志也就没有存在的必要了，它占用的磁盘空间就可以被后续的 redo 日志所重用。也就是说，判断某些 redo 日志占用的磁盘空间是否可以覆盖的依据，就是它对应的脏页是否已经被刷新到了磁盘中。举个例子：<br> <img src="https://images2.imgbox.com/b9/c3/msDBPYgM_o.png" alt="c8ABaI"><br> 虽然 mtr_ 1 和 mtr_2 生成的 redo 日志都已经写到了磁盘中，但是它们修改的脏页仍然留在[[Buffer Pool]]中，所以它们生成的 redo 日志在磁盘中的空间是不可以被覆盖的。之后随着系统的运行，如果页 a 被刷新到了磁盘，那么页 a 对应的控制块就会从 flush 链表中移除。<br> <img src="https://images2.imgbox.com/53/0b/1FYuyJP9_o.png" alt="rWi1Xf"><br> 这样 mtr_1 生成的 redo 日志就没有用了，这些 redo 日志占用的磁盘空间就可以被覆盖掉了 。InnoDB 提出了个全局变量 checkpoint_lsn，用来表示当前系统中可以被覆盖的 redo 日志总量是多少。这个变量初始值也是 8704。<br> 比如，现在页 a 被刷新到了磁盘上，mtr_1 生成的 redo 日志就可以被覆盖了，所以可以进行一个增加 checkpoint_lsn 的操作。我们把这个过程称为执行一次 checkpoint。<br> [[Buffer Pool]]提到过有些后台线程不停地将脏页刷新到磁盘中，其实这个「将脏页刷新到磁盘中」和「执行一次 checkpoint」是两回事。 一般来讲，刷脏页和执行 checkpoint 是在不同的线程上执行的，并不是说每次有脏页刷新就要去执行一次 checkpoint。</p> 
+<h4><a id="_checkpoint_187"></a>执行一次 checkpoint</h4> 
+<ol><li>计算当前系统中可以被覆盖章的 redo 日志对应的 Isn 值最大是多少。<br> redo 日志可以被覆盖，这意味着它对应的脏页被刷新到了磁盘中。只要我们计算出当前系统中最早修改的脏页对应的 oldest_modification 值 ， 那么凡是系统在 Isn 值小于该节点的 oldest_modification 值时产生的 redo 日志都可以被覆盖。我们把该脏页的 oldest_modification 赋值给 checkpoint_lsn。<br> 比如，当前系统中页 a 已经被刷新到磁盘，那么 flush 链表的尾节点就是页 c。该节点就是当前系统中最早修改的脏页了，它的 oldest_modification 值为 8916。我们把 8916 赋值给 checkpoint_lsn（也就是说在 redo 日志对应的 Isn 值小于 8916 时，就可以被覆盖掉）。</li><li>将 checkpoint_lsn 与对应的 redo 日志文件组偏移量以及此次 checkpoint 编号写到日志文件的管理信息（就是 checkpoint1 或者 checkpoint2）中。 InnoDB 维护了一个 checkpoint_no 变量，用来统计目前系统执行了多少次 checkpoint；每执行一次 checkpoint，该变量的值就加 1。计算一个 Isn 值对应的 redo 日志文件组偏移量是很容易的，所以可以计算得到该 checkpoint_lsn 在 redo 日志文件组中对应的偏移量 checkpoint_offset，然后把 checkpoint_no、 checkpoint_lsn 、 checkpoint_offset 这 3 个值都写到 redo 日志文件组的管理信息中。</li></ol> 
+<p>每一个 redo 日志文件都有 2048 字节的管理信息，但是上述关于 checkpoint 的信息只会被写到日志文件组中第一个日志文件的管理信息中。InnoDB 规定：当 checkpoint_no 的值是偶数时，就写到 checkpoint1 中；是奇数时，就写到 checkpoint2 中。<br> 记录完 checkpoint 的信息之后。redo 日志文件组中各个 Isn 值的关系如下所示：<br> <img src="https://images2.imgbox.com/36/3d/Zb4KKS1y_o.png" alt="YQ3Xoo"></p> 
+<h3><a id="_flush__196"></a>用户线程批量从 flush 链表中刷出脏页</h3> 
+<p>[[Buffer Pool]]中提到过一般情况下都是后台的线程对 LRU 链表和 flush 链表进行刷脏操作， 这主要因为刷脏操卡比较慢，不想影响用户线程处理请求。但是，如果当前系统修改页面的操作十分频繁，这就导致写 redo 日志的操作十分频繁，系统 lsn 值增长过快。如果后台线程的刷脏操作不能将脏页快速刷出，系统将无法及时执行 checkpoint，可能就需要用户线程从 flush 链表中把那些最早修改的脏页 (oldest_modificatio）同步刷新到磁盘。这样这些脏页对应的 redo 日志就没用了，然后就可以去执行 checkpoint 了。</p> 
+<h3><a id="_lsn__198"></a>查看系统的各种 lsn 值</h3> 
+<p>可以使用 SHOW ENGINE INNODB STATUS 命令查看当前 InnoDB 存储引擎中各种 Isn 值<br> 的情况。</p> 
+<ul><li>Log sequence number：表示系统中的 Isn 值，也就是当前系统已经写入的 redo 日志量，包括写入到 log buffer 中的 redo 日志；</li><li>Log flushed up：表示 flushed_to_ disk 的值，也就是当前系统己经写入磁盘的 redo 日志量；</li><li>Pages flushed up：表示 flush 链表中被最早修改的那个页面对应的 oldest_modification 属性值;</li><li>Last checkpoint at：表示当前系统的 checkpoint_lsn 值。</li></ul> 
+<h3><a id="innodb_flush_log_at_trx_commit_206"></a>innodb_flush_log_at_trx_commit</h3> 
+<p>为了保证事务的持久性，用户线程在事务提交时需要将该事务执行过程中产生的所有 redo 日志都刷新到磁盘中。这会明显地降低数据库性能。如果对事务的持久性要求不那么强烈，可选择修改一个名为 innodb_flush_log_at_trx_commit 的系统变的值。该变最有 3 个可选的值：</p> 
+<ul><li>0：当该系统变量的值为 0 时，表示在事务提交时不立即向磁盘同步 redo 日志，这个任务交给后台线程来处理；这样会明显加快请求处理速度。但是，如果事务提交后服器"挂"了，后台线程没有及时将 redo 日志刷新到磁盘，那么该事务对页面的修改会丢失。</li><li>1：当该系统变量的值为 1 时，表示在事务提交时需要将 redo 日志同步到磁盘。这可以保证事务的持久性。 innodb_flush_log_at_trx_commit 的默认值也是 1。</li><li>2：当该系统变量的值为 2 时，表示在事务提交时需要将 redo 日志写到操作系统的缓冲区中，但并不需要保证将日志真正地刷新到磁盘。在这种情况下 ， 如果数据库「挂」了而操作系统没「挂」，事务的持久性还是可以保证的。但是如果操作系统也「挂」了，那就不能保证持久性了。</li></ul> 
+<h3><a id="_211"></a>崩溃恢复</h3> 
+<p>在服务器不「挂」的情况下， redo 日志只会让性能变得更差。 但是万一数据库挂了，那我们就可以在重启时根据 redo 日志中的记录将页面恢复到系统崩溃前的状态。</p> 
+<h4><a id="_213"></a>确定恢复的起点</h4> 
+<p>对于对应的 Isn 值小于 checkpoint_lsn 的 redo 日志来说，它们是可以被覆盖的。这些 redo 日志对应的脏页都己经被刷新到磁盘中了。既然这些脏页已经被刷盘，也就没必要恢复它们了。对于对应的 Isn 值不小于 checkpoint_lsn 的 redo 日志，它们对应的脏页可能没被刷盘，也可能被刷盘了，我们不能确定（因为刷盘操作大部分时候是异步进行的），所以需要从对应的 Isn 值为 checkpoint_lsn 的 redo 日志开始恢复页面。<br> 在 redo 日志文件组第一个文件的管理信息中，有两个 block 都存储了问 checkpoint_lsn 的信息，我们当然是要选取最近发生的那次 checkpoint 的信息。用来衡量 checkpoint 发生时<br> 间早晚的信息就是 checkpoint_no，我们只要把 checkpoint1 和 checkpoint2 这两个 block 中的 checkpoint_no 值读出来并比一下大小，哪个 checkpoint_no 值更大，就说明哪个 block 存储的就是最近的一次 checkpoint 信息。这样就能拿到最近发生的 checkpoint 对应的 checkpoint_lsn 值以及它在 redo 日志文件组中的偏移量 checkpoint_offset。</p> 
+<h4><a id="_218"></a>确定恢复的终点</h4> 
+<p>redo 日志是顺序写入的，写满了一个 block 之后再往下一个 block 中写，如下图所示<br> <img src="https://images2.imgbox.com/86/ac/CFIV9QZ4_o.png" alt="A1DKrV"><br> 普通 block 的 log block header 部分有一个名为 LOG_BLOCK_HDR_DATA_LEN 的属性，<br> 该属性值记录了当前 block 中使用了多少字节的空间。对于被填满的 block 来说，该值永远为 512。如果该属性的值不为 512，那么它就是此次崩溃恢复中需要扫描的最后一个 block。也就是说在因崩溃而恢复系统时，只需要从 checkpoint_Isn 在日志文件组中对应的偏移量开始，一直扫描 redo 日志文件中的 block。直到某个 block 的 LOG_BLOCK_HDR_DATA_LEN 值不等于 512 为止。</p> 
+<h3><a id="_223"></a>恢复过程</h3> 
+<p>假设现在的 redo 日志文件中有 5 条 redo 日志，如下图所示：<br> <img src="https://images2.imgbox.com/37/a5/v4YobkS0_o.png" alt="dmlZc6"><br> 由于 redo 0 对应的 Isn 值小于 checkpoint_lsn。恢复时可以不管它。我们现在按照 redo 日志的顺序依次扫描 checkpoint_lsn 之后的各条 redo 日志，按照日志中记载的内容将对应的页面恢复过来。除此之外，InnoDB 还使用了下面的方式加快恢复过程。</p> 
+<h4><a id="_227"></a>使用哈希表</h4> 
+<p>根据 redo 日志的 space ID 和 page number 属性计算出哈希值，把 space ID 和 page number 相同的 redo 日志放到哈希表的同一个槽中。如果有多个 space ID 和 page number 都相同的 redo 日志，那么它们之间使用链表连接起来（按照生成的先后顺序连接)<br> <img src="https://images2.imgbox.com/b2/de/sb8K6OlJ_o.png" alt="hPDBGq"><br> 之后就可以遍历哈希表。因为对同一个页面进行修改的 redo 日志都放在了一个槽中，所以可以一次性将一个页面修复好（避免了很多读取页面的随机 I/O）。这样可以加快恢复速度。另外需要注意一点的是，同一个页面的 redo 日志是按照生成时间顺序进行排序的，所以恢复时也是按照这个顺序进行恢复。如果不按照生成时间顺序进行排序，那么可能出现错误。比如，原先的修改操作是先插入一条记录，再删除该条记录，如果恢复时不按照这个顺序来，就可能变成先删除一条记录，再插入一条记录，这显然是错误的。</p> 
+<h4><a id="_232"></a>跳过己经刷新到磁盘中的页面</h4> 
+<p>对于 lsn 值小于 checkpoint_lsn 的 redo 日志，它所对应的脏页肯定都己经刷到磁盘中但是对于 lsn 值不小于 checkpoint_lsn 的 redo 日志，它所对应的脏页不能确定是否已经刷到磁盘中。原因是在最近执行的一次出 checkpoint 后，后台线程可能又不断地从 LRU 链表和 flush 链表中将一些脏页刷出 [[Buffer Pool]]。对于这些 lsn 值不小于 checkpoint_lsn 的 redo 日志，如果它们对应的脏页在崩溃发生时已经刷新到磁盘，那么在恢复时也就没有必要根据 redo 日志的内容修改该页面了。<br> 每个页面都有一个称为 File Header 的部分。在 File Header 中有一个称为 FIL_PAGE_LSN 的属性，该属性记载了最近一次修改页面时对应的 Isn 值（其实就是页面控制块中的 newest_modificatioin 值）。如果在执行了某次 checkpoint 之后，有脏页被刷新到磁盘中，那么该页对应的 FIL_PAGE_LSN 代表的 Isn 值肯定大于 checkpoint_Isn 的值。凡是符合这种情况的页面就不需要根据 Isn 值小于 FIL_PAGE_LSN 的 redo 日志进行恢复了，所以这进一步提升了崩溃恢复的速度。</p> 
+<h3><a id="LOCS_BLOCK_HDR_NO__235"></a>LOCS_BLOCK_HDR_NO 是如何计算的</h3> 
+<p>对于实际存储 redo 日志的普通的 log block 来说，在 log block header 处有一个名为 LOG_BLOCK_HDR_NO 的属性。这个属性代表一个唯一的编号，它的值在初次使用该 block 时进行分配，与当时的系统 Isn 值有关。使用下面的公式可以计算出该 block 的 LOG_BLOCK_HDR_NO 值：</p> 
+<pre><code class="prism language-sql"><span class="token punctuation">(</span><span class="token punctuation">(</span>lsn<span class="token operator">/</span><span class="token number">512</span><span class="token punctuation">)</span> <span class="token operator">&amp;</span> <span class="token number">0x3FFFFFFF</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token number">1</span>
+</code></pre> 
+<p>0x3FFFFFFF 的二进制表示如下图所示：<br> <img src="https://images2.imgbox.com/f6/fe/KagsguxM_o.png" alt="NjjGaU"><br> 0x3FFFFFFF 对应的 32 位二进制数的前 2 个比特为 0。后 30 个比特都为 1。让一个数与 0x3FFFFFFF 进行与运算的意思就是要将该值的前 2 个比特置为 0（这样该值就肯定小于或等于 0x3FFFFFFF 了。 这也就说明，无论 Isn 多大，((lsn/512) &amp; 0x3FFFFFFF) 的值肯定在 0～0x3FFFFFFF 之间，再加 1 的话肯定在 1～0x4000000 之间。而 0x4000000 就是 2 的 30 次方，它代表着 1G。也就是说，系统能产生的不重复的 LOG_BLOCK_HDR_NO 值最多有 1G 个。InnoDB 规定，redo 日志文件组中包含的所有文件大小的总和不得超过 512GB，一个 block 大小是 512 字节，也就是说 redo 日志文件组中包含的 block 块最多为 1G 个，所以有 1GB 个不重复的编号值也就够用了。<br> 另外 LOG_BLOCK_HDR_NO 值的第一个比特比较特殊，称为 flush bit。如果该值为 1，代表本 block 是在将 log buffer 中的 block 刷新到磁盘的某次操作中时，第一个被刷入的 block。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/0efbaf3838eb240c97eb1e099c6515c5/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">信号完整性分析学习--18--源端匹配</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/dabf8dc9c60ebb5d5384d4af9ec96a21/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Latex数学公式汇总</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Redis的缓存问题之缓存穿透、缓存雪崩、缓存击穿 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Redis的缓存问题之缓存穿透、缓存雪崩、缓存击穿" />
+<meta property="og:description" content="目录
+一、什么是缓存穿透？
+二、常见的解决方案有两种：
+1、缓存空对象
+2、布隆过滤
+综上所述
+三、编码解决商品查询的缓存穿透问题
+四、缓存雪崩问题及解决思路
+1、什么是缓存雪崩？
+五、缓存击穿问题及解决思路
+1、什么是缓存击穿？
+2、解决方案（2种）
+（1）互斥锁
+（2）逻辑过期
+3、互斥锁与逻辑过期的对比分析
+六、利用互斥锁解决缓存击穿问题
+代码实现
+七、利用逻辑过期解决缓存击穿问题
+需求描述
+代码实现
+八、封装 Redis 工具类
+一、什么是缓存穿透？ 缓存穿透是指客户端请求的数据在缓存中和数据库中都不存在，这样缓存永远不会生效，这些请求都会打到数据库。
+二、常见的解决方案有两种： 1、缓存空对象 简单的来说，就是请求之后，发现数据不存在，就将null值打入Redis中。
+优点：实现简单，维护方便缺点： 额外的内存消耗可能造成短期的不一致 思路分析：
+当我们客户端访问不存在的数据时，先请求 redis，但是此时 redis 中没有数据，此时会访问到数据库，但是数据库中也没有数据，这个数据穿透了缓存，直击数据库，我们都知道数据库能够承载的并发不如 redis 这么高，如果大量的请求同时过来访问这种不存在的数据，这些请求就都会访问到数据库，简单的解决方案就是哪怕这个数据在数据库中也不存在，我们也把这个数据存入到 redis 中去，这样，下次用户过来访问这个不存在的数据，那么在 redis 中也能找到这个数据就不会进入到数据库了。
+2、布隆过滤 在客户端与Redis之间加了一个布隆过滤器，对于请求进行过滤。 布隆过滤器的大致的原理：布隆过滤器中存放二进制位。数据库的数据通过hash算法计算其hash值并存放到布隆过滤器中，之后判断数据是否存在的时候，就是判断该hash值是0还是1。
+但是这个玩意是一种概率上的统计，当其判断不存在的时候就一定是不存在；当其判断存在的时候就不一定存在。所以有一定的穿透风险！！！
+优点：内存占用较少，没有多余 key缺点： 实现复杂存在误判可能 综上所述 我们可以两种方案一起用，这样子最为保险。据统计使用布隆过滤器一般可以避免90%的无效请求。但是黑马程序员这里的视频是使用方案一（缓存空对象）。
+三、编码解决商品查询的缓存穿透问题 核心思路如下：
+在原来的逻辑中，我们如果发现这个数据在 mysql 中不存在，直接就返回 404 了，这样是会存在缓存穿透问题的
+现在的逻辑中：如果这个数据不存在，我们不会返回 404 ，还是会把这个数据写入到 Redis 中，并且将 value 设置为空，欧当再次发起查询时，我们如果发现命中之后，判断这个 value 是否是 null，如果是 null，则是之前写入的数据，证明是缓存穿透数据，如果不是，则直接返回数据。
+显然我们在这里只要做两件事：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/25b20622dbe05a7fae68420fc12f472f/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-12-31T16:28:31+08:00" />
+<meta property="article:modified_time" content="2022-12-31T16:28:31+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Redis的缓存问题之缓存穿透、缓存雪崩、缓存击穿</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p id="main-toc"><strong>目录</strong></p> 
+<p id="%E4%B8%80%E3%80%81%E4%BB%80%E4%B9%88%E6%98%AF%E7%BC%93%E5%AD%98%E7%A9%BF%E9%80%8F%EF%BC%9F-toc" style="margin-left:0px;"><a href="#%E4%B8%80%E3%80%81%E4%BB%80%E4%B9%88%E6%98%AF%E7%BC%93%E5%AD%98%E7%A9%BF%E9%80%8F%EF%BC%9F" rel="nofollow">一、什么是缓存穿透？</a></p> 
+<p id="%E4%BA%8C%E3%80%81%E5%B8%B8%E8%A7%81%E7%9A%84%E8%A7%A3%E5%86%B3%E6%96%B9%E6%A1%88%E6%9C%89%E4%B8%A4%E7%A7%8D%EF%BC%9A-toc" style="margin-left:0px;"><a href="#%E4%BA%8C%E3%80%81%E5%B8%B8%E8%A7%81%E7%9A%84%E8%A7%A3%E5%86%B3%E6%96%B9%E6%A1%88%E6%9C%89%E4%B8%A4%E7%A7%8D%EF%BC%9A" rel="nofollow">二、常见的解决方案有两种：</a></p> 
+<p id="1%E3%80%81%E7%BC%93%E5%AD%98%E7%A9%BA%E5%AF%B9%E8%B1%A1-toc" style="margin-left:40px;"><a href="#1%E3%80%81%E7%BC%93%E5%AD%98%E7%A9%BA%E5%AF%B9%E8%B1%A1" rel="nofollow">1、缓存空对象</a></p> 
+<p id="2%E3%80%81%E5%B8%83%E9%9A%86%E8%BF%87%E6%BB%A4-toc" style="margin-left:40px;"><a href="#2%E3%80%81%E5%B8%83%E9%9A%86%E8%BF%87%E6%BB%A4" rel="nofollow">2、布隆过滤</a></p> 
+<p id="%E7%BB%BC%E4%B8%8A%E6%89%80%E8%BF%B0-toc" style="margin-left:80px;"><a href="#%E7%BB%BC%E4%B8%8A%E6%89%80%E8%BF%B0" rel="nofollow">综上所述</a></p> 
+<p id="%E4%B8%89%E3%80%81%E7%BC%96%E7%A0%81%E8%A7%A3%E5%86%B3%E5%95%86%E5%93%81%E6%9F%A5%E8%AF%A2%E7%9A%84%E7%BC%93%E5%AD%98%E7%A9%BF%E9%80%8F%E9%97%AE%E9%A2%98-toc" style="margin-left:0px;"><a href="#%E4%B8%89%E3%80%81%E7%BC%96%E7%A0%81%E8%A7%A3%E5%86%B3%E5%95%86%E5%93%81%E6%9F%A5%E8%AF%A2%E7%9A%84%E7%BC%93%E5%AD%98%E7%A9%BF%E9%80%8F%E9%97%AE%E9%A2%98" rel="nofollow">三、编码解决商品查询的缓存穿透问题</a></p> 
+<p id="%E5%9B%9B%E3%80%81%E7%BC%93%E5%AD%98%E9%9B%AA%E5%B4%A9%E9%97%AE%E9%A2%98%E5%8F%8A%E8%A7%A3%E5%86%B3%E6%80%9D%E8%B7%AF-toc" style="margin-left:0px;"><a href="#%E5%9B%9B%E3%80%81%E7%BC%93%E5%AD%98%E9%9B%AA%E5%B4%A9%E9%97%AE%E9%A2%98%E5%8F%8A%E8%A7%A3%E5%86%B3%E6%80%9D%E8%B7%AF" rel="nofollow">四、缓存雪崩问题及解决思路</a></p> 
+<p id="1%E3%80%81%E4%BB%80%E4%B9%88%E6%98%AF%E7%BC%93%E5%AD%98%E9%9B%AA%E5%B4%A9%EF%BC%9F-toc" style="margin-left:40px;"><a href="#1%E3%80%81%E4%BB%80%E4%B9%88%E6%98%AF%E7%BC%93%E5%AD%98%E9%9B%AA%E5%B4%A9%EF%BC%9F" rel="nofollow">1、什么是缓存雪崩？</a></p> 
+<p id="%E4%BA%94%E3%80%81%E7%BC%93%E5%AD%98%E5%87%BB%E7%A9%BF%E9%97%AE%E9%A2%98%E5%8F%8A%E8%A7%A3%E5%86%B3%E6%80%9D%E8%B7%AF-toc" style="margin-left:0px;"><a href="#%E4%BA%94%E3%80%81%E7%BC%93%E5%AD%98%E5%87%BB%E7%A9%BF%E9%97%AE%E9%A2%98%E5%8F%8A%E8%A7%A3%E5%86%B3%E6%80%9D%E8%B7%AF" rel="nofollow">五、缓存击穿问题及解决思路</a></p> 
+<p id="%C2%A01%E3%80%81%E4%BB%80%E4%B9%88%E6%98%AF%E7%BC%93%E5%AD%98%E5%87%BB%E7%A9%BF%EF%BC%9F-toc" style="margin-left:40px;"><a href="#%C2%A01%E3%80%81%E4%BB%80%E4%B9%88%E6%98%AF%E7%BC%93%E5%AD%98%E5%87%BB%E7%A9%BF%EF%BC%9F" rel="nofollow"> 1、什么是缓存击穿？</a></p> 
+<p id="2%E3%80%81%E8%A7%A3%E5%86%B3%E6%96%B9%E6%A1%88%EF%BC%882%E7%A7%8D%EF%BC%89-toc" style="margin-left:40px;"><a href="#2%E3%80%81%E8%A7%A3%E5%86%B3%E6%96%B9%E6%A1%88%EF%BC%882%E7%A7%8D%EF%BC%89" rel="nofollow">2、解决方案（2种）</a></p> 
+<p id="%EF%BC%881%EF%BC%89%E4%BA%92%E6%96%A5%E9%94%81-toc" style="margin-left:80px;"><a href="#%EF%BC%881%EF%BC%89%E4%BA%92%E6%96%A5%E9%94%81" rel="nofollow">（1）互斥锁</a></p> 
+<p id="%C2%A0%EF%BC%882%EF%BC%89%E9%80%BB%E8%BE%91%E8%BF%87%E6%9C%9F-toc" style="margin-left:80px;"><a href="#%C2%A0%EF%BC%882%EF%BC%89%E9%80%BB%E8%BE%91%E8%BF%87%E6%9C%9F" rel="nofollow"> （2）逻辑过期</a></p> 
+<p id="%E4%BA%92%E6%96%A5%E9%94%81%E4%B8%8E%E9%80%BB%E8%BE%91%E8%BF%87%E6%9C%9F%E7%9A%84%E5%AF%B9%E6%AF%94%E5%88%86%E6%9E%90-toc" style="margin-left:40px;"><a href="#%E4%BA%92%E6%96%A5%E9%94%81%E4%B8%8E%E9%80%BB%E8%BE%91%E8%BF%87%E6%9C%9F%E7%9A%84%E5%AF%B9%E6%AF%94%E5%88%86%E6%9E%90" rel="nofollow">3、互斥锁与逻辑过期的对比分析</a></p> 
+<p id="%E5%85%AD%E3%80%81%E5%88%A9%E7%94%A8%E4%BA%92%E6%96%A5%E9%94%81%E8%A7%A3%E5%86%B3%E7%BC%93%E5%AD%98%E5%87%BB%E7%A9%BF%E9%97%AE%E9%A2%98-toc" style="margin-left:0px;"><a href="#%E5%85%AD%E3%80%81%E5%88%A9%E7%94%A8%E4%BA%92%E6%96%A5%E9%94%81%E8%A7%A3%E5%86%B3%E7%BC%93%E5%AD%98%E5%87%BB%E7%A9%BF%E9%97%AE%E9%A2%98" rel="nofollow">六、利用互斥锁解决缓存击穿问题</a></p> 
+<p id="%E4%BB%A3%E7%A0%81%E5%AE%9E%E7%8E%B0-toc" style="margin-left:80px;"><a href="#%E4%BB%A3%E7%A0%81%E5%AE%9E%E7%8E%B0" rel="nofollow">代码实现</a></p> 
+<p id="%E4%B8%83%E3%80%81%E5%88%A9%E7%94%A8%E9%80%BB%E8%BE%91%E8%BF%87%E6%9C%9F%E8%A7%A3%E5%86%B3%E7%BC%93%E5%AD%98%E5%87%BB%E7%A9%BF%E9%97%AE%E9%A2%98-toc" style="margin-left:0px;"><a href="#%E4%B8%83%E3%80%81%E5%88%A9%E7%94%A8%E9%80%BB%E8%BE%91%E8%BF%87%E6%9C%9F%E8%A7%A3%E5%86%B3%E7%BC%93%E5%AD%98%E5%87%BB%E7%A9%BF%E9%97%AE%E9%A2%98" rel="nofollow">七、利用逻辑过期解决缓存击穿问题</a></p> 
+<p id="%E9%9C%80%E6%B1%82%E6%8F%8F%E8%BF%B0-toc" style="margin-left:80px;"><a href="#%E9%9C%80%E6%B1%82%E6%8F%8F%E8%BF%B0" rel="nofollow">需求描述</a></p> 
+<p id="%E4%BB%A3%E7%A0%81%E5%AE%9E%E7%8E%B0-toc" style="margin-left:80px;"><a href="#%E4%BB%A3%E7%A0%81%E5%AE%9E%E7%8E%B0" rel="nofollow">代码实现</a></p> 
+<p id="%E5%85%AB%E3%80%81%E5%B0%81%E8%A3%85%20Redis%20%E5%B7%A5%E5%85%B7%E7%B1%BB-toc" style="margin-left:0px;"><a href="#%E5%85%AB%E3%80%81%E5%B0%81%E8%A3%85%20Redis%20%E5%B7%A5%E5%85%B7%E7%B1%BB" rel="nofollow">八、封装 Redis 工具类</a></p> 
+<hr id="hr-toc"> 
+<p></p> 
+<h2 id="%E4%B8%80%E3%80%81%E4%BB%80%E4%B9%88%E6%98%AF%E7%BC%93%E5%AD%98%E7%A9%BF%E9%80%8F%EF%BC%9F">一、什么是缓存穿透？</h2> 
+<blockquote> 
+ <p>        缓存穿透是指客户端请求的<strong>数据在缓存中和数据库中都不存在</strong>，这样缓存永远不会生效，<strong>这些请求都会打到数据库</strong>。</p> 
+</blockquote> 
+<hr> 
+<h2 id="%E4%BA%8C%E3%80%81%E5%B8%B8%E8%A7%81%E7%9A%84%E8%A7%A3%E5%86%B3%E6%96%B9%E6%A1%88%E6%9C%89%E4%B8%A4%E7%A7%8D%EF%BC%9A">二、常见的解决方案有两种：</h2> 
+<h3 id="1%E3%80%81%E7%BC%93%E5%AD%98%E7%A9%BA%E5%AF%B9%E8%B1%A1">1、缓存空对象</h3> 
+<p><img alt="" src="https://images2.imgbox.com/59/1e/tN0NzpXs_o.png"> </p> 
+<p><strong>简单的来说，就是请求之后，发现数据不存在，就将null值打入Redis中</strong>。</p> 
+<ul><li>优点：<strong>实现简单，维护方便</strong></li><li>缺点： 
+  <ul><li><strong>额外的内存消耗</strong></li><li><strong>可能造成短期的不一致</strong></li></ul></li></ul> 
+<p><strong>思路分析：</strong></p> 
+<p>        当我们客户端访问不存在的数据时，<strong>先请求 redis，但是此时 redis 中没有数据，此时会访问到数据库，但是数据库中也没有数据，这个数据穿透了缓存，直击数据库</strong>，我们都知道数据库能够承载的并发不如 redis 这么高，<strong>如果大量的请求同时过来访问这种不存在的数据，这些请求就都会访问到数据库，简单的解决方案就是哪怕这个数据在数据库中也不存在，我们也把这个数据存入到 redis 中去</strong>，这样，下次用户过来访问这个不存在的数据，那么在 redis 中也能找到这个数据就不会进入到数据库了。</p> 
+<h3 id="2%E3%80%81%E5%B8%83%E9%9A%86%E8%BF%87%E6%BB%A4">2、布隆过滤</h3> 
+<p><img alt="" src="https://images2.imgbox.com/90/66/sPERyHcU_o.png"></p> 
+<p>在客户端与Redis之间加了一个布隆过滤器，对于请求进行过滤。 </p> 
+<p>        布隆过滤器的大致的原理：<strong>布隆过滤器中存放二进制位。数据库的数据通过hash算法计算其hash值并存放到布隆过滤器中，之后判断数据是否存在的时候，就是判断该hash值是0还是1</strong>。</p> 
+<p>        但是这个玩意是一种概率上的统计，<strong>当其判断不存在的时候就一定是不存在；当其判断存在的时候就不一定存在。所以有一定的穿透风险</strong>！！！</p> 
+<ul><li>优点：内存占用较少，没有多余 key</li><li>缺点： 
+  <ul><li>实现复杂</li><li>存在误判可能</li></ul></li></ul> 
+<h4 id="%E7%BB%BC%E4%B8%8A%E6%89%80%E8%BF%B0">综上所述</h4> 
+<p>我们可以<strong>两种方案一起用</strong>，这样子最为保险。据统计使用布隆过滤器一般可以避免90%的无效请求。但是黑马程序员这里的视频是使用<strong>方案一（缓存空对象）。</strong></p> 
+<hr> 
+<h2 id="%E4%B8%89%E3%80%81%E7%BC%96%E7%A0%81%E8%A7%A3%E5%86%B3%E5%95%86%E5%93%81%E6%9F%A5%E8%AF%A2%E7%9A%84%E7%BC%93%E5%AD%98%E7%A9%BF%E9%80%8F%E9%97%AE%E9%A2%98">三、编码解决商品查询的缓存穿透问题</h2> 
+<p>核心思路如下：</p> 
+<p>在原来的逻辑中，我们如果发现这个数据在 mysql 中不存在，直接就返回 404 了，这样是会存在缓存穿透问题的</p> 
+<p>        现在的逻辑中：如果这个数据不存在，我们不会返回 404 ，还是会把这个数据写入到 Redis 中，并且将 value 设置为空，欧当再次发起查询时，我们如果发现命中之后，判断这个 value 是否是 null，如果是 null，则是之前写入的数据，证明是缓存穿透数据，如果不是，则直接返回数据。</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/44/4d/28ughSYB_o.png"></p> 
+<p> </p> 
+<p>显然我们在这里只要做两件事：</p> 
+<ul><li>当查询数据在数据库中不存在时，将<strong>空值写入 redis</strong></li><li> 判断缓存是否命中后，再加一个<strong>判断是否为空值</strong></li></ul> 
+<pre><code class="language-java">@Override
+public Result queryById(Long id) {
+ 
+    // 从redis查询商铺缓存
+    String key = CACHE_SHOP_KEY + id;
+    String shopJson = stringRedisTemplate.opsForValue().get(key);
+ 
+    // 判断是否存在
+    if (StrUtil.isNotBlank(shopJson)) {
+        // 存在，直接返回
+        Shop shop = JSONUtil.toBean(shopJson, Shop.class);
+        return Result.ok(shop);
+    }
+ 
+    // 1.判断空值
+    if (shopJson != null) {
+        // 返回一个错误信息
+        return Result.fail("店铺不存在！");
+    }
+ 
+ 
+    // 不存在，根据id查询数据库
+    Shop shop = getById(id);
+ 
+    // 不存在，返回错误
+    if (shop == null) {
+        
+        // 2.防止穿透问题，将空值写入redis!!!
+        stringRedisTemplate.opsForValue().set(key,"",CACHE_NULL_TTL,TimeUnit.MINUTES);
+        return Result.fail("店铺不存在！");
+    }
+ 
+    // 存在，写入Redis
+    // 把shop转换成为JSON形式写入Redis
+    // 同时添加超时时间
+    stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(shop), CACHE_SHOP_TTL, TimeUnit.MINUTES);
+    return Result.ok(shop);
+}</code></pre> 
+<p> 小总结：</p> 
+<p><strong>缓存穿透产生的原因是什么？</strong></p> 
+<ul><li>用户请求的数据在缓存中和数据库中都不存在，不断发起这样的请求，给数据库带来巨大压力</li></ul> 
+<p><strong>缓存穿透的解决方案有哪些？</strong></p> 
+<ul><li>缓存 null 值</li><li>布隆过滤</li><li>增强 id 的复杂度，避免被猜测 id 规律</li><li>做好数据的基础格式校验</li><li>加强用户权限校验</li><li>做好热点参数的限流</li></ul> 
+<hr> 
+<h2 id="%E5%9B%9B%E3%80%81%E7%BC%93%E5%AD%98%E9%9B%AA%E5%B4%A9%E9%97%AE%E9%A2%98%E5%8F%8A%E8%A7%A3%E5%86%B3%E6%80%9D%E8%B7%AF">四、缓存雪崩问题及解决思路</h2> 
+<h3 id="1%E3%80%81%E4%BB%80%E4%B9%88%E6%98%AF%E7%BC%93%E5%AD%98%E9%9B%AA%E5%B4%A9%EF%BC%9F">1、什么是缓存雪崩？</h3> 
+<p>        缓存雪崩是指在<strong>同一时段大量的缓存key同时失效</strong>或者<strong>Redis服务宕机</strong>，导致大量请求到达数据库，带来巨大压力。情况大致如下图所示：</p> 
+<p><img alt="" src="https://images2.imgbox.com/b1/aa/kAtWCwn7_o.png"></p> 
+<p><strong>解决方案（4种）</strong></p> 
+<ul><li><strong>（1）给不同的Key的TTL添加随机值（推荐）</strong></li></ul> 
+<p>        操作简单，当我们在做缓存预热的时候，就有可能在同一时间批量插入大量的数据，那么如果它们的TTL都一样的话就可能出现大量key同时过期的情况！！！所以我们需要在设置过期时间TTL的时候，定义一个范围，追加该范围内的一个随机数。</p> 
+<ul><li><strong>（2）利用Redis集群提高服务的可用性</strong></li></ul> 
+<p>        使用集群提高可靠性，后续讲解~~~之后写了会在这里贴上链接。</p> 
+<ul><li><strong>（3）给缓存业务添加降级限流策略</strong></li></ul> 
+<p>        也是后续的微服务的知识~~~SpringCloud中有提！！！</p> 
+<ul><li><strong>（4）给业务添加多级缓存  </strong></li></ul> 
+<p>        请求到达浏览器，nginx可以做缓存，未命中找Redis，再未命中找JVM，最后到数据库......</p> 
+<hr> 
+<h2 id="%E4%BA%94%E3%80%81%E7%BC%93%E5%AD%98%E5%87%BB%E7%A9%BF%E9%97%AE%E9%A2%98%E5%8F%8A%E8%A7%A3%E5%86%B3%E6%80%9D%E8%B7%AF">五、缓存击穿问题及解决思路</h2> 
+<h3 id="%C2%A01%E3%80%81%E4%BB%80%E4%B9%88%E6%98%AF%E7%BC%93%E5%AD%98%E5%87%BB%E7%A9%BF%EF%BC%9F"> 1、什么是缓存击穿？</h3> 
+<p><strong>缓存雪崩是因为大量的key同时过期所导致的问题，而缓存击穿则是部分key过期导致的严重后果</strong>。</p> 
+<p>为什么大量key过期会产生问题<strong>而少量的key也会有问题呢</strong>？？？</p> 
+<p>这是因为<strong>这一部分的key不简单</strong>！！！</p> 
+<p><span style="color:#fe2c24;"><strong>缓存击穿问题也叫热点Key问题，就是⼀个被高并发访问并且缓存重建业务较复杂的key突然失效了，无数的请求访问会在瞬间给数据库带来巨大的冲击</strong></span>。</p> 
+<p>具体情况如下图所示：</p> 
+<p><img alt="" src="https://images2.imgbox.com/ea/0f/p4LhIuZ3_o.png"></p> 
+<p>上述：此时假设<strong>该热点key的TTL时间到（失效了）</strong>，则查询缓存未命中，会继续<strong>查询数据库，并进行缓存重建工作</strong>。<strong>但是由于查询SQL逻辑比较复杂、重建缓存的时间较久，并且该key又是热点key，短时间内有大量的线程对其进行访问，所以请求会直接 “打到” 数据库中，数据库就有可能崩掉</strong>！！！</p> 
+<h3 id="2%E3%80%81%E8%A7%A3%E5%86%B3%E6%96%B9%E6%A1%88%EF%BC%882%E7%A7%8D%EF%BC%89">2、解决方案（2种）</h3> 
+<h4 id="%EF%BC%881%EF%BC%89%E4%BA%92%E6%96%A5%E9%94%81">（1）互斥锁</h4> 
+<p><img alt="" src="https://images2.imgbox.com/5a/11/IUvilm5B_o.png"></p> 
+<ul><li>简单的来说就是，并不是所有的线程都有 “ <strong>资格 </strong>” 去访问数据库，只有持有<strong>锁</strong>的线程才可以对其进行操作。</li><li>不过该操作有一个很明显的问题，就是会出现相互等待的情况。</li></ul> 
+<h4 id="%C2%A0%EF%BC%882%EF%BC%89%E9%80%BB%E8%BE%91%E8%BF%87%E6%9C%9F"> （2）逻辑过期</h4> 
+<p><img alt="" src="https://images2.imgbox.com/61/e2/RSROVXyp_o.png"></p> 
+<p> 不设置TTL，之前所说导致缓存击穿的原因就是该key的TTL到期了，所以我们在这就<strong>不设置TTL了</strong>，而是使用一个<strong>字段</strong>例如：expire表示过期时间（<strong>逻辑</strong>上的）。当我们想让它 “ 过期 ” 的时候，我们可以直接<strong>手动</strong>将其<strong>删除</strong>（热点key，即只是<strong>在一段时间</strong>内，其<strong>被访问的频次很高</strong>）。</p> 
+<p><strong>这种方案巧妙在于，异步的构建缓存，缺点在于在构建完缓存之前，返回的都是脏数据</strong>。</p> 
+<h3 id="%E4%BA%92%E6%96%A5%E9%94%81%E4%B8%8E%E9%80%BB%E8%BE%91%E8%BF%87%E6%9C%9F%E7%9A%84%E5%AF%B9%E6%AF%94%E5%88%86%E6%9E%90">3、互斥锁与逻辑过期的对比分析</h3> 
+<p><img alt="" src="https://images2.imgbox.com/0b/7f/GNXBGHHa_o.png"></p> 
+<p> </p> 
+<hr> 
+<h2 id="%E5%85%AD%E3%80%81%E5%88%A9%E7%94%A8%E4%BA%92%E6%96%A5%E9%94%81%E8%A7%A3%E5%86%B3%E7%BC%93%E5%AD%98%E5%87%BB%E7%A9%BF%E9%97%AE%E9%A2%98">六、利用互斥锁解决缓存击穿问题</h2> 
+<p>       <strong> 核心思路</strong>：相较于原来从缓存中查询不到数据后直接查询数据库而言，现在的方案是 进行查询之后，如果从缓存没有查询到数据，则进行互斥锁的获取，获取互斥锁后，判断是否获得到了锁，如果没有获得到，则休眠，过一会再进行尝试，直到获取到锁为止，才能进行查询</p> 
+<p>        如果获取到了锁的线程，再去进行查询，查询后将数据写入 redis，再释放锁，返回数据，利用互斥锁就能保证只有一个线程去执行操作数据库的逻辑，防止缓存击穿。</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/fe/9e/KxibOnmJ_o.png"></p> 
+<p> </p> 
+<h4 id="%E4%BB%A3%E7%A0%81%E5%AE%9E%E7%8E%B0">代码实现</h4> 
+<p>（1）首先，我们声明一下获取锁、释放锁的方法，<strong>tryLock()、unLock()</strong></p> 
+<pre><code class="language-java">/**
+  * 获取锁
+  * @param key
+  * @return
+*/
+private boolean tryLock(String key) {
+    // setnx 就是 setIfAbsent 如果存在
+    Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", 10, TimeUnit.MINUTES);
+    // 装箱是将值类型装换成引用类型的过程；拆箱就是将引用类型转换成值类型的过程
+    // 不要直接返回flag，可能为null
+    return BooleanUtil.isTrue(flag);
+}
+ 
+/**
+ * 释放锁
+ * @param key
+ */
+private void unLock(String key) {
+    stringRedisTemplate.delete(key);
+}</code></pre> 
+<p><strong>注意</strong>：这里的锁不是真正的线程锁，而是redis里面的一个特殊的key。 </p> 
+<p>2）互斥锁解决缓存击穿 <strong>queryWithMutex()</strong></p> 
+<pre><code class="language-java">/**
+ * 互斥锁解决缓存击穿 queryWithMutex()
+ * @param id
+ * @return
+ */
+public Shop queryWithMutex(Long id) {
+    // 1.从redis查询商铺缓存
+    String key = CACHE_SHOP_KEY + id;
+    String shopJson = stringRedisTemplate.opsForValue().get(key);
+ 
+    // 2.判断是否存在
+    if (StrUtil.isNotBlank(shopJson)) {
+        return JSONUtil.toBean(shopJson, Shop.class);
+    }
+ 
+    // 判断空值
+    if (shopJson != null) {
+        // 返回一个错误信息
+        return null;
+    }
+ 
+    String lockKey = "lock:shop:" + id;
+    Shop shop = null;
+    try {
+        // 4.实现缓存重建
+        // 4.1获取互斥锁
+        boolean isLock = tryLock(lockKey);
+ 
+        // 4.2判断是否成功
+        if (!isLock) {
+            // 4.3失败，则休眠并重试
+            Thread.sleep(50);
+            // 递归
+            return queryWithMutex(id);
+        }
+        // 4.4成功，根据id查询数据库
+        shop = getById(id);
+ 
+        // 模拟延迟
+        Thread.sleep(200);
+ 
+        // 5.不存在，返回错误
+        if (shop == null) {
+            stringRedisTemplate.opsForValue().set(key,"",CACHE_NULL_TTL,TimeUnit.MINUTES);
+            return null;
+        }
+ 
+        // 6.存在，写入redis
+        stringRedisTemplate.opsForValue().set(key,JSONUtil.toJsonStr(shop),CACHE_SHOP_TTL,TimeUnit.MINUTES);
+ 
+    } catch (InterruptedException ex) {
+        throw new RuntimeException(ex);
+    } finally {
+        // 7.释放锁
+        unLock(lockKey);
+    }
+ 
+    // 8.返回
+    return shop;
+}</code></pre> 
+<p> </p> 
+<hr> 
+<h2 id="%E4%B8%83%E3%80%81%E5%88%A9%E7%94%A8%E9%80%BB%E8%BE%91%E8%BF%87%E6%9C%9F%E8%A7%A3%E5%86%B3%E7%BC%93%E5%AD%98%E5%87%BB%E7%A9%BF%E9%97%AE%E9%A2%98">七、利用逻辑过期解决缓存击穿问题</h2> 
+<h4 id="%E9%9C%80%E6%B1%82%E6%8F%8F%E8%BF%B0"><strong>需求描述</strong></h4> 
+<p><strong>修改根据id查询商铺的业务，基于逻辑过期方式来解决缓存击穿问题</strong></p> 
+<p><img alt="" src="https://images2.imgbox.com/6b/23/SVq3pI9c_o.png"></p> 
+<p> <strong>注意</strong>：这里的key是否过期，不是由redis控制的，而是由我们自己去手动编写逻辑去控制的。 </p> 
+<h4>代码实现</h4> 
+<p><strong>（1）添加逻辑过期时间的字段</strong></p> 
+<p>由于我们之前的<strong>Shop</strong>中是没有逻辑过期的字段，那么<strong>我们要如何让它带有这个属性，又不修改之前的代码呢？</strong></p> 
+<p>新建一个<strong>RedisData对象</strong>，里面的<strong>data</strong>指的是Shop对象，而expireTime是逻辑过期时间。</p> 
+<p>即：我们可以使用 <strong>JSONUtil.toBean</strong> 将Shop对象通过序列化、反序列化到<strong>RedisData</strong>类的<strong>data</strong>属性中。</p> 
+<pre><code class="language-java">@Data
+public class RedisData {
+    // LocalDateTime ： 同时含有年月日时分秒的日期对象
+    // 并且LocalDateTime是线程安全的！
+    private LocalDateTime expireTime;
+    private Object data;
+}</code></pre> 
+<p>（2）逻辑过期解决缓存击穿问题 <strong>queryWithLogicalExpire()</strong></p> 
+<p><strong>缓存重建</strong></p> 
+<pre><code class="language-java">/**
+ * 重建缓存,先缓存预热一下，否则queryWithLogicalExpire() 的expire为null
+ * @param id
+ * @param expireSeconds
+ */
+public void saveShopRedis(Long id, Long expireSeconds) {
+    // 1.查询店铺数据
+    Shop shop = getById(id);
+    // 2.封装逻辑过期时间
+    RedisData redisData = new RedisData();
+    redisData.setData(shop);
+    redisData.setExpireTime(LocalDateTime.now().plusSeconds(expireSeconds));  // 过期时间
+    // 3.写入redis
+    stringRedisTemplate.opsForValue().set(CACHE_SHOP_KEY + id, JSONUtil.toJsonStr(redisData));
+}</code></pre> 
+<p>先使用测试方法运行一下<strong>saveShopRedis()</strong>，否则redis里面<strong>没有expireTime ！</strong></p> 
+<p><img alt="" src="https://images2.imgbox.com/e6/d7/IiGm55DL_o.png"></p> 
+<pre><code class="language-java">private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
+
+/**
+ * 逻辑过期解决缓存击穿问题 queryWithLogicalExpire()
+ * 测试前要先缓存预热一下！不然 data 与 expireTime 的缓存值是null！
+ * @param id
+ * @return
+ */
+public Shop queryWithLogicalExpire(Long id) {
+    // 1.从redis查询商铺缓存
+    String key = CACHE_SHOP_KEY + id;
+    String shopJson = stringRedisTemplate.opsForValue().get(key);
+ 
+    // 2.判断是否存在
+    if (StrUtil.isBlank(shopJson)) {
+        return null;
+    }
+ 
+    // 4.命中，需要将json反序列化为对象
+    // redisData没有数据
+    RedisData redisData = JSONUtil.toBean(shopJson, RedisData.class);
+    Shop shop = JSONUtil.toBean((JSONObject) redisData.getData(), Shop.class);
+    LocalDateTime expireTime = redisData.getExpireTime();
+ 
+    // 5.判断是否过期
+    if (expireTime.isAfter(LocalDateTime.now())) {
+        // 5.1未过期，直接返回店铺信息
+        return shop;
+    }
+ 
+    // 5.2已过期，需要缓存重建
+    // 6.缓存重建
+    // 6.1.获取互斥锁
+    String lockKey = LOCK_SHOP_KEY + id;
+    boolean islock = tryLock(lockKey);
+    // 6.2.判断是否获取互斥锁成功
+    if (islock) {
+        // 6.3.成功，开启独立线程，实现缓存重建
+        CACHE_REBUILD_EXECUTOR.submit( () -&gt; {
+            try {
+                // 重建缓存，过期时间为20L
+                saveShopRedis(id,20L);
+            } catch (Exception ex) {
+                throw new RuntimeException(ex);
+            } finally {
+                unLock(lockKey);
+            }
+        });
+    }
+    // 6.4.返回过期店铺信息
+    return shop;
+}</code></pre> 
+<p>我们可以看到在测试的时候，name的值为：“100XXXX”</p> 
+<p>我们现在来修改一下<strong>数据库</strong>，将值改为：“900XXXX”，看看并发情况下<strong>缓存重建能否正确</strong>！</p> 
+<p><img alt="" src="https://images2.imgbox.com/5b/29/zemXnbsV_o.png"></p> 
+<p>通过<strong>Jmeter</strong>做压力测试</p> 
+<p><img alt="" src="https://images2.imgbox.com/ed/69/NxP5wed5_o.png"> 再查看Redis中的数据，可以看到name的值<strong>已经被修改</strong>了，而且上面的<strong>jmeter</strong>的每一个http都是正常的！</p> 
+<p><img alt="" src="https://images2.imgbox.com/d9/df/UcJWuVxp_o.png"></p> 
+<p> </p> 
+<hr> 
+<h2 id="%E5%85%AB%E3%80%81%E5%B0%81%E8%A3%85%20Redis%20%E5%B7%A5%E5%85%B7%E7%B1%BB">八、封装 Redis 工具类</h2> 
+<p> </p> 
+<p><strong>基于 StringRedisTemplate 封装一个缓存工具类，满足下列需求：</strong></p> 
+<ul><li>方法 1：将任意 Java 对象序列化为 json 并存储在 string 类型的 key 中，并且可以设置 TTL 过期时间</li><li>方法 2：将任意 Java 对象序列化为 json 并存储在 string 类型的 key 中，并且可以设置逻辑过期时间，用于处理缓</li></ul> 
+<p><strong>存击穿问题</strong></p> 
+<ul><li>方法 3：根据指定的 key 查询缓存，并反序列化为指定类型，利用缓存空值的方式解决缓存穿透问题</li><li>方法 4：根据指定的 key 查询缓存，并反序列化为指定类型，需要利用逻辑过期解决缓存击穿问题</li></ul> 
+<p>将逻辑进行封装</p> 
+<pre><code class="language-java">@Slf4j
+@Component
+public class CacheClient {
+
+    private final StringRedisTemplate stringRedisTemplate;
+
+    private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
+
+    public CacheClient(StringRedisTemplate stringRedisTemplate) {
+        this.stringRedisTemplate = stringRedisTemplate;
+    }
+
+    public void set(String key, Object value, Long time, TimeUnit unit) {
+        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(value), time, unit);
+    }
+
+    public void setWithLogicalExpire(String key, Object value, Long time, TimeUnit unit) {
+        // 设置逻辑过期
+        RedisData redisData = new RedisData();
+        redisData.setData(value);
+        redisData.setExpireTime(LocalDateTime.now().plusSeconds(unit.toSeconds(time)));
+        // 写入Redis
+        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(redisData));
+    }
+
+    public &lt;R,ID&gt; R queryWithPassThrough(
+            String keyPrefix, ID id, Class&lt;R&gt; type, Function&lt;ID, R&gt; dbFallback, Long time, TimeUnit unit){
+        String key = keyPrefix + id;
+        // 1.从redis查询商铺缓存
+        String json = stringRedisTemplate.opsForValue().get(key);
+        // 2.判断是否存在
+        if (StrUtil.isNotBlank(json)) {
+            // 3.存在，直接返回
+            return JSONUtil.toBean(json, type);
+        }
+        // 判断命中的是否是空值
+        if (json != null) {
+            // 返回一个错误信息
+            return null;
+        }
+
+        // 4.不存在，根据id查询数据库
+        R r = dbFallback.apply(id);
+        // 5.不存在，返回错误
+        if (r == null) {
+            // 将空值写入redis
+            stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+            // 返回错误信息
+            return null;
+        }
+        // 6.存在，写入redis
+        this.set(key, r, time, unit);
+        return r;
+    }
+
+    public &lt;R, ID&gt; R queryWithLogicalExpire(
+            String keyPrefix, ID id, Class&lt;R&gt; type, Function&lt;ID, R&gt; dbFallback, Long time, TimeUnit unit) {
+        String key = keyPrefix + id;
+        // 1.从redis查询商铺缓存
+        String json = stringRedisTemplate.opsForValue().get(key);
+        // 2.判断是否存在
+        if (StrUtil.isBlank(json)) {
+            // 3.存在，直接返回
+            return null;
+        }
+        // 4.命中，需要先把json反序列化为对象
+        RedisData redisData = JSONUtil.toBean(json, RedisData.class);
+        R r = JSONUtil.toBean((JSONObject) redisData.getData(), type);
+        LocalDateTime expireTime = redisData.getExpireTime();
+        // 5.判断是否过期
+        if(expireTime.isAfter(LocalDateTime.now())) {
+            // 5.1.未过期，直接返回店铺信息
+            return r;
+        }
+        // 5.2.已过期，需要缓存重建
+        // 6.缓存重建
+        // 6.1.获取互斥锁
+        String lockKey = LOCK_SHOP_KEY + id;
+        boolean isLock = tryLock(lockKey);
+        // 6.2.判断是否获取锁成功
+        if (isLock){
+            // 6.3.成功，开启独立线程，实现缓存重建
+            CACHE_REBUILD_EXECUTOR.submit(() -&gt; {
+                try {
+                    // 查询数据库
+                    R newR = dbFallback.apply(id);
+                    // 重建缓存
+                    this.setWithLogicalExpire(key, newR, time, unit);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }finally {
+                    // 释放锁
+                    unlock(lockKey);
+                }
+            });
+        }
+        // 6.4.返回过期的商铺信息
+        return r;
+    }
+
+    public &lt;R, ID&gt; R queryWithMutex(
+            String keyPrefix, ID id, Class&lt;R&gt; type, Function&lt;ID, R&gt; dbFallback, Long time, TimeUnit unit) {
+        String key = keyPrefix + id;
+        // 1.从redis查询商铺缓存
+        String shopJson = stringRedisTemplate.opsForValue().get(key);
+        // 2.判断是否存在
+        if (StrUtil.isNotBlank(shopJson)) {
+            // 3.存在，直接返回
+            return JSONUtil.toBean(shopJson, type);
+        }
+        // 判断命中的是否是空值
+        if (shopJson != null) {
+            // 返回一个错误信息
+            return null;
+        }
+
+        // 4.实现缓存重建
+        // 4.1.获取互斥锁
+        String lockKey = LOCK_SHOP_KEY + id;
+        R r = null;
+        try {
+            boolean isLock = tryLock(lockKey);
+            // 4.2.判断是否获取成功
+            if (!isLock) {
+                // 4.3.获取锁失败，休眠并重试
+                Thread.sleep(50);
+                return queryWithMutex(keyPrefix, id, type, dbFallback, time, unit);
+            }
+            // 4.4.获取锁成功，根据id查询数据库
+            r = dbFallback.apply(id);
+            // 5.不存在，返回错误
+            if (r == null) {
+                // 将空值写入redis
+                stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+                // 返回错误信息
+                return null;
+            }
+            // 6.存在，写入redis
+            this.set(key, r, time, unit);
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }finally {
+            // 7.释放锁
+            unlock(lockKey);
+        }
+        // 8.返回
+        return r;
+    }
+
+    private boolean tryLock(String key) {
+        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", 10, TimeUnit.SECONDS);
+        return BooleanUtil.isTrue(flag);
+    }
+
+    private void unlock(String key) {
+        stringRedisTemplate.delete(key);
+    }
+}</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/3ddea7843fa919fdfe5ad198ed53c9ca/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">宝塔面板部署WordPress(保姆式教程)</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/f3f15983a5696ad0c624ac70cbca321e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">修改jmeter内存配置</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>K8S的集群调度 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="K8S的集群调度" />
+<meta property="og:description" content="Scheduler：负责调度资源，把pod调度到node节点，有两种策略，
+1：预选策略
+2：优先策略
+list-watch概念
+k8s集群当中，通过list-watch的机制进行每个组件的协作，保持数据同步，每个组件之间的解耦
+Kubectl配置文件，想APIserver发送命令---apiserver把命令发送到各个组件
+如kubectl runnginx --image=nginx：1.22-----apiserver---controller manager---scheduler---kubelet(管理生命周期)
+List-watch(监听)---会在每一步把监听的消息（先监听apiserver：6443）----每个组件（controller manager，scheduler，kubelet，etcd）都会监听apiserver：6443端口，都会获取消息 1、 kubectl run nginx --image=nginx:1.22 &gt; 2、 由apiserver调度到各个组件 &gt; 3、 controller-manger负责创建pod控制器 &gt; 4、 scheduler调度资源 &gt; 5、 kubelet来管理节点 &gt; 创建成功后，通过kubectl get pod/kubectl describe pod nginx 这些信息都保存在etcd数据库当中。 如何来把pod分配到node 工作流程：
+1.kubectl创建pod和副本数传递给apiserver
+2.创建replicas指定pod的策略保存通过apiserver在etcd数据库中存储配置信息。
+3.etcd会将创建replicas的事件发送给apiserver
+4.apiserver发送创建指令开始调用controller-manger
+5.controller-manger收到指令开始创建pod再将信息发送给apiserver
+6.apiserver收到创建pod的信息并将信息保存在etcd中
+7.etcd把发送创建pod的信息再发送给apiserver
+8.apiserver把创建pod的指令发送给scheduler
+9.scheduler开始选择往哪个node节点上创建pod并更新pod的node节点信息。发送给apiserver
+10.apiserver把pod的更新信息保存到etcd中
+11.etcd告诉apiserver 已经确定节点信息。需要调用节点上的kubelet
+12.apiserver传递消息开始调用kubelet创建pod和容器
+13.kubelet将确定完毕的信息和节点信息，发送给apiserver。
+14.apiserver将最终保存容器、副本、节点信息保存到etcd数据库中。
+调度的过程和策略
+Scheduler是k8s集群的调度器，他的意义就是把破分配到集群的节点
+以下几个问题是它要考虑的
+1 公平：每个节点都能够分配资源
+2 资源高效利用：集群当中的资源可以被最大化使用
+3 效率：调度的性能要好，能够尽快的完成大批量的pod的调度工作
+4 灵活：运行用户根据自己的需求，控制和改变调度的逻辑
+Scheduler是一个单独运行的程序，启动之后就会一直监听APIserver，它会获取报文中的字段:spec.nodeName
+创建pod时候，为每个pod创建一个binding，表示该往哪个节点上部署
+创建pod搭配节点时，由两个策略，先执行预选策略，再执行优选策略，这两步的操作都必须成功，否则立刻返回报错，也就是说，部署的node，必须满足这两个策略
+预算策略" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/55bbfd3272ee46321451748ac22a111d/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-08T23:27:40+08:00" />
+<meta property="article:modified_time" content="2024-01-08T23:27:40+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">K8S的集群调度</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td> <p style="margin-left:.0001pt;text-align:justify;">Scheduler：负责调度资源，把pod调度到node节点，有两种策略，</p> <p style="margin-left:.0001pt;text-align:justify;">1：预选策略</p> <p style="margin-left:.0001pt;text-align:justify;">2：优先策略</p> </td></tr></tbody></table> 
+<p><strong>list-watch概念</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td> <p style="margin-left:.0001pt;text-align:justify;">k8s集群当中，通过list-watch的机制进行每个组件的协作，保持数据同步，每个组件之间的解耦</p> <p style="margin-left:.0001pt;text-align:justify;">Kubectl配置文件，想APIserver发送命令---apiserver把命令发送到各个组件</p> <p style="margin-left:.0001pt;text-align:justify;">如kubectl runnginx --image=nginx：1.22-----apiserver---controller manager---scheduler---kubelet(管理生命周期)</p> <p style="margin-left:.0001pt;text-align:justify;">List-watch(监听)---会在每一步把监听的消息（先监听apiserver：6443）----每个组件（controller manager，scheduler，kubelet，etcd）都会监听apiserver：6443端口，都会获取消息 </p> </td></tr></tbody></table> 
+<pre><code class="language-bash">1、 kubectl run nginx --image=nginx:1.22  &gt;
+2、 由apiserver调度到各个组件  &gt;
+3、 controller-manger负责创建pod控制器  &gt;
+4、 scheduler调度资源  &gt;
+5、 kubelet来管理节点  &gt;
+创建成功后，通过kubectl get pod/kubectl describe pod nginx
+这些信息都保存在etcd数据库当中。</code></pre> 
+<p></p> 
+<p><strong>如何来把pod分配到node </strong></p> 
+<p><img alt="" height="392" src="https://images2.imgbox.com/77/54/L7jNuJzj_o.png" width="829"></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td> <p>工作流程：</p> <p>1.kubectl创建pod和副本数传递给apiserver</p> <p>2.创建replicas指定pod的策略保存通过apiserver在etcd数据库中存储配置信息。</p> <p>3.etcd会将创建replicas的事件发送给apiserver</p> <p>4.apiserver发送创建指令开始调用controller-manger</p> <p>5.controller-manger收到指令开始创建pod再将信息发送给apiserver</p> <p>6.apiserver收到创建pod的信息并将信息保存在etcd中</p> <p>7.etcd把发送创建pod的信息再发送给apiserver</p> <p>8.apiserver把创建pod的指令发送给scheduler</p> <p>9.scheduler开始选择往哪个node节点上创建pod并更新pod的node节点信息。发送给apiserver</p> <p>10.apiserver把pod的更新信息保存到etcd中</p> <p>11.etcd告诉apiserver 已经确定节点信息。需要调用节点上的kubelet</p> <p>12.apiserver传递消息开始调用kubelet创建pod和容器</p> <p>13.kubelet将确定完毕的信息和节点信息，发送给apiserver。</p> <p>14.apiserver将最终保存容器、副本、节点信息保存到etcd数据库中。</p> </td></tr></tbody></table> 
+<p><strong> 调度的过程和策略</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td></td><td> <p style="margin-left:.0001pt;text-align:justify;">Scheduler是k8s集群的调度器，他的意义就是把破分配到集群的节点</p> <p style="margin-left:.0001pt;text-align:justify;">以下几个问题是它要考虑的</p> </td></tr><tr><td>1</td><td> <p style="margin-left:.0001pt;text-align:justify;">公平：每个节点都能够分配资源</p> </td></tr><tr><td>2</td><td> <p style="margin-left:.0001pt;text-align:justify;">资源高效利用：集群当中的资源可以被最大化使用</p> </td></tr><tr><td>3</td><td> <p style="margin-left:.0001pt;text-align:justify;">效率：调度的性能要好，能够尽快的完成大批量的pod的调度工作</p> </td></tr><tr><td>4</td><td> <p style="margin-left:.0001pt;text-align:justify;">灵活：运行用户根据自己的需求，控制和改变调度的逻辑</p> </td></tr><tr><td></td><td> <p style="margin-left:.0001pt;text-align:justify;">Scheduler是一个单独运行的程序，启动之后就会一直监听APIserver，它会获取报文中的字段:spec.nodeName</p> <p style="margin-left:.0001pt;text-align:justify;">创建pod时候，为每个pod创建一个binding，表示该往哪个节点上部署</p> <p style="margin-left:.0001pt;text-align:justify;">创建pod搭配节点时，由两个策略，先执行预选策略，再执行优选策略，这两步的操作都必须成功，否则立刻返回报错，也就是说，部署的node，必须满足这两个策略</p> </td></tr></tbody></table> 
+<p><strong>预算策略</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:650px;"><tbody><tr><td style="width:53px;"></td><td style="width:445px;"> <p style="margin-left:.0001pt;text-align:justify;">Predicate：</p> <p style="margin-left:.0001pt;text-align:justify;">它自带一些算法，选择node节点（scheduler自带的算法策略，不需要人工干预）</p> </td></tr><tr><td style="width:53px;"> <p style="margin-left:.0001pt;text-align:justify;">podfitsresources</p> </td><td style="width:445px;"> <p style="margin-left:.0001pt;text-align:justify;">pod适应资源，检查节点上剩余资源是否满足pod请求的资源，主要是cpu和内存</p> </td></tr><tr><td style="width:53px;"> <p style="margin-left:.0001pt;text-align:justify;">Podfitshost</p> </td><td style="width:445px;"> <p style="margin-left:.0001pt;text-align:justify;">pod适应主机，如果pod指定了node的name，检测主机名是否存在，存在要和pod指定的名称匹配，这才能调度过去</p> <p style="margin-left:.0001pt;text-align:justify;"></p> </td></tr><tr><td style="width:53px;"> <p style="margin-left:.0001pt;text-align:justify;">Podselectormarches</p> </td><td style="width:445px;"> <p style="margin-left:.0001pt;text-align:justify;">pod选择器匹配，创建pod的时候可以根据node的标签来进行匹配，查找指定的node节点上标签是否存在，存在标签是否匹配</p> </td></tr><tr><td style="width:53px;"> <p style="margin-left:.0001pt;text-align:justify;">Nodiskconflict</p> </td><td style="width:445px;"> <p style="margin-left:.0001pt;text-align:justify;">无磁盘冲突，确保已挂载的卷与pod的卷不发生冲突，除非目录是只读</p> </td></tr><tr><td style="width:53px;"></td><td style="width:445px;"> <p style="margin-left:.0001pt;text-align:justify;">如果预算策略都不满足，pod将始终处于pending状态，不断地重试调度，直到有节点满足条件，如果经过预算策略，上述三个节点都满足条件，那么会进入优选策略</p> </td></tr></tbody></table> 
+<p><strong>优先策略</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:650px;"><tbody><tr><td style="width:137px;"> <p style="margin-left:.0001pt;text-align:justify;">Leastrequestedpriority</p> </td><td style="width:511px;"> <p style="margin-left:.0001pt;text-align:justify;">最低请求优先级，通过算法计算节点上的cpu和内存使用率，确定一下节点的权重，使用率越低的节点相应的权重越高，调度时会更倾向于使用率低的节点，实现资源合理的利用</p> </td></tr><tr><td style="width:137px;"> <p style="margin-left:.0001pt;text-align:justify;">balancererourceallocation</p> </td><td style="width:511px;"> <p style="margin-left:.0001pt;text-align:justify;">衡资源分配，考虑cpu和内存的使用率，也会给节点赋予权重，权重算的是cpu和内存使用率接近，权重越高和上面的leastrequestedpriority最低请求优先级一起使用</p> <p style="margin-left:.0001pt;text-align:justify;">例：</p> <p style="margin-left:.0001pt;text-align:justify;">Node1 的cpu和内存使用率:20:60</p> <p style="margin-left:.0001pt;text-align:justify;">Node2 的cpu和内存使用率:50:50</p> <p style="margin-left:.0001pt;text-align:justify;">Node2在被调度时会被优先选择</p> </td></tr><tr><td style="width:137px;"> <p style="margin-left:.0001pt;text-align:justify;">imagelocalitypriority</p> </td><td style="width:511px;"> <p style="margin-left:.0001pt;text-align:justify;">节点上是否已经有了要部署的镜像，镜像的总数成正比，满足的镜像数越多，权重越好</p> <p>例：nginx:1.22</p> <p>node1：无</p> <p>node2：有</p> <p>那么node2在调度时会被优先</p> </td></tr><tr><td style="width:137px;"></td><td style="width:511px;"> <p style="margin-left:.0001pt;text-align:justify;">以上策略都是scheduler自带的算法，通过预算选择出可以部署的节点，再通过有线选择出来最好的节点，以上都是自带的算法，k8s集群自己来选择指定节点</p> <p style="margin-left:.0001pt;text-align:justify;"></p> <p style="margin-left:.0001pt;text-align:justify;">Spec参数设置</p> <p style="margin-left:.0001pt;text-align:justify;">nodeName：node02</p> <p style="margin-left:.0001pt;text-align:justify;">如果指定了节点，在参数中设置了nodeName，指定了节点的名称，会跳过scheduler的调度策略，这个规则是强制匹配</p> <p style="margin-left:.0001pt;text-align:justify;"></p> <p style="margin-left:.0001pt;text-align:justify;">指定标签</p> <p style="margin-left:.0001pt;text-align:justify;">Spec</p> <p style="margin-left:.0001pt;text-align:justify;">NodeSelector：</p> <p style="margin-left:.0001pt;text-align:justify;">指定节点标签部署pod，是要经过scheduler的算法，如果节点不满足条件，pod会进入pending状态，直到节点满足条件为止</p> </td></tr></tbody></table> 
+<p><strong>亲和性</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:650px;"><tbody><tr><td style="width:100px;"></td><td style="width:549px;"> <p style="margin-left:.0001pt;text-align:justify;">两种亲和性：node节点亲和性 和 Pod亲和性</p> </td></tr><tr><td style="width:100px;">Node节点的亲和性</td><td style="width:549px;"> <p style="margin-left:.0001pt;text-align:justify;">preferredDuringSchedulingIgnoredDuringExecution软策略：</p> <p style="margin-left:.0001pt;text-align:justify;">选择node节点时，我声明了我最好能部署在node01，软策略会尽量满足这个条件，不一定会完全部署在node1节点</p> </td></tr><tr><td style="width:100px;"></td><td style="width:549px;"> <p style="margin-left:.0001pt;text-align:justify;">RequiredDuringSchedulinglgnoredDuringExecution硬策略：</p> <p style="margin-left:.0001pt;text-align:justify;">选择pod时，申明了node01，我是硬策略，必须满足硬策略的条件，必须部署在node01，强制性要求</p> </td></tr><tr><td style="width:100px;"> <p style="margin-left:.0001pt;text-align:justify;">Pod的亲和性</p> </td><td style="width:549px;"> <p style="margin-left:.0001pt;text-align:justify;">preferredDuringSchedulingIgnoredDuringExecution软策略：</p> <p style="margin-left:.0001pt;text-align:justify;">要求调度器将pod调度到其他pod的亲和性匹配的节点上，可以是，也可以不是，尽量满足</p> </td></tr><tr><td style="width:100px;"></td><td style="width:549px;"> <p style="margin-left:.0001pt;text-align:justify;">RequiredDuringSchedulinglgnoredDuringExecution硬策略：</p> <p style="margin-left:.0001pt;text-align:justify;">要求调度器想pod调度到其他pod的亲和性匹配的节点上，必须是pod nginx1 node01</p> </td></tr></tbody></table> 
+<p style="margin-left:.0001pt;text-align:justify;"><strong>键值的运算关系</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td> <p style="margin-left:.0001pt;text-align:justify;">标签，都是根据标签来选择亲和性</p> <p style="margin-left:.0001pt;text-align:justify;">In：在，选择的标签值在node节点上存在</p> <p style="margin-left:.0001pt;text-align:justify;">Notin：不在，选择label的值不在node节点上</p> <p style="margin-left:.0001pt;text-align:justify;"></p> <p style="margin-left:.0001pt;text-align:justify;">Gt：大于，大于选择的标签值</p> <p style="margin-left:.0001pt;text-align:justify;">Lt：小于，小于选择的标签值</p> <p style="margin-left:.0001pt;text-align:justify;">Exits：存在，选择标签对象，值不考虑</p> <p style="margin-left:.0001pt;text-align:justify;">DoesNotExist：选择不具有指定标签的对象，值不考虑</p> </td></tr></tbody></table> 
+<p style="margin-left:.0001pt;text-align:justify;"><strong>面试题</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td> <p style="margin-left:.0001pt;text-align:justify;">你在部署pod的时候选择什么样的策略？</p> <p style="margin-left:.0001pt;text-align:justify;">node的亲和性：性能不一致，我尽量把pod往性能高的多部署，这个时候选择软策略</p> <p style="margin-left:.0001pt;text-align:justify;">节点故障，或者节点维护，只能选择硬策略，必须选择可以使用的节点，把故障节点剔除</p> </td></tr></tbody></table> 
+<p><img alt="" height="560" src="https://images2.imgbox.com/d5/a9/tgbFYx55_o.png" width="830"></p> 
+<pre><code class="language-bash">c
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    run: nginx1
+  name: nginx1
+spec:
+  containers:
+  - image: nginx:1.22.0
+    name: nginx1
+    resources:
+      limits:
+        memory: "1G"
+        cpu: "1"
+    volumeMounts:
+    - name: nginx1
+      mountPath: //usr/share/nginx/html
+      readOnly: false
+    lifecycle:
+      postStart:
+        exec:
+          command: ["/bin/bash","-c","echo nginx is up ; sleep 10"]
+      preStop:
+        exec:
+          command: ["/bin/bash","-c","echo nginx is down"]
+    startupProbe:
+      tcpSocket:
+        port: 80
+      initialDelaySeconds: 4
+      periodSeconds: 2
+    livenessProbe:
+      httpGet:
+        path: /
+        port: 80
+      initialDelaySeconds: 4
+      periodSeconds: 2
+    readinessProbe:
+      exec:
+        command:
+        - cat
+        - /etc/passwd
+      initialDelaySeconds: 4
+      periodSeconds: 2
+  volumes:
+  - name: nginx1
+    hostPath:
+      path: /opt/html
+      type: DirectoryOrCreate
+
+wx
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx3
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      wx: nginx3
+  template:
+    metadata:
+      labels:
+        wx: nginx3
+    spec:
+      containers:
+      - name: nginx3
+        image: nginx:1.22
+        resources:
+          limits:
+            memory: "2G"
+            cpu: "2"
+        startupProbe:
+          tcpSocket:
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 2
+        livenessProbe:
+          httpGet:
+            scheme: HTTP
+            port: 80
+            path: index.html
+          initialDelaySeconds: 4
+          periodSeconds: 2
+        readinessProbe:
+          exec:
+            command: ["/usr/bin/test","-e","/etc/passwd"]
+          initialDelaySeconds: 4
+          periodSeconds: 2
+        volumeMounts:
+        - name: test
+          mountPath: /opt
+          readOnly: false
+        lifecycle:
+          postStart:
+            exec:
+              command: ["echo","nginx is up"]
+          preStop:
+            exec:
+              command: ["echo","nginx is down"]
+
+      volumes:
+      - name: test
+        hostPath:
+          path: /opt/html
+          type: DirectoryOrCreate
+
+zfj
+pod.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      run: nginx1
+  template:
+    metadata:
+      labels:
+        run: nginx1
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.22
+        startupProbe:
+          tcpSocket:
+            port: 80
+          initialDelaySeconds: 4
+          periodSeconds: 2
+        livenessProbe: 
+          httpGet :
+            scheme: HTTP
+            port: 80
+          initialDelaySeconds: 4
+          periodSeconds: 2
+        readinessProbe:
+          exec:
+            command: ["/usr/bin/test", "-e", "/etc/passwd"]
+          initialDelaySeconds: 4
+          periodSeconds: 2
+        resources:
+          limits:
+            memory: "1Gi"
+            cpu: "2"
+        volumeMounts:
+        - name: nginx
+          mountPath: /opt
+          readOnly: false
+        lifecycle: 
+          postStart:
+            exec:
+              command: ["/bin/bash", "-c", "echo nginx is up &gt;&gt;/opt/123.txt"]
+          preStop:
+            exec:
+              command: ["/bin/bash", "-c", "echo nginx is down &gt;&gt;/opt/123.txt"]
+      volumes: 
+      - name: nginx
+        hostPath:
+          path: /opt/html
+          type: DirectoryOrCreate
+
+service.yaml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-service
+  labels:
+    run: nginx1
+spec:
+  type: NodePort
+  ports:
+  - port: 80
+    targetPort: 80
+    nodePort: 30001
+  selector:
+    run: nginx1
+
+
+</code></pre> 
+<p><strong> 指定节点以及指定标签</strong></p> 
+<p><strong>指定节点：</strong>在spec参数设置当中加入nodeName字段</p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td> <p><strong>如果指定了节点。在参数中设置了nodeName指定节点名称。他将跳过scheduler的调度策略。这个规则是强制匹配</strong></p> </td></tr></tbody></table> 
+<pre><code class="language-bash">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx2
+  labels:
+    app: nginx
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - image: nginx:1.22
+        name: nginx
+      nodeName: node02
+[root@master01 k8s.yaml]# kubectl apply -f q.yaml
+deployment.apps/nginx2 created
+[root@master01 k8s.yaml]# kubectl get pod -o wide
+NAME                          READY   STATUS    RESTARTS   AGE     IP            NODE     NOMINATED NODE   READINESS GATES
+centos-797bc57596-fdrnx       1/1     Running   0          6m13s   10.244.1.19   node01   &lt;none&gt;           &lt;none&gt;
+myapp-test-5d94dbb4f-hjtjv    1/1     Running   2          7d19h   10.244.2.18   node02   &lt;none&gt;           &lt;none&gt;
+nginx-chen-65f47476f8-47wvm   1/1     Running   1          3d2h    10.244.1.18   node01   &lt;none&gt;           &lt;none&gt;
+nginx-chen-699bd94c4f-rrhjs   1/1     Running   1          3d2h    10.244.2.20   node02   &lt;none&gt;           &lt;none&gt;
+nginx2-8655748cf-b7kbx        1/1     Running   0          36s     10.244.2.32   node02   &lt;none&gt;           &lt;none&gt;
+nginx2-8655748cf-kjsqr        1/1     Running   0          65s     10.244.2.30   node02   &lt;none&gt;           &lt;none&gt;
+nginx2-8655748cf-sgr48        1/1     Running   0          37s     10.244.2.31   node02   &lt;none&gt;           &lt;none&gt;
+</code></pre> 
+<p><img alt="" height="223" src="https://images2.imgbox.com/6f/f2/cnQLsr4k_o.png" width="1200"></p> 
+<blockquote> 
+ <p><strong> 指定标签：</strong>在spec参数设置当中加入nodeSelector字段</p> 
+</blockquote> 
+<pre><code class="language-bash">[root@master01 k8s.yaml]# kubectl get nodes --show-labels
+查看标签
+[root@master01 k8s.yaml]# kubectl label nodes master01 test1=a
+node/master01 labeled
+[root@master01 k8s.yaml]# kubectl label nodes node01 test2=b
+node/node01 labeled
+[root@master01 k8s.yaml]# kubectl label nodes node02 test2=c
+node/node02 labeled
+修改标签
+[root@master01 k8s.yaml]# kubectl get nodes --show-labels
+NAME       STATUS   ROLES                  AGE   VERSION    LABELS
+master01   Ready    control-plane,master   11d   v1.20.15   beta.kubernetes.io/arch=amd64,beta.kubernetes.io/os=linux,kubernetes.io/arch=amd64,kubernetes.io/hostname=master01,kubernetes.io/os=linux,node-role.kubernetes.io/control-plane=,node-role.kubernetes.io/master=,test1=a
+node01     Ready    &lt;none&gt;                 11d   v1.20.15   beta.kubernetes.io/arch=amd64,beta.kubernetes.io/os=linux,kubernetes.io/arch=amd64,kubernetes.io/hostname=node01,kubernetes.io/os=linux,test2=b
+node02     Ready    &lt;none&gt;                 11d   v1.20.15   beta.kubernetes.io/arch=amd64,beta.kubernetes.io/os=linux,kubernetes.io/arch=amd64,kubernetes.io/hostname=node02,kubernetes.io/os=linux,test2=c
+
+kubectl get nodes --show-labels
+#查看node的标签
+kubectl label nodes 节点名 标签名
+#给node节点创建标签。
+kubectl label nodes 节点名 标签名-
+#删除标签
+kubectl label nodes 节点名 标签名 --overwrite
+#覆盖标签
+
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx1
+  labels:
+    app: nginx
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+       nodeSelector:
+#声明指定标签部署
+        test1: a
+#声明指定标签选择node节点
+       containers:
+       - image: nginx:1.22
+         name: nginx1
+</code></pre> 
+<blockquote> 
+ <p>In：在，选择的标签值，在node节点上存在</p> 
+ <p>硬策略</p> 
+</blockquote> 
+<pre><code class="language-bash">这里是硬策略
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: nginx1
+  name: nginx1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - image: nginx:1.22
+        name: nginx
+      affinity:
+#选择亲和性部署方式：
+        nodeAffinity:
+#选择的是node节点的亲和性：
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+#选择了亲和性的策略，nodeSelectorTerms指你要选择哪个node作为硬策略，匹配的节点的#标签
+            - matchExpressions:
+#定义一个符合我要选择的node节点的信息
+              - key: test3
+                operator: In
+#指定键值对的算法，如果使用In那么后面一定要跟values
+                values:
+                - c
+#标签的值为  c
+</code></pre> 
+<p><img alt="" height="337" src="https://images2.imgbox.com/0c/29/8C5agYV7_o.png" width="1200"> </p> 
+<blockquote> 
+ <p> NotIn：不在，选择label的值不在node节点上</p> 
+ <p>硬策略</p> 
+</blockquote> 
+<pre><code class="language-bash">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: nginx1
+  name: nginx1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - image: nginx:1.22
+        name: nginx
+      affinity:
+#选择亲和性部署方式：
+        nodeAffinity:
+#选择的是node节点的亲和性：
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+#选择了亲和性的策略，nodeSelectorTerms指你要选择哪个node作为硬策略，匹配的节点的#标签
+            - matchExpressions:
+#定义一个符合我要选择的node节点的信息
+              - key: test3
+                operator: NotIn
+#指定键值对的算法
+                values:
+                - c
+#标签的值为  c
+只要不是test3，值为c的node节点都可以部署</code></pre> 
+<blockquote> 
+ <p> 硬策略：Gt</p> 
+ <p style="margin-left:.0001pt;text-align:justify;">RequiredDuringSchedulinglgnoredDuringExecution硬策略：</p> 
+ <p style="margin-left:.0001pt;text-align:justify;">选择pod时，申明了node01，我是硬策略，必须满足硬策略的条件，必须部署在node01，强制性要求</p> 
+</blockquote> 
+<pre><code class="language-bash">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: nginx1
+  name: nginx1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - image: nginx:1.22
+        name: nginx
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: memory
+                operator: Gt
+                values:
+                - "612"
+#硬策略，选择的节点要为 memory 且必须要大于 612 ，值不能为小数点</code></pre> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:justify;">Exits：存在，选择标签对象，值不考虑，使用了Exits就不能使用values</p> 
+ <p style="margin-left:.0001pt;text-align:justify;">硬策略</p> 
+</blockquote> 
+<pre><code class="language-bash">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: nginx1
+  name: nginx1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - image: nginx:1.22
+        name: nginx
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: memory
+                operator: Exists
+
+[root@master01 k8s.yaml]# kubectl label nodes master01 memory-
+这里删掉了master01的memory标签
+这里是用硬策略，Exists指定key标签 memory 必须为存在，才会在该节点上部署，之前已经删除掉了，所以只会在node1 和node2上部署</code></pre> 
+<p><img alt="" height="154" src="https://images2.imgbox.com/e1/95/XfhSb6Yl_o.png" width="1200"></p> 
+<blockquote> 
+ <p> DoesNotExist：选择不具有指定标签的对象，值不考虑</p> 
+ <p>硬策略</p> 
+</blockquote> 
+<pre><code class="language-bash">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: nginx1
+  name: nginx1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - image: nginx:1.22
+        name: nginx
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: memory
+                operator: DoesNotExist
+
+这里改成只要有memory标签就不部署
+[root@master01 k8s.yaml]# kubectl label nodes master01 memory=612
+这里把master01 的memory加回来，也就是三个node节点都有memory，按硬性条件来说理论上应该三个节点都不部署，如果把memory加回来，他会立刻部署，pending状态一直会寻找符合条件的node节点，一旦有了符合条件，会立刻部署</code></pre> 
+<p><img alt="" height="175" src="https://images2.imgbox.com/76/c9/pzu9Dlxd_o.png" width="1200"></p> 
+<blockquote> 
+ <p>软策略：</p> 
+ <p style="margin-left:.0001pt;text-align:justify;">preferredDuringSchedulingIgnoredDuringExecution软策略：</p> 
+ <p style="margin-left:.0001pt;text-align:justify;">选择node节点时，我声明了我最好能部署在node01，软策略会尽量满足这个条件，不一定会完全部署在node1节点</p> 
+</blockquote> 
+<pre><code class="language-bash">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: nginx1
+  name: nginx1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - image: nginx:1.22
+        name: nginx
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+#指定为软策略
+          - weight: 1
+#这里要加权重
+            preference:
+#选择节点的倾向，尽量满足要求而非一定倾向于下面的 memory，但不是一定
+              matchExpressions:
+#定义一个符合我要选择的node节点信息
+              - key: memory
+                operator: DoesNotExist
+
+这里三个节点都有memory，而最终结果表示选择了node1和node2
+[root@master01 k8s.yaml]# kubectl get pod
+[root@master01 k8s.yaml]# kubectl get pod -o wide</code></pre> 
+<p><img alt="" height="154" src="https://images2.imgbox.com/1a/b4/8DqoHEvV_o.png" width="1200"></p> 
+<p><strong> 软策略权重</strong></p> 
+<pre><code class="language-bash">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: nginx1
+  name: nginx1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - image: nginx:1.22
+        name: nginx
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+#指定为软策略
+          - weight: 1
+#这里要加权重
+            preference:
+#选择节点的倾向，尽量满足要求而非一定倾向于下面的 memory，但不是一定
+              matchExpressions:
+#定义一个符合我要选择的node节点信息
+              - key: memory
+                operator: In
+                values:
+                - "1000"
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 10
+            preference:
+              matchExpressions:
+              - key: memory
+                operator: In
+                values:
+                - "500"
+
+存在两个软策略，尽量部署在权重高选择的节点上</code></pre> 
+<p><img alt="" height="150" src="https://images2.imgbox.com/ca/a9/YrA9lGK6_o.png" width="1200"></p> 
+<blockquote> 
+ <p> 软条件跟硬条件一块出现的情况</p> 
+</blockquote> 
+<pre><code class="language-bash">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: nginx1
+  name: nginx1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - image: nginx:1.22
+        name: nginx
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 1
+            preference:
+              matchExpressions:
+              - key: memory
+                operator: In
+                values:
+                - "1000"
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: memory
+                operator: In
+                values:
+                - "500"
+
+软条件和硬条件一块出现，要先满足硬条件，再满足软条件，硬条件无法满足则不会执行软策略，一般再一个文件中指定一个策略，有需求则指定硬策略，比如nginx负载均衡挂了一个可以使用硬策略强制</code></pre> 
+<p><img alt="" height="346" src="https://images2.imgbox.com/42/87/yp0VGXAH_o.png" width="1200"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/6f55883c2c0ae6c7bc6d55f550538818/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">1. 两数之和（Java）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/feed96f2e3de4cb0404cbf9363bdfc2f/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">【动态代理详解】</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>afl覆盖信息的处理（afl-llvm-pass-so.c代码分析） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="afl覆盖信息的处理（afl-llvm-pass-so.c代码分析）" />
+<meta property="og:description" content="插桩统计覆盖率的相关部分主要在afl-llvm-pass-so.c中的bool AFLCoverage::runOnModule(Module &amp;M)部分
+插桩率设置 在函数开始会有相关变量的初始化工作，但是主要值得关注的是关于inst_ratio_str的设置。inst_ratio_str表示 AFL 应该插桩的基本块的比例。例如，如果 AFL_INST_RATIO 设置为 10，那么 AFL 大约会选择 10% 的基本块进行插桩。如果 AFL_INST_RATIO 未设置，或者解析失败，或者值超出了允许的范围，就会使用默认值 100，即插桩所有的基本块。
+/* Decide instrumentation ratio */ char* inst_ratio_str = getenv(&#34;AFL_INST_RATIO&#34;); unsigned int inst_ratio = 100; if (inst_ratio_str) { if (sscanf(inst_ratio_str, &#34;%u&#34;, &amp;inst_ratio) != 1 || !inst_ratio || inst_ratio &gt; 100) FATAL(&#34;Bad value of AFL_INST_RATIO (must be between 1 and 100)&#34;); } 关键全局变量 之后定义了两个关键的全局变量。
+AFLMapPtr是一个指针类型的全局变量，指向 AFL 共享内存区域的开始。这个内存区域存储了 AFL 追踪数据（trace_bits），用于在程序运行时记录哪些路径（或更具体地说，哪些基本块转移）已经被执行过。当 AFL 插桩的代码执行时，它会更新这个内存区域的相应部分。
+AFLPrevLoc是一个 32 位整数类型的全局变量，存储了上一个执行的基本块的 ID。注意，这个变量是线程局部的，这意味着每个线程都有自己的一份副本。这样做是为了避免在多线程环境下出现数据竞态。当 AFL 插桩的代码执行时，它会用当前基本块的 ID 更新这个变量。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/78559c30bcda172ee150c5ff4909aa4a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-08-15T22:44:31+08:00" />
+<meta property="article:modified_time" content="2023-08-15T22:44:31+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">afl覆盖信息的处理（afl-llvm-pass-so.c代码分析）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night-eighties">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>插桩统计覆盖率的相关部分主要在<code>afl-llvm-pass-so.c</code>中的<code>bool AFLCoverage::runOnModule(Module &amp;M)</code>部分</p> 
+<h4><a id="_3"></a>插桩率设置</h4> 
+<p>在函数开始会有相关变量的初始化工作，但是主要值得关注的是关于<code>inst_ratio_str</code>的设置。<code>inst_ratio_str</code>表示 AFL 应该插桩的基本块的比例。例如，如果 <code>AFL_INST_RATIO</code> 设置为 <code>10</code>，那么 AFL 大约会选择 10% 的基本块进行插桩。如果 <code>AFL_INST_RATIO</code> 未设置，或者解析失败，或者值超出了允许的范围，就会使用默认值 100，即插桩所有的基本块。</p> 
+<pre><code class="prism language-c">  <span class="token comment">/* Decide instrumentation ratio */</span>
+  <span class="token keyword">char</span><span class="token operator">*</span> inst_ratio_str <span class="token operator">=</span> <span class="token function">getenv</span><span class="token punctuation">(</span><span class="token string">"AFL_INST_RATIO"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token keyword">unsigned</span> <span class="token keyword">int</span> inst_ratio <span class="token operator">=</span> <span class="token number">100</span><span class="token punctuation">;</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>inst_ratio_str<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">sscanf</span><span class="token punctuation">(</span>inst_ratio_str<span class="token punctuation">,</span> <span class="token string">"%u"</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>inst_ratio<span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token number">1</span> <span class="token operator">||</span> <span class="token operator">!</span>inst_ratio <span class="token operator">||</span>
+        inst_ratio <span class="token operator">&gt;</span> <span class="token number">100</span><span class="token punctuation">)</span>
+      <span class="token function">FATAL</span><span class="token punctuation">(</span><span class="token string">"Bad value of AFL_INST_RATIO (must be between 1 and 100)"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="_19"></a>关键全局变量</h4> 
+<p>之后定义了两个关键的全局变量。<br> <code>AFLMapPtr</code>是一个指针类型的全局变量，指向 AFL 共享内存区域的开始。这个内存区域存储了 AFL 追踪数据（<code>trace_bits</code>），用于在程序运行时记录哪些路径（或更具体地说，哪些基本块转移）已经被执行过。当 AFL 插桩的代码执行时，它会更新这个内存区域的相应部分。</p> 
+<p><code>AFLPrevLoc</code>是一个 32 位整数类型的全局变量，存储了上一个执行的基本块的 ID。注意，这个变量是线程局部的，这意味着每个线程都有自己的一份副本。这样做是为了避免在多线程环境下出现数据竞态。当 AFL 插桩的代码执行时，它会用当前基本块的 ID 更新这个变量。</p> 
+<pre><code class="prism language-c"><span class="token comment">/* Get globals for the SHM region and the previous location. Note that
+
+__afl_prev_loc is thread-local. */</span>
+
+GlobalVariable <span class="token operator">*</span>AFLMapPtr <span class="token operator">=</span>new <span class="token function">GlobalVariable</span><span class="token punctuation">(</span>M<span class="token punctuation">,</span> PointerType<span class="token operator">::</span><span class="token function">get</span><span class="token punctuation">(</span>Int8Ty<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">,</span> false<span class="token punctuation">,</span>GlobalValue<span class="token operator">::</span>ExternalLinkage<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token string">"__afl_area_ptr"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+
+GlobalVariable <span class="token operator">*</span>AFLPrevLoc <span class="token operator">=</span> new <span class="token function">GlobalVariable</span><span class="token punctuation">(</span>M<span class="token punctuation">,</span> Int32Ty<span class="token punctuation">,</span> false<span class="token punctuation">,</span> GlobalValue<span class="token operator">::</span>ExternalLinkage<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token string">"__afl_prev_loc"</span><span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">,</span> GlobalVariable<span class="token operator">::</span>GeneralDynamicTLSModel<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> false<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<h4><a id="_37"></a>进行插桩处理</h4> 
+<p>重要的解释都在下面代码相关行段，主要解释一些补充内容。</p> 
+<p>IRB的作用和用法</p> 
+<blockquote> 
+ <p><code>IRB</code> 主要被用来在LLVM的BasicBlock中插入新的IR指令。例如，<code>IRB.CreateLoad</code>、<code>IRB.CreateZExt</code>、<code>IRB.CreateGEP</code>、<code>IRB.CreateAdd</code> 和 <code>IRB.CreateStore</code> 都是通过<code>IRB</code>创建新的Load、ZExt（零扩展）、GEP（GetElementPointer，获取元素指针）、Add和Store指令。</p> 
+ <p>创建 <code>IRB</code> 的时候，将一个Instruction指针传递给 <code>IRB</code> 的构造函数，这个Instruction指定了新创建的IR指令将被插入的位置。在这个例子中，新创建的IR指令被插入到每个BasicBlock的第一个插入点。</p> 
+</blockquote> 
+<p>为什么要创建随机位置cur_loc</p> 
+<blockquote> 
+ <p>在AFL的插桩策略中，为每个插桩点生成一个随机位置 <code>cur_loc</code> 的主要原因是为了创建一个独特的、在全局范围内唯一的标识符。AFL使用的覆盖追踪策略主要依赖于这个 <code>cur_loc</code>。在每次执行插桩的基本块时，AFL将当前的 <code>cur_loc</code> 与上一个 <code>cur_loc</code> 进行异或操作，并将结果用作索引，将共享内存中该索引位置的计数器增加1。通过这种方式，AFL可以通过观察共享内存区的变化来知道哪些插桩的基本块被执行了，从而了解代码的覆盖情况。</p> 
+</blockquote> 
+<p><code>Value *MapPtrIdx = IRB.CreateGEP(MapPtr, IRB.CreateXor(PrevLocCasted, CurLoc));</code>解释</p> 
+<blockquote> 
+ <p>首先进行了一个 XOR 位运算（通过 <code>IRB.CreateXor(PrevLocCasted, CurLoc)</code> 实现），将上一个位置的值与当前位置的值进行异或操作。<br> 然后使用<code>CreateGEP</code>函数根据异或操作的结果生成一个新的指针。GEP 代表 GetElementPointer，它是 LLVM IR 中的一种指令，用于计算复杂数据结构（如数组、结构体）中元素的地址。在 AFL 中，这个指令被用来在共享内存区中定位到一个特定的位置，这个位置对应的是当前和上一个插桩代码块的异或结果。这样就能对每一对连续执行的插桩代码块进行唯一标识，实现精确的路径覆盖统计。</p> 
+</blockquote> 
+<p><code>LoadInst</code>是什么数据类型</p> 
+<blockquote> 
+ <p><code>LoadInst</code> 是一种指令类，继承自 <code>Instruction</code> 类。它代表了一个从内存加载数据的操作，与在 C 或者 C++ 中的读取变量值的操作相对应。</p> 
+</blockquote> 
+<pre><code class="prism language-c">  <span class="token comment">/* Instrument all the things! */</span>
+  #定义一个计数器，用来统计插桩的BasicBlock的数量。
+  <span class="token keyword">int</span> inst_blocks <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+  #这两个嵌套的<span class="token keyword">for</span>循环用来遍历Module M中的所有Function F和每个Function中的所有BasicBlock BB。
+  <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">auto</span> <span class="token operator">&amp;</span>F <span class="token operator">:</span> M<span class="token punctuation">)</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">auto</span> <span class="token operator">&amp;</span>BB <span class="token operator">:</span> F<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      #找到BB的第一个可插入点IP，然后创建一个IRBuilder对象IRB，用来在这个位置插入新的IR指令。
+      BasicBlock<span class="token operator">::</span>iterator IP <span class="token operator">=</span> BB<span class="token punctuation">.</span><span class="token function">getFirstInsertionPt</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      IRBuilder<span class="token operator">&lt;</span><span class="token operator">&gt;</span> <span class="token function">IRB</span><span class="token punctuation">(</span><span class="token operator">&amp;</span><span class="token punctuation">(</span><span class="token operator">*</span>IP<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      #通过生成<span class="token number">0</span><span class="token operator">-</span><span class="token number">100</span>的随机数，来和inst_ratio进行比较决定该基本块是否要进行插桩
+      <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">AFL_R</span><span class="token punctuation">(</span><span class="token number">100</span><span class="token punctuation">)</span> <span class="token operator">&gt;=</span> inst_ratio<span class="token punctuation">)</span> <span class="token keyword">continue</span><span class="token punctuation">;</span>
+      <span class="token comment">/* Make up cur_loc */</span>
+      <span class="token keyword">unsigned</span> <span class="token keyword">int</span> cur_loc <span class="token operator">=</span> <span class="token function">AFL_R</span><span class="token punctuation">(</span>MAP_SIZE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+      #这行代码的主要目的是在 LLVM IR 中创建一个表示当前位置（或基本块ID）的常量对象，以便后续的插桩代码可以使用。
+      ConstantInt <span class="token operator">*</span>CurLoc <span class="token operator">=</span> ConstantInt<span class="token operator">::</span><span class="token function">get</span><span class="token punctuation">(</span>Int32Ty<span class="token punctuation">,</span> cur_loc<span class="token punctuation">)</span><span class="token punctuation">;</span>
+      
+      <span class="token comment">/* Load prev_loc */</span>
+      #创建一个新的 LLVM IR 的 Load 指令，加载之前存储的上一个位置的值。`AFLPrevLoc` 是一个全局变量，存储了上一个插桩块的位置（即代码路径）。`CreateLoad` 函数会生成一个加载指令，从指定的内存位置加载一个值。
+      LoadInst <span class="token operator">*</span>PrevLoc <span class="token operator">=</span> IRB<span class="token punctuation">.</span><span class="token function">CreateLoad</span><span class="token punctuation">(</span>AFLPrevLoc<span class="token punctuation">)</span><span class="token punctuation">;</span>
+      #给加载指令添加元数据，禁用某些编译器优化。<span class="token string">"nosanitize"</span> 是元数据的种类，它告诉编译器不要对这个加载指令应用任何可以改变其行为的优化。这是必要的，因为 AFL 需要能准确地跟踪代码的执行路径。
+      PrevLoc<span class="token operator">-&gt;</span><span class="token function">setMetadata</span><span class="token punctuation">(</span>M<span class="token punctuation">.</span><span class="token function">getMDKindID</span><span class="token punctuation">(</span><span class="token string">"nosanitize"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> MDNode<span class="token operator">::</span><span class="token function">get</span><span class="token punctuation">(</span>C<span class="token punctuation">,</span> None<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      #创建一个新的 LLVM IR 的 ZeroExtend 指令。<span class="token function">ZeroExtend</span> <span class="token punctuation">(</span>ZExt<span class="token punctuation">)</span> 是一种类型转换指令，它将一个小的整数类型扩展为一个更大的整数类型，高位用<span class="token number">0</span>填充。在这里，`PrevLoc`（上一位置值）被扩展为<span class="token number">32</span>位整数，用于后续的 XOR 操作。ZeroExtend 不会改变数的值，但会改变它的位宽，使得它可以和其他<span class="token number">32</span>位整数进行操作。
+      Value <span class="token operator">*</span>PrevLocCasted <span class="token operator">=</span> IRB<span class="token punctuation">.</span><span class="token function">CreateZExt</span><span class="token punctuation">(</span>PrevLoc<span class="token punctuation">,</span> IRB<span class="token punctuation">.</span><span class="token function">getInt32Ty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      
+      <span class="token comment">/* Load SHM pointer */</span>
+      #创建一个新的 LLVM IR 的 Load 指令，用于加载 AFL 全局变量 `__afl_area_ptr` 的值，也就是 AFL 共享内存区域的起始地址。这个内存区域用于存储每个插桩代码块的执行计数。
+      LoadInst <span class="token operator">*</span>MapPtr <span class="token operator">=</span> IRB<span class="token punctuation">.</span><span class="token function">CreateLoad</span><span class="token punctuation">(</span>AFLMapPtr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+      #加载指令添加元数据，禁用某些编译器优化。
+      MapPtr<span class="token operator">-&gt;</span><span class="token function">setMetadata</span><span class="token punctuation">(</span>M<span class="token punctuation">.</span><span class="token function">getMDKindID</span><span class="token punctuation">(</span><span class="token string">"nosanitize"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> MDNode<span class="token operator">::</span><span class="token function">get</span><span class="token punctuation">(</span>C<span class="token punctuation">,</span> None<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      Value <span class="token operator">*</span>MapPtrIdx <span class="token operator">=</span>
+          IRB<span class="token punctuation">.</span><span class="token function">CreateGEP</span><span class="token punctuation">(</span>MapPtr<span class="token punctuation">,</span> IRB<span class="token punctuation">.</span><span class="token function">CreateXor</span><span class="token punctuation">(</span>PrevLocCasted<span class="token punctuation">,</span> CurLoc<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+      <span class="token comment">/* Update bitmap */</span>
+      #从上一步计算得到的地址 `MapPtrIdx` 中加载当前路径的执行计数。
+      LoadInst <span class="token operator">*</span>Counter <span class="token operator">=</span> IRB<span class="token punctuation">.</span><span class="token function">CreateLoad</span><span class="token punctuation">(</span>MapPtrIdx<span class="token punctuation">)</span><span class="token punctuation">;</span>
+      Counter<span class="token operator">-&gt;</span><span class="token function">setMetadata</span><span class="token punctuation">(</span>M<span class="token punctuation">.</span><span class="token function">getMDKindID</span><span class="token punctuation">(</span><span class="token string">"nosanitize"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> MDNode<span class="token operator">::</span><span class="token function">get</span><span class="token punctuation">(</span>C<span class="token punctuation">,</span> None<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      #创建一个 LLVM 的加法指令，将加载出来的计数值加 <span class="token number">1</span><span class="token punctuation">,</span>之后再存回内存当中。
+      Value <span class="token operator">*</span>Incr <span class="token operator">=</span> IRB<span class="token punctuation">.</span><span class="token function">CreateAdd</span><span class="token punctuation">(</span>Counter<span class="token punctuation">,</span> ConstantInt<span class="token operator">::</span><span class="token function">get</span><span class="token punctuation">(</span>Int8Ty<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      IRB<span class="token punctuation">.</span><span class="token function">CreateStore</span><span class="token punctuation">(</span>Incr<span class="token punctuation">,</span> MapPtrIdx<span class="token punctuation">)</span>
+          <span class="token operator">-&gt;</span><span class="token function">setMetadata</span><span class="token punctuation">(</span>M<span class="token punctuation">.</span><span class="token function">getMDKindID</span><span class="token punctuation">(</span><span class="token string">"nosanitize"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> MDNode<span class="token operator">::</span><span class="token function">get</span><span class="token punctuation">(</span>C<span class="token punctuation">,</span> None<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+          
+      <span class="token comment">/* Set prev_loc to cur_loc &gt;&gt; 1 */</span>
+      #创建了一个存储操作，将 `cur_loc <span class="token operator">&gt;&gt;</span> <span class="token number">1</span>` 的值（右移一位的当前路径位置）存储到全局变量 `__afl_prev_loc` 中。也就是说，这里将当前路径的位置保存下来，以备下一次使用。`cur_loc <span class="token operator">&gt;&gt;</span> <span class="token number">1</span>` 的操作是为了限制位置的范围在预定的大小以内。
+      StoreInst <span class="token operator">*</span>Store <span class="token operator">=</span>
+          IRB<span class="token punctuation">.</span><span class="token function">CreateStore</span><span class="token punctuation">(</span>ConstantInt<span class="token operator">::</span><span class="token function">get</span><span class="token punctuation">(</span>Int32Ty<span class="token punctuation">,</span> cur_loc <span class="token operator">&gt;&gt;</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">,</span> AFLPrevLoc<span class="token punctuation">)</span><span class="token punctuation">;</span>
+      Store<span class="token operator">-&gt;</span><span class="token function">setMetadata</span><span class="token punctuation">(</span>M<span class="token punctuation">.</span><span class="token function">getMDKindID</span><span class="token punctuation">(</span><span class="token string">"nosanitize"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> MDNode<span class="token operator">::</span><span class="token function">get</span><span class="token punctuation">(</span>C<span class="token punctuation">,</span> None<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      #记录已经插桩的基本块的数量。每插桩一个基本块，该计数器就增加一，用于最后报告插桩的统计结果
+      inst_blocks<span class="token operator">++</span><span class="token punctuation">;</span>
+
+    <span class="token punctuation">}</span>
+
+  <span class="token comment">/* Say something nice. */</span>
+  #如果没有设置quiet模式，则输出插桩的信息。
+  <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>be_quiet<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>inst_blocks<span class="token punctuation">)</span> <span class="token function">WARNF</span><span class="token punctuation">(</span><span class="token string">"No instrumentation targets found."</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">else</span> <span class="token function">OKF</span><span class="token punctuation">(</span><span class="token string">"Instrumented %u locations (%s mode, ratio %u%%)."</span><span class="token punctuation">,</span>
+             inst_blocks<span class="token punctuation">,</span> <span class="token function">getenv</span><span class="token punctuation">(</span><span class="token string">"AFL_HARDEN"</span><span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token string">"hardened"</span> <span class="token operator">:</span>
+             <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token function">getenv</span><span class="token punctuation">(</span><span class="token string">"AFL_USE_ASAN"</span><span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token function">getenv</span><span class="token punctuation">(</span><span class="token string">"AFL_USE_MSAN"</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">?</span>
+              <span class="token string">"ASAN/MSAN"</span> <span class="token operator">:</span> <span class="token string">"non-hardened"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> inst_ratio<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+  <span class="token keyword">return</span> true<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="_AFL__Pass_123"></a>注册 AFL 插桩的 Pass</h4> 
+<p><code>registerAFLPass</code>：创建一个新的 <code>AFLCoverage</code> 对象，并将其添加到传递的 Pass 管理器（<code>PM</code>）中。</p> 
+<p><code>RegisterAFLPass</code> :这行代码创建了一个 <code>RegisterStandardPasses</code> 对象，它的构造函数接受两个参数，一个是枚举值 <code>EP_ModuleOptimizerEarly</code>，表示 Pass 的注册阶段；另一个是函数 <code>registerAFLPass</code>，这是一个回调函数，当到达相应的注册阶段时，Pass 管理器会调用这个函数，执行具体的注册工作。</p> 
+<p><code>RegisterAFLPass0</code>:这表示即使在优化级别为 0 的情况下，也会执行这个 Pass。</p> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">registerAFLPass</span><span class="token punctuation">(</span><span class="token keyword">const</span> PassManagerBuilder <span class="token operator">&amp;</span><span class="token punctuation">,</span>
+                            legacy<span class="token operator">::</span>PassManagerBase <span class="token operator">&amp;</span>PM<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  PM<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>new <span class="token function">AFLCoverage</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+
+<span class="token keyword">static</span> RegisterStandardPasses <span class="token function">RegisterAFLPass</span><span class="token punctuation">(</span>
+    PassManagerBuilder<span class="token operator">::</span>EP_ModuleOptimizerEarly<span class="token punctuation">,</span> registerAFLPass<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token keyword">static</span> RegisterStandardPasses <span class="token function">RegisterAFLPass0</span><span class="token punctuation">(</span>
+    PassManagerBuilder<span class="token operator">::</span>EP_EnabledOnOptLevel0<span class="token punctuation">,</span> registerAFLPass<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/5a9d71b9bed6d1a04a737561710985ab/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">llvm-dyn_cast模板函数</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/ee1494c9eaefb8d7f0b6f8e2275a5201/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">2023最新版IntelliJ IDEA安装教程（非常详细）从零基础入门到精通，看完这一篇就够了</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

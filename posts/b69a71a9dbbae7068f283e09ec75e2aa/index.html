@@ -1,0 +1,980 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Android资源管理框架-------之资源的缓存和preload（十） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Android资源管理框架-------之资源的缓存和preload（十）" />
+<meta property="og:description" content="对于integer、bool等values类型的资源还好，对于比较大的资源比如Drawable等，如果我们每次去获取，都要从resources.arsc中查寻资源相关的信息（对于Drawable来说就是资源路径），然后再根据资源信息（路径）去加载图片，那么这个过程将会非常耗时。所以，为了加快资源的获取速度，同时减少不必要的加载次数，android在资源管理过程中存在着大量的缓存机制，并且还会在Zygote进程起来后就会preload许多系统资源。本文我们挑选一些典型的代码来做分析。
+ResourcesManager中对Resources的缓存 ResourcesManager是Android用来统一管理同一个进程中的所有资源，也就是Resources对象的，应用进程中每一个Resources对象的创建和获取都应该经过ResourcesManager之手。它会对它自己创建的每一个Resources对象做缓存，我们在获取Resources对象的时候，如果缓存中已经存在并且没有过时，那么ResourcesManager就会直接返回缓存中的Resources；如果不存在则会创建对应的Resources，然后把它加入缓存并返回：
+//frameworks/base/core/java/android/app/ResourcesManager.java public class ResourcesManager { private static ResourcesManager sResourcesManager; //... /** * 缓存在mActiveResources里面,注意这里使用了若引用， * 也是为了当进程中没有地方使用这个Resources对象的时候能够 * 在gc的同时释放掉资源，节省内存 */ final ArrayMap&lt;ResourcesKey, WeakReference&lt;Resources&gt; &gt; mActiveResources = new ArrayMap&lt;ResourcesKey, WeakReference&lt;Resources&gt; &gt;(); //非常典型的一个单例模式 public static ResourcesManager getInstance() { synchronized (ResourcesManager.class) { if (sResourcesManager == null) { sResourcesManager = new ResourcesManager(); } return sResourcesManager; } } public Resources getTopLevelResources(String resDir, String[] splitResDirs, String[] overlayDirs, String[] libDirs, int displayId, Configuration overrideConfiguration, CompatibilityInfo compatInfo, IBinder token) { //根据这些参数构造key ResourcesKey key = new ResourcesKey(resDir, displayId, overrideConfiguration, scale, token); Resources r; /** * 根据key去缓存中查找 */ WeakReference&lt;Resources&gt; wr = mActiveResources." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/b69a71a9dbbae7068f283e09ec75e2aa/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2019-12-04T13:57:52+08:00" />
+<meta property="article:modified_time" content="2019-12-04T13:57:52+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Android资源管理框架-------之资源的缓存和preload（十）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>        对于integer、bool等values类型的资源还好，对于比较大的资源比如Drawable等，如果我们每次去获取，都要从resources.arsc中查寻资源相关的信息（对于Drawable来说就是资源路径），然后再根据资源信息（路径）去加载图片，那么这个过程将会非常耗时。所以，为了加快资源的获取速度，同时减少不必要的加载次数，android在资源管理过程中存在着大量的缓存机制，并且还会在Zygote进程起来后就会preload许多系统资源。本文我们挑选一些典型的代码来做分析。</p> 
+<h4><a id="ResourcesManagerResources_2"></a><code>ResourcesManager</code>中对<code>Resources</code>的缓存</h4> 
+<p>        <code>ResourcesManager</code>是Android用来统一管理同一个进程中的所有资源，也就是<code>Resources</code>对象的，应用进程中每一个<code>Resources</code>对象的创建和获取都应该经过<code>ResourcesManager</code>之手。它会对它自己创建的每一个<code>Resources</code>对象做缓存，我们在获取<code>Resources</code>对象的时候，如果缓存中已经存在并且没有过时，那么<code>ResourcesManager</code>就会直接返回缓存中的<code>Resources</code>；如果不存在则会创建对应的<code>Resources</code>，然后把它加入缓存并返回：</p> 
+<pre><code class="prism language-java"><span class="token comment">//frameworks/base/core/java/android/app/ResourcesManager.java</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">ResourcesManager</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> ResourcesManager sResourcesManager<span class="token punctuation">;</span>
+    
+    <span class="token comment">//...</span>
+    <span class="token comment">/**
+     * 缓存在mActiveResources里面,注意这里使用了若引用，
+     * 也是为了当进程中没有地方使用这个Resources对象的时候能够
+     * 在gc的同时释放掉资源，节省内存
+     */</span>
+    <span class="token keyword">final</span> ArrayMap<span class="token operator">&lt;</span>ResourcesKey<span class="token punctuation">,</span> WeakReference<span class="token generics function"><span class="token punctuation">&lt;</span>Resources<span class="token punctuation">&gt;</span></span> <span class="token operator">&gt;</span> mActiveResources
+            <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ArrayMap</span><span class="token operator">&lt;</span>ResourcesKey<span class="token punctuation">,</span> WeakReference<span class="token generics function"><span class="token punctuation">&lt;</span>Resources<span class="token punctuation">&gt;</span></span> <span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">//非常典型的一个单例模式</span>
+    <span class="token keyword">public</span> <span class="token keyword">static</span> ResourcesManager <span class="token function">getInstance</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">synchronized</span> <span class="token punctuation">(</span>ResourcesManager<span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>sResourcesManager <span class="token operator">==</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                sResourcesManager <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ResourcesManager</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token keyword">return</span> sResourcesManager<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">public</span> Resources <span class="token function">getTopLevelResources</span><span class="token punctuation">(</span>String resDir<span class="token punctuation">,</span> String<span class="token punctuation">[</span><span class="token punctuation">]</span> splitResDirs<span class="token punctuation">,</span>
+            String<span class="token punctuation">[</span><span class="token punctuation">]</span> overlayDirs<span class="token punctuation">,</span> String<span class="token punctuation">[</span><span class="token punctuation">]</span> libDirs<span class="token punctuation">,</span> <span class="token keyword">int</span> displayId<span class="token punctuation">,</span>
+            Configuration overrideConfiguration<span class="token punctuation">,</span> CompatibilityInfo compatInfo<span class="token punctuation">,</span> IBinder token<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//根据这些参数构造key</span>
+        ResourcesKey key <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ResourcesKey</span><span class="token punctuation">(</span>resDir<span class="token punctuation">,</span> displayId<span class="token punctuation">,</span> overrideConfiguration<span class="token punctuation">,</span> scale<span class="token punctuation">,</span> token<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        Resources r<span class="token punctuation">;</span>
+        <span class="token comment">/**
+         * 根据key去缓存中查找
+         */</span>
+        WeakReference<span class="token generics function"><span class="token punctuation">&lt;</span>Resources<span class="token punctuation">&gt;</span></span> wr <span class="token operator">=</span> mActiveResources<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        r <span class="token operator">=</span> wr <span class="token operator">!=</span> null <span class="token operator">?</span> wr<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">:</span> null<span class="token punctuation">;</span>
+        <span class="token comment">/**
+         * 如果查到了并且没有过时，就可以返回了
+         * 这里的没有过时是指，AssetManager加载完APK后，这个APK没有再被修改过
+         */</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>r <span class="token operator">!=</span> null <span class="token operator">&amp;&amp;</span> r<span class="token punctuation">.</span><span class="token function">getAssets</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">isUpToDate</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span> r<span class="token punctuation">;</span>
+       <span class="token punctuation">}</span>
+
+       <span class="token comment">//如果缓存中没有，那么就要创建新的对象了</span>
+       <span class="token comment">//创建AssetManager对象</span>
+       AssetManager assets <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">AssetManager</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+       <span class="token comment">//添加APK本身这个资源包</span>
+       <span class="token keyword">if</span> <span class="token punctuation">(</span>resDir <span class="token operator">!=</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>assets<span class="token punctuation">.</span><span class="token function">addAssetPath</span><span class="token punctuation">(</span>resDir<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">return</span> null<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//添加分片资源包</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>splitResDirs <span class="token operator">!=</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">for</span> <span class="token punctuation">(</span>String splitResDir <span class="token operator">:</span> splitResDirs<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>assets<span class="token punctuation">.</span><span class="token function">addAssetPath</span><span class="token punctuation">(</span>splitResDir<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token keyword">return</span> null<span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//添加Runtime Resources Overlay资源包</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>overlayDirs <span class="token operator">!=</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">for</span> <span class="token punctuation">(</span>String idmapPath <span class="token operator">:</span> overlayDirs<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                assets<span class="token punctuation">.</span><span class="token function">addOverlayPath</span><span class="token punctuation">(</span>idmapPath<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//添加资源共享库</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>libDirs <span class="token operator">!=</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">for</span> <span class="token punctuation">(</span>String libDir <span class="token operator">:</span> libDirs<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>assets<span class="token punctuation">.</span><span class="token function">addAssetPath</span><span class="token punctuation">(</span>libDir<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    Slog<span class="token punctuation">.</span><span class="token function">w</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"Asset path '"</span> <span class="token operator">+</span> libDir <span class="token operator">+</span>
+                            <span class="token string">"' does not exist or contains no resources."</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">//.......</span>
+
+        <span class="token comment">//创建Resources对象</span>
+        r <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Resources</span><span class="token punctuation">(</span>assets<span class="token punctuation">,</span> dm<span class="token punctuation">,</span> config<span class="token punctuation">,</span> compatInfo<span class="token punctuation">,</span> token<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">//......</span>
+        
+        <span class="token comment">//放入缓存</span>
+        mActiveResources<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span> <span class="token keyword">new</span> <span class="token class-name">WeakReference</span><span class="token generics function"><span class="token punctuation">&lt;</span>Resources<span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>r<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//可以返回了</span>
+        <span class="token keyword">return</span> r<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>        另外需要注意的是，不论是<code>Resources</code>对象还是<code>AssetManager</code>对象，都会有一个静态的实例，代表系统资源，这就是说，在同一进程中，代表系统资源的<code>Resources</code>对象和<code>AssetManager</code>对象只有一个，大家共享之，避免重复：</p> 
+<pre><code class="prism language-java"><span class="token comment">//frameworks/base/core/java/android/content/res/Resources.java</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">Resources</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">static</span> Resources mSystem <span class="token operator">=</span> null<span class="token punctuation">;</span>
+    <span class="token comment">//典型的单例模式，线程安全</span>
+    <span class="token keyword">public</span> <span class="token keyword">static</span> Resources <span class="token function">getSystem</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">synchronized</span> <span class="token punctuation">(</span>sSync<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            Resources ret <span class="token operator">=</span> mSystem<span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">==</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//构造方法会调用AssetManager.getSystem()</span>
+                <span class="token comment">//并为它设置配置信息，创建StringBlock对象</span>
+                ret <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Resources</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                mSystem <span class="token operator">=</span> ret<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token comment">//frameworks/base/core/java/android/content/res/AssetManager.java</span>
+<span class="token keyword">public</span> <span class="token keyword">final</span> <span class="token keyword">class</span> <span class="token class-name">AssetManager</span> <span class="token keyword">implements</span> <span class="token class-name">AutoCloseable</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">static</span> AssetManager sSystem <span class="token operator">=</span> null<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">ensureSystemAssets</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">synchronized</span> <span class="token punctuation">(</span>sSync<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>sSystem <span class="token operator">==</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//创建代表系统资源的AssetManager对象，构造方法中会加载</span>
+                <span class="token comment">//framework-res.apk中的resources.arsc</span>
+                AssetManager system <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">AssetManager</span><span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">//创建StringBlock对象，一个StringBlock代表一个Global String Pool</span>
+                system<span class="token punctuation">.</span><span class="token function">makeStringBlocks</span><span class="token punctuation">(</span>null<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                sSystem <span class="token operator">=</span> system<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">public</span> <span class="token keyword">static</span> AssetManager <span class="token function">getSystem</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//加载framework-res.apk中的resources.arsc</span>
+        <span class="token function">ensureSystemAssets</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> sSystem<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>        <code>AssetManager</code>中的相关逻辑在<a href="https://blog.csdn.net/dayong198866/article/details/100153033">Android资源管理框架-------之Android中的资源包（二）</a>中已经有所描述，这里就不重复了。</p> 
+<h4><a id="APKresourcesarscResTable_143"></a>压缩包（APK）、<code>resources.arsc</code>以及<code>ResTable</code>的缓存</h4> 
+<p>        当我们给<code>AssetManager</code>添加资源包的时候，会调用其<code>AddAssetPath</code>方法，<code>AddAssetPath</code>方法调用<code>appendPathToResTable</code>方法，这个方法会根据这个路径去加载压缩包，也就是我们的APK包，然后从中取出resources.arsc，然后再加载resources.arsc中的内容创建<code>ResTable</code>对象。Android对APK包、resources.arsc和系统的<code>ResTable</code>（非应用的）都有缓存机制。先说一下它们缓存相关的数据结构吧：一个APK包对应缓存中的一个<code>ZipFileRO</code>对象、一个resources.arsc对应缓存中的一个<code>Asset</code>对象，而<code>ResTable</code>的缓存还是一个<code>ResTable</code>对象。它们的缓存机制在<code>appendPathToResTable</code>方法中都有体现。这段代码注释得比较多，但对本文而言关键点仅有四处，我们在注释里有<code>*****关键代码（X）*****</code>这样的标记，其它的注释，只是为了帮助大家理解这个方法，比较熟悉的可以只看<code>*****关键代码（X）*****</code>标记的部分。</p> 
+<pre><code class="prism language-cpp"><span class="token comment">//frameworks/base/libs/androidfw/AssetManager.cpp</span>
+<span class="token keyword">bool</span> AssetManager<span class="token operator">::</span><span class="token function">appendPathToResTable</span><span class="token punctuation">(</span><span class="token keyword">const</span> asset_path<span class="token operator">&amp;</span> ap<span class="token punctuation">)</span> <span class="token keyword">const</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">/*
+     * 在这里ass表示我们的资源包中的resources.arsc，
+     * sharedRes则是用来存放资源包中的resources.arsc中的具体数据
+     */</span>
+    Asset<span class="token operator">*</span> ass <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+    ResTable<span class="token operator">*</span> sharedRes <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+    
+    <span class="token keyword">bool</span> shared <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+    <span class="token keyword">bool</span> onlyEmptyResources <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+    <span class="token function">MY_TRACE_BEGIN</span><span class="token punctuation">(</span>ap<span class="token punctuation">.</span>path<span class="token punctuation">.</span><span class="token function">string</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//idmap 是RRO相关的概念，这里不再多说</span>
+    Asset<span class="token operator">*</span> idmap <span class="token operator">=</span> <span class="token function">openIdmapLocked</span><span class="token punctuation">(</span>ap<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">/*
+     * 这里要先看一下已经加载过多少个资源包了，
+     * 如果没有加载过，那么就认为默认加载的头一个资源包是framework-res.apk
+     * 也就是Android的系统资源包
+     */</span>
+    size_t nextEntryIdx <span class="token operator">=</span> mResources<span class="token operator">-</span><span class="token operator">&gt;</span><span class="token function">getTableCount</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/*
+     * 我们要加载resources.arsc,大多数情况这个文件位于压缩包也就是apk中
+     * 对应我们这个if分支
+     * 但AssetManager也是支持对解压出来的resources.arsc的
+     * 这种情况对应下面的else分支
+     */</span>
+     <span class="token comment">//resources.arsc在apk中</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>ap<span class="token punctuation">.</span>type <span class="token operator">!=</span> kFileTypeDirectory<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>nextEntryIdx <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span><span class="token comment">// *****关键代码（一）*****</span>
+            <span class="token comment">//加载的是framework-res.apk，也就是Google的Android系统资源包</span>
+            <span class="token comment">//先去缓存中查找系统资源包及其overlay包是否已经加载过，如果加载过，同时会创建</span>
+            <span class="token comment">//ResTable对象，并缓存，也就是sharedRes得到的值肯定不为空</span>
+            sharedRes <span class="token operator">=</span> <span class="token keyword">const_cast</span><span class="token operator">&lt;</span>AssetManager<span class="token operator">*</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>
+                mZipSet<span class="token punctuation">.</span><span class="token function">getZipResourceTable</span><span class="token punctuation">(</span>ap<span class="token punctuation">.</span>path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>sharedRes <span class="token operator">!=</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">/**
+                 * 如果已经创建过了，那么要添加的这个资源包，就应该放到它们后面
+                 * 这种情况出现在在同一个进程创建多个不同的AssetManager或者Resources对象的时候，
+                 * 每个AssetManager中都会添加系统资源包，这时候就用上这个缓存了
+                 */</span> 
+                nextEntryIdx <span class="token operator">=</span> sharedRes<span class="token operator">-</span><span class="token operator">&gt;</span><span class="token function">getTableCount</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">//如果当前要加载的不是系统资源或者是系统资源，但是之前并未加载过，走这里</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>sharedRes <span class="token operator">==</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// *****关键代码（二）*****</span>
+            <span class="token comment">//查缓存，看看之前是否加载并创建过Asset对象，这里的Asset对象对应的就是加载到</span>
+            <span class="token comment">//内存中的resources.arsc</span>
+            ass <span class="token operator">=</span> <span class="token keyword">const_cast</span><span class="token operator">&lt;</span>AssetManager<span class="token operator">*</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>
+                mZipSet<span class="token punctuation">.</span><span class="token function">getZipResourceTableAsset</span><span class="token punctuation">(</span>ap<span class="token punctuation">.</span>path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//如果没有找到，则加载之，即打开resources.arsc，并将得到的ass放入缓存</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>ass <span class="token operator">==</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token function">ALOGV</span><span class="token punctuation">(</span><span class="token string">"loading resource table %s\n"</span><span class="token punctuation">,</span> ap<span class="token punctuation">.</span>path<span class="token punctuation">.</span><span class="token function">string</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">// *****关键代码（三）*****</span>
+                <span class="token comment">/**
+                 * 去压缩包中打开resources.arsc
+                 * 具体步骤为：先去缓存中查找压缩包（也就是APK）是否已经加载过了，
+                 * 如果已经加载过，则直接从缓存中取出APK；否则，先从加载APK。
+                 * 然后再从APK中解压出resources.arsc
+                 */</span> 
+                ass <span class="token operator">=</span> <span class="token keyword">const_cast</span><span class="token operator">&lt;</span>AssetManager<span class="token operator">*</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>
+                    <span class="token function">openNonAssetInPathLocked</span><span class="token punctuation">(</span><span class="token string">"resources.arsc"</span><span class="token punctuation">,</span>
+                                             Asset<span class="token operator">::</span>ACCESS_BUFFER<span class="token punctuation">,</span>
+                                             ap<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">//放入缓存</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>ass <span class="token operator">!=</span> <span class="token constant">NULL</span> <span class="token operator">&amp;&amp;</span> ass <span class="token operator">!=</span> kExcludedAsset<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    ass <span class="token operator">=</span> <span class="token keyword">const_cast</span><span class="token operator">&lt;</span>AssetManager<span class="token operator">*</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>
+                        mZipSet<span class="token punctuation">.</span><span class="token function">setZipResourceTableAsset</span><span class="token punctuation">(</span>ap<span class="token punctuation">.</span>path<span class="token punctuation">,</span> ass<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">//如果要加载的是系统资源，但这时候还从未加载过，则连同系统资源包的overlay package一并加载</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>nextEntryIdx <span class="token operator">==</span> <span class="token number">0</span> <span class="token operator">&amp;&amp;</span> ass <span class="token operator">!=</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// If this is the first resource table in the asset</span>
+                <span class="token comment">// manager, then we are going to cache it so that we</span>
+                <span class="token comment">// can quickly copy it out for others.</span>
+                <span class="token function">ALOGV</span><span class="token punctuation">(</span><span class="token string">"Creating shared resources for %s"</span><span class="token punctuation">,</span> ap<span class="token punctuation">.</span>path<span class="token punctuation">.</span><span class="token function">string</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">//创建ResTable对象</span>
+                sharedRes <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token function">ResTable</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">//加入资源包中的resources.arsc以及idmap</span>
+                sharedRes<span class="token operator">-</span><span class="token operator">&gt;</span><span class="token function">add</span><span class="token punctuation">(</span>ass<span class="token punctuation">,</span> idmap<span class="token punctuation">,</span> nextEntryIdx <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property">#<span class="token directive keyword">ifdef</span> HAVE_ANDROID_OS</span>
+                
+                <span class="token keyword">const</span> <span class="token keyword">char</span><span class="token operator">*</span> data <span class="token operator">=</span> <span class="token function">getenv</span><span class="token punctuation">(</span><span class="token string">"ANDROID_DATA"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token function">LOG_ALWAYS_FATAL_IF</span><span class="token punctuation">(</span>data <span class="token operator">==</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token string">"ANDROID_DATA not set"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                String8 <span class="token function">overlaysListPath</span><span class="token punctuation">(</span>data<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                overlaysListPath<span class="token punctuation">.</span><span class="token function">appendPath</span><span class="token punctuation">(</span>kResourceCache<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                overlaysListPath<span class="token punctuation">.</span><span class="token function">appendPath</span><span class="token punctuation">(</span><span class="token string">"overlays.list"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">//加载系统资源包的overlay package，并将这些资源包也加入sharedRes，</span>
+                <span class="token function">addSystemOverlays</span><span class="token punctuation">(</span>overlaysListPath<span class="token punctuation">.</span><span class="token function">string</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> ap<span class="token punctuation">.</span>path<span class="token punctuation">,</span> sharedRes<span class="token punctuation">,</span> nextEntryIdx<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property">#<span class="token directive keyword">endif</span></span>
+
+                <span class="token comment">// *****关键代码（四）*****</span>
+                <span class="token comment">//缓存sharedRes</span>
+                sharedRes <span class="token operator">=</span> <span class="token keyword">const_cast</span><span class="token operator">&lt;</span>AssetManager<span class="token operator">*</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>
+                    mZipSet<span class="token punctuation">.</span><span class="token function">setZipResourceTable</span><span class="token punctuation">(</span>ap<span class="token punctuation">.</span>path<span class="token punctuation">,</span> sharedRes<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span><span class="token comment">//resources.arsc不在apk中，而在某个路径下</span>
+        <span class="token comment">//加载到内存，创建Asset对象</span>
+        ass <span class="token operator">=</span> <span class="token keyword">const_cast</span><span class="token operator">&lt;</span>AssetManager<span class="token operator">*</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>
+            <span class="token function">openNonAssetInPathLocked</span><span class="token punctuation">(</span><span class="token string">"resources.arsc"</span><span class="token punctuation">,</span>
+                                     Asset<span class="token operator">::</span>ACCESS_BUFFER<span class="token punctuation">,</span>
+                                     ap<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//不是apk中的不缓存，不共享，添完就删</span>
+        shared <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>ass <span class="token operator">!=</span> <span class="token constant">NULL</span> <span class="token operator">||</span> sharedRes <span class="token operator">!=</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> ass <span class="token operator">!=</span> kExcludedAsset<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>sharedRes <span class="token operator">!=</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">ALOGV</span><span class="token punctuation">(</span><span class="token string">"Copying existing resources for %s"</span><span class="token punctuation">,</span> ap<span class="token punctuation">.</span>path<span class="token punctuation">.</span><span class="token function">string</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//如果是系统资源包，则将系统资源包连同它的overlay package一起添加到我们的</span>
+            <span class="token comment">//mResources对象当中去</span>
+            mResources<span class="token operator">-</span><span class="token operator">&gt;</span><span class="token function">add</span><span class="token punctuation">(</span>sharedRes<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">ALOGV</span><span class="token punctuation">(</span><span class="token string">"Parsing resources for %s"</span><span class="token punctuation">,</span> ap<span class="token punctuation">.</span>path<span class="token punctuation">.</span><span class="token function">string</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//否则只添加我们要加载的这个资源包（其实仅仅是它的resources.arsc和idmap文件而已）</span>
+            mResources<span class="token operator">-</span><span class="token operator">&gt;</span><span class="token function">add</span><span class="token punctuation">(</span>ass<span class="token punctuation">,</span> idmap<span class="token punctuation">,</span> nextEntryIdx <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">!</span>shared<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        onlyEmptyResources <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+        <span class="token comment">//不共享的话，就没必要留着了</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>shared<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">delete</span> ass<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//没找到资源</span>
+        <span class="token function">ALOGV</span><span class="token punctuation">(</span><span class="token string">"Installing empty resources in to table %p\n"</span><span class="token punctuation">,</span> mResources<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        mResources<span class="token operator">-</span><span class="token operator">&gt;</span><span class="token function">addEmpty</span><span class="token punctuation">(</span>nextEntryIdx <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>idmap <span class="token operator">!=</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">delete</span> idmap<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token function">MY_TRACE_END</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> onlyEmptyResources<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>        先看<code>*****关键代码（一）*****</code>，Android会对<code>framework-res.apk</code>创建一个单独的<code>ResTable</code>对象，并将其缓存。在我们构造新的 java层的<code>AssetManager</code>对象时，每次系统都会往里面添加系统的<code>framework-res.apk</code>资源包。根据我们前面文章的分析，很明显每个Android应用进程或者system_server进程默认都会有代表系统资源的<code>mSystem</code>变量，这个变量是java层<code>Resources</code>类的一个静态变量，在Zygote进程preload资源的时候就会构造。也就是说，在我们的应用程序中，如果我们构造了自己的<code>Resources</code>或者<code>AssetManager</code>对象，系统同样会将<code>framework-res.apk</code>这个资源包添加进去，不过流程将不再是加载<code>framework-res.apk</code>，然后解压出resources.arsc，最后添加到<code>ResTable</code>中；而是从缓存中取出<code>framework-res.apk</code>对应的<code>ResTable</code>对象，然后将其合并到我们新创建的<code>AssetManager</code>对象的<code>ResTable</code>中。我们看<code>sharedRes = const_cast&lt;AssetManager*&gt;(this)-&gt;mZipSet.getZipResourceTable(ap.path);</code>这句，其实现为：</p> 
+<pre><code class="prism language-cpp"><span class="token comment">//frameworks/base/libs/androidfw/AssetManager.cpp</span>
+
+<span class="token comment">/**
+ * ZipSet类用来管理一个AssetManager中添加的所有APK文件
+ * AssetManager中有一个它的实例 mZipSet
+ */</span>
+ResTable<span class="token operator">*</span> AssetManager<span class="token operator">::</span>ZipSet<span class="token operator">::</span><span class="token function">getZipResourceTable</span><span class="token punctuation">(</span><span class="token keyword">const</span> String8<span class="token operator">&amp;</span> path<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//ZipSet中有两个缓存Vector，一个存APK文件，一个存路径，根据路径，找是否加载过APK文件</span>
+    <span class="token keyword">int</span> idx <span class="token operator">=</span> <span class="token function">getIndex</span><span class="token punctuation">(</span>path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    sp<span class="token operator">&lt;</span>SharedZip<span class="token operator">&gt;</span> zip <span class="token operator">=</span> mZipFile<span class="token punctuation">[</span>idx<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token comment">//如果没有加载过APK文件，那就先加载再把它放入缓存Vector</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>zip <span class="token operator">==</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//等下介绍其实现</span>
+        zip <span class="token operator">=</span> SharedZip<span class="token operator">::</span><span class="token function">get</span><span class="token punctuation">(</span>path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        mZipFile<span class="token punctuation">.</span><span class="token function">editItemAt</span><span class="token punctuation">(</span>idx<span class="token punctuation">)</span> <span class="token operator">=</span> zip<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">/**
+     * 接下来的处理就要分开说了
+     * 如果是之前并没有缓存过对应的ResTable对象，那么下面这句就会返回空
+     * 如果之前已经缓存过ResTable对象，那么会将缓存返回
+     */</span>
+    <span class="token keyword">return</span> zip<span class="token operator">-</span><span class="token operator">&gt;</span><span class="token function">getResourceTable</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>        那么什么时候缓存系统的<code>ResTable</code>对象呢？看<code>*****关键代码（四）*****</code>的实现：</p> 
+<pre><code class="prism language-cpp"><span class="token comment">//frameworks/base/libs/androidfw/AssetManager.cpp</span>
+ResTable<span class="token operator">*</span> AssetManager<span class="token operator">::</span>ZipSet<span class="token operator">::</span><span class="token function">setZipResourceTable</span><span class="token punctuation">(</span><span class="token keyword">const</span> String8<span class="token operator">&amp;</span> path<span class="token punctuation">,</span>
+                                                    ResTable<span class="token operator">*</span> res<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> idx <span class="token operator">=</span> <span class="token function">getIndex</span><span class="token punctuation">(</span>path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    sp<span class="token operator">&lt;</span>SharedZip<span class="token operator">&gt;</span> zip <span class="token operator">=</span> mZipFile<span class="token punctuation">[</span>idx<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> zip<span class="token operator">-</span><span class="token operator">&gt;</span><span class="token function">setResourceTable</span><span class="token punctuation">(</span>res<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>        这里的<code>zip-&gt;getResourceTable()</code>和<code>zip-&gt;setResourceTable(res)</code>方法就是简单的getter和setter方法，就不贴代码了。也就是说在<code>*****关键代码（四）*****</code>的位置，也就是Zygote preload系统资源的时候，就会将系统资源包对应的<code>ResTable</code>对象缓存到<code>SharedZip</code>即里面去，后面再用，就会直接从里面取。到这里，系统资源包的<code>ResTable</code>对象的缓存就说完了。<br>         我们再说压缩包，也就是APK文件的缓存机制。一个APK文件对应的数据结构是一个<code>ZipFileRO</code>对象（这里的RO很明显就是read only了）。不过<code>AssetManager</code>为了方便使用，又对它做了封装，这个封装就是`SharedZip：</p> 
+<pre><code class="prism language-cpp"><span class="token comment">//frameworks/base/include/androidfw/AssetManager.h</span>
+<span class="token keyword">class</span> <span class="token class-name">SharedZip</span> <span class="token operator">:</span> <span class="token keyword">public</span> RefBase <span class="token punctuation">{<!-- --></span>
+    
+    <span class="token comment">//省略其方法的声明</span>
+
+    <span class="token keyword">private</span><span class="token operator">:</span>
+        <span class="token function">SharedZip</span><span class="token punctuation">(</span><span class="token keyword">const</span> String8<span class="token operator">&amp;</span> path<span class="token punctuation">,</span> time_t modWhen<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">SharedZip</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// &lt;-- not implemented</span>
+
+        <span class="token comment">//APK的路径</span>
+        String8 mPath<span class="token punctuation">;</span>
+        <span class="token comment">//APK文件，本质是一个ZIP包</span>
+        ZipFileRO<span class="token operator">*</span> mZipFile<span class="token punctuation">;</span>
+        <span class="token comment">//修改时间，主要用来判断我们的ResTable中的资源是否过时</span>
+        time_t mModWhen<span class="token punctuation">;</span>
+        <span class="token comment">//代表一个resources.arsc</span>
+        Asset<span class="token operator">*</span> mResourceTableAsset<span class="token punctuation">;</span>
+        <span class="token comment">//缓存framework-res.apk对应的ResTable对象</span>
+        ResTable<span class="token operator">*</span> mResourceTable<span class="token punctuation">;</span>
+        <span class="token comment">//RRO相关，overlay包的路径</span>
+        Vector<span class="token operator">&lt;</span>asset_path<span class="token operator">&gt;</span> mOverlays<span class="token punctuation">;</span>
+
+        <span class="token keyword">static</span> Mutex gLock<span class="token punctuation">;</span>
+        <span class="token comment">//已经加载过的APK包</span>
+        <span class="token keyword">static</span> DefaultKeyedVector<span class="token operator">&lt;</span>String8<span class="token punctuation">,</span> wp<span class="token operator">&lt;</span>SharedZip<span class="token operator">&gt;</span> <span class="token operator">&gt;</span> gOpen<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>        需要注意的是<code>gOpen</code>成员是<code>static</code>的，也就是说<code>SharedZip</code>是会缓存每一个打开过的APK的。前面我们在分析<code>AssetManager::ZipSet::getZipResourceTable</code>的实现时，涉及到了<code>zip = SharedZip::get(path);</code>这句，我们看其实现：</p> 
+<pre><code class="prism language-cpp"><span class="token comment">//frameworks/base/libs/androidfw/AssetManager.cpp</span>
+sp<span class="token operator">&lt;</span>AssetManager<span class="token operator">::</span>SharedZip<span class="token operator">&gt;</span> AssetManager<span class="token operator">::</span>SharedZip<span class="token operator">::</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token keyword">const</span> String8<span class="token operator">&amp;</span> path<span class="token punctuation">,</span>
+        <span class="token keyword">bool</span> createIfNotPresent<span class="token punctuation">)</span><span class="token comment">/*createIfNotPresent 默认是true*/</span>
+<span class="token punctuation">{<!-- --></span>
+    AutoMutex <span class="token function">_l</span><span class="token punctuation">(</span>gLock<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    time_t modWhen <span class="token operator">=</span> <span class="token function">getFileModDate</span><span class="token punctuation">(</span>path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//先去查缓存</span>
+    sp<span class="token operator">&lt;</span>SharedZip<span class="token operator">&gt;</span> zip <span class="token operator">=</span> gOpen<span class="token punctuation">.</span><span class="token function">valueFor</span><span class="token punctuation">(</span>path<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">promote</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//查到了，并且没有问题则返回</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>zip <span class="token operator">!=</span> <span class="token constant">NULL</span> <span class="token operator">&amp;&amp;</span> zip<span class="token operator">-</span><span class="token operator">&gt;</span>mModWhen <span class="token operator">==</span> modWhen<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> zip<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>zip <span class="token operator">==</span> <span class="token constant">NULL</span> <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>createIfNotPresent<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">//没查到在去加载，并加入缓存，下次就可以直接用了</span>
+    zip <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token function">SharedZip</span><span class="token punctuation">(</span>path<span class="token punctuation">,</span> modWhen<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    gOpen<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>path<span class="token punctuation">,</span> zip<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> zip<span class="token punctuation">;</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>        然后，我们再来看看<code>resources.arsc</code>的缓存，这个体现在<code>*****关键代码（二）*****</code>和<code>*****关键代码（三）*****</code>。这句<code>ass = const_cast&lt;AssetManager*&gt;(this)-&gt;mZipSet.getZipResourceTableAsset(ap.path)</code>的实现：</p> 
+<pre><code class="prism language-cpp"><span class="token comment">//frameworks/base/libs/androidfw/AssetManager.cpp</span>
+Asset<span class="token operator">*</span> AssetManager<span class="token operator">::</span>ZipSet<span class="token operator">::</span><span class="token function">getZipResourceTableAsset</span><span class="token punctuation">(</span><span class="token keyword">const</span> String8<span class="token operator">&amp;</span> path<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//先拿到APK包，可能走缓存哦</span>
+    <span class="token keyword">int</span> idx <span class="token operator">=</span> <span class="token function">getIndex</span><span class="token punctuation">(</span>path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    sp<span class="token operator">&lt;</span>SharedZip<span class="token operator">&gt;</span> zip <span class="token operator">=</span> mZipFile<span class="token punctuation">[</span>idx<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>zip <span class="token operator">==</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        zip <span class="token operator">=</span> SharedZip<span class="token operator">::</span><span class="token function">get</span><span class="token punctuation">(</span>path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        mZipFile<span class="token punctuation">.</span><span class="token function">editItemAt</span><span class="token punctuation">(</span>idx<span class="token punctuation">)</span> <span class="token operator">=</span> zip<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">//再从SharedZip的缓存里找resources.arsc对应的缓存</span>
+    <span class="token keyword">return</span> zip<span class="token operator">-</span><span class="token operator">&gt;</span><span class="token function">getResourceTableAsset</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">//frameworks/base/libs/androidfw/AssetManager.cpp</span>
+Asset<span class="token operator">*</span> AssetManager<span class="token operator">::</span>SharedZip<span class="token operator">::</span><span class="token function">getResourceTableAsset</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token function">ALOGV</span><span class="token punctuation">(</span><span class="token string">"Getting from SharedZip %p resource asset %p\n"</span><span class="token punctuation">,</span> <span class="token keyword">this</span><span class="token punctuation">,</span> mResourceTableAsset<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> mResourceTableAsset<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>        在<code>*****关键代码（二）*****</code>那里，先去查缓存，如果没查到，则进入<code>*****关键代码（三）*****</code>，去加载APK，解压出resources.arsc，构造其对应的<code>Asset</code>对象：</p> 
+<pre><code class="prism language-cpp"><span class="token comment">//frameworks/base/libs/androidfw/AssetManager.cpp</span>
+Asset<span class="token operator">*</span> AssetManager<span class="token operator">::</span><span class="token function">openNonAssetInPathLocked</span><span class="token punctuation">(</span><span class="token keyword">const</span> <span class="token keyword">char</span><span class="token operator">*</span> fileName<span class="token punctuation">,</span> AccessMode mode<span class="token punctuation">,</span>
+    <span class="token keyword">const</span> asset_path<span class="token operator">&amp;</span> ap<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//......</span>
+
+    String8 <span class="token function">path</span><span class="token punctuation">(</span>fileName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//这里还是会走AssetManager::ZipSet::getZip方法，还是会去查APK是否缓存过</span>
+    ZipFileRO<span class="token operator">*</span> pZip <span class="token operator">=</span> <span class="token function">getZipFileLocked</span><span class="token punctuation">(</span>ap<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>pZip <span class="token operator">!=</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//printf("GOT zip, checking NA '%s'\n", (const char*) path);</span>
+        <span class="token comment">//resources.arsc</span>
+        ZipEntryRO entry <span class="token operator">=</span> pZip<span class="token operator">-</span><span class="token operator">&gt;</span><span class="token function">findEntryByName</span><span class="token punctuation">(</span>path<span class="token punctuation">.</span><span class="token function">string</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>entry <span class="token operator">!=</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//printf("FOUND NA in Zip file for %s\n", appName ? appName : kAppCommon);</span>
+            <span class="token comment">//解压出来，并创建Asset对象</span>
+            pAsset <span class="token operator">=</span> <span class="token function">openAssetFromZipLocked</span><span class="token punctuation">(</span>pZip<span class="token punctuation">,</span> entry<span class="token punctuation">,</span> mode<span class="token punctuation">,</span> path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            pZip<span class="token operator">-</span><span class="token operator">&gt;</span><span class="token function">releaseEntry</span><span class="token punctuation">(</span>entry<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+   <span class="token punctuation">}</span>
+
+   <span class="token comment">//......</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>        在<code>*****关键代码（三）*****</code>后面还会调用<code>mZipSet.setZipResourceTableAsset(ap.path, ass);</code>将<code>resources.arsc</code>对应的<code>Asset</code>存入缓存：</p> 
+<pre><code class="prism language-cpp"><span class="token comment">//frameworks/base/libs/androidfw/AssetManager.cpp</span>
+Asset<span class="token operator">*</span> AssetManager<span class="token operator">::</span>ZipSet<span class="token operator">::</span><span class="token function">setZipResourceTableAsset</span><span class="token punctuation">(</span><span class="token keyword">const</span> String8<span class="token operator">&amp;</span> path<span class="token punctuation">,</span>
+                                                 Asset<span class="token operator">*</span> asset<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> idx <span class="token operator">=</span> <span class="token function">getIndex</span><span class="token punctuation">(</span>path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    sp<span class="token operator">&lt;</span>SharedZip<span class="token operator">&gt;</span> zip <span class="token operator">=</span> mZipFile<span class="token punctuation">[</span>idx<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token comment">// doesn't make sense to call before previously accessing.</span>
+    <span class="token comment">//存入对应的SharedZip对象中缓存起来</span>
+    <span class="token keyword">return</span> zip<span class="token operator">-</span><span class="token operator">&gt;</span><span class="token function">setResourceTableAsset</span><span class="token punctuation">(</span>asset<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="Bag_441"></a>Bag资源的缓存</h4> 
+<p>        对于带有Bag的资源，比如说一个style，它的Bag（可以理解为item）可能会有许多，在同一个<code>AssetManager</code>对象中，当我们获取过其中的某一个Bag后，也会被缓存起来，下次再获取的时候就不必再去<code>resources.arsc</code>中查找解析了。这个缓存在<code>PackageGroup</code>中：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">struct</span> ResTable<span class="token operator">::</span>PackageGroup
+<span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">//......省略无关的代码</span>
+
+    <span class="token comment">// Computed attribute bags, first indexed by the type and second</span>
+    <span class="token comment">// by the entry in that type.</span>
+    ByteBucketArray<span class="token operator">&lt;</span>bag_set<span class="token operator">*</span><span class="token operator">*</span><span class="token operator">&gt;</span><span class="token operator">*</span>     bags<span class="token punctuation">;</span>
+    
+    DynamicRefTable                 dynamicRefTable<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>        <code>bags</code>成员就是用来做缓存的，一个<code>bag_set</code>就代表一个资源项的所有Bag，比如一个<code>R.style.Widget_CompoundButton</code>的所有item都会按照bag的id升序排列的。<code>bags</code>的组织方式大概如下：<br> <img src="https://images2.imgbox.com/17/b1/57OA0nRH_o.png" alt="在这里插入图片描述"></p> 
+<p>        我们看在获取bag时是怎么利用缓存的：</p> 
+<pre><code class="prism language-cpp"><span class="token comment">//frameworks/base/libs/androidfw/ResourceTypes.cpp</span>
+ssize_t ResTable<span class="token operator">::</span><span class="token function">getBagLocked</span><span class="token punctuation">(</span><span class="token keyword">uint32_t</span> resID<span class="token punctuation">,</span> <span class="token keyword">const</span> bag_entry<span class="token operator">*</span><span class="token operator">*</span> outBag<span class="token punctuation">,</span>
+        <span class="token keyword">uint32_t</span><span class="token operator">*</span> outTypeSpecFlags<span class="token punctuation">)</span> <span class="token keyword">const</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>mError <span class="token operator">!=</span> NO_ERROR<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> mError<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">//拿到PackageGroup、Type、Entry的索引</span>
+    <span class="token keyword">const</span> ssize_t p <span class="token operator">=</span> <span class="token function">getResourcePackageIndex</span><span class="token punctuation">(</span>resID<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">const</span> <span class="token keyword">int</span> t <span class="token operator">=</span> <span class="token function">Res_GETTYPE</span><span class="token punctuation">(</span>resID<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">const</span> <span class="token keyword">int</span> e <span class="token operator">=</span> <span class="token function">Res_GETENTRY</span><span class="token punctuation">(</span>resID<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">//printf("Get bag: id=0x%08x, p=%d, t=%d\n", resID, p, t);</span>
+    <span class="token comment">//得到PackageGroup对象，合法性检查略去</span>
+    PackageGroup<span class="token operator">*</span> <span class="token keyword">const</span> grp <span class="token operator">=</span> mPackageGroups<span class="token punctuation">[</span>p<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    
+    <span class="token comment">//拿到TypeList，合法性检查略去</span>
+    <span class="token keyword">const</span> TypeList<span class="token operator">&amp;</span> typeConfigs <span class="token operator">=</span> grp<span class="token operator">-</span><span class="token operator">&gt;</span>types<span class="token punctuation">[</span>t<span class="token punctuation">]</span><span class="token punctuation">;</span>
+   
+    <span class="token comment">//对entry的index做合法性检查略去</span>
+    <span class="token keyword">const</span> size_t NENTRY <span class="token operator">=</span> typeConfigs<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token operator">-</span><span class="token operator">&gt;</span>entryCount<span class="token punctuation">;</span>
+    
+    <span class="token comment">// First see if we've already computed this bag...</span>
+    <span class="token comment">/**
+     * 在PackageGroup中，是有对Bag资源做缓存的，先去查缓存
+     */</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>grp<span class="token operator">-</span><span class="token operator">&gt;</span>bags<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//bags根据资源的type、entry的index做了分类</span>
+        <span class="token comment">//根据type、entry的index找到对应的bag_set</span>
+        bag_set<span class="token operator">*</span><span class="token operator">*</span> typeSet <span class="token operator">=</span> grp<span class="token operator">-</span><span class="token operator">&gt;</span>bags<span class="token operator">-</span><span class="token operator">&gt;</span><span class="token function">get</span><span class="token punctuation">(</span>t<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>typeSet<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            bag_set<span class="token operator">*</span> set <span class="token operator">=</span> typeSet<span class="token punctuation">[</span>e<span class="token punctuation">]</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>set<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//缓存里面有</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>set <span class="token operator">!=</span> <span class="token punctuation">(</span>bag_set<span class="token operator">*</span><span class="token punctuation">)</span><span class="token number">0xFFFFFFFF</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span>outTypeSpecFlags <span class="token operator">!=</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token operator">*</span>outTypeSpecFlags <span class="token operator">=</span> set<span class="token operator">-</span><span class="token operator">&gt;</span>typeSpecFlags<span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                    <span class="token comment">//返回缓存里的数据，bag_set后面跟着所有的bag_entry</span>
+                    <span class="token operator">*</span>outBag <span class="token operator">=</span> <span class="token punctuation">(</span>bag_entry<span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span>set<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token comment">//ALOGI("Found existing bag for: %p\n", (void*)resID);</span>
+                    <span class="token comment">//返回bag的数量</span>
+                    <span class="token keyword">return</span> set<span class="token operator">-</span><span class="token operator">&gt;</span>numAttrs<span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                <span class="token function">ALOGW</span><span class="token punctuation">(</span><span class="token string">"Attempt to retrieve bag 0x%08x which is invalid or in a cycle."</span><span class="token punctuation">,</span>
+                     resID<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">return</span> BAD_INDEX<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    
+    <span class="token comment">// Bag not found, we need to compute it!</span>
+    <span class="token comment">/**
+     * 如果缓存中木有查到，那么说明我们是第一次获取,
+     * 我们就只能自己去解析resources.arsc中对应的数据块来获取了
+     */</span>
+     bag_set<span class="token operator">*</span> set <span class="token operator">=</span> <span class="token constant">NULL</span>
+     
+     <span class="token comment">//去resources.arsc里加载解析，非本文重点，略去，结果会存在set里</span>
+
+     <span class="token comment">//把查找到的结果存入缓存</span>
+     typeSet<span class="token punctuation">[</span>e<span class="token punctuation">]</span> <span class="token operator">=</span> set<span class="token punctuation">;</span>
+     
+     <span class="token comment">//...</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>        这里我们不再详细介绍<code>getBagLocked</code>方法，因为其非常复杂，感兴趣的同学可以看这里：<a href="https://blog.csdn.net/dayong198866/article/details/102932307">Android资源管理框架-------之Bag资源信息的获取(七)</a>。</p> 
+<h4><a id="Drawable_530"></a>Drawable资源的缓存</h4> 
+<p>        在<code>Resources</code>类中，对<code>Drawable</code>和<code>ColorStateList</code>以及<code>Animator</code>等都有缓存，我们这里就以<code>Drawable</code>为例来稍作说明。</p> 
+<pre><code class="prism language-java"><span class="token comment">//frameworks/base/core/java/android/content/res/Resources.java</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">Resources</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">//......</span>
+
+    <span class="token comment">/**
+     * 存储预加载的Drawable（xml、PNG等）
+     * 这个数组只有两个元素，和layoutdirection对应
+     * 因为要支持系统根据不同的布局方向，选择不同的图片资源
+     * 所以要分开存
+     */</span> 
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> LongSparseArray<span class="token generics function"><span class="token punctuation">&lt;</span>ConstantState<span class="token punctuation">&gt;</span></span><span class="token punctuation">[</span><span class="token punctuation">]</span> sPreloadedDrawables<span class="token punctuation">;</span>
+    <span class="token comment">/**
+     * 存储预加载的ColorDrawable（color）
+     * ColorDrawable就无所谓布局方向了，不需要用数组
+     */</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> LongSparseArray<span class="token generics function"><span class="token punctuation">&lt;</span>ConstantState<span class="token punctuation">&gt;</span></span> sPreloadedColorDrawables
+            <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">LongSparseArray</span><span class="token generics function"><span class="token punctuation">&lt;</span>ConstantState<span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">/**
+     * Drawable（xml、PNG等）的缓存
+     * 这个缓存是按照theme分类的，其中
+     * key 也就是这个String表示theme的ID
+     * value表示同一theme下的所有Drawable
+     */</span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> ArrayMap<span class="token operator">&lt;</span>String<span class="token punctuation">,</span> LongSparseArray<span class="token operator">&lt;</span>WeakReference<span class="token generics function"><span class="token punctuation">&lt;</span>ConstantState<span class="token punctuation">&gt;</span></span><span class="token operator">&gt;&gt;</span> mDrawableCache <span class="token operator">=</span>
+            <span class="token keyword">new</span> <span class="token class-name">ArrayMap</span><span class="token operator">&lt;</span>String<span class="token punctuation">,</span> LongSparseArray<span class="token operator">&lt;</span>WeakReference<span class="token generics function"><span class="token punctuation">&lt;</span>ConstantState<span class="token punctuation">&gt;</span></span><span class="token operator">&gt;&gt;</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">/**
+     * Drawable（color）的缓存
+     * 这个缓存是按照theme分类的，其中
+     * key 也就是这个String表示theme的ID
+     * value表示同一theme下的所有Drawable
+     */</span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> ArrayMap<span class="token operator">&lt;</span>String<span class="token punctuation">,</span> LongSparseArray<span class="token operator">&lt;</span>WeakReference<span class="token generics function"><span class="token punctuation">&lt;</span>ConstantState<span class="token punctuation">&gt;</span></span><span class="token operator">&gt;&gt;</span> mColorDrawableCache <span class="token operator">=</span>
+            <span class="token keyword">new</span> <span class="token class-name">ArrayMap</span><span class="token operator">&lt;</span>String<span class="token punctuation">,</span> LongSparseArray<span class="token operator">&lt;</span>WeakReference<span class="token generics function"><span class="token punctuation">&lt;</span>ConstantState<span class="token punctuation">&gt;</span></span><span class="token operator">&gt;&gt;</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">//......</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>        需要说明的是，<code>LongSparseArray</code>我们可以简单认为它是一个KEY为<code>long</code>类型的<code>Map</code>（网上介绍<code>SparseArray</code>的文章很多，这里就不多说了）。在这里所谓的<code>long</code>类型的KEY具体是什么呢？确切地说，它是cookie值+资源的路径字符串在Global String Pool中的索引（图片）或者是颜色值（Color），也就是说，它代表一个资源的信息；而VALUE则是<code>ConstantState</code>对象的弱引用，它就是最终的资源本身了。<code>ConstantState</code>则是一个抽象类，它的子类是<code>Drawable</code>中非常关键的成员，比如<code>BitmapDrawable</code>中的<code>BitmapState</code>、<code>ColorDrawable</code>中的<code>ColorState</code>等等。还有，我们看到preload的<code>Drawable</code>使用的都是强引用，而cache的<code>Drawable</code>则使用的是弱引用，这也就是说，gc的时候，如果这些cache的资源没有被引用，则会被回收掉，以便节省内存。另外，preload的时候只会preload系统的资源，也就是framework-res.apk里的资源，应用自己的资源在preload的时候，系统是不知道的。我们了解了这些基本的数据结构后在来看<code>getDrawable</code>的实现：</p> 
+<pre><code class="prism language-java">    <span class="token comment">//frameworks/base/core/java/android/content/res/Resources.java</span>
+    <span class="token keyword">public</span> Drawable <span class="token function">getDrawable</span><span class="token punctuation">(</span><span class="token keyword">int</span> id<span class="token punctuation">)</span> <span class="token keyword">throws</span> NotFoundException <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">final</span> Drawable d <span class="token operator">=</span> <span class="token function">getDrawable</span><span class="token punctuation">(</span>id<span class="token punctuation">,</span> null<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>d <span class="token operator">!=</span> null <span class="token operator">&amp;&amp;</span> d<span class="token punctuation">.</span><span class="token function">canApplyTheme</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            Log<span class="token punctuation">.</span><span class="token function">w</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"Drawable "</span> <span class="token operator">+</span> <span class="token function">getResourceName</span><span class="token punctuation">(</span>id<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">" has unresolved theme "</span>
+                    <span class="token operator">+</span> <span class="token string">"attributes! Consider using Resources.getDrawable(int, Theme) or "</span>
+                    <span class="token operator">+</span> <span class="token string">"Context.getDrawable(int)."</span><span class="token punctuation">,</span> <span class="token keyword">new</span> <span class="token class-name">RuntimeException</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">return</span> d<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>        调用了一个重载方法，加了一个参数theme。这里大家可能不解，Drawable还跟theme有关系？ 答案是确实有关系，我们可以在theme里指定<code>Drawable</code>的某些特定属性，比如是否抗锯齿等。</p> 
+<pre><code class="prism language-java">    <span class="token comment">//frameworks/base/core/java/android/content/res/Resources.java</span>
+    <span class="token keyword">public</span> Drawable <span class="token function">getDrawable</span><span class="token punctuation">(</span><span class="token keyword">int</span> id<span class="token punctuation">,</span> <span class="token annotation punctuation">@Nullable</span> Theme theme<span class="token punctuation">)</span> <span class="token keyword">throws</span> NotFoundException <span class="token punctuation">{<!-- --></span>
+       
+        TypedValue value<span class="token punctuation">;</span>
+        <span class="token keyword">synchronized</span> <span class="token punctuation">(</span>mAccessLock<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            value <span class="token operator">=</span> mTmpValue<span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>value <span class="token operator">==</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                value <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">TypedValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                mTmpValue <span class="token operator">=</span> null<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">/**
+             * 我们知道TypedValue和Res_value基本对应（多了cookie）
+             * value.data 里放的值可能是：
+             * 如果类型是COLOR，那value.data里放的将会是color值
+             * 如果是图片，那value.data里放的将会是cookie值和一个字符串在global string pool中的索引，
+             * 这个字符串表示图片的路径
+             */</span>
+            <span class="token function">getValue</span><span class="token punctuation">(</span>id<span class="token punctuation">,</span> value<span class="token punctuation">,</span> <span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//根据资源信息去加载资源</span>
+        <span class="token keyword">final</span> Drawable res <span class="token operator">=</span> <span class="token function">loadDrawable</span><span class="token punctuation">(</span>value<span class="token punctuation">,</span> id<span class="token punctuation">,</span> theme<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">synchronized</span> <span class="token punctuation">(</span>mAccessLock<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>mTmpValue <span class="token operator">==</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                mTmpValue <span class="token operator">=</span> value<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">return</span> res<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>        接下来才是关键，缓存相关的逻辑都在<code>loadDrawable</code>方法里：</p> 
+<pre><code class="prism language-java">    <span class="token comment">//frameworks/base/core/java/android/content/res/Resources.java</span>
+    Drawable <span class="token function">loadDrawable</span><span class="token punctuation">(</span>TypedValue value<span class="token punctuation">,</span> <span class="token keyword">int</span> id<span class="token punctuation">,</span> Theme theme<span class="token punctuation">)</span> <span class="token keyword">throws</span> NotFoundException <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//是colorDrawable还是png、xml</span>
+        <span class="token keyword">final</span> <span class="token keyword">boolean</span> isColorDrawable<span class="token punctuation">;</span>
+        <span class="token keyword">final</span> ArrayMap<span class="token operator">&lt;</span>String<span class="token punctuation">,</span> LongSparseArray<span class="token operator">&lt;</span>WeakReference<span class="token generics function"><span class="token punctuation">&lt;</span>ConstantState<span class="token punctuation">&gt;</span></span><span class="token operator">&gt;&gt;</span> caches<span class="token punctuation">;</span>
+        <span class="token keyword">final</span> <span class="token keyword">long</span> key<span class="token punctuation">;</span>
+        <span class="token comment">//表示是color，而不是xml、png</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>value<span class="token punctuation">.</span>type <span class="token operator">&gt;=</span> TypedValue<span class="token punctuation">.</span>TYPE_FIRST_COLOR_INT
+                <span class="token operator">&amp;&amp;</span> value<span class="token punctuation">.</span>type <span class="token operator">&lt;=</span> TypedValue<span class="token punctuation">.</span>TYPE_LAST_COLOR_INT<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            isColorDrawable <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+            <span class="token comment">//指向mColorDrawableCache</span>
+            caches <span class="token operator">=</span> mColorDrawableCache<span class="token punctuation">;</span>
+            <span class="token comment">//key是一个颜色值</span>
+            key <span class="token operator">=</span> value<span class="token punctuation">.</span>data<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span><span class="token comment">//png、xml</span>
+            isColorDrawable <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+            <span class="token comment">//指向mDrawableCache</span>
+            caches <span class="token operator">=</span> mDrawableCache<span class="token punctuation">;</span>
+            <span class="token comment">//cookie值 + 字符串索引</span>
+            key <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">long</span><span class="token punctuation">)</span> value<span class="token punctuation">.</span>assetCookie<span class="token punctuation">)</span> <span class="token operator">&lt;&lt;</span> <span class="token number">32</span><span class="token punctuation">)</span> <span class="token operator">|</span> value<span class="token punctuation">.</span>data<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">// First, check whether we have a cached version of this drawable</span>
+        <span class="token comment">// that was inflated against the specified theme.</span>
+        <span class="token comment">/**
+         * 我们知道preload资源的时候是资源的第一次加载，
+         * 也就没必要查缓存了
+         */</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>mPreloading<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//去缓存里查，查到了直接返回</span>
+            <span class="token keyword">final</span> Drawable cachedDrawable <span class="token operator">=</span> <span class="token function">getCachedDrawable</span><span class="token punctuation">(</span>caches<span class="token punctuation">,</span> key<span class="token punctuation">,</span> theme<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>cachedDrawable <span class="token operator">!=</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">return</span> cachedDrawable<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">// Next, check preloaded drawables. These are unthemed but may have</span>
+        <span class="token comment">// themeable attributes.</span>
+        <span class="token keyword">final</span> ConstantState cs<span class="token punctuation">;</span>
+        <span class="token comment">//去preload的资源里查</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>isColorDrawable<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            cs <span class="token operator">=</span> sPreloadedColorDrawables<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//根据布局方向不同，分开的</span>
+            cs <span class="token operator">=</span> sPreloadedDrawables<span class="token punctuation">[</span>mConfiguration<span class="token punctuation">.</span><span class="token function">getLayoutDirection</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">]</span><span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token keyword">final</span> Drawable dr<span class="token punctuation">;</span>
+        <span class="token comment">//如果查到里了，则根据查到到的ConstantState对象创建对应的drawable对象</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>cs <span class="token operator">!=</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">final</span> Drawable clonedDr <span class="token operator">=</span> cs<span class="token punctuation">.</span><span class="token function">newDrawable</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>theme <span class="token operator">!=</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                dr <span class="token operator">=</span> clonedDr<span class="token punctuation">.</span><span class="token function">mutate</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                dr<span class="token punctuation">.</span><span class="token function">applyTheme</span><span class="token punctuation">(</span>theme<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                dr<span class="token punctuation">.</span><span class="token function">clearMutated</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                dr <span class="token operator">=</span> clonedDr<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">//没查到，类型是颜色</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>isColorDrawable<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            dr <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ColorDrawable</span><span class="token punctuation">(</span>value<span class="token punctuation">.</span>data<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">/**
+             * 没查到，类型是xml、png
+             * loadDrawableForCookie则会先根据value中的cookie
+             * 和value.data拿到资源（xml或者png）的路径，剩下的就是根据
+             * 路径加载资源，创建drawable了，这里就不作详细介绍了，有兴趣的
+             * 同学可以自己看
+             */</span> 
+            dr <span class="token operator">=</span> <span class="token function">loadDrawableForCookie</span><span class="token punctuation">(</span>value<span class="token punctuation">,</span> id<span class="token punctuation">,</span> theme<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">// If we were able to obtain a drawable, store it in the appropriate</span>
+        <span class="token comment">// cache (either preload or themed).</span>
+        <span class="token comment">//放入缓存</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>dr <span class="token operator">!=</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//这个changingConfigurations，对应于resources.arsc中ResTable_typeSpec后面跟的</span>
+            <span class="token comment">//typeSpecFlags，表明该项资源都会随着哪些配置的不同而不同</span>
+            dr<span class="token punctuation">.</span><span class="token function">setChangingConfigurations</span><span class="token punctuation">(</span>value<span class="token punctuation">.</span>changingConfigurations<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token function">cacheDrawable</span><span class="token punctuation">(</span>value<span class="token punctuation">,</span> theme<span class="token punctuation">,</span> isColorDrawable<span class="token punctuation">,</span> caches<span class="token punctuation">,</span> key<span class="token punctuation">,</span> dr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token keyword">return</span> dr<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>        这个方法总结起来也是非常简单，查缓存，查到了返回；查不到则创建资源，然后缓存资源，最后返回。但这里面有两个方法值得一说：<code>getCachedDrawable</code>、<code>cacheDrawable</code>。我们一个一个看：</p> 
+<pre><code class="prism language-java">    <span class="token comment">//frameworks/base/core/java/android/content/res/Resources.java</span>
+    <span class="token keyword">private</span> Drawable <span class="token function">getCachedDrawable</span><span class="token punctuation">(</span>
+            ArrayMap<span class="token operator">&lt;</span>String<span class="token punctuation">,</span> LongSparseArray<span class="token operator">&lt;</span>WeakReference<span class="token generics function"><span class="token punctuation">&lt;</span>ConstantState<span class="token punctuation">&gt;</span></span><span class="token operator">&gt;&gt;</span> caches<span class="token punctuation">,</span>
+            <span class="token keyword">long</span> key<span class="token punctuation">,</span> Theme theme<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">synchronized</span> <span class="token punctuation">(</span>mAccessLock<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//preload的资源，theme是空的</span>
+            <span class="token keyword">final</span> String themeKey <span class="token operator">=</span> theme <span class="token operator">!=</span> null <span class="token operator">?</span> theme<span class="token punctuation">.</span>mKey <span class="token operator">:</span> <span class="token string">""</span><span class="token punctuation">;</span>
+            <span class="token comment">//先根据theme的key取出</span>
+            <span class="token keyword">final</span> LongSparseArray<span class="token operator">&lt;</span>WeakReference<span class="token generics function"><span class="token punctuation">&lt;</span>ConstantState<span class="token punctuation">&gt;</span></span><span class="token operator">&gt;</span> themedCache <span class="token operator">=</span> caches<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>themeKey<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>themedCache <span class="token operator">!=</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">/**
+                 * 从LongSparseArray中根据key取出元素，
+                 * 由于是弱引用，还需要判断是否被回收等处理
+                 * 都是常规操作，这里就不贴代码了。
+                 */</span>
+                <span class="token keyword">final</span> Drawable themedDrawable <span class="token operator">=</span> <span class="token function">getCachedDrawableLocked</span><span class="token punctuation">(</span>themedCache<span class="token punctuation">,</span> key<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>themedDrawable <span class="token operator">!=</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token keyword">return</span> themedDrawable<span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token comment">// No cached drawable, we'll need to create a new one.</span>
+            <span class="token keyword">return</span> null<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>        再看<code>cacheDrawable</code>方法，顾名思义，它是用来缓存Drawable的，但是在preloading的时候，它的处理有些不同：</p> 
+<pre><code class="prism language-java">    <span class="token comment">//frameworks/base/core/java/android/content/res/Resources.java</span>
+    <span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">cacheDrawable</span><span class="token punctuation">(</span>TypedValue value<span class="token punctuation">,</span> Theme theme<span class="token punctuation">,</span> <span class="token keyword">boolean</span> isColorDrawable<span class="token punctuation">,</span>
+            ArrayMap<span class="token operator">&lt;</span>String<span class="token punctuation">,</span> LongSparseArray<span class="token operator">&lt;</span>WeakReference<span class="token generics function"><span class="token punctuation">&lt;</span>ConstantState<span class="token punctuation">&gt;</span></span><span class="token operator">&gt;&gt;</span> caches<span class="token punctuation">,</span>
+            <span class="token keyword">long</span> key<span class="token punctuation">,</span> Drawable dr<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//先判空</span>
+        <span class="token keyword">final</span> ConstantState cs <span class="token operator">=</span> dr<span class="token punctuation">.</span><span class="token function">getConstantState</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>cs <span class="token operator">==</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>mPreloading<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span><span class="token comment">//preloading的时候走这里</span>
+            <span class="token comment">// Preloaded drawables never have a theme, but may be themeable.</span>
+            <span class="token keyword">final</span> <span class="token keyword">int</span> changingConfigs <span class="token operator">=</span> cs<span class="token punctuation">.</span><span class="token function">getChangingConfigurations</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>isColorDrawable<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">/**
+                 * 判断该ColorDrawable是否需要保存
+                 * 对于ColorDrawable，如果它会随着字体大小和density外的其它配置
+                 * 的不同而不同的话，就没必要保存了。
+                 */</span> 
+                <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">verifyPreloadConfig</span><span class="token punctuation">(</span>changingConfigs<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> value<span class="token punctuation">.</span>resourceId<span class="token punctuation">,</span> <span class="token string">"drawable"</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    sPreloadedColorDrawables<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span> cs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">/**
+                 * 判断该Drawable是否需要保存
+                 * 对于Drawable，如果它会随着字体大小和density以及布局方向外的其它配置
+                 * 的不同而不同的话，就没必要保存了。
+                 */</span> 
+                <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">verifyPreloadConfig</span><span class="token punctuation">(</span>
+                        changingConfigs<span class="token punctuation">,</span> LAYOUT_DIR_CONFIG<span class="token punctuation">,</span> value<span class="token punctuation">.</span>resourceId<span class="token punctuation">,</span> <span class="token string">"drawable"</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>changingConfigs <span class="token operator">&amp;</span> LAYOUT_DIR_CONFIG<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token comment">// If this resource does not vary based on layout direction,</span>
+                        <span class="token comment">// we can put it in all of the preload maps.</span>
+                        sPreloadedDrawables<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span> cs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        sPreloadedDrawables<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span> cs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token comment">// Otherwise, only in the layout dir we loaded it for.</span>
+                        sPreloadedDrawables<span class="token punctuation">[</span>mConfiguration<span class="token punctuation">.</span><span class="token function">getLayoutDirection</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">]</span><span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span> cs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span><span class="token comment">//非preloading</span>
+            <span class="token keyword">synchronized</span> <span class="token punctuation">(</span>mAccessLock<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//preload的theme为空</span>
+                <span class="token keyword">final</span> String themeKey <span class="token operator">=</span> theme <span class="token operator">==</span> null <span class="token operator">?</span> <span class="token string">""</span> <span class="token operator">:</span> theme<span class="token punctuation">.</span>mKey<span class="token punctuation">;</span>
+                <span class="token comment">//先根据theme的key取出对应的LongSparseArray</span>
+                LongSparseArray<span class="token operator">&lt;</span>WeakReference<span class="token generics function"><span class="token punctuation">&lt;</span>ConstantState<span class="token punctuation">&gt;</span></span><span class="token operator">&gt;</span> themedCache <span class="token operator">=</span> caches<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>themeKey<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">//如果是缓存该theme的第一个资源，先创建LongSparseArray</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>themedCache <span class="token operator">==</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    themedCache <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">LongSparseArray</span><span class="token operator">&lt;</span>WeakReference<span class="token generics function"><span class="token punctuation">&lt;</span>ConstantState<span class="token punctuation">&gt;</span></span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    caches<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>themeKey<span class="token punctuation">,</span> themedCache<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                <span class="token comment">//放进去</span>
+                themedCache<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span> <span class="token keyword">new</span> <span class="token class-name">WeakReference</span><span class="token generics function"><span class="token punctuation">&lt;</span>ConstantState<span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>cs<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>        我们看看到底是如何判断是否保存资源的：</p> 
+<pre><code class="prism language-java">    <span class="token keyword">private</span> <span class="token keyword">boolean</span> <span class="token function">verifyPreloadConfig</span><span class="token punctuation">(</span><span class="token annotation punctuation">@Config</span> <span class="token keyword">int</span> changingConfigurations<span class="token punctuation">,</span>
+            <span class="token annotation punctuation">@Config</span> <span class="token keyword">int</span> allowVarying<span class="token punctuation">,</span> <span class="token annotation punctuation">@AnyRes</span> <span class="token keyword">int</span> resourceId<span class="token punctuation">,</span> <span class="token annotation punctuation">@Nullable</span> String name<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// We allow preloading of resources even if they vary by font scale (which</span>
+        <span class="token comment">// doesn't impact resource selection) or density (which we handle specially by</span>
+        <span class="token comment">// simply turning off all preloading), as well as any other configs specified</span>
+        <span class="token comment">// by the caller.</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span>changingConfigurations<span class="token operator">&amp;</span><span class="token operator">~</span><span class="token punctuation">(</span>ActivityInfo<span class="token punctuation">.</span>CONFIG_FONT_SCALE <span class="token operator">|</span>
+                ActivityInfo<span class="token punctuation">.</span>CONFIG_DENSITY<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&amp;</span> <span class="token operator">~</span>allowVarying<span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            String resName<span class="token punctuation">;</span>
+            <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                resName <span class="token operator">=</span> <span class="token function">getResourceName</span><span class="token punctuation">(</span>resourceId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">NotFoundException</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                resName <span class="token operator">=</span> <span class="token string">"?"</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">// This should never happen in production, so we should log a</span>
+            <span class="token comment">// warning even if we're not debugging.</span>
+            Log<span class="token punctuation">.</span><span class="token function">w</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"Preloaded "</span> <span class="token operator">+</span> name <span class="token operator">+</span> <span class="token string">" resource #0x"</span>
+                    <span class="token operator">+</span> Integer<span class="token punctuation">.</span><span class="token function">toHexString</span><span class="token punctuation">(</span>resourceId<span class="token punctuation">)</span>
+                    <span class="token operator">+</span> <span class="token string">" ("</span> <span class="token operator">+</span> resName <span class="token operator">+</span> <span class="token string">") that varies with configuration!!"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>        也就是说除了<code>CONFIG_FONT_SCALE</code>、<code>CONFIG_DENSITY</code>以及我们指定的配置外，如果这个drawabe还会随着其它配置的不同而不同，那就不保存了。这里我们明白，对于资源的preload，也并不是说preload完了的所有资源我们都会保存，毕竟一个资源可能会随着配置项的不同而不同，如果都保存，那就太多了。</p> 
+<h4><a id="preload_821"></a>资源的preload</h4> 
+<p>        我们知道，Android应用进程以及system_server进程都是由Zygote进程fork出来的。Zygote进程在起来后，会preload许多东西，这样做的好处是，fork出来的每一个进程都已经加载好preload的东西了；否则，每创建一个应用进程都要把这些东西都加载一遍，那就影响启动速度了，这些preload的东西中，就包括资源。其调用序列为：main–&gt;preload–&gt;preloadResources：</p> 
+<pre><code class="prism language-java">    <span class="token comment">//frameworks/base/core/java/com/android/internal/os/ZygoteInit.java</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">preloadResources</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">final</span> VMRuntime runtime <span class="token operator">=</span> VMRuntime<span class="token punctuation">.</span><span class="token function">getRuntime</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        Debug<span class="token punctuation">.</span><span class="token function">startAllocCounting</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            System<span class="token punctuation">.</span><span class="token function">gc</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            runtime<span class="token punctuation">.</span><span class="token function">runFinalizationSync</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">/**
+             * 这句会触发对framework-res.apk的加载
+             * Resources、AssetManager、ResTable的创建等等
+             */</span>
+            mResources <span class="token operator">=</span> Resources<span class="token punctuation">.</span><span class="token function">getSystem</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            mResources<span class="token punctuation">.</span><span class="token function">startPreloading</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>PRELOAD_RESOURCES<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span><span class="token comment">//true</span>
+                Log<span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"Preloading resources..."</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                <span class="token keyword">long</span> startTime <span class="token operator">=</span> SystemClock<span class="token punctuation">.</span><span class="token function">uptimeMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">//预加载图片资源</span>
+                TypedArray ar <span class="token operator">=</span> mResources<span class="token punctuation">.</span><span class="token function">obtainTypedArray</span><span class="token punctuation">(</span>
+                        com<span class="token punctuation">.</span>android<span class="token punctuation">.</span>internal<span class="token punctuation">.</span>R<span class="token punctuation">.</span>array<span class="token punctuation">.</span>preloaded_drawables<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">int</span> N <span class="token operator">=</span> <span class="token function">preloadDrawables</span><span class="token punctuation">(</span>runtime<span class="token punctuation">,</span> ar<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                ar<span class="token punctuation">.</span><span class="token function">recycle</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                Log<span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"...preloaded "</span> <span class="token operator">+</span> N <span class="token operator">+</span> <span class="token string">" resources in "</span>
+                        <span class="token operator">+</span> <span class="token punctuation">(</span>SystemClock<span class="token punctuation">.</span><span class="token function">uptimeMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">-</span>startTime<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">"ms."</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token function">addBootEvent</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">String</span><span class="token punctuation">(</span><span class="token string">"Zygote:Preload "</span><span class="token operator">+</span> N <span class="token operator">+</span> <span class="token string">" obtain resources in "</span> <span class="token operator">+</span>
+								<span class="token punctuation">(</span>SystemClock<span class="token punctuation">.</span><span class="token function">uptimeMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> startTime<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">"ms"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                startTime <span class="token operator">=</span> SystemClock<span class="token punctuation">.</span><span class="token function">uptimeMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                ar <span class="token operator">=</span> mResources<span class="token punctuation">.</span><span class="token function">obtainTypedArray</span><span class="token punctuation">(</span>
+                        com<span class="token punctuation">.</span>android<span class="token punctuation">.</span>internal<span class="token punctuation">.</span>R<span class="token punctuation">.</span>array<span class="token punctuation">.</span>preloaded_color_state_lists<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">//预加载ColorStateList资源</span>
+                N <span class="token operator">=</span> <span class="token function">preloadColorStateLists</span><span class="token punctuation">(</span>runtime<span class="token punctuation">,</span> ar<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                ar<span class="token punctuation">.</span><span class="token function">recycle</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                Log<span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"...preloaded "</span> <span class="token operator">+</span> N <span class="token operator">+</span> <span class="token string">" resources in "</span>
+                        <span class="token operator">+</span> <span class="token punctuation">(</span>SystemClock<span class="token punctuation">.</span><span class="token function">uptimeMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">-</span>startTime<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">"ms."</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">/// M: Added for BOOTPROF @{<!-- --></span>
+                <span class="token function">addBootEvent</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">String</span><span class="token punctuation">(</span><span class="token string">"Zygote:Preload "</span><span class="token operator">+</span> N <span class="token operator">+</span> <span class="token string">" resources in "</span> <span class="token operator">+</span>
+                <span class="token punctuation">(</span>SystemClock<span class="token punctuation">.</span><span class="token function">uptimeMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> startTime<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">"ms"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">/// @}</span>
+            <span class="token punctuation">}</span>
+            mResources<span class="token punctuation">.</span><span class="token function">finishPreloading</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">RuntimeException</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            Log<span class="token punctuation">.</span><span class="token function">w</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"Failure preloading resources"</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+            Debug<span class="token punctuation">.</span><span class="token function">stopAllocCounting</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>        <code>mResources.startPreloading();</code>和<code>mResources.finishPreloading();</code>最关键的就是控制<code>mPreloading</code>的值，前者把值设置为true，后者设置为false。我们可以看一下<code>preloadDrawables</code>方法，<code>preloadColorStateLists</code>就不再介绍了：</p> 
+<pre><code class="prism language-java">    <span class="token comment">//frameworks/base/core/java/com/android/internal/os/ZygoteInit.java</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">preloadDrawables</span><span class="token punctuation">(</span>VMRuntime runtime<span class="token punctuation">,</span> TypedArray ar<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">int</span> N <span class="token operator">=</span> ar<span class="token punctuation">.</span><span class="token function">length</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//遍历TypedArray</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span> i<span class="token operator">&lt;</span>N<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>Debug<span class="token punctuation">.</span><span class="token function">getGlobalAllocSize</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> PRELOAD_GC_THRESHOLD<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token boolean">false</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    Log<span class="token punctuation">.</span><span class="token function">v</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">" GC at "</span> <span class="token operator">+</span> Debug<span class="token punctuation">.</span><span class="token function">getGlobalAllocSize</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                System<span class="token punctuation">.</span><span class="token function">gc</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                runtime<span class="token punctuation">.</span><span class="token function">runFinalizationSync</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                Debug<span class="token punctuation">.</span><span class="token function">resetGlobalAllocSize</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">//拿到资源id</span>
+            <span class="token keyword">int</span> id <span class="token operator">=</span> ar<span class="token punctuation">.</span><span class="token function">getResourceId</span><span class="token punctuation">(</span>i<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token boolean">false</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                Log<span class="token punctuation">.</span><span class="token function">v</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"Preloading resource #"</span> <span class="token operator">+</span> Integer<span class="token punctuation">.</span><span class="token function">toHexString</span><span class="token punctuation">(</span>id<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>id <span class="token operator">!=</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//getDrawable流程上面已经介绍过，第二个参数为theme，preload的时候是null</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>mResources<span class="token punctuation">.</span><span class="token function">getDrawable</span><span class="token punctuation">(</span>id<span class="token punctuation">,</span> null<span class="token punctuation">)</span> <span class="token operator">==</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">IllegalArgumentException</span><span class="token punctuation">(</span>
+                            <span class="token string">"Unable to find preloaded drawable resource #0x"</span>
+                            <span class="token operator">+</span> Integer<span class="token punctuation">.</span><span class="token function">toHexString</span><span class="token punctuation">(</span>id<span class="token punctuation">)</span>
+                            <span class="token operator">+</span> <span class="token string">" ("</span> <span class="token operator">+</span> ar<span class="token punctuation">.</span><span class="token function">getString</span><span class="token punctuation">(</span>i<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">")"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//返回preload的个数</span>
+        <span class="token keyword">return</span> N<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>        本篇就到这里啦，下一篇介绍<code>AssetManager2</code>。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/bc55944073841908f143b3bad2641a7f/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">MOOC数据结构与算法Python版-第九周编程作业</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/753a604f0b7dd786347192543762cd0f/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Davinci配置部署出坑指南</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

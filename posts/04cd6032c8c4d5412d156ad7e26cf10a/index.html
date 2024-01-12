@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>MySQL之基于代价的慢查询优化建议 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="MySQL之基于代价的慢查询优化建议" />
+<meta property="og:description" content="1.背景 慢查询是指数据库中查询时间超过指定阈值（美团设置为 100ms）的 SQL，它是数据库的性能杀手，也是业务优化数据库访问的重要抓手。
+如何优化慢查询呢？最直接有效的方法就是选用一个查询效率高的索引。关于高效率的索引推荐，主要在日常工作中，基于经验规则的推荐随处可见，对于简单的、SQL，如
+select * from sync_test1 where name like &#39;Bobby%&#39;， 直接添加索引 IX(name) 就可以取得不错的效果；但对于稍微复杂点的 SQL，如
+select from sync_test1 where name like &#39;Bobby%&#39; and dt &gt; &#39;2021-07-06&#39; 到底选择 IX(name)、IX(dt)、IX(dt,name) 还是 IX(name,dt)，该方法也无法给出准确的回答。更别说像多表 Join、子查询这样复杂的场景了。所以采用基于代价的推荐来解决该问题会更加普适，因为基于代价的方法使用了和数据库优化器相同的方式，去量化评估所有的可能性，选出的是执行 SQL 耗费代价最小的索引。
+2.基于代价的优化器介绍 2.1 SQL 执行与优化器 一条 SQL 在 MySQL 服务器中执行流程主要包含：SQL 解析、基于语法树的准备工作、优化器的逻辑变化、优化器的代价准备工作、基于代价模型的优化、进行额外的优化和运行执行计划等部分。具体如下图所示：
+2.2 代价模型介绍 而对于优化器来说，执行一条 SQL 有各种各样的方案可供选择，如表是否用索引、选择哪个索引、是否使用范围扫描、多表 Join 的连接顺序和子查询的执行方式等。如何从这些可选方案中选出耗时最短的方案呢？这就需要定义一个量化数值指标，这个指标就是代价 (Cost)，我们分别计算出可选方案的操作耗时，从中选出最小值。
+代价模型将操作分为 Server 层和 Engine（存储引擎）层两类，Server 层主要是CPU 代价，Engine 层主要是 IO 代价，比如 MySQL 从磁盘读取一个数据页的代价io_block_read_cost 为 1，计算符合条件的行代价为 row_evaluate_cost 为 0.2。除此之外还有：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/04cd6032c8c4d5412d156ad7e26cf10a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-04T21:17:07+08:00" />
+<meta property="article:modified_time" content="2024-01-04T21:17:07+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">MySQL之基于代价的慢查询优化建议</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="1_1"></a>1.背景</h2> 
+<p>慢查询是指数据库中<strong>查询时间超过指定阈值</strong>（美团设置为 100ms）的 SQL，它是数据库的性能杀手，也是业务优化数据库访问的重要抓手。</p> 
+<p>如何优化慢查询呢？最直接有效的方法就是选用一个查询效率高的索引。关于高效率的索引推荐，主要在日常工作中，基于经验规则的推荐随处可见，对于简单的、SQL，如</p> 
+<pre><code class="prism language-sql"><span class="token keyword">select</span> <span class="token operator">*</span> <span class="token keyword">from</span> sync_test1 <span class="token keyword">where</span> name <span class="token operator">like</span> <span class="token string">'Bobby%'</span>，
+</code></pre> 
+<p>直接添加索引 IX(name) 就可以取得不错的效果；但对于稍微复杂点的 SQL，如</p> 
+<pre><code class="prism language-sql"><span class="token keyword">select</span> <span class="token keyword">from</span> sync_test1 <span class="token keyword">where</span> name <span class="token operator">like</span> <span class="token string">'Bobby%'</span> <span class="token operator">and</span> dt <span class="token operator">&gt;</span> <span class="token string">'2021-07-06'</span>
+</code></pre> 
+<p>到底选择 IX(name)、IX(dt)、IX(dt,name) 还是 IX(name,dt)，该方法也无法给出准确的回答。更别说像多表 Join、子查询这样复杂的场景了。所以采用<strong>基于代价的推荐</strong>来解决该问题会更加普适，因为基于代价的方法使用了和数据库优化器相同的方式，去量化评估所有的可能性，选出的是<strong>执行 SQL 耗费代价最小的索引</strong>。</p> 
+<h2><a id="2_19"></a>2.基于代价的优化器介绍</h2> 
+<h3><a id="21_SQL__21"></a>2.1 SQL 执行与优化器</h3> 
+<p>一条 SQL 在 MySQL 服务器中执行流程主要包含：SQL 解析、基于语法树的准备工作、优化器的逻辑变化、优化器的代价准备工作、基于代价模型的优化、进行额外的优化和运行执行计划等部分。具体如下图所示：<br> <img src="https://images2.imgbox.com/cd/51/Z04y0MCb_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="22__28"></a>2.2 代价模型介绍</h3> 
+<p>而对于优化器来说，执行一条 SQL 有各种各样的方案可供选择，如表是否用索引、选择哪个索引、是否使用范围扫描、多表 Join 的连接顺序和子查询的执行方式等。如何从这些可选方案中选出耗时最短的方案呢？这就需要定义一个<strong>量化数值指标</strong>，这个指标就是<strong>代价 (Cost)</strong>，我们分别计算出可选方案的操作耗时，从中选出最小值。</p> 
+<p>代价模型将操作分为 Server 层和 Engine（存储引擎）层两类，Server 层主要是CPU 代价，Engine 层主要是 IO 代价，比如 MySQL 从磁盘读取一个数据页的代价io_block_read_cost 为 1，计算符合条件的行代价为 row_evaluate_cost 为 0.2。除此之外还有：</p> 
+<blockquote> 
+ <ol><li> <p>memory_temptable_create_cost (default 2.0) 内存临时表的创建代价。</p> </li><li> <p>memory_temptable_row_cost (default 0.2) 内存临时表的行代价。</p> </li><li> <p>key_compare_cost (default 0.1) 键比较的代价，例如排序。</p> </li><li> <p>disk_temptable_create_cost (default 40.0) 内部 myisam 或 innodb 临时</p> <p>表的创建代价。</p> </li><li> <p>disk_temptable_row_cost (default 1.0) 内部 myisam 或 innodb 临时表的行</p> </li></ol> 
+ <p>代价。</p> 
+</blockquote> 
+<p>在 MySQL 5.7 中，这些操作代价的默认值都可以进行配置。为了计算出方案的总代价，还需要参考一些统计数据，如表数据量大小、元数据和索引信息等。MySQL 的代价优化器模型整体如下图所示：</p> 
+<p><img src="https://images2.imgbox.com/1f/44/tPM2zK6L_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="23__53"></a>2.3 基于代价的索引选择</h3> 
+<p>还是继续拿上述的 SQL</p> 
+<pre><code class="prism language-sql"> <span class="token keyword">select</span> <span class="token operator">*</span> <span class="token keyword">from</span> sync_test1 <span class="token keyword">where</span> name <span class="token operator">like</span>  <span class="token string">'Bobby%'</span> <span class="token operator">and</span> dt <span class="token operator">&gt;</span> <span class="token string">'2021-07-06'</span> 
+</code></pre> 
+<p>为例，我们看看 MySQL 优化器是如何根据代价模型选择索引的。</p> 
+<p>首先，我们直接在建表时加入四个候选索引</p> 
+<pre><code class="prism language-sql"><span class="token keyword">Create</span> <span class="token keyword">Table</span>: <span class="token keyword">CREATE</span> <span class="token keyword">TABLE</span> <span class="token identifier"><span class="token punctuation">`</span>sync_test1<span class="token punctuation">`</span></span> <span class="token punctuation">(</span>
+ <span class="token identifier"><span class="token punctuation">`</span>id<span class="token punctuation">`</span></span> <span class="token keyword">int</span><span class="token punctuation">(</span><span class="token number">11</span><span class="token punctuation">)</span> <span class="token operator">NOT</span> <span class="token boolean">NULL</span> <span class="token keyword">AUTO_INCREMENT</span><span class="token punctuation">,</span>
+ <span class="token identifier"><span class="token punctuation">`</span>cid<span class="token punctuation">`</span></span> <span class="token keyword">int</span><span class="token punctuation">(</span><span class="token number">11</span><span class="token punctuation">)</span> <span class="token operator">NOT</span> <span class="token boolean">NULL</span><span class="token punctuation">,</span>
+ <span class="token identifier"><span class="token punctuation">`</span>phone<span class="token punctuation">`</span></span> <span class="token keyword">int</span><span class="token punctuation">(</span><span class="token number">11</span><span class="token punctuation">)</span> <span class="token operator">NOT</span> <span class="token boolean">NULL</span><span class="token punctuation">,</span>
+ <span class="token identifier"><span class="token punctuation">`</span>name<span class="token punctuation">`</span></span> <span class="token keyword">varchar</span><span class="token punctuation">(</span><span class="token number">10</span><span class="token punctuation">)</span> <span class="token operator">NOT</span> <span class="token boolean">NULL</span><span class="token punctuation">,</span>
+ <span class="token identifier"><span class="token punctuation">`</span>address<span class="token punctuation">`</span></span> <span class="token keyword">varchar</span><span class="token punctuation">(</span><span class="token number">255</span><span class="token punctuation">)</span> <span class="token keyword">DEFAULT</span> <span class="token boolean">NULL</span><span class="token punctuation">,</span>
+ <span class="token identifier"><span class="token punctuation">`</span>dt<span class="token punctuation">`</span></span> <span class="token keyword">datetime</span> <span class="token keyword">DEFAULT</span> <span class="token boolean">NULL</span><span class="token punctuation">,</span>
+ <span class="token keyword">PRIMARY</span> <span class="token keyword">KEY</span> <span class="token punctuation">(</span><span class="token identifier"><span class="token punctuation">`</span>id<span class="token punctuation">`</span></span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+ <span class="token keyword">KEY</span> <span class="token identifier"><span class="token punctuation">`</span>IX_name<span class="token punctuation">`</span></span> <span class="token punctuation">(</span><span class="token identifier"><span class="token punctuation">`</span>name<span class="token punctuation">`</span></span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+ <span class="token keyword">KEY</span> <span class="token identifier"><span class="token punctuation">`</span>IX_dt<span class="token punctuation">`</span></span> <span class="token punctuation">(</span><span class="token identifier"><span class="token punctuation">`</span>dt<span class="token punctuation">`</span></span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+ <span class="token keyword">KEY</span> <span class="token identifier"><span class="token punctuation">`</span>IX_dt_name<span class="token punctuation">`</span></span> <span class="token punctuation">(</span><span class="token identifier"><span class="token punctuation">`</span>dt<span class="token punctuation">`</span></span><span class="token punctuation">,</span><span class="token identifier"><span class="token punctuation">`</span>name<span class="token punctuation">`</span></span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+ <span class="token keyword">KEY</span> <span class="token identifier"><span class="token punctuation">`</span>IX_name_dt<span class="token punctuation">`</span></span> <span class="token punctuation">(</span><span class="token identifier"><span class="token punctuation">`</span>name<span class="token punctuation">`</span></span><span class="token punctuation">,</span><span class="token identifier"><span class="token punctuation">`</span>dt<span class="token punctuation">`</span></span><span class="token punctuation">)</span>
+ <span class="token punctuation">)</span> <span class="token keyword">ENGINE</span><span class="token operator">=</span><span class="token keyword">InnoDB</span>
+</code></pre> 
+<p>通过执行 explain 看出 MySQL 最终选择了 IX_name 索引。</p> 
+<pre><code class="prism language-sql">mysql<span class="token operator">&gt;</span> <span class="token keyword">explain</span> <span class="token keyword">select</span> <span class="token operator">*</span> <span class="token keyword">from</span> sync_test1 <span class="token keyword">where</span> name <span class="token operator">like</span> ‘Bobby<span class="token operator">%</span>’<span class="token operator">and</span> dt <span class="token operator">&gt;</span> ‘<span class="token number">2021</span><span class="token operator">-</span><span class="token number">07</span><span class="token operator">-</span><span class="token number">06</span>’<span class="token punctuation">;</span>
+<span class="token operator">+</span><span class="token comment">----+-------------+------------+------------+-------+-------------------------------------+----</span>
+<span class="token comment">-----+---------+------+------+----------+------------------------------------+</span>
+<span class="token operator">|</span> id <span class="token operator">|</span> select_type <span class="token operator">|</span> <span class="token keyword">table</span> <span class="token operator">|</span> partitions <span class="token operator">|</span> <span class="token keyword">type</span> <span class="token operator">|</span> possible_keys <span class="token operator">|</span> <span class="token keyword">key</span> 
+<span class="token operator">|</span> key_len <span class="token operator">|</span> ref <span class="token operator">|</span> <span class="token keyword">rows</span> <span class="token operator">|</span> filtered <span class="token operator">|</span> Extra <span class="token operator">|</span>
+<span class="token operator">+</span><span class="token comment">----+-------------+------------+------------+-------+-----------------------------------</span>
+<span class="token comment">-----+---------+------+------+----------+------------------------------------+</span>
+<span class="token operator">|</span> <span class="token number">1</span> <span class="token operator">|</span> <span class="token keyword">SIMPLE</span> <span class="token operator">|</span> sync_test1 <span class="token operator">|</span> <span class="token boolean">NULL</span> <span class="token operator">|</span> range <span class="token operator">|</span> IX_name<span class="token punctuation">,</span>IX_dt<span class="token punctuation">,</span>IX_dt_name<span class="token punctuation">,</span>IX_name_dt <span class="token operator">|</span> IX_
+name <span class="token operator">|</span> <span class="token number">12</span> <span class="token operator">|</span> <span class="token boolean">NULL</span> <span class="token operator">|</span> <span class="token number">572</span> <span class="token operator">|</span> <span class="token number">36.83</span> <span class="token operator">|</span> <span class="token keyword">Using</span> <span class="token keyword">index</span> condition<span class="token punctuation">;</span> <span class="token keyword">Using</span> <span class="token keyword">where</span> <span class="token operator">|</span>
+<span class="token operator">+</span><span class="token comment">----+-------------+------------+------------+-------+-----------------------------------</span>
+<span class="token comment">-----+---------+------+------+----------+------------------------------------+</span>
+</code></pre> 
+<p>然后再打开 MySQL 追踪优化器 Trace 功能。可以看出，没有选择其他三个索引的原因<strong>均是因为在其他三个索引上使用 range scan 的代价均 &gt;= IX_name</strong>。</p> 
+<pre><code class="prism language-sql">mysql<span class="token operator">&gt;</span> <span class="token keyword">select</span> <span class="token operator">*</span> <span class="token keyword">from</span> INFORMATION_SCHEMA<span class="token punctuation">.</span>OPTIMIZER_TRACE\G<span class="token punctuation">;</span>
+<span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span> <span class="token number">1.</span> <span class="token keyword">row</span> <span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span><span class="token operator">*</span>
+TRACE: {
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+“rows_estimation”: <span class="token punctuation">[</span>
+{
+“<span class="token keyword">table</span>”:“<span class="token identifier"><span class="token punctuation">`</span>sync_test1<span class="token punctuation">`</span></span>”<span class="token punctuation">,</span>
+“range_analysis”: {
+“table_scan”: {
+ “<span class="token keyword">rows</span>”: <span class="token number">105084</span><span class="token punctuation">,</span>
+ “cost”: <span class="token number">21628</span>
+}<span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+“analyzing_range_alternatives”: {
+ “range_scan_alternatives”: <span class="token punctuation">[</span>
+ {“<span class="token keyword">index</span>”:“IX_name”<span class="token punctuation">,</span>
+ “ranges”: <span class="token punctuation">[</span>
+ “Bobby\u0000\u0000\u0000\u0000\u0000 <span class="token operator">&lt;=</span> name <span class="token operator">&lt;=</span> Bobbyÿÿÿÿÿ”
+ <span class="token punctuation">]</span><span class="token punctuation">,</span>
+ “index_dives_for_eq_ranges”: <span class="token boolean">true</span><span class="token punctuation">,</span>
+ “rowid_ordered”: <span class="token boolean">false</span><span class="token punctuation">,</span>
+ “using_mrr”: <span class="token boolean">false</span><span class="token punctuation">,</span>
+ “index_only”: <span class="token boolean">false</span><span class="token punctuation">,</span>
+ “<span class="token keyword">rows</span>”: <span class="token number">572</span><span class="token punctuation">,</span>
+ “cost”: <span class="token number">687.41</span><span class="token punctuation">,</span>
+ “chosen”: <span class="token boolean">true</span>
+ }<span class="token punctuation">,</span>
+ {
+ “<span class="token keyword">index</span>”:“IX_dt”<span class="token punctuation">,</span>
+ “ranges”: <span class="token punctuation">[</span>
+ “<span class="token number">0x99aa0c0000</span> <span class="token operator">&lt;</span> dt”
+ <span class="token punctuation">]</span><span class="token punctuation">,</span>
+ “index_dives_for_eq_ranges”: <span class="token boolean">true</span><span class="token punctuation">,</span>
+ “rowid_ordered”: <span class="token boolean">false</span><span class="token punctuation">,</span>
+ “using_mrr”: <span class="token boolean">false</span><span class="token punctuation">,</span>
+ “index_only”: <span class="token boolean">false</span><span class="token punctuation">,</span>
+ “<span class="token keyword">rows</span>”: <span class="token number">38698</span><span class="token punctuation">,</span>
+ “cost”: <span class="token number">46439</span><span class="token punctuation">,</span>
+ “chosen”: <span class="token boolean">false</span><span class="token punctuation">,</span>
+ “cause”:“cost”
+ }<span class="token punctuation">,</span>
+ {
+ “<span class="token keyword">index</span>”:“IX_dt_name”<span class="token punctuation">,</span>
+ “ranges”: <span class="token punctuation">[</span>
+ “<span class="token number">0x99aa0c0000</span> <span class="token operator">&lt;</span> dt”
+ <span class="token punctuation">]</span><span class="token punctuation">,</span>
+ “index_dives_for_eq_ranges”: <span class="token boolean">true</span><span class="token punctuation">,</span>
+ “rowid_ordered”: <span class="token boolean">false</span><span class="token punctuation">,</span>
+ “using_mrr”: <span class="token boolean">false</span><span class="token punctuation">,</span>
+ “index_only”: <span class="token boolean">false</span><span class="token punctuation">,</span>
+ “<span class="token keyword">rows</span>”: <span class="token number">38292</span><span class="token punctuation">,</span>
+ “cost”: <span class="token number">45951</span><span class="token punctuation">,</span>
+ “chosen”: <span class="token boolean">false</span><span class="token punctuation">,</span>
+ “cause”:“cost”
+ }<span class="token punctuation">,</span>
+ {
+ “<span class="token keyword">index</span>”:“IX_name_dt”<span class="token punctuation">,</span>
+ “ranges”: <span class="token punctuation">[</span>
+ “Bobby\u0000\u0000\u0000\u0000\u0000 <span class="token operator">&lt;=</span> name <span class="token operator">&lt;=</span> Bobbyÿÿÿÿÿ”
+ <span class="token punctuation">]</span><span class="token punctuation">,</span>
+ “index_dives_for_eq_ranges”: <span class="token boolean">true</span><span class="token punctuation">,</span>
+ “rowid_ordered”: <span class="token boolean">false</span><span class="token punctuation">,</span>
+ “using_mrr”: <span class="token boolean">false</span><span class="token punctuation">,</span>
+ “index_only”: <span class="token boolean">false</span><span class="token punctuation">,</span>“<span class="token keyword">rows</span>”: <span class="token number">572</span><span class="token punctuation">,</span>
+ “cost”: <span class="token number">687.41</span><span class="token punctuation">,</span>
+ “chosen”: <span class="token boolean">false</span><span class="token punctuation">,</span>
+ “cause”:“cost”
+ }
+ <span class="token punctuation">]</span><span class="token punctuation">,</span>
+ “analyzing_roworder_intersect”: {
+ “usable”: <span class="token boolean">false</span><span class="token punctuation">,</span>
+ “cause”:“too_few_roworder_scans”
+ }
+}<span class="token punctuation">,</span>
+“chosen_range_access_summary”: {
+ “range_access_plan”: {
+ “<span class="token keyword">type</span>”:“range_scan”<span class="token punctuation">,</span>
+ “<span class="token keyword">index</span>”:“IX_name”<span class="token punctuation">,</span>
+ “<span class="token keyword">rows</span>”: <span class="token number">572</span><span class="token punctuation">,</span>
+ “ranges”: <span class="token punctuation">[</span>
+ “Bobby\u0000\u0000\u0000\u0000\u0000 <span class="token operator">&lt;=</span> name <span class="token operator">&lt;=</span> Bobbyÿÿÿÿÿ”
+ <span class="token punctuation">]</span>
+ }<span class="token punctuation">,</span>
+ “rows_for_plan”: <span class="token number">572</span><span class="token punctuation">,</span>
+ “cost_for_plan”: <span class="token number">687.41</span><span class="token punctuation">,</span>
+ “chosen”: <span class="token boolean">true</span>
+}
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+}
+</code></pre> 
+<blockquote> 
+ <p>1.走全表扫描的代价：io_cost + cpu_cost = （数据页个数 * io_block_read_cost）+ ( 数 据 行 数 * row_evaluate_cost + 1.1) = （data_length / block_size + 1）+ (rows * 0.2 + 1.1) = (9977856 / 16384 + 1) + (105084 * 0.2 + 1.1) = 21627.9。<br> 2.走二级索引 IX_name 的代价：io_cost + cpu_cost = ( 预估范围行数 * io_block_read_cost + 1) + ( 数据行数 * row_evaluate_cost + 0.01) = (572 * 1 + 1) + (572<em>0.2 + 0.01) = 687.41。<br> 3.走二级索引 IX_dt 的代价：io_cost + cpu_cost = ( 预估范围行数 * io_block_read_cost + 1) + ( 数据行数 * row_evaluate_cost + 0.01) = (38698 * 1 + 1) + (38698</em>0.2 + 0.01) = 46438.61。</p> 
+ <p>4.走二级索引 IX_dt_name 的代价 : io_cost + cpu_cost = ( 预估范围行数 * io_block_read_cost + 1) + ( 数 据 行 数 * row_evaluate_cost + 0.01) = (38292 * 1 + 1) + (38292 * 0.2 + 0.01) = 45951.41。</p> 
+ <p>5.走二级索引 IX_name_dt 的代价：io_cost + cpu_cost = ( 预估范围行数 * io_block_read_cost + 1) + ( 数 据 行 数 * row_evaluate_cost + 0.01) = (572 * 1 + 1) + (572*0.2 + 0.01) = 687.41。</p> 
+</blockquote> 
+<h3><a id="24__199"></a>2.4 基于代价的索引推荐思路</h3> 
+<p>如果想借助 MySQL 优化器给慢查询计算出最佳索引，那么需要真实地在业务表上添加所有候选索引。对于线上业务来说，直接添加索引的时间空间成本太高，是不可接受的。MySQL 优化器选最佳索引用到的数据是索引元数据和统计数据，所以我们想否可以通过给它提供候选索引的这些数据，而非真实添加索引的这种方式来实现。</p> 
+<p>通过深入调研 MySQL 的代码结构和优化器流程，我们发现是可行的：一部分存在于Server 层的 frm 文件中，比如索引定义；另一部分存在于 Engine 层中，或者通过调用 Engine 层的接口函数来获取，比如索引中某个列的不同值个数、索引占据的页面大小等。索引相关的信息，如下图所示：</p> 
+<p><img src="https://images2.imgbox.com/5d/9f/BTzsJe18_o.png" alt="在这里插入图片描述"></p> 
+<p>因为 MySQL 本身就支持自定义存储引擎，所以索引推荐思路是<strong>构建一个支持虚假索引的存储引擎</strong>，在它上面建立包含候选索引的空表，再采集样本数据，计算出统计数据提供给优化器，让优化器选出最优索引，整个调用关系如下图所示：</p> 
+<p><img src="https://images2.imgbox.com/d2/6e/AmiyY09Y_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="3_213"></a>3.索引推荐实现</h2> 
+<p>因为存储引擎本身并<strong>不具备对外提供服务的能力</strong>，直接在 MySQL Server 层修改也难以维护，所以我们将整个索引推荐系统拆分成支持虚假索引的 Fakeindex 存储引擎和对外提供服务的 Go-Server 两部分，整体架构图如下：</p> 
+<p><img src="https://images2.imgbox.com/0b/4e/Tr6OXeEA_o.png" alt="在这里插入图片描述"></p> 
+<p>首先简要介绍一下 Fakeindex 存储引擎，这是一个轻量级的存储引擎，负责将索引的相关接口透传到 Go-Server 部分。因为它必须采用 C++ 实现，与 Go-Server 间存在跨语言调用的问题，我们使用了 Go 原生的轻量级 RPC 技术 +cgo 来避免引入重量级的 RPC 框架，也不必引入第三方依赖包。函数调用链路如下所示，MySQL优化器调用 Fakeindex 的 C++ 函数，参数转换成 C 语言，然后通过 cgo 调用到Go 语言的方法，再通过 Go 自带的 RPC 客户端向服务端发起调用。</p> 
+<p><img src="https://images2.imgbox.com/fb/c8/5Y2xCsxF_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="4_225"></a>4.慢查询治理运营</h2> 
+<p>我们主要从时间维度的三个方向将慢查询接入索引推荐，推广治理：</p> 
+<p><img src="https://images2.imgbox.com/ac/90/ybIkx5Id_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="41____232"></a>4.1 过去 - 历史慢查询</h3> 
+<p>这类慢查询属于过去产生的，并且一直存在，数量较多，治理推动力不足，可通过收集历史慢查询日志发现，分成两类接入：</p> 
+<blockquote> 
+ <p>● 核心数据库：该类慢查询通常会被周期性地关注，如慢查询周报、月报，可直</p> 
+ <p>接将优化建议提前生成出来，接入它们，一并运营治理。</p> 
+ <p>● 普通数据库：可将优化建议直接接入数据库平台的慢查询模块，让研发自助地</p> 
+ <p>选择治理哪些慢查询。</p> 
+</blockquote> 
+<h3><a id="42____244"></a>4.2 现在 - 新增慢查询</h3> 
+<p>这类慢查询属于<strong>当前产生的，数量较少</strong>，属于治理的重点，也可通过实时收集慢查询日志发现，分成两类接入：</p> 
+<blockquote> 
+ <p>● 影响程度一般的慢查询：可通过实时分析慢查询日志，对比历史慢查询，识别出新增慢查询，并生成优化建议，为用户创建数据库风险项，跟进治理。</p> 
+ <p>● 影响程度较大的慢查询：该类通常会引发数据库告警，如慢查询导致数据库Load 过高，可通过故障诊断根因系统，识别出具体的慢查询 SQL，并生成优化建议，及时推送到故障处理群，降低故障处理时长。</p> 
+</blockquote> 
+<h3><a id="43____252"></a>4.3 未来 - 潜在慢查询</h3> 
+<p>这类查询属于当前还没被定义成慢查询，随着时间推进可能变成演变成慢查询，对于</p> 
+<p>一些核心业务来说，往往会引发故障，属于他们治理的重点，分成两类接入：</p> 
+<blockquote> 
+ <p>● 未上线的准慢查询：项目准备上线而引入的新的准慢查询，可接入发布前的集成测试流水线，Java 项目可通过 agentmain 的代理方式拦截被测试用例覆盖到的 SQL，再通过经验 +explain 识别出慢查询，并生成优化建议，给用户在需求管理系统上创建缺陷任务，解决后才能发布上线。</p> 
+ <p>● 已上线的准慢查询：该类属于当前执行时间较快的 SQL，随着表数据量的增 加，会演变成慢查询，最常见的就是全表扫描，这类可通过增加慢查询配置参 数 log_queries_not_using_indexes 记录到慢日志，并生成优化建议，为用户创建数据库风险项，跟进治理。</p> 
+</blockquote>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/bcee0b76e3732acafd698e0728685832/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">prometheus与zabbix监控的对比介绍</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/53fdc4ded5f8957b4e1e2c43d00b312b/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">每日coding</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

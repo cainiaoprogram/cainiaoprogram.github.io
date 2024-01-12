@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>springboot &#43; minio 实现断点续传、秒传 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="springboot &#43; minio 实现断点续传、秒传" />
+<meta property="og:description" content="基于springboot &#43; minio 实现的断点续传和秒传功能
+Controller
+/** * 断点续传 * @param chunk 文件块对象（分片除了最后一片，必须大于等于5M，minio固定要求） * @return 文件块信息 */ @RequestMapping(value = &#34;/fileUpload&#34;, method = {RequestMethod.GET,RequestMethod.POST}) public R&lt;FileChunkVO&gt; fileUpload(@ModelAttribute FileChunkDTO chunk){ return sysFileService.fileUpload(chunk); } Service
+/** * 断点续传 * @param chunk 文件块对象 * @return 文件块信息 */ R&lt;FileChunkVO&gt; fileUpload(FileChunkDTO chunk); ServiceImpl
+private final RedisTemplate redisTemplate; private final MinioTemplate minioTemplate; private final MinioProperties minioProperties; @Value(&#34;${minio.defualt-bucket}&#34;) private String minioDefaultBucket; @Value(&#34;${minio.tmp-bucket}&#34;) private String minioTmpBucket; @Override public R&lt;FileChunkVO&gt; fileUpload(FileChunkDTO dto) { // 返回对象 FileChunkVO vo = BeanUtil." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/ccfe8754ad7a6e993a1416496ddbf86e/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-10-31T11:22:33+08:00" />
+<meta property="article:modified_time" content="2023-10-31T11:22:33+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">springboot &#43; minio 实现断点续传、秒传</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>基于springboot + minio 实现的断点续传和秒传功能</p> 
+<p>Controller</p> 
+<pre><code class="language-java">    /**
+     * 断点续传
+     * @param chunk 文件块对象（分片除了最后一片，必须大于等于5M，minio固定要求）
+     * @return 文件块信息
+     */
+    @RequestMapping(value  = "/fileUpload", method = {RequestMethod.GET,RequestMethod.POST})
+    public R&lt;FileChunkVO&gt; fileUpload(@ModelAttribute FileChunkDTO chunk){
+        return sysFileService.fileUpload(chunk);
+    }</code></pre> 
+<p>Service</p> 
+<pre><code class="language-java">    /**
+     * 断点续传
+     * @param chunk 文件块对象
+     * @return 文件块信息
+     */
+    R&lt;FileChunkVO&gt; fileUpload(FileChunkDTO chunk);</code></pre> 
+<p>ServiceImpl</p> 
+<pre><code class="language-java">    
+    private final RedisTemplate redisTemplate;
+    private final MinioTemplate minioTemplate;
+    private final MinioProperties minioProperties;
+
+    @Value("${minio.defualt-bucket}")
+    private String minioDefaultBucket;
+    @Value("${minio.tmp-bucket}")
+    private String minioTmpBucket;
+
+    @Override
+    public R&lt;FileChunkVO&gt; fileUpload(FileChunkDTO dto) {
+        // 返回对象
+        FileChunkVO vo = BeanUtil.copyProperties(dto, FileChunkVO.class);
+        // 设置桶名
+        vo.setBucketName(StrUtil.isNotBlank(dto.getBucketName())?dto.getBucketName():minioDefaultBucket);
+        // 设置已上传文件块下标（用于断点续传）
+        vo.setUploaded(this.getUploadedFileChunkIdx(dto.getIdentifier()));
+        try{
+            // 上传文件块
+            String objectName = this.writeToMinio(dto);
+            // 设置上传状态
+            vo.setStatus(StrUtil.isNotBlank(objectName)?FileChunkVO.FileChunkStatus.ALL.getStatus():FileChunkVO.FileChunkStatus.SINGLE.getStatus());
+            if(StrUtil.isNotBlank(objectName)){
+                // 设置对象名
+                vo.setObjectName(objectName);
+                // 设置访问连接
+                vo.setUrl(StrUtil.concat(true, minioProperties.getUrl(), "/", dto.getBucketName(), "/", objectName));
+            }
+        }catch (Exception ex){
+            ex.printStackTrace();
+            return R.failed("文件上传异常");
+        }
+        return R.ok(vo);
+    }
+
+    /**
+     * 分片写入minio
+     * @param dto 分块文件信息
+     */
+    private String writeToMinio(FileChunkDTO dto) {
+        try{
+            // 文件块对象
+            MultipartFile file = dto.getFile();
+            // 桶名
+            String bucketName = StrUtil.isNotBlank(dto.getBucketName()) ? dto.getBucketName() : minioDefaultBucket;
+            // 对象名
+            String objName = StrUtil.concat(true, dto.getIdentifier(), StrUtil.DOT, FileUtil.extName(dto.getFilename()));
+            // redis保存key
+            String redisKey = StrUtil.concat(true, FileChunkVO.FileChunkConstant.REDIS_DIR, dto.getIdentifier());
+            // 创建桶
+            minioTemplate.createBucket(bucketName);
+
+            try{
+                // 秒传，未查询到数据会报异常，不用处理
+                ObjectStat objectInfo = minioTemplate.getObjectInfo(bucketName, objName);
+                if(objectInfo!=null){
+                    // 复制一份新的对象
+                    String newObjName = StrUtil.concat(true, dto.getIdentifier(), "_", IdUtil.simpleUUID(), StrUtil.DOT, FileUtil.extName(dto.getFilename()));
+                    minioTemplate.copyObject(bucketName, objName, bucketName, newObjName);
+                    return newObjName;
+                }
+            }catch (Exception ignore){
+            }
+
+            // 上传分块文件
+            if(file!=null){
+                // 当前文件块下标
+                Integer chunkNumber = dto.getChunkNumber();
+                // 临时文件块对象名
+                String tempFileChunkObjName = StrUtil.concat(true, dto.getIdentifier(), "_", chunkNumber.toString());
+                // 上传临时文件块
+                // 创建临时桶
+                minioTemplate.createBucket(minioTmpBucket);
+                minioTemplate.putObject(minioTmpBucket, tempFileChunkObjName, file.getInputStream());
+
+                // 将当前分块信息存入redis，后续断点续传使用
+                Object oldCacheVal = redisTemplate.opsForValue().get(redisKey);
+                String cacheVal = oldCacheVal==null?chunkNumber.toString():StrUtil.concat(true, oldCacheVal.toString(), ",", chunkNumber.toString());
+                redisTemplate.opsForValue().set(redisKey, cacheVal, FileChunkVO.FileChunkConstant.REDIS_TIMEOUT, FileChunkVO.FileChunkConstant.REDIS_TIMEOUT_UNIT);
+
+                // 判断是否是最后一次上传
+                if(dto.getChunkNumber().equals(dto.getTotalChunks())){
+                    // 获取临时对象名称集合
+                    List&lt;String&gt; tempNameList = Stream.iterate(1, i -&gt; ++i)
+                            .limit(dto.getTotalChunks())
+                            .map(i -&gt; StrUtil.concat(true, dto.getIdentifier(), "_", i.toString()))
+                            .collect(Collectors.toList());
+                    // 合并文件
+                    this.merge(bucketName, objName, tempNameList);
+                    // 删除临时文件
+                    minioTemplate.removeObjects(minioTmpBucket, tempNameList);
+                    // 删除redis信息
+                    redisTemplate.delete(redisKey);
+                    return objName;
+               }
+            }
+        }catch (Exception ex){
+            throw new RuntimeException("文件上传异常", ex);
+        }
+        return null;
+    }
+
+    /**
+     * 合并文件
+     * @param bucketName 桶名
+     * @param objName 对象名
+     * @param tempNameList 临时文件名列表
+     */
+    private void merge(String bucketName, String objName, List&lt;String&gt; tempNameList) {
+        // 转换对象
+        List&lt;ComposeSource&gt; sourceObjectList = tempNameList.stream().map(data -&gt; {
+            try {
+                return new ComposeSource(minioTmpBucket, data);
+            } catch (InvalidArgumentException e) {
+                throw new RuntimeException("创建组成源异常", e);
+            }
+        }).collect(Collectors.toList());
+
+        try {
+            // 合并文件
+            minioTemplate.composeObject(bucketName, objName, sourceObjectList);
+        }catch (Exception e) {
+            throw new RuntimeException("合并文件异常", e);
+        }
+    }
+
+    /**
+     * 获取已上传文件块下标列表
+     * @param identifier 文件标识
+     * @return 已上传下标列表
+     */
+    private List&lt;Integer&gt; getUploadedFileChunkIdx(String identifier){
+        Object data = redisTemplate.opsForValue().get(StrUtil.concat(true, FileChunkVO.FileChunkConstant.REDIS_DIR, identifier));
+        return data==null?new ArrayList&lt;&gt;():Arrays.stream(data.toString().split(",")).map(Integer::parseInt).collect(Collectors.toList());
+    }</code></pre> 
+<p>DTO</p> 
+<pre><code class="language-java">package com.amc.admin.api.dto;
+
+import lombok.Data;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.io.Serializable;
+
+/**
+ * 文件块传输对象
+ * @author yt
+ */
+@Data
+public class FileChunkDTO implements Serializable {
+
+    private static final long serialVersionUID = 1L;
+
+    /**
+     * minio 桶名
+     */
+    private String bucketName;
+
+    /**
+     * 当前文件块，从1开始
+     */
+    private Integer chunkNumber;
+    /**
+     * 分块大小
+     */
+    private Long chunkSize;
+    /**
+     * 当前分块大小
+     */
+    private Long currentChunkSize;
+    /**
+     * 总大小
+     */
+    private Long totalSize;
+    /**
+     * 文件标识
+     */
+    private String identifier;
+    /**
+     * 文件名
+     */
+    private String filename;
+    /**
+     * 相对路径
+     */
+    private String relativePath;
+    /**
+     * 总块数
+     */
+    private Integer totalChunks;
+
+    /**
+     * 二进制文件
+     */
+    private MultipartFile file;
+}
+
+
+</code></pre> 
+<p>VO</p> 
+<pre><code class="language-java">
+package com.amc.admin.api.vo;
+
+import io.swagger.annotations.ApiModel;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.Getter;
+
+import java.io.Serializable;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * 文件块返回信息
+ * @author yt
+ */
+@Data
+@ApiModel(value = "文件块返回信息")
+public class FileChunkVO implements Serializable {
+
+    private static final long serialVersionUID = 1L;
+
+    /**
+     * minio 桶名
+     */
+    private String bucketName;
+    /**
+     * minio 对象名
+     */
+    private String objectName;
+    /**
+     * 访问路径
+     */
+    private String url;
+    /**
+     * 已上传文件块下标集合
+     */
+    private List&lt;Integer&gt; uploaded;
+    /**
+     * 上传状态：1 单块文件上传完成，2 全部分块上传完成
+     */
+    private Integer status;
+
+    /**
+     * 当前文件块，从1开始
+     */
+    private Integer chunkNumber;
+    /**
+     * 分块大小
+     */
+    private Long chunkSize;
+    /**
+     * 当前分块大小
+     */
+    private Long currentChunkSize;
+    /**
+     * 总大小
+     */
+    private Long totalSize;
+    /**
+     * 文件标识
+     */
+    private String identifier;
+    /**
+     * 文件名
+     */
+    private String filename;
+    /**
+     * 相对路径
+     */
+    private String relativePath;
+    /**
+     * 总块数
+     */
+    private Integer totalChunks;
+
+    /**
+     * 文件分块上传状态枚举
+     */
+    @Getter
+    @AllArgsConstructor
+    public enum FileChunkStatus {
+        /**
+         * 单块上传完成状态
+         */
+        SINGLE(1, "单块上传完成状态"),
+
+        /**
+         * 全部分块上传完成状态
+         */
+        ALL(2, "全部分块上传完成状态");
+
+        /**
+         * 类型
+         */
+        private final Integer status;
+        /**
+         * 描述
+         */
+        private final String descr;
+    }
+
+    /**
+     * 文件分块上传常量类
+     */
+    @Getter
+    public static class FileChunkConstant {
+        /**
+         * redis文件块上传目录
+         */
+        public static String REDIS_DIR = "fileChunk:";
+        /**
+         * redis过期时间
+         */
+        public static Integer REDIS_TIMEOUT = 3;
+        /**
+         * redis过期时间单位
+         */
+        public static TimeUnit REDIS_TIMEOUT_UNIT = TimeUnit.DAYS;
+    }
+}
+</code></pre> 
+<p>MinioTemplate</p> 
+<pre><code class="language-java">package com.amc.minio.service;
+
+import com.amc.minio.vo.MinioItem;
+import io.minio.ComposeSource;
+import io.minio.MinioClient;
+import io.minio.ObjectStat;
+import io.minio.Result;
+import io.minio.messages.Bucket;
+import io.minio.messages.Item;
+import lombok.RequiredArgsConstructor;
+import lombok.SneakyThrows;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.util.Assert;
+
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+
+/**
+ * minio 交互类
+ */
+@RequiredArgsConstructor
+public class MinioTemplate implements InitializingBean {
+    private final String endpoint;
+    private final String accessKey;
+    private final String secretKey;
+    private MinioClient client;
+
+    /**
+     * 创建bucket
+     *
+     * @param bucketName bucket名称
+     */
+    @SneakyThrows
+    public void createBucket(String bucketName) {
+        if (!client.bucketExists(bucketName)) {
+            client.makeBucket(bucketName);
+        }
+    }
+
+    /**
+     * 获取全部bucket
+     * &lt;p&gt;
+     * https://docs.minio.io/cn/java-client-api-reference.html#listBuckets
+     */
+    @SneakyThrows
+    public List&lt;Bucket&gt; getAllBuckets() {
+        return client.listBuckets();
+    }
+
+    /**
+     * @param bucketName bucket名称
+     */
+    @SneakyThrows
+    public Optional&lt;Bucket&gt; getBucket(String bucketName) {
+        return client.listBuckets().stream().filter(b -&gt; b.name().equals(bucketName)).findFirst();
+    }
+
+    /**
+     * @param bucketName bucket名称
+     */
+    @SneakyThrows
+    public void removeBucket(String bucketName) {
+        client.removeBucket(bucketName);
+    }
+
+    /**
+     * 根据文件前置查询文件
+     *
+     * @param bucketName bucket名称
+     * @param prefix     前缀
+     * @param recursive  是否递归查询
+     * @return MinioItem 列表
+     */
+    @SneakyThrows
+    public List&lt;MinioItem&gt; getAllObjectsByPrefix(String bucketName, String prefix, boolean recursive) {
+        List&lt;MinioItem&gt; objectList = new ArrayList&lt;&gt;();
+        Iterable&lt;Result&lt;Item&gt;&gt; objectsIterator = client
+                .listObjects(bucketName, prefix, recursive);
+
+        for (Result&lt;Item&gt; itemResult : objectsIterator) {
+            objectList.add(new MinioItem(itemResult.get()));
+        }
+        return objectList;
+    }
+
+    /**
+     * 获取文件外链
+     *
+     * @param bucketName bucket名称
+     * @param objectName 文件名称
+     * @param expires    过期时间 &lt;=7
+     * @return url
+     */
+    @SneakyThrows
+    public String getObjectURL(String bucketName, String objectName, Integer expires) {
+        return client.presignedGetObject(bucketName, objectName, expires);
+    }
+
+    /**
+     * 获取文件
+     *
+     * @param bucketName bucket名称
+     * @param objectName 文件名称
+     * @return 二进制流
+     */
+    @SneakyThrows
+    public InputStream getObject(String bucketName, String objectName) {
+        return client.getObject(bucketName, objectName);
+    }
+
+
+    /**
+     * 复制文件
+     *
+     * @param srcBucketName Source bucket name
+     * @param srcObjectName Source object name
+     * @param bucketName    目标 bucket名称
+     * @param objectName    目标 文件名称
+     * @return 二进制流
+     */
+    @SneakyThrows
+    public void copyObject(String srcBucketName, String srcObjectName, String bucketName, String objectName) {
+        client.copyObject(bucketName, objectName, null, null, srcBucketName, srcObjectName, null, null);
+    }
+
+    /**
+     * 上传文件
+     *
+     * @param bucketName bucket名称
+     * @param objectName 文件名称
+     * @param stream     文件流
+     * @throws Exception https://docs.minio.io/cn/java-client-api-reference.html#putObject
+     */
+    public void putObject(String bucketName, String objectName, InputStream stream) throws Exception {
+        client.putObject(bucketName, objectName, stream, (long) stream.available(), null, null, "application/octet-stream");
+    }
+
+    /**
+     * 上传文件
+     *
+     * @param bucketName  bucket名称
+     * @param objectName  文件名称
+     * @param stream      文件流
+     * @param size        大小
+     * @param contextType 类型
+     * @throws Exception https://docs.minio.io/cn/java-client-api-reference.html#putObject
+     */
+    public void putObject(String bucketName, String objectName, InputStream stream, long size, String contextType) throws Exception {
+        client.putObject(bucketName, objectName, stream, size, null, null, contextType);
+    }
+
+    /**
+     * 合并文件
+     *
+     * @param bucketName  bucket名称
+     * @param objectName  文件名称
+     * @param sources     需要合并的文件列表
+     * @throws Exception https://docs.minio.io/cn/java-client-api-reference.html#putObject
+     */
+    public void composeObject(String bucketName, String objectName, List&lt;ComposeSource&gt; sources) throws Exception {
+        client.composeObject(bucketName, objectName, sources, null, null);
+    }
+
+    /**
+     * 获取文件信息
+     *
+     * @param bucketName bucket名称
+     * @param objectName 文件名称
+     * @throws Exception https://docs.minio.io/cn/java-client-api-reference.html#statObject
+     */
+    public ObjectStat getObjectInfo(String bucketName, String objectName) throws Exception {
+        return client.statObject(bucketName, objectName);
+    }
+
+    /**
+     * 删除文件
+     *
+     * @param bucketName bucket名称
+     * @param objectName 文件名称
+     * @throws Exception https://docs.minio.io/cn/java-client-api-reference.html#removeObject
+     */
+    public void removeObject(String bucketName, String objectName) throws Exception {
+        client.removeObject(bucketName, objectName);
+    }
+    public void removeObjects(String bucketName, List&lt;String&gt; objectNames) throws Exception {
+        for (String objectName : objectNames) {
+            client.removeObject(bucketName, objectName);
+        }
+    }
+
+    @Override
+    public void afterPropertiesSet() throws Exception {
+        Assert.hasText(endpoint, "Minio url 为空");
+        Assert.hasText(accessKey, "Minio accessKey为空");
+        Assert.hasText(secretKey, "Minio secretKey为空");
+        this.client = new MinioClient(endpoint, accessKey, secretKey);
+    }
+
+}
+</code></pre> 
+<p>MinioProperties</p> 
+<pre><code class="language-java">package com.amc.minio;
+
+import lombok.Data;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+
+/**
+ * minio 配置信息
+ * @author rio
+ */
+@Data
+@ConfigurationProperties(prefix = "minio")
+public class MinioProperties {
+    /**
+     * minio 服务地址 http://ip:port
+     */
+    private String url;
+
+    /**
+     * 用户名
+     */
+    private String accessKey;
+
+    /**
+     * 密码
+     */
+    private String secretKey;
+
+}
+</code></pre> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/4615f732388dd788a620d3b0cdeeb945/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Retrofit 网络请求参数注解@Path @Field @Query 等使用</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/d297c41250efcb216112dd8eb55630a7/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">ubuntu 飞书 VLC is unable to open the MRL</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

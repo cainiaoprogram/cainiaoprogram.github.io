@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>MySQL XtraBackup 备份原理 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="MySQL XtraBackup 备份原理" />
+<meta property="og:description" content="实现原理：
+XtraBackup基于InnoDB的crash recovery机制，在备份还原时利用redo log得到完整的数据文件，并通过全局读锁，保证InnoDB数据与非InnoDB数据的一致性，最终完成备份还原的功能
+由于是热备操作，在备份过程中可能有持续的数据写入，直接复制出来的数据文件可能有缺失或被修改的页，而redo log记录了InnoDB引擎的所有事务日志，可以在还原时应用redo log来补全数据文件中缺失或修改的页。所以为了确保redo log一定包含备份过程中涉及的数据页，需要首先开始复制redo log
+全备流程 1. 复制已有的redo log，然后监听redo log变化并持续复制
+2. 复制事务引擎数据文件 3. 等到数据文件复制完成
+4. 加锁：全局读锁
+5. 备份非事务引擎数据文件及其他文件
+6. 获取binlog点位信息等元数据
+7. 停止复制redo log
+为什么要先停止复制redo log，再解锁全局读锁？
+也是因为要保证“非事务资源与事务资源的一致性”，保证通过redo log回放后的InnoDB数据与非InnoDB数据都是处于读锁期间取得的位点。
+8. 解锁：全局读锁
+9. 复制buffer pool dump
+10. 备份完成
+全备还原流程
+1. 模拟MySQL进行recover，将redo log回放到数据文件中
+2. 等到recover完成
+3. 重建redo log，为启动数据库做准备
+4. 将数据文件复制回MySQL数据目录
+5. 还原完成
+在recover完成后，InnoDB数据与非InnoDB数据是达成一致的吗
+InnoDB数据会被恢复至备份结束时(全局读锁时)的状态，而非InnoDB数据本身即是在全局读锁时被复制出来，它们的数据一致。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/b424a571c00736f46c074469b71fd962/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-04-08T00:21:51+08:00" />
+<meta property="article:modified_time" content="2021-04-08T00:21:51+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">MySQL XtraBackup 备份原理</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>实现原理：</p> 
+<p>XtraBackup基于InnoDB的crash recovery机制，在备份还原时利用redo log得到完整的数据文件，并通过全局读锁，保证InnoDB数据与非InnoDB数据的一致性，最终完成备份还原的功能</p> 
+<p>由于是热备操作，在备份过程中可能有持续的数据写入，直接复制出来的数据文件可能有缺失或被修改的页，而redo log记录了InnoDB引擎的所有事务日志，可以在还原时应用redo log来补全数据文件中缺失或修改的页。所以为了确保redo log一定包含备份过程中涉及的数据页，需要首先开始复制redo log</p> 
+<h2>全备流程</h2> 
+<p>1. 复制已有的redo log，然后监听redo log变化并持续复制</p> 
+<p>2. 复制事务引擎数据文件 </p> 
+<p>3. 等到数据文件复制完成</p> 
+<p>4. 加锁：全局读锁</p> 
+<p>5. 备份非事务引擎数据文件及其他文件</p> 
+<p>6. 获取binlog点位信息等元数据</p> 
+<p>7. 停止复制redo log<br>     为什么要先停止复制redo log，再解锁全局读锁？<br>     也是因为要保证“非事务资源与事务资源的一致性”，保证通过redo log回放后的InnoDB数据与非InnoDB数据都是处于读锁期间取得的位点。</p> 
+<p>8. 解锁：全局读锁</p> 
+<p>9. 复制buffer pool dump</p> 
+<p>10. 备份完成</p> 
+<p> </p> 
+<h2>全备还原流程<br>  </h2> 
+<p>1. 模拟MySQL进行recover，将redo log回放到数据文件中</p> 
+<p>2. 等到recover完成</p> 
+<p>3. 重建redo log，为启动数据库做准备</p> 
+<p>4. 将数据文件复制回MySQL数据目录</p> 
+<p>5. 还原完成</p> 
+<p>在recover完成后，InnoDB数据与非InnoDB数据是达成一致的吗<br>     InnoDB数据会被恢复至备份结束时(全局读锁时)的状态，而非InnoDB数据本身即是在全局读锁时被复制出来，它们的数据一致。<br>  </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/a75739aa69b20937ce38acd7d2ae4b99/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">模糊连接度分割</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/e4f188e71a8da90e3b3a5e380582c42a/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">李宏毅2020机器学习2</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

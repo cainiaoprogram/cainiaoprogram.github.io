@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>imx6ull的Uboot启动过程——区别于传统Uboot - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="imx6ull的Uboot启动过程——区别于传统Uboot" />
+<meta property="og:description" content="本文捋一捋imx6ull的uboot的启动流程。
+首先，NXP提供的uboot经过编译最终烧写进存储介质中的是uboot.imx文件，这个imx后缀的文件不同于传统的比如S3C2440最终烧写的uboot.bin文件。
+imx文件是在bin文件的基础上加上了一个头部，IMX6ULL的BOOTROM程序会根据拨码开关的高低电平选择对应的启动介质，从中读取这个头部信息，然后对头部信息进行解析，头部中最重要的是一个叫DCD表的东西。
+DCD表中包含了时钟寄存器的地址和寄存器的值，引脚复用寄存器地址和寄存器的值，DDR控制器的寄存器地址和寄存器的值。imx6ull内部的BOOTROM程序会根据DCD表的内容打开时钟，初始化外部DDR。因此NXP提供的uboot代码的汇编阶段没有初始化时钟和初始化DDR的相关汇编代码！这也是NXP的uboot和传统的三星提供的uboot的重大区别。
+除了上述标黑部分的区别以外，还有一个区别就是，IMX6ULL的BOOTROM程序会根据解析出来的链接起始地址在一开始就把整个Uboot源码读取到DDR中去，也就是说Uboot的第一行代码就运行在DDR中，这是不同于三星的传统Uboot的，传统Uboot的第一句代码是运行在片内SRAM上的。
+由于上述的区别，Uboot的重定位过程也就不同了，IMX6ULL的重定位过程是把Uboot整体从DDR的起始地址给挪到DDR的后端地址上去，给Linux内核腾位置。而三星Uboot中重定位是从Flash中把Uboot加载到DDR中去，这也算是一个不同之处。
+除了上述提到了几点不同以外，Uboot代码的其他部分功能基本大差不差：
+IMX6ULL在uboot的汇编阶段要做的事情仅仅包含了：
+一、设置CPU运行模式为SVC模式，关闭FIQ和IRQ中断。
+设置成SVC模式是为了让CPU可以使用SoC的各种资源。
+关中断因为启动过程不允许被打断，否则可能发生错误。
+二、设置CP15协处理器的若干个寄存器，包括了设置异常向量表重定位并写入异常向量表的地址，失效Cache，关闭MMU，清除Cache。
+重定位异常向量表是因为，我们知道异常向量表的地址是0x00000000，而Uboot是在DDR中运行的，DDR的起始地址肯定不是0x00000000，那么异常向量表必须重定位，这里只是配置好了重定位所需要的寄存器内容，实际的向量表重定位由后续的relocate_vector函数完成。
+关闭MMU是因为，MMU负责虚拟地址到实际物理地址的转换，此时还没有加载操作系统，操作的都是实际物理地址，不需要MMU来转换。
+清除Cache是因为，Cache的内容是从DDR中缓存过来的，起始阶段DDR中还没有我们加载的内容，此时从DDR中缓存内容到Cache中，如果CPU从Cache中取数据可能导致错误。
+三、设置芯片内部的IRAM，划分出一部分用来作为堆栈（方便后续调用C函数），划分一部分用来存储uboot中的重要变量：struct global_data，这个结构体中包含了cpu的时钟频率信息，总线的时钟频率，uboot重定位的地址，外部DDR的大小，Uboot本身的大小的起始地址与终止地址，malloc内存池的大小和位置等等众多重要数据，这些结构体内部的变量是在后续的board_init_f()函数中被初始化的，这些变量被初始化完成以后，Uboot会根据其值进行重定位和一系列对外设的操作。
+上述就是imx6ull的uboot在汇编阶段做的事情，下面在arch/arm/lib/crt0.S文件中的_main函数中会调用若干个C函数。
+一、board_init_f_alloc_reserve，用于设置内部IRAM，划分出malloc区和存储global_data变量的区域，并将这个变量的地址写入R9寄存器中。
+二、board_init_f_init_reserve，将上述函数划分的存储空间进行清零，把早期malloc区的地址写入到global_data结构体变量的malloc_base成员中去。
+三、board_init_f，用于初始化部分外设和初始化global_data，这个函数里面有一个函数数组，函数数组中的函数会被依次执行，以此来实现初始化部分外设和global_data，这个函数数组在common/board_f.c文件中定义。这里初始化的外设主要是串口，定时器，初始化global_data主要是初始化其中的地址成员，比如uboot重定位以后的地址，malloc区的基地址，新的global_data变量的地址（因此刚开始global_data是放在内部的IRAM中的）。这个函数执行以后，外部DDR由原本的一张白纸变成了一段一段划分好的区域，每一段用于存储不同的内容。
+四、 relocate_code，就是重定位代码，这个重定位是从DDR到DDR的重定位，因为对于imx6ull来说，一开始uboot就被加载到了DDR上去运行，重定位就是为了把DDR前面的位置空出来以加载Linux内核，该函数定义在文件 arch/arm/lib/relocate.S中。
+五、 relocate_vectors，重定位向量表。
+六、board_init_r函数，该函数和board_init_f一样，其中有一个函数数组，其中的函数会依次执行，这个函数的作用也是初始化外设，初始化那些在board_init_f函数中没有初始化过的外设， 比如该函数会初始化中断，网络信息，控制台以及存储设备等等。注意：函数数组中有一个叫board_init的函数，这个函数就是imx6ull的板级初始化函数，该函数定义在board/freescale/mx6ullevk/mx6ullevk.c文件中。我们进行Uboot移植的时候如果需要增减代码，基本就是在这个文件中进行代码的编辑。
+至此，uboot启动的主要部分就结束了。
+接下来进入交互界面等待命令，主要包含三个函数。
+一、run_main_loop，如果3秒倒计时按下任意键，进入uboot的命令模式，否则启动Linux内核。
+二、cli_loop，解析命令行命令函数。
+三、cmd_process，执行相应的命令。
+uboot启动Linux内核的过程：
+一般进入到uboot命令以后，我们会使用tftp命令或者nfs命令把zImage加载到DDR中去，然后使用bootz命令启动，使用bootz命令就调用了第一个函数。
+do_bootz：这个函数主要干三件事。
+第一，调用bootz_start函数，这个函数会调用do_bootm_states执行BOOTM_STATE_START阶段；
+设置images的ep变量，即系统镜像的地址。
+调用bootz_setup去验证镜像；最后调用bootm_find_images查找设备树文件，放在images-&gt;ft_addr成员变量中。
+第二，关中断
+第三，设置images结构体变量的os成员，这个成员也是个结构体变量，设置它为IN_OS_LINUX。然后执行do_bootm_states函数，该函数使用参数标识不同的启动阶段，此时的启动阶段为BOOTM_STATE_OS_PREP | BOOTM_STATE_OS_FAKE_GO |BOOTM_STATE_OS_GO。
+do_bootm_states中会根据images.os.os这个系统类型来查找对应的系统启动函数，这里找到的是do_bootm_linux；do_bootm_linux函数最终会调用boot_jump_linux函数，这是uboot跳转到linux执行的最后一个函数。
+boot_jump_linux函数调用了一个叫做kernel_entry的函数，这个函数是Linux内核定义的，Linux内核镜像文件的第一行代码就是kernel_entry，该函数有三个参数，第一个参数是0，第二个参数是机器ID，第三个参数是ATAGS或者设备树首地址。images-&gt;ep中保存着Linux内核镜像的起始地址，即Linux内核的第一行代码。
+一旦开始执行kernel_entry，uboot的生命周期就结束了。
+参考资料——《正点原子Linux驱动开发手册》" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/63f10ce476a3f450db4446ed90eb1fdd/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-08-26T22:25:10+08:00" />
+<meta property="article:modified_time" content="2022-08-26T22:25:10+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">imx6ull的Uboot启动过程——区别于传统Uboot</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>本文捋一捋imx6ull的uboot的启动流程。</p> 
+<p>首先，NXP提供的uboot经过编译最终烧写进存储介质中的是uboot.imx文件，这个imx后缀的文件不同于传统的比如S3C2440最终烧写的uboot.bin文件。</p> 
+<p>imx文件是在bin文件的基础上加上了一个头部，IMX6ULL的BOOTROM程序会根据拨码开关的高低电平选择对应的启动介质，从中读取这个头部信息，然后对头部信息进行解析，头部中最重要的是一个叫DCD表的东西。</p> 
+<p>DCD表中包含了时钟寄存器的地址和寄存器的值，引脚复用寄存器地址和寄存器的值，DDR控制器的寄存器地址和寄存器的值。<strong>imx6ull内部的BOOTROM程序会根据DCD表的内容打开时钟，初始化外部DDR。因此NXP提供的uboot代码的汇编阶段没有初始化时钟和初始化DDR的相关汇编代码！这也是NXP的uboot和传统的三星提供的uboot的重大区别。</strong></p> 
+<p>除了上述标黑部分的区别以外，还有一个区别就是，<strong>IMX6ULL的BOOTROM程序会根据解析出来的链接起始地址在一开始就把整个Uboot源码读取到DDR中去，也就是说Uboot的第一行代码就运行在DDR中，这是不同于三星的传统Uboot的，传统Uboot的第一句代码是运行在片内SRAM上的。</strong></p> 
+<p>由于上述的区别，Uboot的重定位过程也就不同了，<strong>IMX6ULL的重定位过程是把Uboot整体从DDR的起始地址给挪到DDR的后端地址上去，给Linux内核腾位置。而三星Uboot中重定位是从Flash中把Uboot加载到DDR中去，这也算是一个不同之处。</strong></p> 
+<p>除了上述提到了几点不同以外，Uboot代码的其他部分功能基本大差不差：</p> 
+<p>IMX6ULL在uboot的汇编阶段要做的事情仅仅包含了：</p> 
+<p><strong>一、</strong>设置CPU运行模式为SVC模式，关闭FIQ和IRQ中断。</p> 
+<p>        设置成SVC模式是为了让CPU可以使用SoC的各种资源。</p> 
+<p>        关中断因为启动过程不允许被打断，否则可能发生错误。</p> 
+<p><strong>二、</strong>设置CP15协处理器的若干个寄存器，包括了设置异常向量表重定位并写入异常向量表的地址，失效Cache，关闭MMU，清除Cache。</p> 
+<p>        重定位异常向量表是因为，我们知道异常向量表的地址是0x00000000，而Uboot是在DDR中运行的，DDR的起始地址肯定不是0x00000000，那么异常向量表必须重定位，这里只是配置好了重定位所需要的寄存器内容，实际的向量表重定位由后续的relocate_vector函数完成。</p> 
+<p>        关闭MMU是因为，MMU负责虚拟地址到实际物理地址的转换，此时还没有加载操作系统，操作的都是实际物理地址，不需要MMU来转换。</p> 
+<p>        清除Cache是因为，Cache的内容是从DDR中缓存过来的，起始阶段DDR中还没有我们加载的内容，此时从DDR中缓存内容到Cache中，如果CPU从Cache中取数据可能导致错误。</p> 
+<p><strong>三、</strong>设置芯片内部的IRAM，划分出一部分用来作为堆栈（方便后续调用C函数），划分一部分用来存储uboot中的重要变量：<strong>struct global_data</strong>，<strong>这个结构体中包含了cpu的时钟频率信息，总线的时钟频率，uboot重定位的地址，外部DDR的大小，Uboot本身的大小的起始地址与终止地址，malloc内存池的大小和位置等等众多重要数据，这些结构体内部的变量是在后续的board_init_f()函数中被初始化的，这些变量被初始化完成以后，Uboot会根据其值进行重定位和一系列对外设的操作。</strong></p> 
+<p>上述就是imx6ull的uboot在汇编阶段做的事情，下面在arch/arm/lib/crt0.S文件中的_main函数中会调用若干个C函数。</p> 
+<p>一、<strong>board_init_f_alloc_reserve</strong>，用于设置内部IRAM，划分出malloc区和存储global_data变量的区域，并将这个变量的地址写入R9寄存器中。</p> 
+<p>二、<strong>board_init_f_init_reserve</strong>，将上述函数划分的存储空间进行清零，把早期malloc区的地址写入到global_data结构体变量的malloc_base成员中去。</p> 
+<p>三、<strong>board_init_f</strong>，用于初始化部分外设和初始化global_data，这个函数里面有一个函数数组，函数数组中的函数会被依次执行，以此来实现初始化部分外设和global_data，这个函数数组在common/board_f.c文件中定义。这里初始化的外设主要是串口，定时器，初始化global_data主要是初始化其中的地址成员，比如uboot重定位以后的地址，malloc区的基地址，新的global_data变量的地址（因此刚开始global_data是放在内部的IRAM中的）。这个函数执行以后，外部DDR由原本的一张白纸变成了一段一段划分好的区域，每一段用于存储不同的内容。</p> 
+<p>四、 <strong>relocate_code</strong>，就是重定位代码，<strong>这个重定位是从DDR到DDR的重定位，因为对于imx6ull来说，一开始uboot就被加载到了DDR上去运行</strong>，<strong>重定位就是为了把DDR前面的位置空出来以加载Linux内核</strong>，该函数定义在文件 arch/arm/lib/relocate.S中。</p> 
+<p>五、<strong> relocate_vectors</strong>，重定位向量表。</p> 
+<p>六、<strong>board_init_r</strong>函数，该函数和board_init_f一样，其中有一个函数数组，其中的函数会依次执行，这个函数的作用也是初始化外设，初始化那些在board_init_f函数中没有初始化过的外设， 比如该函数会初始化中断，网络信息，控制台以及存储设备等等。<strong>注意：函数数组中有一个叫board_init的函数，这个函数就是imx6ull的板级初始化函数，该函数定义在board/freescale/mx6ullevk/mx6ullevk.c文件中。我们进行Uboot移植的时候如果需要增减代码，基本就是在这个文件中进行代码的编辑。</strong></p> 
+<p></p> 
+<p>至此，uboot启动的主要部分就结束了。</p> 
+<p>接下来进入交互界面等待命令，主要包含三个函数。</p> 
+<p>一、run_main_loop，如果3秒倒计时按下任意键，进入uboot的命令模式，否则启动Linux内核。</p> 
+<p>二、cli_loop，解析命令行命令函数。</p> 
+<p>三、cmd_process，执行相应的命令。</p> 
+<p></p> 
+<p>uboot启动Linux内核的过程：</p> 
+<p>        一般进入到uboot命令以后，我们会使用tftp命令或者nfs命令把zImage加载到DDR中去，然后使用bootz命令启动，使用bootz命令就调用了第一个函数。</p> 
+<p><strong>do_bootz</strong>：这个函数主要干三件事。</p> 
+<p>        第一，调用bootz_start函数，这个函数会调用do_bootm_states执行BOOTM_STATE_START阶段；</p> 
+<p>        设置images的ep变量，即系统镜像的地址。</p> 
+<p>        调用bootz_setup去验证镜像；最后调用bootm_find_images查找设备树文件，放在images-&gt;ft_addr成员变量中。</p> 
+<p></p> 
+<p>第二，关中断</p> 
+<p>第三，设置images结构体变量的os成员，这个成员也是个结构体变量，设置它为IN_OS_LINUX。然后执行<strong>do_bootm_states</strong>函数，该函数使用参数标识不同的启动阶段，此时的启动阶段为BOOTM_STATE_OS_PREP | BOOTM_STATE_OS_FAKE_GO |BOOTM_STATE_OS_GO。</p> 
+<p>        do_bootm_states中会根据images.os.os这个系统类型来查找对应的系统启动函数，这里找到的是<strong>do_bootm_linux</strong>；do_bootm_linux函数最终会调用<strong>boot_jump_linux</strong>函数，这是uboot跳转到linux执行的最后一个函数。</p> 
+<p>        boot_jump_linux函数调用了一个叫做<strong>kernel_entry</strong>的函数，这个函数是Linux内核定义的，<strong>Linux内核镜像文件的第一行代码就是kernel_entry</strong>，<strong>该函数有三个参数，第一个参数是0，第二个参数是机器ID，第三个参数是ATAGS或者设备树首地址。</strong>images-&gt;ep中保存着Linux内核镜像的起始地址，即Linux内核的第一行代码。</p> 
+<p>一旦开始执行kernel_entry，uboot的生命周期就结束了。</p> 
+<p></p> 
+<p>参考资料——《正点原子Linux驱动开发手册》</p> 
+<p></p> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/d717a616586825b29ecaf52d700e4794/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">ffmpeg的使用 | m3u8视频下载、合并</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/48ff4c81db537664cc73866eecd431eb/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Python三目运算符（三元运算符）用法详解（含Python代码）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

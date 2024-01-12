@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>论TCP客户端如何快速判断与服务器断联 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="论TCP客户端如何快速判断与服务器断联" />
+<meta property="og:description" content="TCP客户端如何快速判断与服务器断联 问题产生的背景说明 我曾经对接中国电信的服务器的时候，遇到了该问题。中国电信要求和服务器断联之后(异常或者正常断联，其中包括拔掉网线)能够在30s之内连接上中国电信服务器并且接收服务器下发的无线配置。客户端重启无线，能够用无线扫描工具扫描该无线ssid已经被同步。该需求当时面临如下几个问题：
+1.客户端在和服务器连接的时候需要通过一系列的鉴权机制(dh秘钥协商)，然后才可以和服务器通信
+2. 无线配置到生效(ssid改变)，需要花费一定的时间。
+为了满足这一系列的动作，需要优化如下几点： 能够快速判断和服务器已经断开(正常或者异常)必须优化无线生效时间，尽可能短在拔掉网线再插上网线，必须尽快拿到分配的ip地址，尽快和服务器建立连接 今天我们来讨论如何快速的检测和服务器已经断联。
+目前检测客户端和服务器断联的方法 epoll(能够检测正常的断开连接，事件触发机制。优点是快速)read方式检测keeplive方式检测自定义心跳包方式检测getsockopt 下面我们逐个分析上述方式的优缺点
+epoll epoll是在2.6内核中提出的，是之前的select和poll的增强版本。相对于select和poll来说，epoll更加灵活，没有描述符限制。epoll使用一个文件描述符管理多个描述符，将用户关系的文件描述符的事件存放到内核的一个事件表中，这样在用户空间和内核空间的copy只需一次。
+相比较select和poll的方式，epoll对于监听的文件描述符没有限制(唯一的限制就是内核本身支持的文件描述符个数-可修改)。
+我们在注册epoll的时候主要是监听两类事件(EPOLLIN和EPOLLOUT)，这两类事件分别代表着可读和可写。我们可以创建读写回调函数，当检测到对应事件的时候，调用对应的程序。为了检测客户端和服务器已经断开我们需要注册另一类事件(EPOLLRDHUP)。该事件代表的是读关闭，当服务器close的时候，会触发该事件。
+说明：EPOLLERR 只有采取动作时，才能知道是否对方异常。即对方突然断掉，是不可能有此事件发生的。只有自己采取动作（当然自己此刻也不知道），read，write时，出EPOLLERR错，说明对方已经异常断开。
+总结: epoll的事件触发机制不满足上述需求(插拔网线是检测不到的)。但是它的优缺点不言而喻(文件描述符监听不受限制，事件触发)。
+read方式检测 但我们不采用epoll的时候(即不采用事件触发机制的时候)。我们可以创建一个单独的读线程，文件描述符设置为非阻塞。那么在读线程中死循环调用read函数。这时候可以根据read的返回值来判断socket连接是否已经出了问题。检测方式如下:
+调用了read函数读取socket，如果read的返回值为小于0同时错误码不为errno == EAGAIN || errno == EWOULDBLOCK)，则代表和服务器的连接已经断开。
+说明:该方式适用于各种异常情况，但是因为需要read循环接收，必须开辟线程。系统创建线程是需要有开销的，所以我不推荐该方式。
+自定义心跳包检测方式 该方式对于大家都不陌生，说的直白一点就是定时发送心跳包给服务器。如果发送失败或者服务器没有定时回复，则认为连接已经断开。该方式通用、常见并且有效。在一些实时性要求不高的地方推荐这种方式。(基本现在的cs架构都有心跳机制)。但是该方式不适合我上述需求，因为心跳包是有间隔的，有间隔就代表有延时。同时又不能把心跳包设置的太短，这样会增加服务器负荷。
+keeplive机制 关于keeplive机制，我在这里不详细说明。说白了就是利用系统发送心跳包。和上述心跳包检测方式一致
+getsockopt机制 在应用程序中可以通过调用如下代码来判断连接是否断开
+struct tcp_info info; int len = sizeof(struct tcp_info); getsockopt(g_fd, IPPROTO_TCP, TCP_INFO, &amp;info, (socklen_t *)&amp;len); if ((info.tcpi_state == TCP_ESTABLISHED)) { // myprintf(&#34;socket connected\n&#34;); return 1; } else { printf(&#34;===========socket disconnected&#34;); // myprintf(&#34;socket disconnected\n&#34;); return 0; } 运行结果如下：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/700a46e1f80677f5376e61d0369553d3/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-06-09T23:03:29+08:00" />
+<meta property="article:modified_time" content="2020-06-09T23:03:29+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">论TCP客户端如何快速判断与服务器断联</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="TCP_0"></a>TCP客户端如何快速判断与服务器断联</h2> 
+<h3><a id="_2"></a>问题产生的背景说明</h3> 
+<p>我曾经对接中国电信的服务器的时候，遇到了该问题。中国电信要求和服务器断联之后(异常或者正常断联，其中包括拔掉网线)能够在30s之内连接上中国电信服务器并且接收服务器下发的无线配置。客户端重启无线，能够用无线扫描工具扫描该无线ssid已经被同步。该需求当时面临如下几个问题：</p> 
+<p>1.客户端在和服务器连接的时候需要通过一系列的鉴权机制(dh秘钥协商)，然后才可以和服务器通信<br> 2. 无线配置到生效(ssid改变)，需要花费一定的时间。</p> 
+<ul><li>为了满足这一系列的动作，需要优化如下几点：</li></ul> 
+<ol start="3"><li>能够快速判断和服务器已经断开(正常或者异常)</li><li>必须优化无线生效时间，尽可能短</li><li>在拔掉网线再插上网线，必须尽快拿到分配的ip地址，尽快和服务器建立连接</li></ol> 
+<p>今天我们来讨论如何快速的检测和服务器已经断联。</p> 
+<h3><a id="_15"></a>目前检测客户端和服务器断联的方法</h3> 
+<ul><li>epoll(能够检测正常的断开连接，事件触发机制。优点是快速)</li><li>read方式检测</li><li>keeplive方式检测</li><li>自定义心跳包方式检测</li><li>getsockopt</li></ul> 
+<p>下面我们逐个分析上述方式的优缺点</p> 
+<h4><a id="epoll_24"></a>epoll</h4> 
+<p>epoll是在2.6内核中提出的，是之前的select和poll的增强版本。相对于select和poll来说，epoll更加灵活，没有描述符限制。epoll使用一个文件描述符管理多个描述符，将用户关系的文件描述符的事件存放到内核的一个事件表中，这样在用户空间和内核空间的copy只需一次。</p> 
+<p>相比较select和poll的方式，epoll对于监听的文件描述符没有限制(唯一的限制就是内核本身支持的文件描述符个数-可修改)。</p> 
+<p>我们在注册epoll的时候主要是监听两类事件(EPOLLIN和EPOLLOUT)，这两类事件分别代表着可读和可写。我们可以创建读写回调函数，当检测到对应事件的时候，调用对应的程序。<strong>为了检测客户端和服务器已经断开我们需要注册另一类事件(EPOLLRDHUP)。该事件代表的是读关闭，当服务器close的时候，会触发该事件</strong>。</p> 
+<p>说明：EPOLLERR 只有采取动作时，才能知道是否对方异常。即对方突然断掉，是不可能有此事件发生的。只有自己采取动作（当然自己此刻也不知道），read，write时，出EPOLLERR错，说明对方已经异常断开。</p> 
+<p>总结: epoll的事件触发机制不满足上述需求(插拔网线是检测不到的)。但是它的优缺点不言而喻(文件描述符监听不受限制，事件触发)。</p> 
+<h4><a id="read_35"></a>read方式检测</h4> 
+<p>但我们不采用epoll的时候(即不采用事件触发机制的时候)。我们可以创建一个单独的读线程，文件描述符设置为非阻塞。那么在读线程中死循环调用read函数。这时候可以根据read的返回值来判断socket连接是否已经出了问题。检测方式如下:<br> 调用了read函数读取socket，如果read的返回值为小于0同时错误码不为errno == EAGAIN || errno == EWOULDBLOCK)，则代表和服务器的连接已经断开。</p> 
+<p>说明:该方式适用于各种异常情况，但是因为需要read循环接收，必须开辟线程。系统创建线程是需要有开销的，所以我不推荐该方式。</p> 
+<h4><a id="_41"></a>自定义心跳包检测方式</h4> 
+<p>该方式对于大家都不陌生，说的直白一点就是定时发送心跳包给服务器。如果发送失败或者服务器没有定时回复，则认为连接已经断开。该方式通用、常见并且有效。在一些实时性要求不高的地方推荐这种方式。(基本现在的cs架构都有心跳机制)。但是该方式不适合我上述需求，因为心跳包是有间隔的，有间隔就代表有延时。同时又不能把心跳包设置的太短，这样会增加服务器负荷。</p> 
+<h4><a id="keeplive_44"></a>keeplive机制</h4> 
+<p>关于keeplive机制，我在这里不详细说明。说白了就是利用系统发送心跳包。和上述心跳包检测方式一致</p> 
+<h4><a id="getsockopt_48"></a>getsockopt机制</h4> 
+<p>在应用程序中可以通过调用如下代码来判断连接是否断开</p> 
+<pre><code class="prism language-c">  <span class="token keyword">struct</span> tcp_info info<span class="token punctuation">;</span>
+  <span class="token keyword">int</span> len <span class="token operator">=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">struct</span> tcp_info<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token function">getsockopt</span><span class="token punctuation">(</span>g_fd<span class="token punctuation">,</span> IPPROTO_TCP<span class="token punctuation">,</span> TCP_INFO<span class="token punctuation">,</span> <span class="token operator">&amp;</span>info<span class="token punctuation">,</span> <span class="token punctuation">(</span>socklen_t <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>info<span class="token punctuation">.</span>tcpi_state <span class="token operator">==</span> TCP_ESTABLISHED<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// myprintf("socket connected\n");</span>
+    <span class="token keyword">return</span> <span class="token number">1</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"===========socket disconnected"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// myprintf("socket disconnected\n");</span>
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<p>运行结果如下：<br> <img src="https://images2.imgbox.com/4d/95/JFMgOEDg_o.png" alt="在这里插入图片描述"></p> 
+<p>说明:该方法只适用于正常断开服务器(即服务器主动close)，不适用于拔掉网线的情况</p> 
+<h3><a id="_68"></a>下面提供几种切换网络，断开网络的方案</h3> 
+<h4><a id="arp_69"></a>arp方案</h4> 
+<p>在客户端开启一个定时器，将定时事件设置很短，比如3秒。然后一直ping网关，设置ping的超时时间为1秒。如果检测到2次未返回(次数可以自己根据实际情况定义)，则认为连接已经断开</p> 
+<p>说明: 该方案有一个弊端，这种方式还是在发送数据包，如果服务器没有直接和客户端连接，那么不会加重服务器的负担。(这一点比超短时间发送心跳包友好)。但是该方式本质上仍然是发送数据包。所以仍然会对直连的网关或者路由设备带来负担</p> 
+<h4><a id="_75"></a>判断有无路由或者路由表时候改变</h4> 
+<p>我们可以通过如下代码来获取默认路由的ip地址</p> 
+<pre><code class="prism language-c">
+<span class="token macro property">#<span class="token directive keyword">define</span> BUFSIZE 8192</span>
+
+<span class="token keyword">struct</span> route_info <span class="token punctuation">{<!-- --></span>
+  u_int dstAddr<span class="token punctuation">;</span>
+  u_int srcAddr<span class="token punctuation">;</span>
+  u_int gateWay<span class="token punctuation">;</span>
+  <span class="token keyword">char</span> ifName<span class="token punctuation">[</span>IF_NAMESIZE<span class="token punctuation">]</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+<span class="token keyword">int</span> <span class="token function">readNlSock</span><span class="token punctuation">(</span><span class="token keyword">int</span> sockFd<span class="token punctuation">,</span> <span class="token keyword">char</span> <span class="token operator">*</span>bufPtr<span class="token punctuation">,</span> <span class="token keyword">int</span> seqNum<span class="token punctuation">,</span> <span class="token keyword">int</span> pId<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">struct</span> nlmsghdr <span class="token operator">*</span>nlHdr<span class="token punctuation">;</span>
+  <span class="token keyword">int</span> readLen <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">,</span> msgLen <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+  <span class="token keyword">do</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//收到内核的应答</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>readLen <span class="token operator">=</span> <span class="token function">recv</span><span class="token punctuation">(</span>sockFd<span class="token punctuation">,</span> bufPtr<span class="token punctuation">,</span> BUFSIZE <span class="token operator">-</span> msgLen<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token function">perror</span><span class="token punctuation">(</span><span class="token string">"SOCK READ: "</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    nlHdr <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> nlmsghdr <span class="token operator">*</span><span class="token punctuation">)</span>bufPtr<span class="token punctuation">;</span>
+    <span class="token comment">//检查header是否有效</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token function">NLMSG_OK</span><span class="token punctuation">(</span>nlHdr<span class="token punctuation">,</span> readLen<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token punctuation">(</span>nlHdr<span class="token operator">-&gt;</span>nlmsg_type <span class="token operator">==</span> NLMSG_ERROR<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token function">perror</span><span class="token punctuation">(</span><span class="token string">"Error in recieved packet"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>nlHdr<span class="token operator">-&gt;</span>nlmsg_type <span class="token operator">==</span> NLMSG_DONE<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+      bufPtr <span class="token operator">+</span><span class="token operator">=</span> readLen<span class="token punctuation">;</span>
+      msgLen <span class="token operator">+</span><span class="token operator">=</span> readLen<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>nlHdr<span class="token operator">-&gt;</span>nlmsg_flags <span class="token operator">&amp;</span> NLM_F_MULTI<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span> <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>nlHdr<span class="token operator">-&gt;</span>nlmsg_seq <span class="token operator">!=</span> seqNum<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token punctuation">(</span>nlHdr<span class="token operator">-&gt;</span>nlmsg_pid <span class="token operator">!=</span> pId<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token keyword">return</span> msgLen<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token comment">//分析返回的路由信息</span>
+<span class="token keyword">void</span> <span class="token function">parseRoutes</span><span class="token punctuation">(</span><span class="token keyword">struct</span> nlmsghdr <span class="token operator">*</span>nlHdr<span class="token punctuation">,</span> <span class="token keyword">struct</span> route_info <span class="token operator">*</span>rtInfo<span class="token punctuation">,</span>
+                 <span class="token keyword">char</span> <span class="token operator">*</span>gateway<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">struct</span> rtmsg <span class="token operator">*</span>rtMsg<span class="token punctuation">;</span>
+  <span class="token keyword">struct</span> rtattr <span class="token operator">*</span>rtAttr<span class="token punctuation">;</span>
+  <span class="token keyword">int</span> rtLen<span class="token punctuation">;</span>
+  <span class="token keyword">char</span> <span class="token operator">*</span>tempBuf <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+  <span class="token keyword">struct</span> in_addr dst<span class="token punctuation">;</span>
+  <span class="token keyword">struct</span> in_addr gate<span class="token punctuation">;</span>
+
+  tempBuf <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token function">malloc</span><span class="token punctuation">(</span><span class="token number">100</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  rtMsg <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> rtmsg <span class="token operator">*</span><span class="token punctuation">)</span><span class="token function">NLMSG_DATA</span><span class="token punctuation">(</span>nlHdr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token comment">// If the route is not for AF_INET or does not belong to main routing table</span>
+  <span class="token comment">// then return.</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>rtMsg<span class="token operator">-&gt;</span>rtm_family <span class="token operator">!=</span> AF_INET<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token punctuation">(</span>rtMsg<span class="token operator">-&gt;</span>rtm_table <span class="token operator">!=</span> RT_TABLE_MAIN<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token function">FREE</span><span class="token punctuation">(</span>tempBuf<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+
+  rtAttr <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> rtattr <span class="token operator">*</span><span class="token punctuation">)</span><span class="token function">RTM_RTA</span><span class="token punctuation">(</span>rtMsg<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  rtLen <span class="token operator">=</span> <span class="token function">RTM_PAYLOAD</span><span class="token punctuation">(</span>nlHdr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token punctuation">;</span> <span class="token function">RTA_OK</span><span class="token punctuation">(</span>rtAttr<span class="token punctuation">,</span> rtLen<span class="token punctuation">)</span><span class="token punctuation">;</span> rtAttr <span class="token operator">=</span> <span class="token function">RTA_NEXT</span><span class="token punctuation">(</span>rtAttr<span class="token punctuation">,</span> rtLen<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">switch</span> <span class="token punctuation">(</span>rtAttr<span class="token operator">-&gt;</span>rta_type<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">case</span> RTA_OIF<span class="token punctuation">:</span>
+        <span class="token function">if_indextoname</span><span class="token punctuation">(</span><span class="token operator">*</span><span class="token punctuation">(</span><span class="token keyword">int</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token function">RTA_DATA</span><span class="token punctuation">(</span>rtAttr<span class="token punctuation">)</span><span class="token punctuation">,</span> rtInfo<span class="token operator">-&gt;</span>ifName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">break</span><span class="token punctuation">;</span>
+      <span class="token keyword">case</span> RTA_GATEWAY<span class="token punctuation">:</span>
+        rtInfo<span class="token operator">-&gt;</span>gateWay <span class="token operator">=</span> <span class="token operator">*</span><span class="token punctuation">(</span>u_int <span class="token operator">*</span><span class="token punctuation">)</span><span class="token function">RTA_DATA</span><span class="token punctuation">(</span>rtAttr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">break</span><span class="token punctuation">;</span>
+      <span class="token keyword">case</span> RTA_PREFSRC<span class="token punctuation">:</span>
+        rtInfo<span class="token operator">-&gt;</span>srcAddr <span class="token operator">=</span> <span class="token operator">*</span><span class="token punctuation">(</span>u_int <span class="token operator">*</span><span class="token punctuation">)</span><span class="token function">RTA_DATA</span><span class="token punctuation">(</span>rtAttr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">break</span><span class="token punctuation">;</span>
+      <span class="token keyword">case</span> RTA_DST<span class="token punctuation">:</span>
+        rtInfo<span class="token operator">-&gt;</span>dstAddr <span class="token operator">=</span> <span class="token operator">*</span><span class="token punctuation">(</span>u_int <span class="token operator">*</span><span class="token punctuation">)</span><span class="token function">RTA_DATA</span><span class="token punctuation">(</span>rtAttr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+  dst<span class="token punctuation">.</span>s_addr <span class="token operator">=</span> rtInfo<span class="token operator">-&gt;</span>dstAddr<span class="token punctuation">;</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">strstr</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token function">inet_ntoa</span><span class="token punctuation">(</span>dst<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token string">"0.0.0.0"</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    gate<span class="token punctuation">.</span>s_addr <span class="token operator">=</span> rtInfo<span class="token operator">-&gt;</span>gateWay<span class="token punctuation">;</span>
+    <span class="token function">sprintf</span><span class="token punctuation">(</span>gateway<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token function">inet_ntoa</span><span class="token punctuation">(</span>gate<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    gate<span class="token punctuation">.</span>s_addr <span class="token operator">=</span> rtInfo<span class="token operator">-&gt;</span>srcAddr<span class="token punctuation">;</span>
+    gate<span class="token punctuation">.</span>s_addr <span class="token operator">=</span> rtInfo<span class="token operator">-&gt;</span>dstAddr<span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+  <span class="token function">FREE</span><span class="token punctuation">(</span>tempBuf<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token keyword">return</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">int</span> <span class="token function">get_gateway_ip</span><span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span>gateway<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">struct</span> nlmsghdr <span class="token operator">*</span>nlMsg<span class="token punctuation">;</span>
+  <span class="token keyword">struct</span> rtmsg <span class="token operator">*</span>rtMsg<span class="token punctuation">;</span>
+  <span class="token keyword">struct</span> route_info <span class="token operator">*</span>rtInfo<span class="token punctuation">;</span>
+  <span class="token keyword">char</span> msgBuf<span class="token punctuation">[</span>BUFSIZE<span class="token punctuation">]</span><span class="token punctuation">;</span>
+
+  <span class="token keyword">int</span> sock<span class="token punctuation">,</span> len<span class="token punctuation">,</span> msgSeq <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+
+  <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>sock <span class="token operator">=</span> <span class="token function">socket</span><span class="token punctuation">(</span>PF_NETLINK<span class="token punctuation">,</span> SOCK_DGRAM<span class="token punctuation">,</span> NETLINK_ROUTE<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token function">perror</span><span class="token punctuation">(</span><span class="token string">"Socket Creation: "</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+
+  <span class="token function">memset</span><span class="token punctuation">(</span>msgBuf<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> BUFSIZE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+  nlMsg <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> nlmsghdr <span class="token operator">*</span><span class="token punctuation">)</span>msgBuf<span class="token punctuation">;</span>
+  rtMsg <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> rtmsg <span class="token operator">*</span><span class="token punctuation">)</span><span class="token function">NLMSG_DATA</span><span class="token punctuation">(</span>nlMsg<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+  nlMsg<span class="token operator">-&gt;</span>nlmsg_len <span class="token operator">=</span> <span class="token function">NLMSG_LENGTH</span><span class="token punctuation">(</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">struct</span> rtmsg<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">// Length of message.</span>
+  nlMsg<span class="token operator">-&gt;</span>nlmsg_type <span class="token operator">=</span>
+      RTM_GETROUTE<span class="token punctuation">;</span>  <span class="token comment">// Get the routes from kernel routing table .</span>
+
+  nlMsg<span class="token operator">-&gt;</span>nlmsg_flags <span class="token operator">=</span>
+      NLM_F_DUMP <span class="token operator">|</span> NLM_F_REQUEST<span class="token punctuation">;</span>  <span class="token comment">// The message is a request for dump.</span>
+  nlMsg<span class="token operator">-&gt;</span>nlmsg_seq <span class="token operator">=</span> msgSeq<span class="token operator">++</span><span class="token punctuation">;</span>     <span class="token comment">// Sequence of the message packet.</span>
+  nlMsg<span class="token operator">-&gt;</span>nlmsg_pid <span class="token operator">=</span> <span class="token function">getpid</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>     <span class="token comment">// PID of process sending the request.</span>
+
+  <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">send</span><span class="token punctuation">(</span>sock<span class="token punctuation">,</span> nlMsg<span class="token punctuation">,</span> nlMsg<span class="token operator">-&gt;</span>nlmsg_len<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"Write To Socket Failed…\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">close</span><span class="token punctuation">(</span>sock<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+
+  <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>len <span class="token operator">=</span> <span class="token function">readNlSock</span><span class="token punctuation">(</span>sock<span class="token punctuation">,</span> msgBuf<span class="token punctuation">,</span> msgSeq<span class="token punctuation">,</span> <span class="token function">getpid</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"Read From Socket Failed…\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">close</span><span class="token punctuation">(</span>sock<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+
+  rtInfo <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> route_info <span class="token operator">*</span><span class="token punctuation">)</span><span class="token function">malloc</span><span class="token punctuation">(</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">struct</span> route_info<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token punctuation">;</span> <span class="token function">NLMSG_OK</span><span class="token punctuation">(</span>nlMsg<span class="token punctuation">,</span> len<span class="token punctuation">)</span><span class="token punctuation">;</span> nlMsg <span class="token operator">=</span> <span class="token function">NLMSG_NEXT</span><span class="token punctuation">(</span>nlMsg<span class="token punctuation">,</span> len<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token function">memset</span><span class="token punctuation">(</span>rtInfo<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">struct</span> route_info<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">parseRoutes</span><span class="token punctuation">(</span>nlMsg<span class="token punctuation">,</span> rtInfo<span class="token punctuation">,</span> gateway<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+  <span class="token function">free</span><span class="token punctuation">(</span>rtInfo<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token function">close</span><span class="token punctuation">(</span>sock<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>如果路由表改变或者消失，那么则认为断开连接。该方式需要开启一个定时器，循环检测。但是相比于ping的方式，该方式不会对对外的设备带来负担。所以这一点是比ping的方式友好</p> 
+<h3><a id="1epoll__218"></a>总结：目前我只想到了这两种比较好的方式，在我的实际项目中我采用的是判断路由表的方式(定时器设置为1秒，检测异常断联)结合epoll的事件触发方式(检测正常断联)以及心跳报文超时的方式。能够快速的检测。如果大家有 更好的方式欢迎留言，最好是异步通知的方式。该博客不定时更新(如果本人想到了新的方案)</h3> 
+<h2><a id="QQ610849576_220"></a>欢迎加入QQ群(610849576),大家一起交流</h2>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e19ac1baa5f32542b38fb995299fb62f/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">时间复杂度和空间复杂度</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/bfe79bfb273e852f4f9a27fa74123d4e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">解决matplotlib画图中文乱码</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>冗余表系列文章（二）冗余表的实现方案之异步写 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="冗余表系列文章（二）冗余表的实现方案之异步写" />
+<meta property="og:description" content="冗余表系列文章（二）冗余表的实现方案之异步写 冗余表系列文章（一）冗余表的实现方案之同步双写
+冗余表系列文章（二）冗余表的实现方案之异步写
+1 冗余表 1.1为什么要有冗余表 当t_order表达到500万条或2GB时需要考虑水平分表，进行水平分表需要根据某个列进行分割，假设根据userId分割。用户查询自己的订单携带着userId，因此能够定位到具体哪张表。而商家查询者自己店铺的订单，没办法确定userId，只能访问一遍所有的分表再合并结果，效率非常低。为了加快商家端的查询，可以冗余一份订单表，这份冗余表根据merchantId切分，商家访问冗余表，效率就很好。这是引入冗余表的好处，坏处是我们要维护普通表和冗余表的数据一致。
+1.2冗余表的两种实现方案 1.2.1 同步双写 更新t_order的操作要执行两次，一次更新普通表，一次更新冗余表，写两次。
+优点：
+实现简单，由一次写变为两次写
+容易维护数据的一致性
+缺点：
+代码冗余，第二次写跟第一次写的代码类似，而且每个更新的地方都要写两次
+请求处理时间变长
+1.2.2 异步写 更新请求过来，写一次数据库，再发送一条消息到消息中间件，返回响应。消费者拉取消息进行写操作。
+优点：
+处理时间是单次写 缺点
+较复杂，引入了消息中间件不容易维护数据的一致性 2 异步写 项目源码
+进入async-write文件夹
+2.1数据库规划 mysql3上存储订单数据，主要用于用户端访问。t_order、t_order_item表都按user_id进行水平切分为两个表，分片规则保持一致。mysq5上冗余一份订单数据，主要用于商家端访问，根据merchat_id分片。
+mysql3的order_db0库上有t_order_0、t_order_1、t_order_item_0、t_order_item_1。
+mysql5的order_db1库上有t_order_0、t_order_1、t_order_item_0、t_order_item_1。
+2.2创建表 见源码中的order_db0、order_db1文件
+2.3maven pom文件 比较主要的几个依赖。完整pom见源码。
+&lt;!--shardingsphere--&gt; &lt;dependency&gt; &lt;groupId&gt;org.apache.shardingsphere&lt;/groupId&gt; &lt;artifactId&gt;shardingsphere-jdbc-core-spring-boot-starter&lt;/artifactId&gt; &lt;version&gt;5.2.0&lt;/version&gt; &lt;/dependency&gt; &lt;!-- mybatis-plus--&gt; &lt;dependency&gt; &lt;groupId&gt;com.baomidou&lt;/groupId&gt; &lt;artifactId&gt;mybatis-plus-boot-starter&lt;/artifactId&gt; &lt;version&gt;3.5.2&lt;/version&gt; &lt;/dependency&gt; &lt;!-- kafka--&gt; &lt;dependency&gt; &lt;groupId&gt;org.springframework.kafka&lt;/groupId&gt; &lt;artifactId&gt;spring-kafka&lt;/artifactId&gt; &lt;/dependency&gt; 2.4创建实体类 t_order是普通表，给用户端访问的。
+@TableName(&#34;t_order&#34;) @Data @AllArgsConstructor @NoArgsConstructor public class Order { @TableId(type = IdType.ASSIGN_ID) private Long orderId; private Long userId; private Long merchantId; private BigDecimal amount; private Integer orderStatusId; } t_order_2是冗余表，给商家端访问的。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/7f4e945119bb90012cd046d011e76608/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-11-23T15:29:46+08:00" />
+<meta property="article:modified_time" content="2022-11-23T15:29:46+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">冗余表系列文章（二）冗余表的实现方案之异步写</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <div align="center"> 
+ <font size="70"> 冗余表系列文章（二）冗余表的实现方案之异步写 </font> 
+</div> 
+<p><a href="https://blog.csdn.net/2201_75287294/article/details/128000508">冗余表系列文章（一）冗余表的实现方案之同步双写</a><br> <a href="https://blog.csdn.net/2201_75287294/article/details/128001250">冗余表系列文章（二）冗余表的实现方案之异步写</a></p> 
+<h2><a id="1____8"></a>1 冗余表</h2> 
+<h3><a id="11_10"></a>1.1为什么要有冗余表</h3> 
+<p>当t_order表达到500万条或2GB时需要考虑水平分表，进行水平分表需要根据某个列进行分割，假设根据userId分割。用户查询自己的订单携带着userId，因此能够定位到具体哪张表。而商家查询者自己店铺的订单，没办法确定userId，只能访问一遍所有的分表再合并结果，效率非常低。为了加快商家端的查询，可以冗余一份订单表，这份冗余表根据merchantId切分，商家访问冗余表，效率就很好。这是引入冗余表的好处，坏处是我们要维护普通表和冗余表的数据一致。</p> 
+<h3><a id="12_14"></a>1.2冗余表的两种实现方案</h3> 
+<h4><a id="121_____16"></a>1.2.1 同步双写</h4> 
+<p><img src="https://images2.imgbox.com/c6/b9/fm2aOBaR_o.png" alt="在这里插入图片描述"></p> 
+<p>更新t_order的操作要执行两次，一次更新普通表，一次更新冗余表，写两次。<br> 优点：</p> 
+<ul><li> <p>实现简单，由一次写变为两次写</p> </li><li> <p>容易维护数据的一致性</p> </li></ul> 
+<p>缺点：</p> 
+<ul><li> <p>代码冗余，第二次写跟第一次写的代码类似，而且每个更新的地方都要写两次</p> </li><li> <p>请求处理时间变长</p> </li></ul> 
+<h4><a id="122_____33"></a>1.2.2 异步写</h4> 
+<p><img src="https://images2.imgbox.com/94/06/8Z7TZSjZ_o.png" alt="在这里插入图片描述"></p> 
+<p>更新请求过来，写一次数据库，再发送一条消息到消息中间件，返回响应。消费者拉取消息进行写操作。<br> 优点：</p> 
+<ul><li>处理时间是单次写</li></ul> 
+<p>缺点</p> 
+<ul><li>较复杂，引入了消息中间件</li><li>不容易维护数据的一致性</li></ul> 
+<h2><a id="2____47"></a>2 异步写</h2> 
+<p><a href="https://gitee.com/tong-exists/redundant-table-solutions" rel="nofollow">项目源码</a></p> 
+<p>进入async-write文件夹</p> 
+<h3><a id="21_53"></a>2.1数据库规划</h3> 
+<p>mysql3上存储订单数据，主要用于用户端访问。t_order、t_order_item表都按user_id进行水平切分为两个表，分片规则保持一致。mysq5上冗余一份订单数据，主要用于商家端访问，根据merchat_id分片。<br> mysql3的order_db0库上有t_order_0、t_order_1、t_order_item_0、t_order_item_1。<br> mysql5的order_db1库上有t_order_0、t_order_1、t_order_item_0、t_order_item_1。</p> 
+<h3><a id="22_59"></a>2.2创建表</h3> 
+<p>见源码中的order_db0、order_db1文件</p> 
+<h3><a id="23maven_pom_63"></a>2.3maven pom文件</h3> 
+<p>比较主要的几个依赖。完整pom见源码。</p> 
+<pre><code class="prism language-xml"><span class="token comment">&lt;!--shardingsphere--&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>dependency</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>groupId</span><span class="token punctuation">&gt;</span></span>org.apache.shardingsphere<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>groupId</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>artifactId</span><span class="token punctuation">&gt;</span></span>shardingsphere-jdbc-core-spring-boot-starter<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>artifactId</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>version</span><span class="token punctuation">&gt;</span></span>5.2.0<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>version</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>dependency</span><span class="token punctuation">&gt;</span></span>
+<span class="token comment">&lt;!--        mybatis-plus--&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>dependency</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>groupId</span><span class="token punctuation">&gt;</span></span>com.baomidou<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>groupId</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>artifactId</span><span class="token punctuation">&gt;</span></span>mybatis-plus-boot-starter<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>artifactId</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>version</span><span class="token punctuation">&gt;</span></span>3.5.2<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>version</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>dependency</span><span class="token punctuation">&gt;</span></span>
+<span class="token comment">&lt;!--        kafka--&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>dependency</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>groupId</span><span class="token punctuation">&gt;</span></span>org.springframework.kafka<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>groupId</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>artifactId</span><span class="token punctuation">&gt;</span></span>spring-kafka<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>artifactId</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>dependency</span><span class="token punctuation">&gt;</span></span>
+</code></pre> 
+<h3><a id="24_89"></a>2.4创建实体类</h3> 
+<p>t_order是普通表，给用户端访问的。</p> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@TableName</span><span class="token punctuation">(</span><span class="token string">"t_order"</span><span class="token punctuation">)</span>
+ <span class="token annotation punctuation">@Data</span>
+ <span class="token annotation punctuation">@AllArgsConstructor</span>
+ <span class="token annotation punctuation">@NoArgsConstructor</span>
+ <span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">Order</span> <span class="token punctuation">{<!-- --></span>
+   <span class="token annotation punctuation">@TableId</span><span class="token punctuation">(</span>type <span class="token operator">=</span> <span class="token class-name">IdType</span><span class="token punctuation">.</span><span class="token constant">ASSIGN_ID</span><span class="token punctuation">)</span>
+   <span class="token keyword">private</span> <span class="token class-name">Long</span> orderId<span class="token punctuation">;</span>
+   <span class="token keyword">private</span> <span class="token class-name">Long</span> userId<span class="token punctuation">;</span>
+   <span class="token keyword">private</span> <span class="token class-name">Long</span> merchantId<span class="token punctuation">;</span>
+   <span class="token keyword">private</span> <span class="token class-name">BigDecimal</span> amount<span class="token punctuation">;</span>
+   <span class="token keyword">private</span> <span class="token class-name">Integer</span> orderStatusId<span class="token punctuation">;</span>
+ <span class="token punctuation">}</span>
+</code></pre> 
+<p>t_order_2是冗余表，给商家端访问的。</p> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@TableName</span><span class="token punctuation">(</span><span class="token string">"t_order_2"</span><span class="token punctuation">)</span>
+ <span class="token annotation punctuation">@Data</span>
+ <span class="token annotation punctuation">@AllArgsConstructor</span>
+ <span class="token annotation punctuation">@NoArgsConstructor</span>
+ <span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">Order2</span> <span class="token punctuation">{<!-- --></span>
+   <span class="token annotation punctuation">@TableId</span><span class="token punctuation">(</span>type <span class="token operator">=</span> <span class="token class-name">IdType</span><span class="token punctuation">.</span><span class="token constant">INPUT</span><span class="token punctuation">)</span>
+   <span class="token keyword">private</span> <span class="token class-name">Long</span> orderId<span class="token punctuation">;</span>
+   <span class="token keyword">private</span> <span class="token class-name">Long</span> userId<span class="token punctuation">;</span>
+   <span class="token keyword">private</span> <span class="token class-name">Long</span> merchantId<span class="token punctuation">;</span>
+   <span class="token keyword">private</span> <span class="token class-name">BigDecimal</span> amount<span class="token punctuation">;</span>
+   <span class="token keyword">private</span> <span class="token class-name">Integer</span> orderStatusId<span class="token punctuation">;</span>
+ <span class="token punctuation">}</span>
+</code></pre> 
+<p>t_order_item、t_order_item_2同理。见源码。</p> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Data</span>
+ <span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">OrderDTO</span> <span class="token punctuation">{<!-- --></span>
+   <span class="token keyword">private</span> <span class="token class-name">Order</span> order<span class="token punctuation">;</span>
+   <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">OrderItem</span><span class="token punctuation">&gt;</span></span> items<span class="token punctuation">;</span>
+ <span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="25mapper_137"></a>2.5创建mapper</h3> 
+<p>OrderMapper有个根据userId查询订单详情的方法。</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">interface</span> <span class="token class-name">OrderMapper</span> <span class="token keyword">extends</span> <span class="token class-name">BaseMapper</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Order</span><span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+   <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">OrderDTO</span><span class="token punctuation">&gt;</span></span> <span class="token function">getOrderListByUserId</span><span class="token punctuation">(</span><span class="token annotation punctuation">@Param</span><span class="token punctuation">(</span><span class="token string">"userId"</span><span class="token punctuation">)</span> <span class="token class-name">Long</span> userId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ <span class="token punctuation">}</span>
+</code></pre> 
+<p>OrderMapper2有个根据merchantId查询订单详情的方法。</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">interface</span> <span class="token class-name">OrderMapper2</span> <span class="token keyword">extends</span> <span class="token class-name">BaseMapper</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Order2</span><span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+   <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">OrderDTO</span><span class="token punctuation">&gt;</span></span> <span class="token function">getOrderListByMerchantId</span><span class="token punctuation">(</span><span class="token annotation punctuation">@Param</span><span class="token punctuation">(</span><span class="token string">"merchantId"</span><span class="token punctuation">)</span> <span class="token class-name">Long</span> merchantId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ <span class="token punctuation">}</span>
+</code></pre> 
+<p>OrderItemMapper、OrderItemMapper2见源码。</p> 
+<h4><a id="251____xml_157"></a>2.5.1 xml</h4> 
+<p>OrderMapper.xml</p> 
+<pre><code class="prism language-xml"><span class="token prolog">&lt;?xml version="1.0" encoding="UTF-8" ?&gt;</span>
+<span class="token doctype"><span class="token punctuation">&lt;!</span><span class="token doctype-tag">DOCTYPE</span> <span class="token name">mapper</span>
+        <span class="token name">PUBLIC</span> <span class="token string">"-//mybatis.org//DTD Mapper 3.0//EN"</span>
+        <span class="token string">"http://mybatis.org/dtd/mybatis-3-mapper.dtd"</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>mapper</span> <span class="token attr-name">namespace</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>com.example.asyncwrite.mapper.OrderMapper<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+
+
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>resultMap</span> <span class="token attr-name">id</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>order_dto_resultmap<span class="token punctuation">"</span></span> <span class="token attr-name">type</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>com.example.asyncwrite.model.OrderDTO<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>association</span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>order<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>com.example.asyncwrite.model.Order<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>id</span> <span class="token attr-name">column</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>order_id<span class="token punctuation">"</span></span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>orderId<span class="token punctuation">"</span></span> <span class="token attr-name">jdbcType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>BIGINT<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>java.lang.Long<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>result</span> <span class="token attr-name">column</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>amount<span class="token punctuation">"</span></span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>amount<span class="token punctuation">"</span></span>  <span class="token attr-name">jdbcType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>DECIMAL<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>java.math.BigDecimal<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>result</span> <span class="token attr-name">column</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>user_id<span class="token punctuation">"</span></span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>userId<span class="token punctuation">"</span></span>  <span class="token attr-name">jdbcType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>BIGINT<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>java.lang.Long<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>result</span> <span class="token attr-name">column</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>merchant_id<span class="token punctuation">"</span></span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>merchantId<span class="token punctuation">"</span></span>  <span class="token attr-name">jdbcType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>BIGINT<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>java.lang.Long<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>result</span> <span class="token attr-name">column</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>order_status_id<span class="token punctuation">"</span></span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>orderStatusId<span class="token punctuation">"</span></span>  <span class="token attr-name">jdbcType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>INTEGER<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>java.lang.Integer<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>association</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>collection</span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>items<span class="token punctuation">"</span></span> <span class="token attr-name">ofType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>com.example.asyncwrite.model.OrderItem<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>id</span> <span class="token attr-name">column</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>order_item_id<span class="token punctuation">"</span></span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>orderItemId<span class="token punctuation">"</span></span> <span class="token attr-name">jdbcType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>BIGINT<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>java.lang.Long<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>result</span> <span class="token attr-name">column</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>item_amount<span class="token punctuation">"</span></span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>amount<span class="token punctuation">"</span></span>  <span class="token attr-name">jdbcType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>DECIMAL<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>java.math.BigDecimal<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>result</span> <span class="token attr-name">column</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>user_id<span class="token punctuation">"</span></span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>userId<span class="token punctuation">"</span></span>  <span class="token attr-name">jdbcType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>BIGINT<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>java.lang.Long<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>result</span> <span class="token attr-name">column</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>merchant_id<span class="token punctuation">"</span></span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>merchantId<span class="token punctuation">"</span></span>  <span class="token attr-name">jdbcType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>BIGINT<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>java.lang.Long<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>collection</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>resultMap</span><span class="token punctuation">&gt;</span></span>
+
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>select</span> <span class="token attr-name">id</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>getOrderListByUserId<span class="token punctuation">"</span></span> <span class="token attr-name">resultMap</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>order_dto_resultmap<span class="token punctuation">"</span></span> <span class="token attr-name">parameterType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>long<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+    select o.order_id, o.amount, o.user_id, o.merchant_id, o.order_status_id,
+           oi.amount as item_amount, oi.order_item_id
+    from t_order as o join t_order_item as oi on o.order_id = oi.order_id
+    where o.user_id = #{userId,jdbcType=BIGINT}
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>select</span><span class="token punctuation">&gt;</span></span>
+
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>mapper</span><span class="token punctuation">&gt;</span></span>
+</code></pre> 
+<p>OrderMapper2.xml</p> 
+<pre><code class="prism language-xml"><span class="token prolog">&lt;?xml version="1.0" encoding="UTF-8" ?&gt;</span>
+<span class="token doctype"><span class="token punctuation">&lt;!</span><span class="token doctype-tag">DOCTYPE</span> <span class="token name">mapper</span>
+        <span class="token name">PUBLIC</span> <span class="token string">"-//mybatis.org//DTD Mapper 3.0//EN"</span>
+        <span class="token string">"http://mybatis.org/dtd/mybatis-3-mapper.dtd"</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>mapper</span> <span class="token attr-name">namespace</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>com.example.asyncwrite.mapper.OrderMapper2<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>resultMap</span> <span class="token attr-name">id</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>order_dto_resultmap<span class="token punctuation">"</span></span> <span class="token attr-name">type</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>com.example.asyncwrite.model.OrderDTO<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>association</span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>order<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>com.example.asyncwrite.model.Order<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+            <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>id</span> <span class="token attr-name">column</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>order_id<span class="token punctuation">"</span></span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>orderId<span class="token punctuation">"</span></span> <span class="token attr-name">jdbcType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>BIGINT<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>java.lang.Long<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+            <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>result</span> <span class="token attr-name">column</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>amount<span class="token punctuation">"</span></span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>amount<span class="token punctuation">"</span></span>  <span class="token attr-name">jdbcType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>DECIMAL<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>java.math.BigDecimal<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+            <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>result</span> <span class="token attr-name">column</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>user_id<span class="token punctuation">"</span></span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>userId<span class="token punctuation">"</span></span>  <span class="token attr-name">jdbcType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>BIGINT<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>java.lang.Long<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+            <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>result</span> <span class="token attr-name">column</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>merchant_id<span class="token punctuation">"</span></span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>merchantId<span class="token punctuation">"</span></span>  <span class="token attr-name">jdbcType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>BIGINT<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>java.lang.Long<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+            <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>result</span> <span class="token attr-name">column</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>order_status_id<span class="token punctuation">"</span></span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>orderStatusId<span class="token punctuation">"</span></span>  <span class="token attr-name">jdbcType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>INTEGER<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>java.lang.Integer<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>association</span><span class="token punctuation">&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>collection</span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>items<span class="token punctuation">"</span></span> <span class="token attr-name">ofType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>com.example.asyncwrite.model.OrderItem<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+            <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>id</span> <span class="token attr-name">column</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>order_item_id<span class="token punctuation">"</span></span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>orderItemId<span class="token punctuation">"</span></span> <span class="token attr-name">jdbcType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>BIGINT<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>java.lang.Long<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+            <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>result</span> <span class="token attr-name">column</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>item_amount<span class="token punctuation">"</span></span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>amount<span class="token punctuation">"</span></span>  <span class="token attr-name">jdbcType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>DECIMAL<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>java.math.BigDecimal<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+            <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>result</span> <span class="token attr-name">column</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>user_id<span class="token punctuation">"</span></span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>userId<span class="token punctuation">"</span></span>  <span class="token attr-name">jdbcType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>BIGINT<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>java.lang.Long<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+            <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>result</span> <span class="token attr-name">column</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>merchant_id<span class="token punctuation">"</span></span> <span class="token attr-name">property</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>merchantId<span class="token punctuation">"</span></span>  <span class="token attr-name">jdbcType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>BIGINT<span class="token punctuation">"</span></span> <span class="token attr-name">javaType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>java.lang.Long<span class="token punctuation">"</span></span><span class="token punctuation">/&gt;</span></span>
+        <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>collection</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>resultMap</span><span class="token punctuation">&gt;</span></span>
+
+
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>select</span> <span class="token attr-name">id</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>getOrderListByMerchantId<span class="token punctuation">"</span></span> <span class="token attr-name">resultMap</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>order_dto_resultmap<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+        select o.order_id, o.amount, o.user_id, o.merchant_id, o.order_status_id,
+               oi.amount as item_amount, oi.order_item_id
+        from t_order_2 as o join t_order_item_2 as oi on o.order_id = oi.order_id
+        where o.merchant_id = #{merchantId,jdbcType=BIGINT}
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>select</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>mapper</span><span class="token punctuation">&gt;</span></span>
+</code></pre> 
+<h3><a id="26_230"></a>2.6配置文件</h3> 
+<p>完整配置见源码application.properties。</p> 
+<h4><a id="261_____234"></a>2.6.1 运行模式、持久化仓库</h4> 
+<pre><code class="prism language-shell"><span class="token comment"># 运行模式: 单机模式</span>
+ <span class="token assign-left variable">spring.shardingsphere.mode.type</span><span class="token operator">=</span>Standalone
+ <span class="token comment"># 持久化仓库类型</span>
+ <span class="token assign-left variable">spring.shardingsphere.mode.repository.type</span><span class="token operator">=</span>JDBC
+ <span class="token comment"># 持久化仓库所需属性</span>
+ <span class="token assign-left variable">spring.shardingsphere.mode.repository.props.provider</span><span class="token operator">=</span>H2
+ <span class="token assign-left variable">spring.shardingsphere.mode.repository.props.jdbc_url</span><span class="token operator">=</span>jdbc:h2:mem:config<span class="token punctuation">;</span><span class="token assign-left variable">DB_CLOSE_DELAY</span><span class="token operator">=</span>-1<span class="token punctuation">;</span><span class="token assign-left variable">DATABASE_TO_UPPER</span><span class="token operator">=</span>false<span class="token punctuation">;</span><span class="token assign-left variable">MODE</span><span class="token operator">=</span>MYSQL
+ <span class="token assign-left variable">spring.shardingsphere.mode.repository.props.username</span><span class="token operator">=</span>root
+ <span class="token assign-left variable">spring.shardingsphere.mode.repository.props.password</span><span class="token operator">=</span>
+</code></pre> 
+<h4><a id="262_____250"></a>2.6.2 数据源</h4> 
+<pre><code class="prism language-shel"># 配置真实数据源
+ spring.shardingsphere.datasource.names=ds1,ds2
+ # 配置第 1 个数据源
+ spring.shardingsphere.datasource.ds1.type=com.zaxxer.hikari.HikariDataSource
+ spring.shardingsphere.datasource.ds1.driver-class-name=com.mysql.cj.jdbc.Driver
+ spring.shardingsphere.datasource.ds1.jdbc-url=jdbc:mysql://mysql3:3306/order_db0
+ spring.shardingsphere.datasource.ds1.username=root
+ spring.shardingsphere.datasource.ds1.password= 
+ # 配置第 2 个数据源
+ spring.shardingsphere.datasource.ds2.type=com.zaxxer.hikari.HikariDataSource
+ spring.shardingsphere.datasource.ds2.driver-class-name=com.mysql.cj.jdbc.Driver
+ spring.shardingsphere.datasource.ds2.jdbc-url=jdbc:mysql://mysql5:3306/order_db1
+ spring.shardingsphere.datasource.ds2.username=root
+ spring.shardingsphere.datasource.ds2.password=
+</code></pre> 
+<h4><a id="263____t_ordert_order_item_271"></a>2.6.3 t_order、t_order_item（用户端）分片</h4> 
+<p>根据userId分片</p> 
+<pre><code class="prism language-shell"><span class="token comment"># 用户端</span>
+ <span class="token comment"># 标准分片表配置</span>
+ <span class="token comment"># 由数据源名 + 表名组成，以小数点分隔。多个表以逗号分隔，支持 inline 表达式。缺省表示使用已知数据源与逻辑表名称生成数据节点，用于广播表（即每个库中都需要一个同样的表用于关联查询，多为字典表）或只分库不分表且所有库的表结构完全一致的情况</span>
+ spring.shardingsphere.rules.sharding.tables.t_order.actual-data-nodes<span class="token operator">=</span>ds1.t_order_$-<span class="token operator">&gt;</span><span class="token punctuation">{<!-- --></span><span class="token number">0</span><span class="token punctuation">..</span><span class="token number">1</span><span class="token punctuation">}</span>
+ spring.shardingsphere.rules.sharding.tables.t_order_item.actual-data-nodes<span class="token operator">=</span>ds1.t_order_item_$-<span class="token operator">&gt;</span><span class="token punctuation">{<!-- --></span><span class="token number">0</span><span class="token punctuation">..</span><span class="token number">1</span><span class="token punctuation">}</span>
+ <span class="token comment"># 分库策略，缺省表示使用默认分库策略，以下的分片策略只能选其一</span>
+ <span class="token comment"># 用于单分片键的标准分片场景</span>
+ <span class="token comment"># 分片列名称</span>
+ spring.shardingsphere.rules.sharding.tables.t_order.table-strategy.standard.sharding-column<span class="token operator">=</span>user_id
+ <span class="token comment"># 分片算法名称</span>
+ spring.shardingsphere.rules.sharding.tables.t_order.table-strategy.standard.sharding-algorithm-name<span class="token operator">=</span>my_mod
+ spring.shardingsphere.rules.sharding.tables.t_order_item.table-strategy.standard.sharding-column<span class="token operator">=</span>user_id
+ spring.shardingsphere.rules.sharding.tables.t_order_item.table-strategy.standard.sharding-algorithm-name<span class="token operator">=</span>my_mod
+</code></pre> 
+<h4><a id="264____t_order_2t_order_item_2_293"></a>2.6.4 t_order_2、t_order_item_2（商家端）分片</h4> 
+<p>根据merchantId分片</p> 
+<pre><code class="prism language-shell"><span class="token comment"># 商家端</span>
+ spring.shardingsphere.rules.sharding.tables.t_order_2.actual-data-nodes<span class="token operator">=</span>ds2.t_order_$-<span class="token operator">&gt;</span><span class="token punctuation">{<!-- --></span><span class="token number">0</span><span class="token punctuation">..</span><span class="token number">1</span><span class="token punctuation">}</span>
+ spring.shardingsphere.rules.sharding.tables.t_order_item_2.actual-data-nodes<span class="token operator">=</span>ds2.t_order_item_$-<span class="token operator">&gt;</span><span class="token punctuation">{<!-- --></span><span class="token number">0</span><span class="token punctuation">..</span><span class="token number">1</span><span class="token punctuation">}</span>
+ spring.shardingsphere.rules.sharding.tables.t_order_2.table-strategy.standard.sharding-column<span class="token operator">=</span>merchant_id
+ spring.shardingsphere.rules.sharding.tables.t_order_2.table-strategy.standard.sharding-algorithm-name<span class="token operator">=</span>my_mod
+ spring.shardingsphere.rules.sharding.tables.t_order_item_2.table-strategy.standard.sharding-column<span class="token operator">=</span>merchant_id
+ spring.shardingsphere.rules.sharding.tables.t_order_item_2.table-strategy.standard.sharding-algorithm-name<span class="token operator">=</span>my_mod
+</code></pre> 
+<h4><a id="265_____309"></a>2.6.5 绑定表、分片算法</h4> 
+<pre><code class="prism language-shell"><span class="token comment"># 分片算法配置</span>
+ <span class="token comment"># 分片算法类型</span>
+ spring.shardingsphere.rules.sharding.sharding-algorithms.my_mod.type<span class="token operator">=</span>MOD
+ <span class="token comment"># 分片算法属性配置</span>
+ spring.shardingsphere.rules.sharding.sharding-algorithms.my_mod.props.sharding-count<span class="token operator">=</span><span class="token number">2</span>
+ <span class="token comment"># 绑定表规则列表</span>
+ spring.shardingsphere.rules.sharding.binding-tables<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token operator">=</span>t_order,t_order_item
+ spring.shardingsphere.rules.sharding.binding-tables<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token operator">=</span>t_order_2,t_order_item_2
+ spring.shardingsphere.props.sql-show<span class="token operator">=</span>true
+</code></pre> 
+<h4><a id="266____kafka_325"></a>2.6.6 kafka</h4> 
+<pre><code class="prism language-shell"><span class="token comment"># kafka</span>
+ spring.kafka.bootstrap-servers<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token operator">=</span>kafka9:9092
+ spring.kafka.client-id<span class="token operator">=</span>user_order
+ spring.kafka.consumer.auto-offset-reset<span class="token operator">=</span>latest
+
+ spring.kafka.consumer.group-id<span class="token operator">=</span>order_new_consumer_group_1
+ spring.kafka.consumer.key-deserializer<span class="token operator">=</span>org.apache.kafka.common.serialization.StringDeserializer
+ spring.kafka.consumer.value-deserializer<span class="token operator">=</span>org.apache.kafka.common.serialization.StringDeserializer
+
+ spring.kafka.producer.key-serializer<span class="token operator">=</span>org.apache.kafka.common.serialization.StringSerializer
+ spring.kafka.producer.value-serializer<span class="token operator">=</span>org.apache.kafka.common.serialization.StringSerializer
+</code></pre> 
+<h3><a id="27_343"></a>2.7服务</h3> 
+<h4><a id="271_____345"></a>2.7.1 用户服务新增订单</h4> 
+<p>使用OrderMapper、OrderItemMapper新增订单，写到普通表，发送订单信息到”order_new”主题。</p> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Service</span>
+ <span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">UserOrderService</span> <span class="token punctuation">{<!-- --></span>
+
+   <span class="token annotation punctuation">@Autowired</span>
+   <span class="token keyword">private</span> <span class="token class-name">OrderMapper</span> orderMapper<span class="token punctuation">;</span>
+   <span class="token annotation punctuation">@Autowired</span>
+   <span class="token keyword">private</span> <span class="token class-name">OrderItemMapper</span> itemMapper<span class="token punctuation">;</span>
+   <span class="token annotation punctuation">@Autowired</span>
+   <span class="token keyword">private</span> <span class="token class-name">KafkaTemplate</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> kafkaTemplate<span class="token punctuation">;</span>
+
+   <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">createOrder</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+     <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">long</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> <span class="token number">12</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+       <span class="token class-name">Order</span> order <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Order</span><span class="token punctuation">(</span><span class="token keyword">null</span><span class="token punctuation">,</span> i <span class="token operator">+</span> <span class="token number">10000</span><span class="token punctuation">,</span> i <span class="token operator">+</span> <span class="token number">20001</span><span class="token punctuation">,</span> <span class="token keyword">new</span> <span class="token class-name">BigDecimal</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+       <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">OrderItem</span><span class="token punctuation">&gt;</span></span> list <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+       <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">long</span> j <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> j <span class="token operator">&lt;</span> <span class="token number">3</span><span class="token punctuation">;</span> j<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+         <span class="token class-name">OrderItem</span> orderItem <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">OrderItem</span><span class="token punctuation">(</span><span class="token keyword">null</span><span class="token punctuation">,</span> order<span class="token punctuation">.</span><span class="token function">getOrderId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> order<span class="token punctuation">.</span><span class="token function">getUserId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> order<span class="token punctuation">.</span><span class="token function">getMerchantId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token keyword">new</span> <span class="token class-name">BigDecimal</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+         list<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>orderItem<span class="token punctuation">)</span><span class="token punctuation">;</span>
+       <span class="token punctuation">}</span>
+       <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">OrderItem</span> orderItem <span class="token operator">:</span> list<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+         order<span class="token punctuation">.</span><span class="token function">setAmount</span><span class="token punctuation">(</span>order<span class="token punctuation">.</span><span class="token function">getAmount</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>orderItem<span class="token punctuation">.</span><span class="token function">getAmount</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+       <span class="token punctuation">}</span>
+       orderMapper<span class="token punctuation">.</span><span class="token function">insert</span><span class="token punctuation">(</span>order<span class="token punctuation">)</span><span class="token punctuation">;</span>
+       <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">OrderItem</span> orderItem <span class="token operator">:</span> list<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+         orderItem<span class="token punctuation">.</span><span class="token function">setOrderId</span><span class="token punctuation">(</span>order<span class="token punctuation">.</span><span class="token function">getOrderId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+         itemMapper<span class="token punctuation">.</span><span class="token function">insert</span><span class="token punctuation">(</span>orderItem<span class="token punctuation">)</span><span class="token punctuation">;</span>
+       <span class="token punctuation">}</span>
+       <span class="token class-name">OrderDTO</span> orderDTO <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">OrderDTO</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+       orderDTO<span class="token punctuation">.</span><span class="token function">setOrder</span><span class="token punctuation">(</span>order<span class="token punctuation">)</span><span class="token punctuation">;</span>
+       orderDTO<span class="token punctuation">.</span><span class="token function">setItems</span><span class="token punctuation">(</span>list<span class="token punctuation">)</span><span class="token punctuation">;</span>
+       kafkaTemplate<span class="token punctuation">.</span><span class="token function">send</span><span class="token punctuation">(</span><span class="token string">"order_new"</span><span class="token punctuation">,</span> <span class="token constant">JSON</span><span class="token punctuation">.</span><span class="token function">toJSONString</span><span class="token punctuation">(</span>orderDTO<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+     <span class="token punctuation">}</span>
+
+   <span class="token punctuation">}</span>
+
+
+ <span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="272_____391"></a>2.7.2 异步写到冗余表</h4> 
+<p>消费者监听”order_new”主题，当有新消息时，使用OrderMapper2、OrderItemMapper2新增订单，写到冗余表</p> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Configuration</span>
+ <span class="token annotation punctuation">@Slf4j</span>
+ <span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">WriteConsumer</span> <span class="token punctuation">{<!-- --></span>
+
+   <span class="token annotation punctuation">@Bean</span>
+   <span class="token keyword">public</span> <span class="token class-name">NewTopic</span> <span class="token function">topic</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+     <span class="token keyword">return</span> <span class="token class-name">TopicBuilder</span><span class="token punctuation">.</span><span class="token function">name</span><span class="token punctuation">(</span><span class="token string">"order_new"</span><span class="token punctuation">)</span>
+         <span class="token punctuation">.</span><span class="token function">partitions</span><span class="token punctuation">(</span><span class="token number">3</span><span class="token punctuation">)</span>
+         <span class="token punctuation">.</span><span class="token function">replicas</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>
+         <span class="token punctuation">.</span><span class="token function">build</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+   <span class="token punctuation">}</span>
+
+   <span class="token annotation punctuation">@Autowired</span>
+   <span class="token keyword">private</span> <span class="token class-name">OrderMapper2</span> orderMapper222<span class="token punctuation">;</span>
+
+   <span class="token annotation punctuation">@Autowired</span>
+   <span class="token keyword">private</span> <span class="token class-name">OrderItemMapper2</span> itemMapper222<span class="token punctuation">;</span>
+
+   <span class="token annotation punctuation">@KafkaListener</span><span class="token punctuation">(</span>id <span class="token operator">=</span> <span class="token string">"orderWew"</span><span class="token punctuation">,</span> topics <span class="token operator">=</span> <span class="token string">"order_new"</span><span class="token punctuation">)</span>
+   <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">orderWew</span><span class="token punctuation">(</span><span class="token class-name">String</span> in<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+     <span class="token class-name">OrderDTO</span> orderDTO <span class="token operator">=</span> <span class="token constant">JSON</span><span class="token punctuation">.</span><span class="token function">parseObject</span><span class="token punctuation">(</span>in<span class="token punctuation">,</span> <span class="token class-name">OrderDTO</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+     log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span>orderDTO<span class="token punctuation">.</span><span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+     <span class="token class-name">Order2</span> order2 <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Order2</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+     <span class="token class-name">BeanUtils</span><span class="token punctuation">.</span><span class="token function">copyProperties</span><span class="token punctuation">(</span>orderDTO<span class="token punctuation">.</span><span class="token function">getOrder</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> order2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+     orderMapper222<span class="token punctuation">.</span><span class="token function">insert</span><span class="token punctuation">(</span>order2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+     <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">OrderItem</span> item <span class="token operator">:</span> orderDTO<span class="token punctuation">.</span><span class="token function">getItems</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+       <span class="token class-name">OrderItem2</span> orderItem2 <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">OrderItem2</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+       <span class="token class-name">BeanUtils</span><span class="token punctuation">.</span><span class="token function">copyProperties</span><span class="token punctuation">(</span>item<span class="token punctuation">,</span> orderItem2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+       itemMapper222<span class="token punctuation">.</span><span class="token function">insert</span><span class="token punctuation">(</span>orderItem2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+     <span class="token punctuation">}</span>
+
+   <span class="token punctuation">}</span>
+
+
+ <span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="28_436"></a>2.8用户查询</h3> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Service</span>
+ <span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">UserOrderService</span> <span class="token punctuation">{<!-- --></span>
+
+   <span class="token annotation punctuation">@Autowired</span>
+   <span class="token keyword">private</span> <span class="token class-name">OrderMapper</span> orderMapper<span class="token punctuation">;</span>
+   <span class="token annotation punctuation">@Autowired</span>
+   <span class="token keyword">private</span> <span class="token class-name">OrderItemMapper</span> itemMapper<span class="token punctuation">;</span>
+   <span class="token annotation punctuation">@Autowired</span>
+   <span class="token keyword">private</span> <span class="token class-name">KafkaTemplate</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> kafkaTemplate<span class="token punctuation">;</span>
+
+   <span class="token keyword">public</span> <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">OrderDTO</span><span class="token punctuation">&gt;</span></span> <span class="token function">getOrderListByUserId</span><span class="token punctuation">(</span><span class="token class-name">Long</span> userId<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+     <span class="token keyword">return</span> orderMapper<span class="token punctuation">.</span><span class="token function">getOrderListByUserId</span><span class="token punctuation">(</span>userId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+   <span class="token punctuation">}</span>
+
+ <span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="281_____458"></a>2.8.1 商家查询</h4> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Service</span>
+ <span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">MerchantOrderService</span> <span class="token punctuation">{<!-- --></span>
+
+   <span class="token annotation punctuation">@Autowired</span>
+   <span class="token keyword">private</span> <span class="token class-name">OrderMapper2</span> orderMapper2<span class="token punctuation">;</span>
+
+   <span class="token keyword">public</span> <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">OrderDTO</span><span class="token punctuation">&gt;</span></span> <span class="token function">getOrderListByMerchantId</span><span class="token punctuation">(</span><span class="token annotation punctuation">@Param</span><span class="token punctuation">(</span><span class="token string">"merchantId"</span><span class="token punctuation">)</span> <span class="token class-name">Long</span> merchantId<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+     <span class="token keyword">return</span> orderMapper2<span class="token punctuation">.</span><span class="token function">getOrderListByMerchantId</span><span class="token punctuation">(</span>merchantId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+   <span class="token punctuation">}</span>
+
+ <span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="29_476"></a>2.9控制器</h3> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@RestController</span>
+ <span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">OrderController</span> <span class="token punctuation">{<!-- --></span>
+   <span class="token annotation punctuation">@Autowired</span>
+   <span class="token keyword">private</span> <span class="token class-name">UserOrderService</span> userOrderService<span class="token punctuation">;</span>
+   <span class="token annotation punctuation">@Autowired</span>
+   <span class="token keyword">private</span> <span class="token class-name">MerchantOrderService</span> merchantOrderService<span class="token punctuation">;</span>
+
+   <span class="token annotation punctuation">@GetMapping</span><span class="token punctuation">(</span><span class="token string">"/user/create"</span><span class="token punctuation">)</span>
+   <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">createOrder</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+     userOrderService<span class="token punctuation">.</span><span class="token function">createOrder</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+   <span class="token punctuation">}</span>
+
+   <span class="token annotation punctuation">@GetMapping</span><span class="token punctuation">(</span><span class="token string">"/user/order-list/{userId}"</span><span class="token punctuation">)</span>
+   <span class="token keyword">public</span> <span class="token class-name">Object</span> <span class="token function">getOrderListByUserId</span><span class="token punctuation">(</span><span class="token annotation punctuation">@PathVariable</span><span class="token punctuation">(</span><span class="token string">"userId"</span><span class="token punctuation">)</span> <span class="token class-name">Long</span> userId<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+     <span class="token keyword">return</span> userOrderService<span class="token punctuation">.</span><span class="token function">getOrderListByUserId</span><span class="token punctuation">(</span>userId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+   <span class="token punctuation">}</span>
+
+   <span class="token annotation punctuation">@GetMapping</span><span class="token punctuation">(</span><span class="token string">"/merchant/order-list/{merchantId}"</span><span class="token punctuation">)</span>
+   <span class="token keyword">public</span> <span class="token class-name">Object</span> <span class="token function">getOrderListByMerchantId</span><span class="token punctuation">(</span><span class="token annotation punctuation">@PathVariable</span><span class="token punctuation">(</span><span class="token string">"merchantId"</span><span class="token punctuation">)</span> <span class="token class-name">Long</span> merchantId<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+     <span class="token keyword">return</span> merchantOrderService<span class="token punctuation">.</span><span class="token function">getOrderListByMerchantId</span><span class="token punctuation">(</span>merchantId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+   <span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="210____504"></a>2.10 测试</h3> 
+<h4><a id="2101___506"></a>2.10.1 创建订单</h4> 
+<p>http://localhost:8080/user/create</p> 
+<h4><a id="2102___510"></a>2.10.2 用户查询</h4> 
+<h5><a id="21021_userId_512"></a>2.10.2.1 userId为奇数</h5> 
+<p>http://localhost:8080/user/order-list/10001</p> 
+<p>结果正确</p> 
+<pre><code>[{"order":{"orderId":1595244847462182914,"userId":10001,"merchantId":20002,"amount":6.00,"orderStatusId":1},"items":[{"orderItemId":1595244847462182915,"orderId":null,"userId":10001,"merchantId":20002,"amount":2.00}]},{"order":{"orderId":1595244847462182914,"userId":10001,"merchantId":20002,"amount":6.00,"orderStatusId":1},"items":[{"orderItemId":1595244847525097473,"orderId":null,"userId":10001,"merchantId":20002,"amount":2.00}]},{"order":{"orderId":1595244847462182914,"userId":10001,"merchantId":20002,"amount":6.00,"orderStatusId":1},"items":[{"orderItemId":1595244847588012033,"orderId":null,"userId":10001,"merchantId":20002,"amount":2.00}]}]
+</code></pre> 
+<p>只有一个Actual SQL。入参userId为奇数，选择的是ds1数据源（即mysql3-order_db0），关联的表是t_order_1、t_order_item_1。</p> 
+<pre><code>2022-11-23 12:15:57.746 INFO 12992 --- [nio-8080-exec-1] ShardingSphere-SQL            : Logic SQL: select o.order_id, o.amount, o.user_id, o.merchant_id, o.order_status_id,
+
+​        oi.amount as item_amount, oi.order_item_id
+
+​    from t_order as o join t_order_item as oi on o.order_id = oi.order_id
+
+​    where o.user_id = ?
+
+2022-11-23 12:15:57.748 INFO 12992 --- [nio-8080-exec-1] ShardingSphere-SQL            : Actual SQL: ds1 ::: select o.order_id, o.amount, o.user_id, o.merchant_id, o.order_status_id,
+
+​        oi.amount as item_amount, oi.order_item_id
+
+​    from t_order_1 as o join t_order_item_1 as oi on o.order_id = oi.order_id
+
+​    where o.user_id = ? ::: [10001]
+</code></pre> 
+<h5><a id="21022_userId_544"></a>2.10.2.2 userId为偶数</h5> 
+<p>http://localhost:8080/user/order-list/10002</p> 
+<pre><code>[{"order":{"orderId":1595244847667703810,"userId":10002,"merchantId":20003,"amount":6.00,"orderStatusId":1},"items":[{"orderItemId":1595244847718035457,"orderId":null,"userId":10002,"merchantId":20003,"amount":2.00}]},{"order":{"orderId":1595244847667703810,"userId":10002,"merchantId":20003,"amount":6.00,"orderStatusId":1},"items":[{"orderItemId":1595244847718035458,"orderId":null,"userId":10002,"merchantId":20003,"amount":2.00}]},{"order":{"orderId":1595244847667703810,"userId":10002,"merchantId":20003,"amount":6.00,"orderStatusId":1},"items":[{"orderItemId":1595244847780950017,"orderId":null,"userId":10002,"merchantId":20003,"amount":2.00}]}]
+</code></pre> 
+<p>只有一个Actual SQL。入参userId为偶数，选择的是ds1数据源（即mysql3-order_db0），关联的表是t_order_0、t_order_item_0。</p> 
+<pre><code>2022-11-23 12:21:12.638 INFO 12992 --- [nio-8080-exec-4] ShardingSphere-SQL            : Logic SQL: select o.order_id, o.amount, o.user_id, o.merchant_id, o.order_status_id,
+
+​        oi.amount as item_amount, oi.order_item_id
+
+​    from t_order as o join t_order_item as oi on o.order_id = oi.order_id
+
+​    where o.user_id = ?
+
+2022-11-23 12:21:12.639 INFO 12992 --- [nio-8080-exec-4] ShardingSphere-SQL            : Actual SQL: ds1 ::: select o.order_id, o.amount, o.user_id, o.merchant_id, o.order_status_id,
+
+​        oi.amount as item_amount, oi.order_item_id
+
+​    from t_order_0 as o join t_order_item_0 as oi on o.order_id = oi.order_id
+
+​    where o.user_id = ? ::: [10002]
+</code></pre> 
+<h4><a id="2103___574"></a>2.10.3 商家查询</h4> 
+<h5><a id="21031_merchantId_576"></a>2.10.3.1 merchantId为奇数</h5> 
+<p>http://localhost:8080/merchant/order-list/20001</p> 
+<pre><code>[{"order":{"orderId":1595244840621273089,"userId":10000,"merchantId":20001,"amount":6.00,"orderStatusId":1},"items":[{"orderItemId":1595244846082256897,"orderId":null,"userId":10000,"merchantId":20001,"amount":2.00}]},{"order":{"orderId":1595244840621273089,"userId":10000,"merchantId":20001,"amount":6.00,"orderStatusId":1},"items":[{"orderItemId":1595244846145171457,"orderId":null,"userId":10000,"merchantId":20001,"amount":2.00}]},{"order":{"orderId":1595244840621273089,"userId":10000,"merchantId":20001,"amount":6.00,"orderStatusId":1},"items":[{"orderItemId":1595244846203891713,"orderId":null,"userId":10000,"merchantId":20001,"amount":2.00}]}]
+</code></pre> 
+<p>只有一个Actual SQL。入参merchantId为奇数，选择的是ds2数据源（即mysql5-order_db1），关联的表是t_order_1、t_order_item_1。</p> 
+<pre><code>2022-11-23 12:23:40.547 INFO 12992 --- [nio-8080-exec-6] ShardingSphere-SQL            : Logic SQL: select o.order_id, o.amount, o.user_id, o.merchant_id, o.order_status_id,
+
+​        oi.amount as item_amount, oi.order_item_id
+
+​    from t_order_2 as o join t_order_item_2 as oi on o.order_id = oi.order_id
+
+​    where o.merchant_id = ?
+
+2022-11-23 12:23:40.547 INFO 12992 --- [nio-8080-exec-6] ShardingSphere-SQL            : Actual SQL: ds2 ::: select o.order_id, o.amount, o.user_id, o.merchant_id, o.order_status_id,
+
+​        oi.amount as item_amount, oi.order_item_id
+
+​    from t_order_1 as o join t_order_item_1 as oi on o.order_id = oi.order_id
+
+​    where o.merchant_id = ? ::: [20001]
+</code></pre> 
+<h5><a id="21032_merchantId_606"></a>2.10.3.2 merchantId为偶数</h5> 
+<p>http://localhost:8080/merchant/order-list/20002</p> 
+<pre><code>[{"order":{"orderId":1595244847462182914,"userId":10001,"merchantId":20002,"amount":6.00,"orderStatusId":1},"items":[{"orderItemId":1595244847462182915,"orderId":null,"userId":10001,"merchantId":20002,"amount":2.00}]},{"order":{"orderId":1595244847462182914,"userId":10001,"merchantId":20002,"amount":6.00,"orderStatusId":1},"items":[{"orderItemId":1595244847525097473,"orderId":null,"userId":10001,"merchantId":20002,"amount":2.00}]},{"order":{"orderId":1595244847462182914,"userId":10001,"merchantId":20002,"amount":6.00,"orderStatusId":1},"items":[{"orderItemId":1595244847588012033,"orderId":null,"userId":10001,"merchantId":20002,"amount":2.00}]}]
+</code></pre> 
+<p>只有一个Actual SQL。入参merchantId为偶数，选择的是ds2数据源（即mysql5-order_db1），关联的表是t_order_0、t_order_item_0。</p> 
+<pre><code>2022-11-23 12:25:45.910 INFO 12992 --- [io-8080-exec-10] ShardingSphere-SQL            : Logic SQL: select o.order_id, o.amount, o.user_id, o.merchant_id, o.order_status_id,
+
+​        oi.amount as item_amount, oi.order_item_id
+
+​    from t_order_2 as o join t_order_item_2 as oi on o.order_id = oi.order_id
+
+​    where o.merchant_id = ?
+
+2022-11-23 12:25:45.911 INFO 12992 --- [io-8080-exec-10] ShardingSphere-SQL            : Actual SQL: ds2 ::: select o.order_id, o.amount, o.user_id, o.merchant_id, o.order_status_id,
+
+​        oi.amount as item_amount, oi.order_item_id
+
+​     from t_order_0 as o join t_order_item_0 as oi on o.order_id = oi.order_id
+
+​    where o.merchant_id = ? ::: [20002]
+</code></pre> 
+<h4><a id="2104___636"></a>2.10.4 删除绑定表配置</h4> 
+<p>注释掉application.properties中的</p> 
+<pre><code class="prism language-shell"><span class="token comment">## 绑定表规则列表</span>
+<span class="token comment">#spring.shardingsphere.rules.sharding.binding-tables[0]=t_order,t_order_item</span>
+<span class="token comment">#spring.shardingsphere.rules.sharding.binding-tables[1]=t_order_2,t_order_item_2</span>
+</code></pre> 
+<p>访问http://localhost:8080/user/order-list/10002</p> 
+<p>结果依然正确</p> 
+<pre><code>[{"order":{"orderId":1595244847667703810,"userId":10002,"merchantId":20003,"amount":6.00,"orderStatusId":1},"items":[{"orderItemId":1595244847718035457,"orderId":null,"userId":10002,"merchantId":20003,"amount":2.00}]},{"order":{"orderId":1595244847667703810,"userId":10002,"merchantId":20003,"amount":6.00,"orderStatusId":1},"items":[{"orderItemId":1595244847718035458,"orderId":null,"userId":10002,"merchantId":20003,"amount":2.00}]},{"order":{"orderId":1595244847667703810,"userId":10002,"merchantId":20003,"amount":6.00,"orderStatusId":1},"items":[{"orderItemId":1595244847780950017,"orderId":null,"userId":10002,"merchantId":20003,"amount":2.00}]}]
+</code></pre> 
+<p>有两个Actual SQL。入参userId为偶数，选择的是ds1数据源（即mysql3-order_db0）。<br> 第一个sql关联的表是t_order_0、t_order_item_0。<br> 第一个sql关联的表是t_order_0、t_order_item_1。<br> 说明sharding-jdbc没有对t_order_item使用分片，因为我们并<strong>没有给出t_order_item的user_id</strong>条件</p> 
+<pre><code>2022-11-23 12:31:10.563 INFO 18036 --- [nio-8080-exec-1] ShardingSphere-SQL            : Logic SQL: select o.order_id, o.amount, o.user_id, o.merchant_id, o.order_status_id,
+
+​        oi.amount as item_amount, oi.order_item_id
+
+​    from t_order as o join t_order_item as oi on o.order_id = oi.order_id
+
+​    where o.user_id = ?
+
+2022-11-23 12:31:10.564 INFO 18036 --- [nio-8080-exec-1] ShardingSphere-SQL            : Actual SQL: ds1 ::: select o.order_id, o.amount, o.user_id, o.merchant_id, o.order_status_id,
+
+​        oi.amount as item_amount, oi.order_item_id
+
+​    from t_order_0 as o join t_order_item_0 as oi on o.order_id = oi.order_id
+
+​    where o.user_id = ? ::: [10002]
+
+2022-11-23 12:31:10.564 INFO 18036 --- [nio-8080-exec-1] ShardingSphere-SQL            : Actual SQL: ds1 ::: select o.order_id, o.amount, o.user_id, o.merchant_id, o.order_status_id,
+
+​        oi.amount as item_amount, oi.order_item_id
+
+​    from t_order_0 as o join t_order_item_1 as oi on o.order_id = oi.order_id
+
+​    where o.user_id = ? ::: [10002]
+</code></pre> 
+<h5><a id="21041_sqlt_order_itemuser_id_687"></a>2.10.4.1 修改sql，增加t_order_item的user_id条件</h5> 
+<pre><code class="prism language-xml"><span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>select</span> <span class="token attr-name">id</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>getOrderListByUserId<span class="token punctuation">"</span></span> <span class="token attr-name">resultMap</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>order_dto_resultmap<span class="token punctuation">"</span></span> <span class="token attr-name">parameterType</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>long<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>
+   select o.order_id, o.amount, o.user_id, o.merchant_id, o.order_status_id,
+      oi.amount as item_amount, oi.order_item_id
+   from t_order as o join t_order_item as oi on o.order_id = oi.order_id
+   where o.user_id = #{userId,jdbcType=BIGINT} and oi.user_id = #{userId,jdbcType=BIGINT}
+ <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>select</span><span class="token punctuation">&gt;</span></span>
+</code></pre> 
+<p>结果跟未删除绑定表之前一样。绑定表就是分片规则一致的作为一组。这说明配置了绑定表，在关联查询时我们只需要给出一个表的条件即可。</p> 
+<pre><code>2022-11-23 12:37:21.429 INFO 19420 --- [nio-8080-exec-1] ShardingSphere-SQL            : Logic SQL: select o.order_id, o.amount, o.user_id, o.merchant_id, o.order_status_id,
+
+        oi.amount as item_amount, oi.order_item_id
+
+    from t_order as o join t_order_item as oi on o.order_id = oi.order_id
+
+    where o.user_id = ? and oi.user_id = ?
+
+2022-11-23 12:37:21.430 INFO 19420 --- [nio-8080-exec-1] ShardingSphere-SQL            : Actual SQL: ds1 ::: select o.order_id, o.amount, o.user_id, o.merchant_id, o.order_status_id,
+
+        oi.amount as item_amount, oi.order_item_id
+
+    from t_order_0 as o join t_order_item_0 as oi on o.order_id = oi.order_id
+
+    where o.user_id = ? and oi.user_id = ? ::: [10002, 10002]
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/2a379dd4af0a05de167ed2d46a206e4f/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">CentOS Stream 9 配置静态 IP</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/d6f4c49f6f643f17507e1bd4e76f2400/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">(BV11b)基于标准LWE假设的加密方案初学</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>进程间通信---共享内存&amp;shmget - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="进程间通信---共享内存&amp;shmget" />
+<meta property="og:description" content="介绍这一部分主要从它的几个函数入手：
+概念：共享内存是在物理内存上开辟一块区域，这段被多个进程映射到自己进程的虚拟地址空间上，这些进程就可以直接访问该共享内存区域，从而通过该区域实现各进程间的通信。共享内存是进程间最快的一种通信方式，一个进程向共享内存上面写数据，共享这块内存的所有进程都可以看到其中的内容，这块共享内存的页面，出现在所用共享该页面进程的页表中，给人一种就是在访问自己地址空间里面的数据一样。共享内存映射图：
+可以看到进程A和进程B共享了一块内存，分别将共享内存所在的物理页加入到自己的页表中，访问时就像访问自己的东西一样，所以它是最快的一种通信方式。但是会有一个问题，就是可能存在多个进程同时访问这块区域，此时共享内存区域就成了临界资源，所以我们在使用共享内存时需要对它进行同步控制才能保证安全的使用。比如信号量、加锁等方式。
+和其他IPC对象一样，共享内存对象的获取也是由key控制。每一个新创建的共享内存对象都用一个shmid_kernel的数据结构表示。系统中所用的shmid_kernel数据结构都保存在shm_segs向量表中，该向量表中的每一个元素都是一个指向shmid_kernel数据结构的指针。shimd_kernel会包含共享内存的所用信息。
+Linux为共享内存提供的四种操作
+1、shmget函数：创建或者获得一个共享内存对象。它和其他两种IPC机制一样，进程在使用共享内存区域之前，必须通过系统调用sys_ipc（call值为SHMGET）创建一个键值为key的共享内存对象，或者获得已经存在的键值为key的某共享内存对象的引用标识符。以后对共享内存对象的访问都是通过该引用标识符进行。看一下shmget函数定义：
+int shmget(key_t key,int size,int shmflg) 这里key表示该共享内存的键值，size是该共享内存的大小（以字节为单位），shmflg是标志（对该共享内存对象的特殊要求）。
+过程如下：
+计算size要占用的页数，检查其合法性申请一块内存用于建立shmid_kernel数据结构，（这里申请的内存区域大小不包括真正的共享内存区，实际上，要等第一个进程试图访问它的时候才真正创建共享内存区。将shmid_kernel数据结构加入到向量表shm_segs中的合适位置返回该共享内存对象的引用标识符。 2、shmat函数：在获得共享内存区域的引用标识符后，还必须将共享内存区域映射到进程的虚拟地址空间中，然后才能使用该共享内存区域。系统调用sys_IPC（call值为SHMAT）用于共享内存区到进程虚拟地址空间的映射。看一下shmat函数的定义：
+void * shmat(int shmid,const void *shmaddr,int shmflg); shmid：是shmget返回的共享内存对象的引用标识符
+shmaddr：用来指定该共享内存在进程虚拟地址空间对应的虚拟地址（如果是0则由系统分配，一般从1G开始）
+shaflg：映射标志
+返回值：进程的虚拟地址
+过程如下：
+根据shmid找到共享内存对象检查shmaddr的合法性（不能超过3G)申请一块内存用于创建数据结构vm_area_struct，填写该结构将其加入到进程的mm结构和该共享对象的vm_area_atruct中 注意：
+当进程第一次访问共享虚拟内存的某页时，因为所有的共享内存页都还没有分配，所以会发生一个page fault异常。然后Linux处理这个缺页异常，将分配一个物理页，并为它创建一个页表条目。这个不仅进入当前进程的页表，同时也存到shmid_kernel数据结构的页表shm_pages中。
+当下一个进程访问这块内存时，发生page fault的时候，在查看shmid_kelnel数据结构的shm_pages时，发现共享页已经存在，它只需要把其中的页表项填入到自己进程页表的相应位置即可，而不需要重新创建物理页，所以，是第一个访问共享内存的进程创建物理页后其他访问它的进程只需要把该页加入到自己的虚拟地址空间就好了。
+3、shmdt函数：当进程不需要共享这块内存时，更新自己的页表，共享内存对应的虚拟内存页被标记为无效。当最后一个进程分离这个共享内存时，共享内存页被释放，同时共享内存的shmid_kernel数据结构也被释放。Shmdt函数定义：
+int shmdt(char *shmaddr) shmaddr:表示进程要分离共享页的起始虚拟地址。
+该函数搜索内存中所用的vm_area_atruct数据结构，找到地址shmaddr对应的那个，调用函数将其释放，更新进程表中对应的页表项。
+4、Shmctl函数：操作包括获得共享内存对象的状态、释放共享内存对象资源等。这里涉及到了同步控制问题。
+下面看一下代码示例：
+#include &lt;sys/types.h&gt; #include &lt;sys/ipc.h&gt; #include &lt;sys/shm.h&gt; 1.创建共享内存： int shmget(key_t key,int size,int shmflg); 参数说明： key:用来表示新建或者已经存在的共享内存去的关键字。 size：创建共享内存的大小。 shmflg：可以指定的特殊标志。IPC_CREATE,IPC_EXCL以及低九位的权限。 eg： int shmid; shmid=shmget(IPC_PRIVATE,4096,IPC_CREATE|IPC_EXCL|0660); if(shmid==-1) perror(&#34;shmget()&#34;); 2.连接共享内存 char *shmat(int shmid,char *shmaddr,int shmflg); 参数说明 shmid：共享内存的关键字 shmaddr：指定共享内存出现在进程内存地址的什么位置，通常我们让内核自己决定一个合适的地址位置，用的时候设为0。 eg： int shmid; char *shmp; shmp=shmat(shmid,0,0); if(shmp==(char *)(-1)) perror(&#34;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/7222cebaa4018059fa467ff640237b33/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2018-08-17T12:43:30+08:00" />
+<meta property="article:modified_time" content="2018-08-17T12:43:30+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">进程间通信---共享内存&amp;shmget</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p style="margin-left:0pt;"><span style="color:#f33b45;">介绍这一部分主要从它的几个函数入手：</span></p> 
+<p style="margin-left:0pt;"><span style="color:#3399ea;"><strong>概念</strong></span>：共享内存是在物理内存上开辟一块区域，这段被多个进程映射到自己进程的虚拟地址空间上，这些进程就可以直接访问该共享内存区域，从而通过该区域实现各进程间的通信。共享内存是进程间最快的一种通信方式，一个进程向共享内存上面写数据，共享这块内存的所有进程都可以看到其中的内容，这块共享内存的页面，出现在所用共享该页面进程的页表中，给人一种就是在访问自己地址空间里面的数据一样。共享内存映射图：</p> 
+<p style="margin-left:0pt;"><img alt="" class="has" height="220" src="https://images2.imgbox.com/18/0b/WDUQ8DFZ_o.png" width="665"></p> 
+<p style="margin-left:0pt;">可以看到进程A和进程B共享了一块内存，分别将共享内存所在的物理页加入到自己的页表中，访问时就像访问自己的东西一样，所以它是最快的一种通信方式。但是会有一个问题，就是可能存在多个进程同时访问这块区域，此时共享内存区域就成了临界资源，所以我们在使用共享内存时需要对它进行同步控制才能保证安全的使用。比如信号量、加锁等方式。</p> 
+<p style="margin-left:0pt;"> </p> 
+<p style="margin-left:0pt;">和其他IPC对象一样，共享内存对象的获取也是由key控制。每一个新创建的共享内存对象都用一个<strong><span style="color:#f33b45;">shmid_kernel</span></strong>的数据结构表示。系统中所用的shmid_kernel数据结构都保存在<span style="color:#f33b45;">shm_segs</span>向量表中，该向量表中的每一个元素都是一个指向shmid_kernel数据结构的指针。shimd_kernel会包含共享内存的所用信息。</p> 
+<p style="margin-left:0pt;"> </p> 
+<p style="margin-left:0pt;"><strong><span style="color:#f33b45;">Linux为共享内存提供的四种操作</span></strong></p> 
+<p><span style="color:#3399ea;">1、shmget函数</span>：创建或者获得一个共享内存对象。它和其他两种IPC机制一样，进程在使用共享内存区域之前，必须通过系统调用sys_ipc（call值为SHMGET）创建一个键值为key的共享内存对象，或者获得已经存在的键值为key的某共享内存对象的引用标识符。以后对共享内存对象的访问都是通过该引用标识符进行。看一下shmget函数定义：</p> 
+<pre class="has"><code class="language-cpp">int shmget(key_t key,int size,int shmflg)</code></pre> 
+<p style="margin-left:0pt;">这里key表示该共享内存的键值，size是该共享内存的大小（以字节为单位），shmflg是标志（对该共享内存对象的特殊要求）。</p> 
+<p style="margin-left:0pt;"> 过程如下：</p> 
+<ol><li>计算size要占用的页数，检查其合法性</li><li>申请一块内存用于建立shmid_kernel数据结构，（这里申请的内存区域大小不包括真正的共享内存区，实际上，要等第一个进程试图访问它的时候才真正创建共享内存区。</li><li>将shmid_kernel数据结构加入到向量表shm_segs中的合适位置</li><li>返回该共享内存对象的引用标识符。</li></ol> 
+<p style="margin-left:0pt;"> </p> 
+<p><span style="color:#3399ea;">2、shmat函数：</span>在获得共享内存区域的引用标识符后，还必须将共享内存区域映射到进程的虚拟地址空间中，然后才能使用该共享内存区域。系统调用sys_IPC（call值为SHMAT）用于共享内存区到进程虚拟地址空间的映射。看一下shmat函数的定义：</p> 
+<pre class="has"><code class="language-cpp">void * shmat(int shmid,const void *shmaddr,int shmflg);</code></pre> 
+<p style="margin-left:0pt;">shmid：是shmget返回的共享内存对象的引用标识符</p> 
+<p style="margin-left:0pt;">shmaddr：用来指定该共享内存在进程虚拟地址空间对应的虚拟地址（如果是0则由系统分配，一般从1G开始）</p> 
+<p style="margin-left:0pt;">shaflg：映射标志</p> 
+<p style="margin-left:0pt;">返回值：进程的虚拟地址</p> 
+<p style="margin-left:0pt;">过程如下：</p> 
+<ol><li>根据shmid找到共享内存对象</li><li>检查shmaddr的合法性（不能超过3G)</li><li>申请一块内存用于创建数据结构vm_area_struct，填写该结构</li><li>将其加入到进程的mm结构和该共享对象的vm_area_atruct中</li></ol> 
+<p style="margin-left:0pt;">注意：</p> 
+<p style="margin-left:0pt;">当进程第一次访问共享虚拟内存的某页时，因为所有的共享内存页都还没有分配，所以会发生一个page fault异常。然后Linux处理这个缺页异常，将分配一个物理页，并为它创建一个页表条目。这个不仅进入当前进程的页表，同时也存到shmid_kernel数据结构的页表shm_pages中。</p> 
+<p style="margin-left:0pt;">当下一个进程访问这块内存时，发生page fault的时候，在查看shmid_kelnel数据结构的shm_pages时，发现共享页已经存在，它只需要把其中的页表项填入到自己进程页表的相应位置即可，而不需要重新创建物理页，所以，是第一个访问共享内存的进程创建物理页后其他访问它的进程只需要把该页加入到自己的虚拟地址空间就好了。</p> 
+<p style="margin-left:0pt;"> </p> 
+<p><span style="color:#3399ea;">3、shmdt函数：</span>当进程不需要共享这块内存时，更新自己的页表，共享内存对应的虚拟内存页被标记为无效。当最后一个进程分离这个共享内存时，共享内存页被释放，同时共享内存的shmid_kernel数据结构也被释放。Shmdt函数定义：</p> 
+<pre class="has"><code class="language-cpp">int shmdt(char *shmaddr)</code></pre> 
+<p style="margin-left:0pt;">shmaddr:表示进程要分离共享页的起始虚拟地址。</p> 
+<p style="margin-left:0pt;">该函数搜索内存中所用的vm_area_atruct数据结构，找到地址shmaddr对应的那个，调用函数将其释放，更新进程表中对应的页表项。</p> 
+<p style="margin-left:0pt;"> </p> 
+<p><span style="color:#3399ea;">4、Shmctl函数：</span>操作包括获得共享内存对象的状态、释放共享内存对象资源等。这里涉及到了同步控制问题。</p> 
+<p>下面看一下代码示例：</p> 
+<pre class="has"><code class="language-cpp">#include &lt;sys/types.h&gt;
+#include &lt;sys/ipc.h&gt;
+#include &lt;sys/shm.h&gt;
+1.创建共享内存：
+int shmget(key_t key,int size,int shmflg);
+参数说明：
+key:用来表示新建或者已经存在的共享内存去的关键字。
+size：创建共享内存的大小。
+shmflg：可以指定的特殊标志。IPC_CREATE,IPC_EXCL以及低九位的权限。
+eg：
+int shmid;
+shmid=shmget(IPC_PRIVATE,4096,IPC_CREATE|IPC_EXCL|0660);
+if(shmid==-1)
+perror("shmget()");
+
+2.连接共享内存
+char *shmat(int shmid,char *shmaddr,int shmflg);
+参数说明
+shmid：共享内存的关键字
+shmaddr：指定共享内存出现在进程内存地址的什么位置，通常我们让内核自己决定一个合适的地址位置，用的时候设为0。
+eg：
+int shmid;
+char *shmp;
+shmp=shmat(shmid,0,0);
+if(shmp==(char *)(-1))
+perror("shmat()\n");
+
+3.分离共享内存：当程序不再需要共享内后，我们需要将共享内存分离以便对其进行释放，分离共享内存的函数原形如下：
+int shmdt(char *shmaddr);
+
+4.释放共享内存
+int shmctl(int shmid,int cmd,struct shmid_ds *buf);</code></pre> 
+<p>参考博客：<a href="https://blog.csdn.net/yusiguyuan/article/details/45154921">https://blog.csdn.net/yusiguyuan/article/details/45154921</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/7b4acdf074d2af2ecb1cf977ff9e6bc7/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">关于mysql的mycat中间件安装配置与python使用mycat例子</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/361aae461d77d34997d82d5b53f0604e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">java.lang.ArrayIndexOutOfBoundsException 数组下标越界异常</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

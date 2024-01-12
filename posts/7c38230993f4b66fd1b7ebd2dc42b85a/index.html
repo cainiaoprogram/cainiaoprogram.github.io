@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>对mysql索引、排序理解 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="对mysql索引、排序理解" />
+<meta property="og:description" content="节前和同时讨论了一下mysql的索引,发现自己对索引的理解有很大问题,国庆节就看了一下这里做一下记录,目前了解的比较浅如果有理解错的地方还请大家可以提出来一起讨论、学习
+再聊索引之前我们一起聊一下表在windows里面的存储,其实库在机器里面就是一个目录
+表就是对应库目录下面的以.frm结尾的文件,文件里面就记录了一条条数据
+什么是索引
+自己理解就是存在磁盘里面为了提升查询速度的一棵树,当然在需要的时候会将索引从磁盘加载到内存里 聚簇索引
+聚簇索引就是主键索引下面是画的一张主键索引草图,当我们通过索引查询的时候先会将索引树加载到内存里面,之后通过二分法找到值所在磁盘,将指定磁盘加载到内存在通过二分法找到主键下面对应的数据
+非聚簇索引非聚簇索引也叫二级索引,他跟聚簇索引的区别是不是主键 并且最后的叶子结点存放的不是最终的数据,而是主键的值,在查询到主键的值后在回到主键索引树里面找到最终的数据,这个过程叫做回表 可以看出会标需要查询两次索引树性能较慢,不过我们也可以通过索引覆盖来避免回表.
+索引覆盖
+索引覆盖就是我们创建的非聚簇索引包含了我们需要查询的所有字段这时候我们需要的数据在索引树上面就全部都有了,不需要在回表了,那怎么让我们索引包含多个字段呢?这又引入了另一个中非聚簇索引 联合索引 联合索引
+联合索引是将表里面多个字段合在一起作为一个索引树,其实这是创建了三个索引,但是再使用的时候会遵循最左原则,这里的最左原则我们稍后会详细介绍,先看下图了解,通过下图我们可以发现联合索引树上面的顺序是根据最左边的索引来决定的,而后面的索引会根据前面的索引作为第一排序,然后在对第二、第三…进行排序 可以理解成ascll码值的排序比如下图所展示的 (1,1 1,2 2,1 2,4 3,1)
+创建一张表包含的字段和设置索引
+第一段sql通过包含最左边的字段进行查询其匹配规则是先找到索引树上面最左边的字段name进行查询,在通过第二个age进行查询在通过orde进行查询可以看到每一个查询的类型都是const,这里编写sql的时候可以不用关注先后顺序,mysql会自动优化顺序在进行查询
+这句sql没有包含最左边的字段name最终查询的类型是index也就是便利了整课索引树
+如果联合索引是由字段A,B,C组成那么在查询的时候如果是通过where A= ? and C = ?这样的方式就没办法两个索引都使用到,因为联合索引排序是从左到右字段顺序排列,就下下面的例子,name = ‘555’ and orde = 6 通过使用索引的长度可以看出来只是使用了name字段
+索引与排序
+filesort: 这个排序准确来说有三种排序方式
+单路排序:查询条件使用了索引但是排序没使用索引(联合索引排除,下面细说)mysql会将查询出来的数据放入到sort buffer进行排序然后返回双路排序:还是单路排序的情况但是这时候查询出来的字段特别多sort buffer内存不够了,这时候mysql会将主键id(可以定位到整条数据的字段值)和排序的字段值放入到sort buffer里面进行排序然后拿出来再回一次表将数据返回文件排: 这种情况就是查询出来的数据过大双路排序晒出来的字段也超过了sort buffer里面的内存这时候mysql会将所有的数据拆分成多份,每一份单独排序生成一个临时小文件,之后小文件在跟小文件之间排序一次类推生成一个数据总和返回效率极低 我们创建一个 id 主键索引 age,sex 联合索引的一张测试表
+mysql默认排序貌似是有自己的算法来决定的,这里的sql可以看出来他是通过age的索引进行顺序排列,并不一定默认是主键,通过explain来看根据索引排序的话无论是正序还是倒叙都不会触发filesort联合索引排除 select * from t_test; 这里详细说一下联合索引,我们都知道最左原则这里通过最左原则的age先定位到部分数据也就是age=1的数据后面排序通过联合索引里面的sex进行倒叙或者顺序都不会触发filesort EXPLAIN select * from t_test where age = 1 order by sex desc; EXPLAIN select * from t_test where age = 1 order by sex; 如果最左原则查到的是一个范围而不是相同数据的值那么可以看出来无论联合索引里面的另一个字段是顺序还是倒叙都会触发filesort这个我们通过上面的联合索引存储方式很容易理解,因为联合索引默认会对数据进行排序存储,(1,1) (1,2) (2,1) (2,2)这里where使用到了索引age但是因为是联合索引所以没有办法对age进行单独排序在对sex记性排序的时候就没办法通过索引了 EXPLAIN select * from t_test where age in (1,2) order by sex asc; EXPLAIN select * from t_test where age in (1,2) order by sex desc; 还是上面的情况,联合索引最左原则筛选出范围数据,因为联合索引的排序是多字段的所以排序的时候需要加上最左边的即可不不触发filesort,但是还有触发的情况继续往下看 EXPLAIN select * from t_test where age in (1,2) order by age asc,sex asc; EXPLAIN select * from t_test where age in (1,2) order by age desc,sex desc; 如果联合索引里面的排序加上了最左边的,但是两个字段一个是正序一个是降序也会触发filesort这个原因结合联合索引的存储方式就很容易理解上面也有解释 EXPLAIN select * from t_test where age in (1,2) order by age asc,sex desc; EXPLAIN select * from t_test where age in (1,2) order by age desc,sex asc; 需要注意的点:如果我查询的语句没有使用到索引 那么order by 即使使用了索引也会二次排序 举个例子 一张表 id:主键索引 age:普通索引 sex和subject:联合索引sex在左边 name:没有索引 示例一: 会进入sort file,查询条件没有走索引 所以这里order by只能二次排序" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/7c38230993f4b66fd1b7ebd2dc42b85a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-07-20T12:02:48+08:00" />
+<meta property="article:modified_time" content="2023-07-20T12:02:48+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">对mysql索引、排序理解</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <blockquote> 
+ <p>节前和同时讨论了一下mysql的索引,发现自己对索引的理解有很大问题,国庆节就看了一下这里做一下记录,目前了解的比较浅如果有理解错的地方还请大家可以提出来一起讨论、学习<br> 再聊索引之前我们一起聊一下表在windows里面的存储,其实库在机器里面就是一个目录<br> 表就是对应库目录下面的以.frm结尾的文件,文件里面就记录了一条条数据</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/a0/e2/ijRv3Mql_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/4e/6b/cudofHtX_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>什么是索引</strong></p> 
+<ul><li>自己理解就是存在磁盘里面为了提升查询速度的一棵树,当然在需要的时候会将索引从磁盘加载到内存里</li></ul> 
+<p><strong>聚簇索引</strong></p> 
+<ul><li>聚簇索引就是主键索引下面是画的一张主键索引草图,当我们通过索引查询的时候先会将索引树加载到内存里面,之后通过二分法找到值所在磁盘,将指定磁盘加载到内存在通过二分法找到主键下面对应的数据<br> <img src="https://images2.imgbox.com/fa/61/mKk3gcPt_o.png" alt=""><br> <strong>非聚簇索引</strong></li><li>非聚簇索引也叫二级索引,他跟聚簇索引的区别是不是主键 并且最后的叶子结点存放的不是最终的数据,而是主键的值,在查询到主键的值后在回到主键索引树里面找到最终的数据,这个过程叫做回表 可以看出会标需要查询两次索引树性能较慢,不过我们也可以通过索引覆盖来避免回表.<br> <img src="https://images2.imgbox.com/f4/1a/RPWp5MA7_o.png" alt="在这里插入图片描述"></li></ul> 
+<p><strong>索引覆盖</strong></p> 
+<ul><li>索引覆盖就是我们创建的非聚簇索引包含了我们需要查询的所有字段这时候我们需要的数据在索引树上面就全部都有了,不需要在回表了,那怎么让我们索引包含多个字段呢?这又引入了另一个中非聚簇索引 联合索引</li></ul> 
+<p><strong>联合索引</strong></p> 
+<ul><li>联合索引是将表里面多个字段合在一起作为一个索引树,其实这是创建了三个索引,但是再使用的时候会遵循最左原则,这里的最左原则我们稍后会详细介绍,先看下图了解,</li><li>通过下图我们可以发现联合索引树上面的顺序是根据最左边的索引来决定的,而后面的索引会根据前面的索引作为第一排序,然后在对第二、第三…进行排序 可以理解成ascll码值的排序比如下图所展示的 (1,1 1,2 2,1 2,4 3,1)<br> <img src="https://images2.imgbox.com/fa/91/F1fm8HHT_o.png" alt="在这里插入图片描述"></li><li>创建一张表包含的字段和设置索引<br> <img src="https://images2.imgbox.com/bb/99/89UwRdIz_o.png" alt="在这里插入图片描述"><img src="https://images2.imgbox.com/2f/48/dF1JmUfu_o.png" alt="在这里插入图片描述"></li></ul> 
+<blockquote> 
+ <p>第一段sql通过包含最左边的字段进行查询其匹配规则是先找到索引树上面最左边的字段name进行查询,在通过第二个age进行查询在通过orde进行查询可以看到每一个查询的类型都是const,这里编写sql的时候可以不用关注先后顺序,mysql会自动优化顺序在进行查询<br> <img src="https://images2.imgbox.com/07/57/NSWpJrqG_o.png" alt="在这里插入图片描述"></p> 
+</blockquote> 
+<blockquote> 
+ <p>这句sql没有包含最左边的字段name最终查询的类型是index也就是便利了整课索引树<br> <img src="https://images2.imgbox.com/e8/58/vbq8VBww_o.png" alt="在这里插入图片描述"></p> 
+</blockquote> 
+<blockquote> 
+ <p>如果联合索引是由字段A,B,C组成那么在查询的时候如果是通过where A= ? and C = ?这样的方式就没办法两个索引都使用到,因为联合索引排序是从左到右字段顺序排列,就下下面的例子,name = ‘555’ and orde = 6 通过使用索引的长度可以看出来只是使用了name字段<br> <img src="https://images2.imgbox.com/4d/bc/GgNr2cXy_o.png" alt="在这里插入图片描述"></p> 
+</blockquote> 
+<p><strong>索引与排序</strong><br> filesort: 这个排序准确来说有三种排序方式</p> 
+<ol><li>单路排序:查询条件使用了索引但是排序没使用索引(<em>联合索引排除,下面细说</em>)mysql会将查询出来的数据放入到sort buffer进行排序然后返回</li><li>双路排序:还是单路排序的情况但是这时候查询出来的字段特别多sort buffer内存不够了,这时候mysql会将主键id(<em>可以定位到整条数据的字段值</em>)和排序的字段值放入到sort buffer里面进行排序然后拿出来再回一次表将数据返回</li><li>文件排: 这种情况就是查询出来的数据过大双路排序晒出来的字段也超过了sort buffer里面的内存这时候mysql会将所有的数据拆分成多份,每一份单独排序生成一个临时小文件,之后小文件在跟小文件之间排序一次类推生成一个数据总和返回效率极低</li></ol> 
+<blockquote> 
+ <p>我们创建一个 id 主键索引 age,sex 联合索引的一张测试表<br> <img src="https://images2.imgbox.com/b0/3d/3yVh4SWa_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/bc/30/htd5rdyI_o.png" alt="在这里插入图片描述"></p> 
+</blockquote> 
+<ol><li>mysql默认排序貌似是有自己的算法来决定的,这里的sql可以看出来他是通过age的索引进行顺序排列,并不一定默认是主键,通过explain来看根据索引排序的话无论是正序还是倒叙都不会触发filesort<em>联合索引排除</em></li></ol> 
+<pre><code class="prism language-java">select <span class="token operator">*</span> from t_test<span class="token punctuation">;</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/d6/14/sDzD11jX_o.png" alt="在这里插入图片描述"></p> 
+<ol start="2"><li>这里详细说一下联合索引,我们都知道最左原则这里通过最左原则的age先定位到部分数据也就是age=1的数据后面排序通过联合索引里面的sex进行倒叙或者顺序都不会触发filesort</li></ol> 
+<pre><code class="prism language-java"><span class="token constant">EXPLAIN</span>
+select <span class="token operator">*</span> from t_test where age <span class="token operator">=</span> <span class="token number">1</span> order by sex desc<span class="token punctuation">;</span>
+<span class="token constant">EXPLAIN</span>
+select <span class="token operator">*</span> from t_test where age <span class="token operator">=</span> <span class="token number">1</span> order by sex<span class="token punctuation">;</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/10/18/4P4ZOky9_o.png" alt="在这里插入图片描述"></p> 
+<ol start="3"><li>如果最左原则查到的是一个范围而不是相同数据的值那么可以看出来无论联合索引里面的另一个字段是顺序还是倒叙都会触发filesort这个我们通过上面的联合索引存储方式很容易理解,因为联合索引默认会对数据进行排序存储,(1,1) (1,2) (2,1) (2,2)这里where使用到了索引age但是因为是联合索引所以没有办法对age进行单独排序在对sex记性排序的时候就没办法通过索引了</li></ol> 
+<pre><code class="prism language-java"><span class="token constant">EXPLAIN</span>
+select <span class="token operator">*</span> from t_test where age in <span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">)</span> order by sex asc<span class="token punctuation">;</span>
+<span class="token constant">EXPLAIN</span>
+select <span class="token operator">*</span> from t_test where age in <span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">)</span> order by sex desc<span class="token punctuation">;</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/97/8e/1khbe1hq_o.png" alt="在这里插入图片描述"></p> 
+<ol start="4"><li>还是上面的情况,联合索引最左原则筛选出范围数据,因为联合索引的排序是多字段的所以排序的时候需要加上最左边的即可不不触发filesort,但是还有触发的情况继续往下看</li></ol> 
+<pre><code class="prism language-java"><span class="token constant">EXPLAIN</span>
+select <span class="token operator">*</span> from t_test where age in <span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">)</span> order by age asc<span class="token punctuation">,</span>sex asc<span class="token punctuation">;</span>
+<span class="token constant">EXPLAIN</span>
+select <span class="token operator">*</span> from t_test where age in <span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">)</span> order by age desc<span class="token punctuation">,</span>sex desc<span class="token punctuation">;</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/4c/c3/9R8iG6f6_o.png" alt="在这里插入图片描述"></p> 
+<ol start="5"><li>如果联合索引里面的排序加上了最左边的,但是两个字段一个是正序一个是降序也会触发filesort这个原因结合联合索引的存储方式就很容易理解上面也有解释</li></ol> 
+<pre><code class="prism language-java"><span class="token constant">EXPLAIN</span>
+select <span class="token operator">*</span> from t_test where age in <span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">)</span> order by age asc<span class="token punctuation">,</span>sex desc<span class="token punctuation">;</span>
+<span class="token constant">EXPLAIN</span>
+select <span class="token operator">*</span> from t_test where age in <span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">)</span> order by age desc<span class="token punctuation">,</span>sex asc<span class="token punctuation">;</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/74/93/Hx16g0MX_o.png" alt="在这里插入图片描述"></p> 
+<ol start="6"><li><em>需要注意的点</em>:如果我查询的语句没有使用到索引 那么order by 即使使用了索引也会二次排序 举个例子 一张表 <strong>id</strong>:主键索引 <strong>age</strong>:普通索引 <strong>sex和subject</strong>:联合索引sex在左边 <strong>name</strong>:没有索引</li></ol> 
+<blockquote> 
+ <p>示例一: 会进入sort file,查询条件没有走索引 所以这里order by只能二次排序<br> 示例二: 会进入sort file,虽然where条件走了索引但是排序并没有通过age的索引树去排而是通过id所以需要二次排序<br> 示例三: 不会进入sort file,虽然没有where条件但是查询的数据是age有索引树,所以这里扫的是age的整棵树order by的也是这个字段所以不需要二次排序<br> 示例四: 不会进入sort file,这里能看出来mysql非常强大mysql的优化器会根据我查询的字段和条件在联合索引里面,所以会全表扫我的联合索引树根据sex进行排序不会二次排序但是这里的排序如果换成了subject那么就需要进入二次排序了,因为最左原则这个大家都知道就不多赘述</p> 
+</blockquote> 
+<pre><code class="prism language-java">示例一<span class="token operator">:</span>
+select name from 表名 order by id<span class="token punctuation">;</span>
+示例二<span class="token operator">:</span>
+select name from 表名 where age in <span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">)</span> order by id<span class="token punctuation">;</span>
+示例三<span class="token operator">:</span>
+select age from 表名 order by age desc<span class="token punctuation">;</span>
+示例四<span class="token operator">:</span>
+select id from 表名 where subject <span class="token operator">=</span> <span class="token char">'数学'</span> order by sex desc<span class="token punctuation">;</span>
+</code></pre> 
+<p><strong>索引树怎么保证顺序</strong></p> 
+<blockquote> 
+ <p>我们都知道磁盘里面保存的数据不会存在顺序,是按照页的概念去存储一页存储16k数据这里面是没有任何顺序可言的,那么我们在查询的时候有默认的排序,其实这种都是通过索引树来实现的.</p> 
+</blockquote> 
+<ul><li> <p>在创建索引的时候会将指定的索引查出来进行排序,也就是我们上面说的单路排序、多路排序以及文件排序,排序结束后会插入到B+tree上这时候树是有顺序的类似下图<br> <img src="https://images2.imgbox.com/57/0c/KNsYX79m_o.png" alt="在这里插入图片描述"></p> </li><li> <p>假设下面的叶子结点都已经处于饱满的状态我要在往里面赛数据,这时候就会出现页分裂的情况也就是最先出来的中间点页分裂大概就是我现在要插入索引数据9 那么会new一个page 然后将上一个&lt;=9那一页的50%的数据移动到new的page里面然后再插入数据9如下图,但是这会有个问题如果我是顺序插入那么是不是意味着永远有碎片没有使用到类似红框里面的空间<br> <img src="https://images2.imgbox.com/b1/b2/UajMs6bl_o.png" alt="在这里插入图片描述"></p> </li><li> <p>所以上面的问题又进一步进行了优化 插入点页分裂就是如果我本次插入的数据是递增的数据就不将上一页50%的数据进行移动而是直接插入到下一页入下图1,但是这样又会有个问题就是如果这时候我插入11是new出来的新页那我在插入10是不是又需要new新页插入9也是需要new新页如图2<br> <img src="https://images2.imgbox.com/04/10/BMPNy1eM_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/18/cd/29kCI2Fz_o.png" alt="在这里插入图片描述"></p> </li><li> <p>为了解决上面的问题再次进行优化,如果是有序且插入的时候先尝试插入到next page且这时候需要修改上级索引的最小值如下如图所示<br> <img src="https://images2.imgbox.com/c6/a3/aSjpJ5hP_o.png" alt="在这里插入图片描述"></p> </li></ul> 
+<p><strong>索引下推</strong></p> 
+<blockquote> 
+ <p>大家都知道联合索引最左匹配原则,但是在mysql5.6之后就出现了一个新的技术叫索引下推假设我现在一张表test_table,有一个联合索引 (product_name,product_code)</p> 
+</blockquote> 
+<ol><li>我们先关闭索引下推,这时候可以看到sql是走了索引但是使用了using where,这是因为我们只使用到了product_name这个索引后面的product_code没办法继续时候查询到的主键id回表后给到service进行where条件的过滤</li></ol> 
+<pre><code class="prism language-java"><span class="token comment">// 关闭索引下推</span>
+set optimizer_switch<span class="token operator">=</span><span class="token string">"index_condition_pushdown=off"</span><span class="token punctuation">;</span>
+
+explain
+select <span class="token operator">*</span> from product where product_name <span class="token operator">=</span> <span class="token char">'香油'</span> and product_code like '<span class="token operator">%</span><span class="token number">111</span>xw<span class="token operator">%</span>'
+</code></pre> 
+<p><img src="https://images2.imgbox.com/57/e0/wNATdQYB_o.png" alt="在这里插入图片描述"></p> 
+<ol start="2"><li>开启索引下推,可以看到直接是使用了using index condition就结束了,这时候的执行流程是匹配到product_name数据之后mysql发现当前索引树可以满足product_code的查询所以将之前product_name查询出来的数据再次进行过滤如果符合 %111xw%就记录不符合就跳过,之后将符合的条件回表数据给到service,且这时候的条件全部都执行完成不需要再次using where了</li></ol> 
+<pre><code class="prism language-java">set optimizer_switch<span class="token operator">=</span><span class="token string">"index_condition_pushdown=on"</span><span class="token punctuation">;</span>
+
+explain
+select <span class="token operator">*</span> from product where product_name <span class="token operator">=</span> <span class="token char">'香油'</span> and product_code like '<span class="token operator">%</span><span class="token number">111</span>xw<span class="token operator">%</span>'
+</code></pre> 
+<p><img src="https://images2.imgbox.com/60/ad/um6IfLGh_o.png" alt="在这里插入图片描述"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/1decabbef12cf45d6119f2cf06d5d657/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">24款热门数据可视化工具 你用过哪些？</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/a9973e8a7d72a037aeea743ff87994a8/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">M.2固态硬盘接口说明</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

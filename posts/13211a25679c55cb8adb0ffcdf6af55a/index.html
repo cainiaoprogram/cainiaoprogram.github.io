@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>M3DB存储引擎浅度探究 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="M3DB存储引擎浅度探究" />
+<meta property="og:description" content="目录
+M3组件
+M3DB特性：
+M3DB限制：
+分布式机制
+​
+存储引擎
+1.压缩算法
+2. 内存架构布局
+架构图
+架构说明：
+block分类
+持久存储：
+commitlog
+snapshot
+blocksize
+灾难恢复
+存储策略
+写入
+属性
+简要流程
+读取
+属性
+流程
+后台进程
+Ticking
+Flush
+大厂UBER背书过的M3存储解决方案共有4个组件:
+M3组件 M3 coordinator
+协调上游系统和M3DB之间的读写操作，长期存储和其他监控系统的多DC(数据库集群)设置
+M3DB
+M3DB是一个分布式时间序列数据库，提供可扩展存储和时间序列的反向索引。
+M3 query
+包含分布式查询引擎，用于查询实时和历史指标，支持多种语言。
+支持低延迟实时查询和可能需要更长时间执行的查询，聚合更大的数据集，用于分析用例
+M3 Aggregator
+专用度量聚合器。
+基于存储在etcd中的动态规则提供基于流的下采样。
+它使用领导者选举和聚合窗口跟踪，利用etcd来管理状态，从而可靠地为地采样标准发送至少一次聚合到长期存储。
+最关心的就是其中的M3DB。
+M3DB特性： 1. 分布式存储，单个节点使用一个WAL日志，并独立保存每个shard的时间窗
+2. 基于ETCD的集群管理
+3. 内置同步赋值，可配置的耐用性和读一致性（1个，多数，所有，等等）
+4. M3TSZ float64压缩算法，根据Gorilla TSZ启发而来。可配置成无损或有损耗
+5. 时间精度可配置，从秒到纳秒
+6. 可配置的无序写入，目前限制于blocksize的大小。
+M3DB限制： M3DB目前支持基于ID的精确查找。它不支持标记/辅助索引。
+这个特性正在开发中，M3DB的未来版本将支持内置的反向索引。
+M3DB不支持更新/删除。所有写入M3DB的数据都是不可变的。
+M3DB不支持任意写入时间。这通常用于监视工作负载，但对于传统的OLTP和OLAP工作负载可能是有问题的。M3DB的未来版本将更好地支持任意时间戳的写入。
+M3DB不支持用双精度浮点以外的值编写数据池。M3DB的未来版本将支持存储任意值。
+M3DB不支持存储具有不确定保留期的数据，M3DB中的每个名称空间都需要有一个保留策略，该策略指定该名称空间中的数据将保留多长时间。虽然这个值没有上限
+M3DB不支持后台数据修复或CasDANRA样式的读取修复。M3DB的未来版本将支持数据作为正在进行的后台进程的自动修复。
+分布式机制 m3coordinator" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/13211a25679c55cb8adb0ffcdf6af55a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2018-09-11T18:15:46+08:00" />
+<meta property="article:modified_time" content="2018-09-11T18:15:46+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">M3DB存储引擎浅度探究</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p id="main-toc"><strong>目录</strong></p> 
+<p id="M3%E7%BB%84%E4%BB%B6-toc" style="margin-left:0px;"><a href="#M3%E7%BB%84%E4%BB%B6" rel="nofollow">M3组件</a></p> 
+<p id="M3DB%E7%89%B9%E6%80%A7%EF%BC%9A-toc" style="margin-left:0px;"><a href="#M3DB%E7%89%B9%E6%80%A7%EF%BC%9A" rel="nofollow">M3DB特性：</a></p> 
+<p id="M3DB%E9%99%90%E5%88%B6%EF%BC%9A-toc" style="margin-left:0px;"><a href="#M3DB%E9%99%90%E5%88%B6%EF%BC%9A" rel="nofollow">M3DB限制：</a></p> 
+<p id="%E5%88%86%E5%B8%83%E5%BC%8F%E6%9C%BA%E5%88%B6-toc" style="margin-left:0px;"><a href="#%E5%88%86%E5%B8%83%E5%BC%8F%E6%9C%BA%E5%88%B6" rel="nofollow">分布式机制</a></p> 
+<p id="%E2%80%8B-toc" style="margin-left:0px;"><a href="#%E2%80%8B" rel="nofollow">​</a></p> 
+<p id="%E5%AD%98%E5%82%A8%E5%BC%95%E6%93%8E-toc" style="margin-left:0px;"><a href="#%E5%AD%98%E5%82%A8%E5%BC%95%E6%93%8E" rel="nofollow">存储引擎</a></p> 
+<p id="1.%E5%8E%8B%E7%BC%A9%E7%AE%97%E6%B3%95-toc" style="margin-left:40px;"><a href="#1.%E5%8E%8B%E7%BC%A9%E7%AE%97%E6%B3%95" rel="nofollow">1.压缩算法</a></p> 
+<p id="2.%20%E5%86%85%E5%AD%98%E6%9E%B6%E6%9E%84%E5%B8%83%E5%B1%80-toc" style="margin-left:40px;"><a href="#2.%20%E5%86%85%E5%AD%98%E6%9E%B6%E6%9E%84%E5%B8%83%E5%B1%80" rel="nofollow">2. 内存架构布局</a></p> 
+<p id="%E6%9E%B6%E6%9E%84%E5%9B%BE-toc" style="margin-left:80px;"><a href="#%E6%9E%B6%E6%9E%84%E5%9B%BE" rel="nofollow">架构图</a></p> 
+<p id="%E6%9E%B6%E6%9E%84%E8%AF%B4%E6%98%8E%EF%BC%9A-toc" style="margin-left:80px;"><a href="#%E6%9E%B6%E6%9E%84%E8%AF%B4%E6%98%8E%EF%BC%9A" rel="nofollow">架构说明：</a></p> 
+<p id="block%E5%88%86%E7%B1%BB-toc" style="margin-left:80px;"><a href="#block%E5%88%86%E7%B1%BB" rel="nofollow">block分类</a></p> 
+<p id="%E6%8C%81%E4%B9%85%E5%AD%98%E5%82%A8%EF%BC%9A-toc" style="margin-left:40px;"><a href="#%E6%8C%81%E4%B9%85%E5%AD%98%E5%82%A8%EF%BC%9A" rel="nofollow">持久存储：</a></p> 
+<p id="commitlog-toc" style="margin-left:80px;"><a href="#commitlog" rel="nofollow">commitlog</a></p> 
+<p id="snapshot-toc" style="margin-left:80px;"><a href="#snapshot" rel="nofollow">snapshot</a></p> 
+<p id="blocksize-toc" style="margin-left:80px;"><a href="#blocksize" rel="nofollow">blocksize</a></p> 
+<p id="%E7%81%BE%E9%9A%BE%E6%81%A2%E5%A4%8D-toc" style="margin-left:80px;"><a href="#%E7%81%BE%E9%9A%BE%E6%81%A2%E5%A4%8D" rel="nofollow">灾难恢复</a></p> 
+<p id="%E5%AD%98%E5%82%A8%E7%AD%96%E7%95%A5-toc" style="margin-left:80px;"><a href="#%E5%AD%98%E5%82%A8%E7%AD%96%E7%95%A5" rel="nofollow">存储策略</a></p> 
+<p id="%E5%86%99%E5%85%A5-toc" style="margin-left:40px;"><a href="#%E5%86%99%E5%85%A5" rel="nofollow">写入</a></p> 
+<p id="%E5%B1%9E%E6%80%A7-toc" style="margin-left:80px;"><a href="#%E5%B1%9E%E6%80%A7" rel="nofollow">属性</a></p> 
+<p id="%E7%AE%80%E8%A6%81%E6%B5%81%E7%A8%8B-toc" style="margin-left:80px;"><a href="#%E7%AE%80%E8%A6%81%E6%B5%81%E7%A8%8B" rel="nofollow">简要流程</a></p> 
+<p id="%E8%AF%BB%E5%8F%96-toc" style="margin-left:40px;"><a href="#%E8%AF%BB%E5%8F%96" rel="nofollow">读取</a></p> 
+<p style="margin-left:80px;"><a href="#%E5%B1%9E%E6%80%A7" rel="nofollow">属性</a></p> 
+<p id="%E6%B5%81%E7%A8%8B-toc" style="margin-left:80px;"><a href="#%E6%B5%81%E7%A8%8B" rel="nofollow">流程</a></p> 
+<p id="%E5%90%8E%E5%8F%B0%E8%BF%9B%E7%A8%8B-toc" style="margin-left:40px;"><a href="#%E5%90%8E%E5%8F%B0%E8%BF%9B%E7%A8%8B" rel="nofollow">后台进程</a></p> 
+<p id="Ticking-toc" style="margin-left:80px;"><a href="#Ticking" rel="nofollow">Ticking</a></p> 
+<p id="Flush-toc" style="margin-left:80px;"><a href="#Flush" rel="nofollow">Flush</a></p> 
+<hr id="hr-toc"> 
+<hr> 
+<p>大厂UBER背书过的M3存储解决方案共有4个组件:</p> 
+<h2 id="M3%E7%BB%84%E4%BB%B6">M3组件</h2> 
+<p>M3 coordinator<br> 协调上游系统和M3DB之间的读写操作，长期存储和其他监控系统的多DC(数据库集群)设置</p> 
+<p>M3DB<br> M3DB是一个分布式时间序列数据库，提供可扩展存储和时间序列的反向索引。</p> 
+<p>M3 query<br> 包含分布式查询引擎，用于查询实时和历史指标，支持多种语言。<br> 支持低延迟实时查询和可能需要更长时间执行的查询，聚合更大的数据集，用于分析用例</p> 
+<p>M3 Aggregator<br> 专用度量聚合器。<br> 基于存储在etcd中的动态规则提供基于流的下采样。<br> 它使用领导者选举和聚合窗口跟踪，利用etcd来管理状态，从而可靠地为地采样标准发送至少一次聚合到长期存储。<br>  </p> 
+<p>最关心的就是其中的M3DB。</p> 
+<h2 id="M3DB%E7%89%B9%E6%80%A7%EF%BC%9A">M3DB特性：</h2> 
+<p>1. 分布式存储，单个节点使用一个WAL日志，并独立保存每个shard的时间窗<br> 2. 基于ETCD的集群管理<br> 3. 内置同步赋值，可配置的耐用性和读一致性（1个，多数，所有，等等）<br> 4. M3TSZ float64压缩算法，根据Gorilla TSZ启发而来。可配置成无损或有损耗<br> 5. 时间精度可配置，从秒到纳秒<br> 6. 可配置的无序写入，目前限制于blocksize的大小。</p> 
+<h2 id="M3DB%E9%99%90%E5%88%B6%EF%BC%9A">M3DB限制：</h2> 
+<p>M3DB目前支持基于ID的精确查找。它不支持标记/辅助索引。<br> 这个特性正在开发中，M3DB的未来版本将支持内置的反向索引。<br>    <br> M3DB不支持更新/删除。所有写入M3DB的数据都是不可变的。</p> 
+<p>M3DB不支持任意写入时间。这通常用于监视工作负载，但对于传统的OLTP和OLAP工作负载可能是有问题的。M3DB的未来版本将更好地支持任意时间戳的写入。</p> 
+<p>M3DB不支持用双精度浮点以外的值编写数据池。M3DB的未来版本将支持存储任意值。<br>    <br> M3DB不支持存储具有不确定保留期的数据，M3DB中的每个名称空间都需要有一个保留策略，该策略指定该名称空间中的数据将保留多长时间。虽然这个值没有上限<br>    <br> M3DB不支持后台数据修复或CasDANRA样式的读取修复。M3DB的未来版本将支持数据作为正在进行的后台进程的自动修复。</p> 
+<h2 id="%E5%88%86%E5%B8%83%E5%BC%8F%E6%9C%BA%E5%88%B6">分布式机制</h2> 
+<h2 id="%E2%80%8B"><img alt="" class="has" height="308" src="https://images2.imgbox.com/4a/91/vrKYHtMI_o.png" width="792"></h2> 
+<p>m3coordinator</p> 
+<p>协调集群所有集群的读写，轻量级进程，不存储任何数据。它一般在Prometheus旁边一起运行，Prometheus的指令都通过m3coordinator下发到集群中的主机。</p> 
+<p>storage node</p> 
+<p>m3dbnode进程是各节点数据库主进程，存储数据，提供读写</p> 
+<p>Seed Node</p> 
+<p>种子节点本身也是储存节点。除此以外，还要运行嵌入式ETCD服务。推断拓扑、配置</p> 
+<p> </p> 
+<h2 id="%E5%AD%98%E5%82%A8%E5%BC%95%E6%93%8E">存储引擎</h2> 
+<h3 id="1.%E5%8E%8B%E7%BC%A9%E7%AE%97%E6%B3%95">1.压缩算法</h3> 
+<p>主要压缩算法M3TSZ， 是Gorilla paper算法的变体，根据UBER的数据特征，每个points压缩后达到1.45bytes大小，压缩率很高。</p> 
+<h3 id="2.%20%E5%86%85%E5%AD%98%E6%9E%B6%E6%9E%84%E5%B8%83%E5%B1%80">2. 内存架构布局</h3> 
+<h4 id="%E6%9E%B6%E6%9E%84%E5%9B%BE">架构图</h4> 
+<p><img alt="" class="has" height="937" src="https://images2.imgbox.com/89/b5/35kL5iva_o.png" width="626"></p> 
+<h4 id="%E6%9E%B6%E6%9E%84%E8%AF%B4%E6%98%8E%EF%BC%9A">架构说明：</h4> 
+<p>1. 每个M3DB进程只有一个database<br> 2. 每个database有多个namespace, 每个namespace有独立的名字和配置（根据数据保留和块代销）<br>     namespace相当于普通数据库中的表。<br> 3. 一个namespace包含多个shard, shards按照series ID的哈希值来分配数据。<br> 4. 一个shard包含多个series<br> 5. 一个series包含多个blocks对象，</p> 
+<h4 id="block%E5%88%86%E7%B1%BB">block分类</h4> 
+<p>1. fileset file, 已写入磁盘，密封（不可写）的一段已压缩的数据流的对象。<br>     而且无法读取其中的单个数据点，如果想要读取单个数据点，必须整个解压block。内存中并没有cache这些数据流</p> 
+<p>2. In-memory cache, 未写入磁盘，已密封的数据，不可写入，一样需要解压整个block，与第一种block唯一的区别就是还未写入磁盘，内存中Cache</p> 
+<p>3. active buffer, 没有被密封的，已被压缩的数据流</p> 
+<h3 id="%E6%8C%81%E4%B9%85%E5%AD%98%E5%82%A8%EF%BC%9A">持久存储：</h3> 
+<h4 id="commitlog">commitlog</h4> 
+<p>即WAL文件，无压缩写入数据，可以每次写，也可以批量写（快得多，但是恢复会丢失数据）</p> 
+<h4 id="snapshot">snapshot</h4> 
+<p>根据配置的blocksize大小，到达阈值，所有active blocks被密封，刷到磁盘fileset files.<br> 这些文件被高度压缩，还被附加的索引文件编入索引。</p> 
+<h4 id="blocksize">blocksize</h4> 
+<p>blocksize参数的大小十分重要，要根据数据负载的特点来设定。这个值是时间，比如默认2小时。<br> 如果太小，频繁刷磁盘，而且更小的数据被压缩，整体压缩率降低，占用磁盘更多。</p> 
+<h4 id="%E7%81%BE%E9%9A%BE%E6%81%A2%E5%A4%8D">灾难恢复</h4> 
+<p>有两个途径，一是从commitlog来恢复，另一个是从peer端的同一个shard中获取（如果复制因子大于1）</p> 
+<h4 id="%E5%AD%98%E5%82%A8%E7%AD%96%E7%95%A5">存储策略</h4> 
+<p>制定策略让某些数据尽可能缓存在内存中，用于应对可能会被经常访问的数据</p> 
+<p> </p> 
+<h3 id="%E5%86%99%E5%85%A5">写入</h3> 
+<h4 id="%E5%B1%9E%E6%80%A7">属性</h4> 
+<p>一次写入必须包含namespace, seriesID(byte blob), timestamp, value四个属性。</p> 
+<h4 id="%E7%AE%80%E8%A6%81%E6%B5%81%E7%A8%8B">简要流程</h4> 
+<p>namespace==&gt; shard ===&gt; series ===&gt; encoder ===&gt;最后编码进压缩流active buffer</p> 
+<p>同时这次写入会加入到commitlog queue(立即写入或者等待批量写入)</p> 
+<p>写入只涉及到commiltlog 和 active buffer, 并不会马上写入磁盘数据集 </p> 
+<p> </p> 
+<h3 id="%E8%AF%BB%E5%8F%96">读取</h3> 
+<h4>属性</h4> 
+<p>一次读取必须包含namespace, seriesID(byte blob), timestamp(start and end) 三个属性</p> 
+<h4 id="%E6%B5%81%E7%A8%8B">流程</h4> 
+<p>namespace ===&gt; shard ===&gt; serires </p> 
+<p>如果serires 不存在， 查询bloom fileter 确认是否在 磁盘文件中。</p> 
+<p>查找磁盘文件的流程略复杂</p> 
+<p>bloom filer ===&gt; 二分查找索引摘要 找到index文件offset ===&gt; 找到index entry，获得data file,offset ===&gt; 读取数据流</p> 
+<p>对于查询涵盖多个block，会合并成一个数据流返回给客户端。</p> 
+<p>但是M3DB返回给客户端的是完整的几个blocks，已压缩的。靠客户端自己解压分解。<br> 官方文档提示：因为高压缩，这个流量问题不大。</p> 
+<p>举例，一次查询涵盖 block1的后半部分，block2完整，block3前半部分， 那么M3DB会把block1,2,3都完整的返回给客户端。</p> 
+<p> </p> 
+<h3 id="%E5%90%8E%E5%8F%B0%E8%BF%9B%E7%A8%8B">后台进程</h3> 
+<h4 id="Ticking">Ticking</h4> 
+<p>1. 合并 给定series block启动组合的编码器<br>    （因为无序导致新的malloc编码器，在刷入磁盘之前要排序，合并编码器）<br> 2. 删除内存中已经flush到disk或者期满的Blocks<br> 3. 文件系统中清楚过期数据</p> 
+<h4 id="Flush">Flush</h4> 
+<p>按照blocksize设置的时间，定期将active buffer变成密封的block，再写入磁盘，同时释放内存资源。<br> 这里应该还要按照缓存策略决定是否释放内存资源。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/1365239f44cb99c6cf642776432644b1/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">python提取具有某种特定字符串的行数据</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/30132339630814825d6ec433b0c55276/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Es查询（模糊，精确，多条件《模糊精确多条件查询》），修改，编辑，删除</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

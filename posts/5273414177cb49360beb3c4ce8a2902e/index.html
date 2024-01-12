@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Linux MTD子系统(二)——mtdblock驱动分析 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Linux MTD子系统(二)——mtdblock驱动分析" />
+<meta property="og:description" content="在之前的文章Linux MTD子系统(一)中有提到过mtd块设备，mtd块设备是在MTD设备之上模拟的块设备。
+它的作用实际上只有一个——便于我们使用mount(umount)挂载(卸载)MTD设备中的文件系统，例如yaffs2，JFFS2等等。
+本文将介绍mtdblock是如何实现模拟块设备的，以及它与mtd设备之间的关系。
+本文基于linux-5.10.181内核代码分析。
+mtd设备节点 当我们查看/dev/mtd*时，通常情况下，我们可以看下类似如下的设备：
+root@OpenWrt:~# ls /dev/mtd* -alh crw------- 1 root root 90, 0 Jan 1 1970 /dev/mtd0 crw------- 1 root root 90, 1 Jan 1 1970 /dev/mtd0ro crw------- 1 root root 90, 2 Jan 1 1970 /dev/mtd1 crw------- 1 root root 90, 3 Jan 1 1970 /dev/mtd1ro crw------- 1 root root 90, 4 Jan 1 1970 /dev/mtd2 crw------- 1 root root 90, 5 Jan 1 1970 /dev/mtd2ro brw------- 1 root root 31, 0 Jan 1 1970 /dev/mtdblock0 brw------- 1 root root 31, 4 Jan 1 1970 /dev/mtdblock1 brw------- 1 root root 31, 8 Jan 1 1970 /dev/mtdblock2 实际上/dev/mtd0，/dev/mtd0ro,/dev/mtdblock0代表的是同一个MTD分区，但是/dev/mtd0，/dev/mtd0ro都是字符设备，其中/dev/mtd0ro是只读字符设备，/dev/mtdblock0是块设备。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/5273414177cb49360beb3c4ce8a2902e/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-06-18T22:22:42+08:00" />
+<meta property="article:modified_time" content="2023-06-18T22:22:42+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Linux MTD子系统(二)——mtdblock驱动分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night-eighties">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>在之前的文章<a href="https://blog.csdn.net/qq_24835087/article/details/119841718?spm=1001.2014.3001.5502">Linux MTD子系统(一)</a>中有提到过mtd块设备，mtd块设备是在MTD设备之上模拟的块设备。<br> 它的作用实际上只有一个——便于我们使用mount(umount)挂载(卸载)MTD设备中的文件系统，例如yaffs2，JFFS2等等。</p> 
+<p>本文将介绍mtdblock是如何实现模拟块设备的，以及它与mtd设备之间的关系。<br> 本文基于<strong>linux-5.10.181</strong>内核代码分析。</p> 
+<h3><a id="mtd_5"></a>mtd设备节点</h3> 
+<p>当我们查看<code>/dev/mtd*</code>时，通常情况下，我们可以看下类似如下的设备：</p> 
+<pre><code class="prism language-bash">root@OpenWrt:~<span class="token comment"># ls /dev/mtd* -alh</span>
+crw-------    <span class="token number">1</span> root     root       <span class="token number">90</span>,   <span class="token number">0</span> Jan  <span class="token number">1</span>  <span class="token number">1970</span> /dev/mtd0
+crw-------    <span class="token number">1</span> root     root       <span class="token number">90</span>,   <span class="token number">1</span> Jan  <span class="token number">1</span>  <span class="token number">1970</span> /dev/mtd0ro
+crw-------    <span class="token number">1</span> root     root       <span class="token number">90</span>,   <span class="token number">2</span> Jan  <span class="token number">1</span>  <span class="token number">1970</span> /dev/mtd1
+crw-------    <span class="token number">1</span> root     root       <span class="token number">90</span>,   <span class="token number">3</span> Jan  <span class="token number">1</span>  <span class="token number">1970</span> /dev/mtd1ro
+crw-------    <span class="token number">1</span> root     root       <span class="token number">90</span>,   <span class="token number">4</span> Jan  <span class="token number">1</span>  <span class="token number">1970</span> /dev/mtd2
+crw-------    <span class="token number">1</span> root     root       <span class="token number">90</span>,   <span class="token number">5</span> Jan  <span class="token number">1</span>  <span class="token number">1970</span> /dev/mtd2ro
+brw-------    <span class="token number">1</span> root     root       <span class="token number">31</span>,   <span class="token number">0</span> Jan  <span class="token number">1</span>  <span class="token number">1970</span> /dev/mtdblock0
+brw-------    <span class="token number">1</span> root     root       <span class="token number">31</span>,   <span class="token number">4</span> Jan  <span class="token number">1</span>  <span class="token number">1970</span> /dev/mtdblock1
+brw-------    <span class="token number">1</span> root     root       <span class="token number">31</span>,   <span class="token number">8</span> Jan  <span class="token number">1</span>  <span class="token number">1970</span> /dev/mtdblock2
+</code></pre> 
+<p>实际上<code>/dev/mtd0</code>，<code>/dev/mtd0ro</code>,<code>/dev/mtdblock0</code>代表的是同一个MTD分区，但是<code>/dev/mtd0</code>，<code>/dev/mtd0ro</code>都是字符设备，其中<code>/dev/mtd0ro</code>是只读字符设备，<code>/dev/mtdblock0</code>是块设备。<br> 常见的<code>mtd-utils</code>，<code>nand_write</code>等工具只能操作<code>/dev/mtdX</code>字符设备，因为只有字符设备才支持<code>ioctl</code>操作。</p> 
+<h3><a id="_24"></a>核心数据结构</h3> 
+<h4><a id="mtdblock_tr_25"></a>mtdblock_tr</h4> 
+<p><code>mtdblock_tr</code>变量不仅定义了<code>mtdblock</code>相关<code>ops</code>,还定义了<code>mtdblock</code>的</p> 
+<ul><li>名字（mtdblock）</li><li>主设备号（MTD_BLOCK_MAJOR为31）</li><li>块大小（固定为512字节）</li></ul> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">struct</span> <span class="token class-name">mtd_blktrans_ops</span> mtdblock_tr <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token punctuation">.</span>name		<span class="token operator">=</span> <span class="token string">"mtdblock"</span><span class="token punctuation">,</span>
+	<span class="token punctuation">.</span>major		<span class="token operator">=</span> MTD_BLOCK_MAJOR<span class="token punctuation">,</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">CONFIG_FIT_PARTITION</span></span>
+	<span class="token punctuation">.</span>part_bits	<span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">,</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+	<span class="token punctuation">.</span>part_bits	<span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">,</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+	<span class="token punctuation">.</span>blksize 	<span class="token operator">=</span> <span class="token number">512</span><span class="token punctuation">,</span>
+	<span class="token punctuation">.</span>open		<span class="token operator">=</span> mtdblock_open<span class="token punctuation">,</span>
+	<span class="token punctuation">.</span>flush		<span class="token operator">=</span> mtdblock_flush<span class="token punctuation">,</span>
+	<span class="token punctuation">.</span>release	<span class="token operator">=</span> mtdblock_release<span class="token punctuation">,</span>
+	<span class="token punctuation">.</span>readsect	<span class="token operator">=</span> mtdblock_readsect<span class="token punctuation">,</span>
+	<span class="token punctuation">.</span>writesect	<span class="token operator">=</span> mtdblock_writesect<span class="token punctuation">,</span>
+	<span class="token punctuation">.</span>add_mtd	<span class="token operator">=</span> mtdblock_add_mtd<span class="token punctuation">,</span>
+	<span class="token punctuation">.</span>remove_dev	<span class="token operator">=</span> mtdblock_remove_dev<span class="token punctuation">,</span>
+	<span class="token punctuation">.</span>owner		<span class="token operator">=</span> THIS_MODULE<span class="token punctuation">,</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><code>mtdblock_open</code>、<code>mtdblock_flush</code>等函数都是标准的。其中<code>mtdblock_tr .readsect</code>和<code>mtdblock_tr.writesect</code>是mtdblock的读写函数指针，最终对mtdblock的读写也是调用的这两个函数。</p> 
+<h4><a id="mtd_blktrans_dev_52"></a>mtd_blktrans_dev</h4> 
+<p><code>mtd_blktrans_dev </code>是一个抽象的设备，可以把它称为<strong>转换设备</strong>，它用于记录将 MTD 设备转换为块设备的一些基本信息。</p> 
+<pre><code class="prism language-c"><span class="token keyword">struct</span> <span class="token class-name">mtd_blktrans_dev</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">struct</span> <span class="token class-name">mtd_blktrans_ops</span> <span class="token operator">*</span>tr<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">list_head</span> list<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">mtd_info</span> <span class="token operator">*</span>mtd<span class="token punctuation">;</span><span class="token comment">//指向mtd设备</span>
+	<span class="token keyword">struct</span> <span class="token class-name">mutex</span> lock<span class="token punctuation">;</span>
+	<span class="token keyword">int</span> devnum<span class="token punctuation">;</span>
+	bool bg_stop<span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">long</span> size<span class="token punctuation">;</span><span class="token comment">//块转换设备的大小（以字节为单位)</span>
+	<span class="token keyword">int</span> readonly<span class="token punctuation">;</span><span class="token comment">//块转换设备是否是只读的，如果是则为1，否则为0</span>
+	<span class="token keyword">int</span> open<span class="token punctuation">;</span><span class="token comment">//块转换设备open 引用计数器</span>
+	<span class="token keyword">struct</span> <span class="token class-name">kref</span> ref<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">gendisk</span> <span class="token operator">*</span>disk<span class="token punctuation">;</span><span class="token comment">//指向磁盘设备或分区</span>
+	<span class="token keyword">struct</span> <span class="token class-name">attribute_group</span> <span class="token operator">*</span>disk_attributes<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">request_queue</span> <span class="token operator">*</span>rq<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">list_head</span> rq_list<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">blk_mq_tag_set</span> <span class="token operator">*</span>tag_set<span class="token punctuation">;</span>
+	<span class="token class-name">spinlock_t</span> queue_lock<span class="token punctuation">;</span>
+	<span class="token keyword">void</span> <span class="token operator">*</span>priv<span class="token punctuation">;</span>
+	<span class="token class-name">fmode_t</span> file_mode<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<h4><a id="mtdblk_dev_78"></a>mtdblk_dev</h4> 
+<p>mtdblock模拟块设备用到的缓存区就是<code>mtdblk_dev-&gt;cache_data</code>,<code>cache_size</code>是缓存区的大小，通常等于MTD设备的一个擦除块大小，<code>cache_offset</code>是缓存区偏移量，<code>cache_state</code>是缓存区的状态标志，当状态为<code>STATE_DIRTY </code>就需要调用<code>flush</code>把缓存区的数据写到Flash。</p> 
+<pre><code class="prism language-c"><span class="token keyword">struct</span> <span class="token class-name">mtdblk_dev</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">struct</span> <span class="token class-name">mtd_blktrans_dev</span> mbd<span class="token punctuation">;</span>
+	<span class="token keyword">int</span> count<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">mutex</span> cache_mutex<span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">char</span> <span class="token operator">*</span>cache_data<span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">long</span> cache_offset<span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span> cache_size<span class="token punctuation">;</span>
+	<span class="token keyword">enum</span> <span class="token punctuation">{<!-- --></span> STATE_EMPTY<span class="token punctuation">,</span> STATE_CLEAN<span class="token punctuation">,</span> STATE_DIRTY <span class="token punctuation">}</span> cache_state<span class="token punctuation">;</span><span class="token comment">//缓存状态</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><code>mtdblock</code>的缓存区示意图如下：<br> <img src="https://images2.imgbox.com/3a/04/5v1qoT6u_o.png" alt="![在这里插入图片描述](https://img-blog.csdnimg.cn/67fb30baed3046a7bf72c8cfb8f433bf.png"></p> 
+<ul><li>在<code>mtdblock_open</code>函数中会设置缓存区大小，默认和<code>mtd</code>设备的一个块大小保持一致，本文中缓存区大小为4096字节</li><li><code>mtdblock</code>的缓存区大小是固定的，但是内容不是固定的，通常与上一次写入的数据有关</li></ul> 
+<p>如果现在需要对起始地址为5120的位置(对应block1)写入512字节数据，则有如下情况出现：</p> 
+<ul><li>如果当前缓存区里面存的正好是block1对应的数据，且cache1的状态不是STATE_DIRTY，那么数据将会被写入cache1，并将cache1的状态设置为STATE_DIRTY(下次写入之前会先将cache1的数据写到block1)</li><li>如果当前缓存区里面存的不是block1对应的数据，那么需要先将block1对应的数据读取到cache1，然后再将数据写入cache1，最后将cache1的状态设置为STATE_DIRTY<br> <img src="https://images2.imgbox.com/19/e9/3dHRZkIf_o.png" alt="在这里插入图片描述"></li></ul> 
+<p>如果现在需要从起始地址为5120的位置(对应block1)读取512字节数据，则有如下情况出现：</p> 
+<p><img src="https://images2.imgbox.com/77/96/aIyRa1PW_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>如果当前缓存区里面存的正好是block1对应的数据，且cache1的状态不是STATE_EMPTY，那么将会从cache1里面读取512字节数据</li><li>如果当前缓存区里面存的不是block1对应的数据，那么就会直接调用<code>mtd_read</code>从硬件Flash中获取数据</li></ul> 
+<h4><a id="mtd_info_109"></a>mtd_info</h4> 
+<p>mtd_info 不做过多介绍，它代表一个mtd设备或者分区，重要的是它是<strong>字符设备</strong>。</p> 
+<pre><code class="prism language-c"><span class="token keyword">struct</span> <span class="token class-name">mtd_info</span> <span class="token punctuation">{<!-- --></span>
+	u_char type<span class="token punctuation">;</span>
+	<span class="token class-name">uint32_t</span> flags<span class="token punctuation">;</span>
+	<span class="token class-name">uint64_t</span> size<span class="token punctuation">;</span>	 <span class="token comment">// Total size of the MTD</span>
+	<span class="token class-name">uint32_t</span> erasesize<span class="token punctuation">;</span>
+	<span class="token comment">/* "Minor" (smallest) erase size supported by the whole device */</span>
+	<span class="token class-name">uint32_t</span> erasesize_minor<span class="token punctuation">;</span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	<span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="mtdblock_123"></a>mtdblock注册过程</h3> 
+<p>mtdblock的注册流程大致如下图所示，核心成员有四个<code>mtdblock_tr</code>,<code>mtdblk_dev</code>,<code>mtd_blktrans_dev</code>,<code>mtd_info</code>搞清楚了这四个成员之间的关系，基本上就通晓了mtdblock和mtd之前的关系。</p> 
+<p><img src="https://images2.imgbox.com/be/d2/km87mS7a_o.png" alt="在这里插入图片描述"></p> 
+<p>下面一步步剖析上图的过程：</p> 
+<h4><a id="1_register_mtd_blktrans_130"></a>1&gt; register_mtd_blktrans</h4> 
+<p>首先<code>mtdblock</code>驱动的入口函数调用了<code>register_mtd_blktrans(&amp;mtdblock_tr)</code><br> <code>register_mtd_blktrans</code>主要执行如下操作：</p> 
+<ul><li>注册mtd_notifier</li><li>注册块设备(主设备号31，name：/dev/mtdblock)</li><li>初始化mtdblock_tr-&gt;devs链表头</li><li>将mtdblock_tr添加到blktrans_majors</li><li>遍历mtd设备Table，依次注册mtdblk_dev</li></ul> 
+<h4><a id="2_mtdblock_add_mtd_140"></a>2&gt; mtdblock_add_mtd</h4> 
+<p>上一步的最后遍历mtd设备table注册mtdblk_dev对应的源码如下：</p> 
+<pre><code class="prism language-c"><span class="token keyword">int</span> <span class="token function">register_mtd_blktrans</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">mtd_blktrans_ops</span> <span class="token operator">*</span>tr<span class="token punctuation">)</span>
+	<span class="token function">mtd_for_each_device</span><span class="token punctuation">(</span>mtd<span class="token punctuation">)</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>mtd<span class="token operator">-&gt;</span>type <span class="token operator">!=</span> MTD_ABSENT<span class="token punctuation">)</span>
+			tr<span class="token operator">-&gt;</span><span class="token function">add_mtd</span><span class="token punctuation">(</span>tr<span class="token punctuation">,</span> mtd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><code>tr-&gt;add_mtd</code>即<code>mtdblock_tr-&gt;add_mtd</code>,也就是<code>mtdblock_add_mtd</code>，此函数的作用是建立<code>mtd</code>和<code>mtd_blktrans_dev </code>之间的联系。</p> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">mtdblock_add_mtd</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">mtd_blktrans_ops</span> <span class="token operator">*</span>tr<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">mtd_info</span> <span class="token operator">*</span>mtd<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">struct</span> <span class="token class-name">mtdblk_dev</span> <span class="token operator">*</span>dev <span class="token operator">=</span> <span class="token function">kzalloc</span><span class="token punctuation">(</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token operator">*</span>dev<span class="token punctuation">)</span><span class="token punctuation">,</span> GFP_KERNEL<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>dev<span class="token punctuation">)</span>
+		<span class="token keyword">return</span><span class="token punctuation">;</span>
+
+	dev<span class="token operator">-&gt;</span>mbd<span class="token punctuation">.</span>mtd <span class="token operator">=</span> mtd<span class="token punctuation">;</span>
+	dev<span class="token operator">-&gt;</span>mbd<span class="token punctuation">.</span>devnum <span class="token operator">=</span> mtd<span class="token operator">-&gt;</span>index<span class="token punctuation">;</span>
+
+	dev<span class="token operator">-&gt;</span>mbd<span class="token punctuation">.</span>size <span class="token operator">=</span> mtd<span class="token operator">-&gt;</span>size <span class="token operator">&gt;&gt;</span> <span class="token number">9</span><span class="token punctuation">;</span>
+	dev<span class="token operator">-&gt;</span>mbd<span class="token punctuation">.</span>tr <span class="token operator">=</span> tr<span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token punctuation">(</span>mtd<span class="token operator">-&gt;</span>flags <span class="token operator">&amp;</span> MTD_WRITEABLE<span class="token punctuation">)</span><span class="token punctuation">)</span>
+		dev<span class="token operator">-&gt;</span>mbd<span class="token punctuation">.</span>readonly <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">add_mtd_blktrans_dev</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>dev<span class="token operator">-&gt;</span>mbd<span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token function">kfree</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>申请mtdblk_dev</li><li>将mtdblk_dev下属成员mtd_blktrans_dev 与mtd设备关联起来</li><li>mtd_blktrans_dev的子设备号就是mtd的index，这也是为什么/dev/mtd0对应/dev/mtdblock0的原因</li><li>mtd_blktrans_dev大小设置为mtd-&gt;size/512,也就是按照512字节每个扇区计算大小</li><li>如果mtd设备是只读的，mtd_blktrans_dev同样要设置只读标记</li><li>调用add_mtd_blktrans_dev注册<code>mtd_blktrans_dev</code></li></ul> 
+<h4><a id="3_add_mtd_blktrans_dev_178"></a>3&gt; add_mtd_blktrans_dev</h4> 
+<p><code>add_mtd_blktrans_dev()</code>是注册<code>mtdblock</code>最关键的函数，它的作用是申请并注册块设备，并建立块设备和<code>mtd_blktrans_dev</code>之间的联系。<br> 其中块设备申请与注册部分的源码如下：</p> 
+<pre><code class="prism language-c"><span class="token keyword">int</span> <span class="token function">add_mtd_blktrans_dev</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">mtd_blktrans_dev</span> <span class="token operator">*</span>new<span class="token punctuation">)</span>
+<span class="token operator">*</span><span class="token operator">*</span>	<span class="token comment">/* Create gendisk */</span>
+	gd <span class="token operator">=</span> <span class="token function">alloc_disk</span><span class="token punctuation">(</span><span class="token number">1</span> <span class="token operator">&lt;&lt;</span> tr<span class="token operator">-&gt;</span>part_bits<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>gd<span class="token punctuation">)</span>
+		<span class="token keyword">goto</span> error2<span class="token punctuation">;</span>
+
+	new<span class="token operator">-&gt;</span>disk <span class="token operator">=</span> gd<span class="token punctuation">;</span> <span class="token comment">//建立块设备和mtd_blktrans_dev 的关联</span>
+	gd<span class="token operator">-&gt;</span>private_data <span class="token operator">=</span> new<span class="token punctuation">;</span>
+	gd<span class="token operator">-&gt;</span>major <span class="token operator">=</span> tr<span class="token operator">-&gt;</span>major<span class="token punctuation">;</span>
+	gd<span class="token operator">-&gt;</span>first_minor <span class="token operator">=</span> <span class="token punctuation">(</span>new<span class="token operator">-&gt;</span>devnum<span class="token punctuation">)</span> <span class="token operator">&lt;&lt;</span> tr<span class="token operator">-&gt;</span>part_bits<span class="token punctuation">;</span>
+	gd<span class="token operator">-&gt;</span>fops <span class="token operator">=</span> <span class="token operator">&amp;</span>mtd_block_ops<span class="token punctuation">;</span>
+
+	<span class="token function">snprintf</span><span class="token punctuation">(</span>gd<span class="token operator">-&gt;</span>disk_name<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>gd<span class="token operator">-&gt;</span>disk_name<span class="token punctuation">)</span><span class="token punctuation">,</span>
+		 <span class="token string">"%s%d"</span><span class="token punctuation">,</span> tr<span class="token operator">-&gt;</span>name<span class="token punctuation">,</span> new<span class="token operator">-&gt;</span>devnum<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token function">set_capacity</span><span class="token punctuation">(</span>gd<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>u64<span class="token punctuation">)</span>new<span class="token operator">-&gt;</span>size <span class="token operator">*</span> tr<span class="token operator">-&gt;</span>blksize<span class="token punctuation">)</span> <span class="token operator">&gt;&gt;</span> <span class="token number">9</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//设置块设备容量，单位是扇区，默认扇区大小是512</span>
+
+	<span class="token comment">/* Create the request queue */</span>
+	<span class="token function">spin_lock_init</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>new<span class="token operator">-&gt;</span>queue_lock<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">INIT_LIST_HEAD</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>new<span class="token operator">-&gt;</span>rq_list<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	new<span class="token operator">-&gt;</span>tag_set <span class="token operator">=</span> <span class="token function">kzalloc</span><span class="token punctuation">(</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token operator">*</span>new<span class="token operator">-&gt;</span>tag_set<span class="token punctuation">)</span><span class="token punctuation">,</span> GFP_KERNEL<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>new<span class="token operator">-&gt;</span>tag_set<span class="token punctuation">)</span>
+		<span class="token keyword">goto</span> error3<span class="token punctuation">;</span>
+
+	new<span class="token operator">-&gt;</span>rq <span class="token operator">=</span> <span class="token function">blk_mq_init_sq_queue</span><span class="token punctuation">(</span>new<span class="token operator">-&gt;</span>tag_set<span class="token punctuation">,</span> <span class="token operator">&amp;</span>mtd_mq_ops<span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">,</span>
+				BLK_MQ_F_SHOULD_MERGE <span class="token operator">|</span> BLK_MQ_F_BLOCKING<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//初始化块设备软件队列</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">IS_ERR</span><span class="token punctuation">(</span>new<span class="token operator">-&gt;</span>rq<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		ret <span class="token operator">=</span> <span class="token function">PTR_ERR</span><span class="token punctuation">(</span>new<span class="token operator">-&gt;</span>rq<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		new<span class="token operator">-&gt;</span>rq <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+		<span class="token keyword">goto</span> error4<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>tr<span class="token operator">-&gt;</span>flush<span class="token punctuation">)</span>
+		<span class="token function">blk_queue_write_cache</span><span class="token punctuation">(</span>new<span class="token operator">-&gt;</span>rq<span class="token punctuation">,</span> true<span class="token punctuation">,</span> false<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//启用写缓存，禁止强制单元访问</span>
+
+	new<span class="token operator">-&gt;</span>rq<span class="token operator">-&gt;</span>queuedata <span class="token operator">=</span> new<span class="token punctuation">;</span>
+	
+	<span class="token comment">//设置逻辑块大小,为了减少存储开销和提高读写性能，可能会将逻辑块大小设置得比较大，如4KB或8KB。</span>
+	<span class="token comment">//而在一些需要频繁访问小文件或小数据结构的应用场景中，则可以将逻辑块大小调整到更小的值（如256字节或128字节）。</span>
+	<span class="token function">blk_queue_logical_block_size</span><span class="token punctuation">(</span>new<span class="token operator">-&gt;</span>rq<span class="token punctuation">,</span> tr<span class="token operator">-&gt;</span>blksize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	
+	<span class="token comment">//指示块设备为非旋转介质,即不是机械硬盘，不需要IO调度</span>
+	<span class="token function">blk_queue_flag_set</span><span class="token punctuation">(</span>QUEUE_FLAG_NONROT<span class="token punctuation">,</span> new<span class="token operator">-&gt;</span>rq<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	
+	<span class="token comment">//允许块设备驱动程序根据需要添加随机数种子，以帮助分散IO请求并提高系统性能</span>
+	<span class="token function">blk_queue_flag_clear</span><span class="token punctuation">(</span>QUEUE_FLAG_ADD_RANDOM<span class="token punctuation">,</span> new<span class="token operator">-&gt;</span>rq<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>tr<span class="token operator">-&gt;</span>discard<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token function">blk_queue_flag_set</span><span class="token punctuation">(</span>QUEUE_FLAG_DISCARD<span class="token punctuation">,</span> new<span class="token operator">-&gt;</span>rq<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//队列支持 TRIM 和 DISCARD 命令，可以在需要时向底层存储介质发出删除数据块的指令</span>
+		<span class="token function">blk_queue_max_discard_sectors</span><span class="token punctuation">(</span>new<span class="token operator">-&gt;</span>rq<span class="token punctuation">,</span> UINT_MAX<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//设置队列支持的最大 DISCARD 命令扇区数目</span>
+	<span class="token punctuation">}</span>
+
+	gd<span class="token operator">-&gt;</span>queue <span class="token operator">=</span> new<span class="token operator">-&gt;</span>rq<span class="token punctuation">;</span><span class="token comment">//</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>new<span class="token operator">-&gt;</span>readonly<span class="token punctuation">)</span>
+		<span class="token function">set_disk_ro</span><span class="token punctuation">(</span>gd<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<h3><a id="mtdblock_242"></a>mtdblock读写流程</h3> 
+<p>mtdblock由于是模拟的块设备，它的读写流程就是块设备读写流程，由于块设备读写比较复杂，这里不再详细介绍。<br> 这里主要介绍块设备的读写请求到达mtdblock设备层之后的处理流程。</p> 
+<p>前面有提到注册<code>mtd_blktrans_dev </code>设备时会初始化一个块设备的请求队列(new-&gt;rq)。</p> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">blk_mq_ops</span> mtd_mq_ops <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token punctuation">.</span>queue_rq	<span class="token operator">=</span> mtd_queue_rq<span class="token punctuation">,</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+new<span class="token operator">-&gt;</span>rq <span class="token operator">=</span> <span class="token function">blk_mq_init_sq_queue</span><span class="token punctuation">(</span>new<span class="token operator">-&gt;</span>tag_set<span class="token punctuation">,</span> <span class="token operator">&amp;</span>mtd_mq_ops<span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">,</span>
+				BLK_MQ_F_SHOULD_MERGE <span class="token operator">|</span> BLK_MQ_F_BLOCKING<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//初始化块设备软件队列</span>
+</code></pre> 
+<p>这里面有个非常重要的结构体——<code>mtd_mq_ops </code>,此数据结构用于块层与块设备层进行通信，总结就是上层的块请求最终都是调用这个<code>mtd_mq_ops -&gt;queue_rq</code>进行处理。<br> <code>mtd_queue_rq</code>处理流程大致如下(并非完整流程，完整流程请参考源码)</p> 
+<pre><code class="prism language-c"><span class="token function">mtd_queue_rq</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+	<span class="token function">mtd_blktrans_work</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+		<span class="token function">do_blktrans_request</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+			<span class="token keyword">if</span> REQ_OP_FLUSH
+				mtdblock_flush
+			<span class="token keyword">case</span> REQ_OP_DISCARD
+				tr<span class="token operator">-&gt;</span>discard
+			<span class="token keyword">case</span> REQ_OP_READ
+				mtdblock_readsect
+			<span class="token keyword">case</span> REQ_OP_WRITE
+				mtdblock_writesect
+</code></pre> 
+<p>由于是模拟的块设备，实际上最多只支持<code>REQ_OP_FLUSH</code>,<code>REQ_OP_DISCARD</code>,<code>REQ_OP_READ</code>,<code>REQ_OP_WRITE</code>这4中块设备IO请求。</p> 
+<h4><a id="mtdblock_readsect_272"></a>mtdblock_readsect</h4> 
+<p><code>mtdblock_readsect()</code> 大致流程如下：</p> 
+<pre><code class="prism language-c"><span class="token function">mtdblock_readsect</span><span class="token punctuation">(</span><span class="token punctuation">)</span> 
+	<span class="token function">do_cached_read</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+		<span class="token function">mtd_read</span><span class="token punctuation">(</span><span class="token punctuation">)</span> 
+			<span class="token function">mtd_read_oob</span><span class="token punctuation">(</span><span class="token punctuation">)</span> 
+				<span class="token function">mtd_read_oob_std</span><span class="token punctuation">(</span><span class="token punctuation">)</span> 
+					<span class="token function">sst25l_read</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token comment">//后面调用芯片厂商自己实现的读取FLASH接口</span>
+</code></pre> 
+<p>这里着重讲一下<code>do_cached_read </code></p> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">mtdblock_readsect</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">mtd_blktrans_dev</span> <span class="token operator">*</span>dev<span class="token punctuation">,</span>
+			      <span class="token keyword">unsigned</span> <span class="token keyword">long</span> block<span class="token punctuation">,</span> <span class="token keyword">char</span> <span class="token operator">*</span>buf<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">struct</span> <span class="token class-name">mtdblk_dev</span> <span class="token operator">*</span>mtdblk <span class="token operator">=</span> <span class="token function">container_of</span><span class="token punctuation">(</span>dev<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">mtdblk_dev</span><span class="token punctuation">,</span> mbd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">return</span> <span class="token function">do_cached_read</span><span class="token punctuation">(</span>mtdblk<span class="token punctuation">,</span> block<span class="token operator">&lt;&lt;</span><span class="token number">9</span><span class="token punctuation">,</span> <span class="token number">512</span><span class="token punctuation">,</span> buf<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">do_cached_read</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">mtdblk_dev</span> <span class="token operator">*</span>mtdblk<span class="token punctuation">,</span> <span class="token keyword">unsigned</span> <span class="token keyword">long</span> pos<span class="token punctuation">,</span>
+			   <span class="token keyword">int</span> len<span class="token punctuation">,</span> <span class="token keyword">char</span> <span class="token operator">*</span>buf<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">struct</span> <span class="token class-name">mtd_info</span> <span class="token operator">*</span>mtd <span class="token operator">=</span> mtdblk<span class="token operator">-&gt;</span>mbd<span class="token punctuation">.</span>mtd<span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span> sect_size <span class="token operator">=</span> mtdblk<span class="token operator">-&gt;</span>cache_size<span class="token punctuation">;</span>
+	<span class="token class-name">size_t</span> retlen<span class="token punctuation">;</span>
+	<span class="token keyword">int</span> ret<span class="token punctuation">;</span>
+	
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>sect_size<span class="token punctuation">)</span>
+		<span class="token keyword">return</span> <span class="token function">mtd_read</span><span class="token punctuation">(</span>mtd<span class="token punctuation">,</span> pos<span class="token punctuation">,</span> len<span class="token punctuation">,</span> <span class="token operator">&amp;</span>retlen<span class="token punctuation">,</span> buf<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">while</span> <span class="token punctuation">(</span>len <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">unsigned</span> <span class="token keyword">long</span> sect_start <span class="token operator">=</span> <span class="token punctuation">(</span>pos<span class="token operator">/</span>sect_size<span class="token punctuation">)</span><span class="token operator">*</span>sect_size<span class="token punctuation">;</span>
+		<span class="token keyword">unsigned</span> <span class="token keyword">int</span> offset <span class="token operator">=</span> pos <span class="token operator">-</span> sect_start<span class="token punctuation">;</span>
+		<span class="token keyword">unsigned</span> <span class="token keyword">int</span> size <span class="token operator">=</span> sect_size <span class="token operator">-</span> offset<span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>size <span class="token operator">&gt;</span> len<span class="token punctuation">)</span>
+			size <span class="token operator">=</span> len<span class="token punctuation">;</span>
+			
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>mtdblk<span class="token operator">-&gt;</span>cache_state <span class="token operator">!=</span> STATE_EMPTY <span class="token operator">&amp;&amp;</span>
+		    mtdblk<span class="token operator">-&gt;</span>cache_offset <span class="token operator">==</span> sect_start<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token function">memcpy</span> <span class="token punctuation">(</span>buf<span class="token punctuation">,</span> mtdblk<span class="token operator">-&gt;</span>cache_data <span class="token operator">+</span> offset<span class="token punctuation">,</span> size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+			ret <span class="token operator">=</span> <span class="token function">mtd_read</span><span class="token punctuation">(</span>mtd<span class="token punctuation">,</span> pos<span class="token punctuation">,</span> size<span class="token punctuation">,</span> <span class="token operator">&amp;</span>retlen<span class="token punctuation">,</span> buf<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span>ret<span class="token punctuation">)</span>
+				<span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span>retlen <span class="token operator">!=</span> size<span class="token punctuation">)</span>
+				<span class="token keyword">return</span> <span class="token operator">-</span>EIO<span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		buf <span class="token operator">+=</span> size<span class="token punctuation">;</span>
+		pos <span class="token operator">+=</span> size<span class="token punctuation">;</span>
+		len <span class="token operator">-=</span> size<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>入口参数<code>pos</code>指的是需要读取的起始地址</li><li>入口参数<code>len</code>指需要读取的数据长度，固定为 512字节(对应一个扇区大小)</li><li><code>sect_size</code>是mtdblock的缓存区大小，如果为0，表示没有缓存区，则需要直接调用<code>mtd_read</code>从Flash获取数据</li><li><code>sect_start</code>是<code>pos</code>对应mtdblock缓存区的起始地址</li><li><code>offset </code>是需要读取的数据对应mtdblock缓存区的偏移量</li><li><code>size</code> 是mtdblock缓存区有效数据长度</li><li><code>size &gt; len</code>表示缓存区内有效是多于本次需要读取的数量，故只需要读取<code>len</code>个字节</li><li><code>mtdblk-&gt;cache_state != STATE_EMPTY</code> 表示缓存区非空，<code>mtdblk-&gt;cache_offset == sect_start</code>表示实际的缓存区的起始地址和<code>pos</code>mtdblock缓存区的起始地址一致 
+  <ul><li>如果能同时满足上述条件则直接读取缓存区的数据</li><li>如果不能同时满足，则需要直接调用<code>mtd_read</code>从Flash获取数据</li></ul> </li></ul> 
+<h4><a id="mtdblock_writesect_338"></a>mtdblock_writesect</h4> 
+<p><code>mtdblock_writesect()</code> 大致流程如下：</p> 
+<pre><code class="prism language-c"><span class="token function">mtdblock_writesect</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+	<span class="token function">do_cached_write</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+		<span class="token function">mtd_write</span><span class="token punctuation">(</span><span class="token punctuation">)</span> 
+			<span class="token function">mtd_write_oob</span><span class="token punctuation">(</span><span class="token punctuation">)</span> 
+				<span class="token function">mtd_write_oob_std</span><span class="token punctuation">(</span><span class="token punctuation">)</span> 
+					<span class="token function">sst25l_write</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token comment">//后面调用芯片厂商自己实现的读取FLASH接口</span>
+</code></pre> 
+<h3><a id="_349"></a>总结</h3> 
+<ul><li>mtdX 和 mtdblockX实际上是同一个设备，mtdX是字符设备，mtdblockX是块设备</li><li>mtdblockX存在的目的主要是为了挂载存在Flash里面的文件系统(例如yaffs2，jffs2)</li><li>mtdblock设备的读写最终也是调用mtd设备的操作函数集</li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/bbeb617b64356b1d68ced5a91e4b9533/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">nvm安装及设置node默认版本</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/8be42561fa44719170c1889eb896cdff/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">llvm程序手册</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

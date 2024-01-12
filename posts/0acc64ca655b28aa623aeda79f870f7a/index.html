@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>深度学习部署神器——triton inference server入门教程指北 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="深度学习部署神器——triton inference server入门教程指北" />
+<meta property="og:description" content="开新坑！准备开始聊triton。
+老潘用triton有两年多了，一直想写个教程给大家。顺便自己学习学习，拖了又拖，趁着这次换版本的机会，终于有机会了写了。
+![](https://img-blog.csdnimg.cn/img_convert/18ac04ec459689dffdeca1a229f52730.jpeg#crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=url&amp;height=282&amp;id=dPIo9&amp;margin=[object Object]&amp;originHeight=366&amp;originWidth=366&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;status=done&amp;style=none&amp;title=&amp;width=282)
+triton作为一个NVIDIA开源的商用级别的服务框架，个人认为很好用而且很稳定，API接口的变化也不大，我从2020年的20.06切换到2022年的22.06，两个大版本切换，一些涉及到代码的工程变动很少，稍微修改修改就可以直接复用，很方便。
+本系列讲解的版本也是基于22.06。
+本系列讲解重点是结合实际的应用场景以及源码分析，以及写一些triton周边的插件、集成等。非速成，适合同样喜欢深入的小伙伴。
+什么是triton inference server？ 肯定很多人想知道triton干啥的，学习这个有啥用？这里简单解释一下：
+triton可以充当服务框架去部署你的深度学习模型，其他用户可以通过http或者grpc去请求，相当于你用flask搭了个服务供别人请求，当然相比flask的性能高很多了triton也可以摘出C-API充当多线程推理服务框架，去除http和grpc部分，适合本地部署多模型，比如你有很多模型要部署，然后分时段调用，或者有pipeline，有了triton就省去你处理显存、内存和线程的麻烦 注意，还有一个同名的triton是GPU编程语言，类似于TVM的TVMscript，需要区分，这篇文章中的triton指的是triton inference server
+借用官方的图，triton的使用场景结构如下：![triton的使用场景结构](https://img-blog.csdnimg.cn/img_convert/d9098334b2391cde1f8cb26d86ea5689.png#clientId=u9bf73545-0e78-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=444&amp;id=u1eecc98c&amp;margin=[object Object]&amp;name=image.png&amp;originHeight=1284&amp;originWidth=2171&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=849409&amp;status=done&amp;style=none&amp;taskId=u73eb0c0a-b768-42f3-ae60-6c2c9c292d3&amp;title=&amp;width=750.390625)
+涉及到运维部分，我也不是很懂，抛去K8S后，结构清爽了些：
+![](https://img-blog.csdnimg.cn/img_convert/69fc24dacc12d9ebee1287f22ba102a3.png#clientId=u9bf73545-0e78-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=658&amp;id=ud22042db&amp;margin=[object Object]&amp;name=image.png&amp;originHeight=989&amp;originWidth=795&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=226247&amp;status=done&amp;style=none&amp;taskId=ud07d8973-e419-4d39-a8c0-2ab197ae05e&amp;title=&amp;width=529)
+triton的一些优点 通过上述的两个结构图，可以大概知道triton的一些功能和特点：
+支持HTTP/GRPC支持多backend，TensorRT、libtorch、onnx、paddle、tvm啥的都支持，也可以自己custom，所以理论上所有backend都可以支持单GPU、多GPU都可以支持，CPU也支持模型可以在CPU层面并行执行很多基本的服务框架的功能都有，模型管理比如热加载、模型版本切换、动态batch，类似于之前的tensorflow server开源，可以自定义修改，很多问题可以直接issue，官方回复及时NVIDIA官方出品，对NVIDIA系列GPU比较友好，也是大厂购买NVIDIA云服务器推荐使用的框架很多公司都在用triton，真的很多，不管是互联网大厂还是NVIDIA的竞品都在用，用户多代表啥不用我多说了吧 ![](https://img-blog.csdnimg.cn/img_convert/3282a5efe37a20f06db904882cc90e4c.png#clientId=u9bf73545-0e78-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=470&amp;id=uf5b0f385&amp;margin=[object Object]&amp;name=image.png&amp;originHeight=913&amp;originWidth=1849&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=733700&amp;status=done&amp;style=none&amp;taskId=u9291ec5a-a075-4490-bfb7-80c9680a740&amp;title=&amp;width=951.3958740234375)
+如何学习triton 两年前开始学习的时候，官方资料比较匮乏， 只能通过看源码来熟悉triton的使用方式，所幸知乎上有个关于TensorRT serving不错的教程，跟着看了几篇大致了解了triton的框架结构。那会triton叫做TensorRT serving，专门针对TensorRT设计的服务器框架，后来才变为triton，支持其他推理后端的。
+现在triton的教程比较多了，官方的docs写着比较详细，还有issue中各种用例可以参考，B站上也有视频教程，比两年前的生态要好了不少。
+当然，最重要的，还是上手使用，然后看源码， 然后客制化。
+源码学习 从triton的源码中可以学到：
+C&#43;&#43;各种高级语法设计模式不同backend（libtorch、TensorRT、onnxruntime等）如何正确创建推理端，如何多线程推理C&#43;&#43;多线程编程/互斥/队列API接口暴露/SDK设计CMAKE高级用法 等等等等，不列举了，对于程序员来说，好的源码就是好的学习资料。当然，也可以看老潘的文章哈。
+triton系列教程计划 triton相关系列也会写一些文章，目前大概规划是这些：
+什么是triton以及triton入门、triton编译、triton运行triton管理模型、调度模型的方式triton的backend介绍、自定义backend自定义客户端，python和c&#43;&#43;高级特性、优先级、rate limiter等等 编译和安装 一般来说，如果想快速使用triton，直接使用官方的镜像最快。
+但是官方镜像有个尴尬点，那就是编译好的镜像需要的环境一般都是最新的，和你的不一定一致。
+![](https://img-blog.csdnimg.cn/img_convert/e23e3412543e413e7f9f5f91716ccbd3.png#clientId=ue2b842dd-981c-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=497&amp;id=uffbd67fa&amp;margin=[object Object]&amp;name=image.png&amp;originHeight=1271&amp;originWidth=1817&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=348217&amp;status=done&amp;style=none&amp;taskId=uf67c2c92-29a6-47aa-a224-807cfc80db2&amp;title=&amp;width=710.4000244140625)
+比如22.09版本的镜像需要的显卡驱动为520及以上，如果想满足自己的显卡驱动，就需要自行编译了。
+官方也提供了使用镜像的快速使用方法：
+# 第一步，创建 model repository git clone -b r22.09 https://github.com/triton-inference-server/server.git cd server/docs/examples ./fetch_models.sh # 第二步，从 NGC Triton container 中拉取最新的镜像并启动 docker run --gpus=1 --rm --net=host -v ${PWD}/model_repository:/models nvcr." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/0acc64ca655b28aa623aeda79f870f7a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-10-19T09:07:16+08:00" />
+<meta property="article:modified_time" content="2022-10-19T09:07:16+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">深度学习部署神器——triton inference server入门教程指北</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>开新坑！准备开始聊triton。</p> 
+<p>老潘用triton有两年多了，一直想写个教程给大家。顺便自己学习学习，拖了又拖，趁着这次换版本的机会，终于有机会了写了。</p> 
+<p>![](https://img-blog.csdnimg.cn/img_convert/18ac04ec459689dffdeca1a229f52730.jpeg#crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=url&amp;height=282&amp;id=dPIo9&amp;margin=[object Object]&amp;originHeight=366&amp;originWidth=366&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;status=done&amp;style=none&amp;title=&amp;width=282)</p> 
+<p>triton作为一个NVIDIA开源的<strong>商用级别</strong>的服务框架，个人认为<strong>很好用而且很稳定</strong>，API接口的变化也不大，<strong>我从2020年的20.06切换到2022年的22.06</strong>，两个大版本切换，一些涉及到代码的工程变动很少，稍微修改修改就可以直接复用，很方便。</p> 
+<blockquote> 
+ <p>本系列讲解的版本也是基于22.06。</p> 
+</blockquote> 
+<p>本系列讲解重点是<strong>结合实际的应用场景以及源码分析</strong>，以及写一些triton周边的插件、集成等。非速成，适合同样喜欢深入的小伙伴。</p> 
+<h3><a id="triton_inference_server_11"></a>什么是triton inference server？</h3> 
+<p>肯定很多人想知道triton干啥的，学习这个有啥用？这里简单解释一下：</p> 
+<ul><li>triton可以充当服务框架去部署你的深度学习模型，其他用户可以通过http或者grpc去请求，相当于你用flask搭了个服务供别人请求，当然相比flask的性能高很多了</li><li>triton也可以摘出C-API充当多线程推理服务框架，去除http和grpc部分，适合本地部署多模型，比如你有很多模型要部署，然后分时段调用，或者有pipeline，有了triton就省去你处理显存、内存和线程的麻烦</li></ul> 
+<blockquote> 
+ <p>注意，还有一个同名的<a href="https://github.com/openai/triton">triton</a>是GPU编程语言，类似于TVM的TVMscript，需要区分，这篇文章中的triton指的是triton inference server</p> 
+</blockquote> 
+<p>借用官方的图，<strong>triton的使用场景结构</strong>如下：![triton的使用场景结构](https://img-blog.csdnimg.cn/img_convert/d9098334b2391cde1f8cb26d86ea5689.png#clientId=u9bf73545-0e78-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=444&amp;id=u1eecc98c&amp;margin=[object Object]&amp;name=image.png&amp;originHeight=1284&amp;originWidth=2171&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=849409&amp;status=done&amp;style=none&amp;taskId=u73eb0c0a-b768-42f3-ae60-6c2c9c292d3&amp;title=&amp;width=750.390625)</p> 
+<p>涉及到运维部分，我也不是很懂，抛去K8S后，结构清爽了些：</p> 
+<p>![](https://img-blog.csdnimg.cn/img_convert/69fc24dacc12d9ebee1287f22ba102a3.png#clientId=u9bf73545-0e78-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=658&amp;id=ud22042db&amp;margin=[object Object]&amp;name=image.png&amp;originHeight=989&amp;originWidth=795&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=226247&amp;status=done&amp;style=none&amp;taskId=ud07d8973-e419-4d39-a8c0-2ab197ae05e&amp;title=&amp;width=529)</p> 
+<h3><a id="triton_24"></a>triton的一些优点</h3> 
+<p>通过上述的两个结构图，可以大概知道triton的一些<strong>功能和特点</strong>：</p> 
+<ul><li>支持HTTP/GRPC</li><li>支持多backend，TensorRT、libtorch、onnx、paddle、tvm啥的都支持，也可以自己custom，所以理论上所有backend都可以支持</li><li>单GPU、多GPU都可以支持，CPU也支持</li><li>模型可以在CPU层面并行执行</li><li>很多基本的服务框架的功能都有，模型管理比如热加载、模型版本切换、动态batch，类似于之前的tensorflow server</li><li>开源，可以自定义修改，很多问题可以直接issue，官方回复及时</li><li>NVIDIA官方出品，对NVIDIA系列GPU比较友好，也是大厂购买NVIDIA云服务器推荐使用的框架</li><li>很多公司都在用triton，真的很多，不管是互联网大厂还是NVIDIA的竞品都在用，用户多代表啥不用我多说了吧</li></ul> 
+<p>![](https://img-blog.csdnimg.cn/img_convert/3282a5efe37a20f06db904882cc90e4c.png#clientId=u9bf73545-0e78-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=470&amp;id=uf5b0f385&amp;margin=[object Object]&amp;name=image.png&amp;originHeight=913&amp;originWidth=1849&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=733700&amp;status=done&amp;style=none&amp;taskId=u9291ec5a-a075-4490-bfb7-80c9680a740&amp;title=&amp;width=951.3958740234375)</p> 
+<h3><a id="triton_38"></a>如何学习triton</h3> 
+<p>两年前开始学习的时候，官方资料比较匮乏， 只能通过看源码来熟悉triton的使用方式，所幸知乎上有个关于<strong>TensorRT serving</strong>不错的<a href="https://www.zhihu.com/people/pwlazy/posts" rel="nofollow">教程</a>，跟着看了几篇大致了解了triton的框架结构。那会triton叫做<strong>TensorRT serving，专门针对TensorRT设计的服务器框架，后来才变为triton，支持其他推理后端的。</strong></p> 
+<blockquote> 
+ <p>现在triton的教程比较多了，官方的docs写着比较详细，还有issue中各种用例可以参考，B站上也有<a href="https://www.bilibili.com/video/BV1KS4y1v7zd/?spm_id_from=333.337.search-card.all.click&amp;vd_source=eec038509607175d58cdfe2e824e8ba2" rel="nofollow">视频教程</a>，比两年前的生态要好了不少。</p> 
+</blockquote> 
+<p>当然，最重要的，还是上手使用，然后看源码， 然后客制化。</p> 
+<h4><a id="_44"></a>源码学习</h4> 
+<p>从triton的源码中可以学到：</p> 
+<ul><li>C++各种高级语法</li><li>设计模式</li><li>不同backend（libtorch、TensorRT、onnxruntime等）如何正确创建推理端，如何多线程推理</li><li>C++多线程编程/互斥/队列</li><li>API接口暴露/SDK设计</li><li>CMAKE高级用法</li></ul> 
+<p>等等等等，不列举了，对于程序员来说，<strong>好的源码就是好的学习资料</strong>。当然，也可以看老潘的文章哈。</p> 
+<h4><a id="triton_55"></a>triton系列教程计划</h4> 
+<p>triton相关系列也会写一些文章，目前大概规划是这些：</p> 
+<ul><li>什么是triton以及triton入门、triton编译、triton运行</li><li>triton管理模型、调度模型的方式</li><li>triton的backend介绍、自定义backend</li><li>自定义客户端，python和c++</li><li>高级特性、优先级、rate limiter等等</li></ul> 
+<h3><a id="_63"></a>编译和安装</h3> 
+<p>一般来说，如果想快速使用triton，直接使用<a href="https://docs.nvidia.com/deeplearning/triton-inference-server/release-notes/index.html" rel="nofollow">官方的镜像</a>最快。<br> 但是官方镜像有个尴尬点，那就是编译好的镜像<strong>需要的环境一般都是最新的，和你的不一定一致</strong>。</p> 
+<p>![](https://img-blog.csdnimg.cn/img_convert/e23e3412543e413e7f9f5f91716ccbd3.png#clientId=ue2b842dd-981c-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=497&amp;id=uffbd67fa&amp;margin=[object Object]&amp;name=image.png&amp;originHeight=1271&amp;originWidth=1817&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=348217&amp;status=done&amp;style=none&amp;taskId=uf67c2c92-29a6-47aa-a224-807cfc80db2&amp;title=&amp;width=710.4000244140625)</p> 
+<p>比如22.09版本的镜像需要的显卡驱动为520及以上，如果想<strong>满足自己的显卡驱动，就需要自行编译了</strong>。<br> 官方也提供了使用镜像的<strong>快速使用方法</strong>：</p> 
+<pre><code class="prism language-bash"><span class="token comment"># 第一步，创建 model repository </span>
+<span class="token function">git</span> clone -b r22.09 https://github.com/triton-inference-server/server.git
+<span class="token builtin class-name">cd</span> server/docs/examples
+./fetch_models.sh
+
+<span class="token comment"># 第二步，从 NGC Triton container 中拉取最新的镜像并启动</span>
+<span class="token function">docker</span> run --gpus<span class="token operator">=</span><span class="token number">1</span> --rm --net<span class="token operator">=</span>host -v <span class="token variable">${<!-- --><span class="token environment constant">PWD</span>}</span>/model_repository:/models nvcr.io/nvidia/tritonserver:22.09-py3 tritonserver --model-repository<span class="token operator">=</span>/models
+
+<span class="token comment"># 第三步，发送</span>
+<span class="token comment"># In a separate console, launch the image_client example from the NGC Triton SDK container</span>
+<span class="token function">docker</span> run -it --rm --net<span class="token operator">=</span>host nvcr.io/nvidia/tritonserver:22.09-py3-sdk
+/workspace/install/bin/image_client -m densenet_onnx -c <span class="token number">3</span> -s INCEPTION /workspace/images/mug.jpg
+
+<span class="token comment"># Inference should return the following</span>
+Image <span class="token string">'/workspace/images/mug.jpg'</span><span class="token builtin class-name">:</span>
+    <span class="token number">15.346230</span> <span class="token punctuation">(</span><span class="token number">504</span><span class="token punctuation">)</span> <span class="token operator">=</span> COFFEE MUG
+    <span class="token number">13.224326</span> <span class="token punctuation">(</span><span class="token number">968</span><span class="token punctuation">)</span> <span class="token operator">=</span> CUP
+    <span class="token number">10.422965</span> <span class="token punctuation">(</span><span class="token number">505</span><span class="token punctuation">)</span> <span class="token operator">=</span> COFFEEPOT
+</code></pre> 
+<h4><a id="triton_91"></a>triton官方仓库</h4> 
+<p>两年前的triton只有一个大仓库，tensorrt_backend也默认在triton主仓库中，但是现在tensorrt_backend被拆分出来了，很显然triton除了支持tensorrt还支持很多其他的后端，我们可以自定义使用很多后端。</p> 
+<p>现在是目前的triton包含的一些仓库：</p> 
+<ul><li>[<a href="https://github.com/triton-inference-server/server">server</a>] triton服务外层框架，包含了http收发请求，服务内存分配等一些功能代码</li><li>[<a href="https://github.com/triton-inference-server/core">core</a>] triton主框架，如果处理请求、后端管理、模型调度啥的全在这里</li><li>[<a href="https://github.com/triton-inference-server/common">common</a>] 通用工具，没啥好说的，打日志的代码在这里</li><li>[<a href="https://github.com/triton-inference-server/backend">backend</a>] backend后端框架代码，存放了一些后端通用父类，自定义后端可以集成这些类仿写新的后端</li><li>[<a href="https://github.com/triton-inference-server/third_party.git">third_party</a>] triton使用的第三方库的汇总，主要是cmake里头会包含</li><li>[<a href="https://github.com/triton-inference-server/tensorrt_backend">tensorrt_backend</a>] tensorrt后端代码</li><li>[<a href="https://github.com/triton-inference-server/pytorch_backend">pytorch_backend</a>] libtorch后端代码</li></ul> 
+<p>最开始的时候，server、core、common、backend这些代码仓库都是合在一起的，后来都拆分出来了，增加了triton的灵活性。</p> 
+<p>![](https://img-blog.csdnimg.cn/img_convert/dfb1adb97e0cd086658df5e91abe5572.png#crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=url&amp;height=478&amp;id=CNmzD&amp;margin=[object Object]&amp;originHeight=1684&amp;originWidth=2066&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;status=done&amp;style=none&amp;title=&amp;width=586)</p> 
+<p>比如，上述的core仓库可以单独暴露出cAPI作为动态链接库供其他程序调用，去掉http、grpc的外层请求接口，直接一步到位调用。</p> 
+<p>一般来说，我们都是从最主要的server开始编，编译的时候会链接core、common、backend中的代码，其他自定义backend（比如tensorrt_backend）在编译的时候也需要带上common、core、backend这三个仓库，这些关系我们可以从相应的CMakeList中找到。</p> 
+<h4><a id="_111"></a>自行编译</h4> 
+<p>如果想要研究源码，修改源码实现客制化，那么自行编译是必须的。</p> 
+<p>triton的编译和安装其实很简单，唯一的难点就是<strong>需要加速</strong>，因为triton在编译的时候会clone很多第三方库，第三方库也会克隆它们需要的第三方库，这些库当然都是国外的，所以有个好的网络环境很重要。</p> 
+<p>比如在编译triton的时候需要下载grpc这个库，grpc又依赖很多第三方其他库，网络不好的话，会经常遇到下面的问题：</p> 
+<pre><code class="prism language-bash">Failed to recurse into submodule path <span class="token string">'third_party/bloaty'</span>
+CMake Error at /tmp/tritonbuild/tritonserver/build/_deps/repo-third-party-build/grpc-repo/tmp/grpc-repo-gitclone.cmake:52 <span class="token punctuation">(</span>message<span class="token punctuation">)</span>:
+  Failed to update submodules in:
+  <span class="token string">'/tmp/tritonbuild/tritonserver/build/_deps/repo-third-party-build/grpc-repo/src/grpc'</span>
+
+
+make<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span>: *** <span class="token punctuation">[</span>_deps/repo-third-party-build/CMakeFiles/grpc-repo.dir/build.make:99: _deps/repo-third-party-build/grpc-repo/src/grpc-repo-stamp/grpc-repo-download<span class="token punctuation">]</span> Error <span class="token number">1</span>
+make<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span>: Leaving directory <span class="token string">'/tmp/tritonbuild/tritonserver/build'</span>
+make<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span>: *** <span class="token punctuation">[</span>CMakeFiles/Makefile2:590: _deps/repo-third-party-build/CMakeFiles/grpc-repo.dir/all<span class="token punctuation">]</span> Error <span class="token number">2</span>
+make<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span>: Leaving directory <span class="token string">'/tmp/tritonbuild/tritonserver/build'</span>
+make<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span>: *** <span class="token punctuation">[</span>CMakeFiles/Makefile2:145: CMakeFiles/server.dir/rule<span class="token punctuation">]</span> Error <span class="token number">2</span>
+make<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span>: Leaving directory <span class="token string">'/tmp/tritonbuild/tritonserver/build'</span>
+</code></pre> 
+<p>开加速是最好的办法，不管是UI还是命令行，都有相应的软件可以用，比如clash。</p> 
+<p>如果你的服务器实在是开不了加速，也有其他办法，<strong>那就是将triton库中大部分重量级库的git地址全换为国内的</strong>。</p> 
+<p>怎么替换，我是在gitee中，同步github上的仓库，比如triton的core仓库，同步过来，就可以使用国内的地址了。![](https://img-blog.csdnimg.cn/img_convert/4f782d2188245d84d507ebe93de0d4ce.png#clientId=u5cb3c810-ca34-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=528&amp;id=u03ac380c&amp;margin=[object Object]&amp;name=image.png&amp;originHeight=1214&amp;originWidth=1390&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=197935&amp;status=done&amp;style=none&amp;taskId=ubaadcec9-9198-4e1f-a80e-97706bb4940&amp;title=&amp;width=605)</p> 
+<p>当然也需要将这些库的submodule中的库也修改为国内源，比如grpc这个库依赖很多第三方库，克隆的时候，这是要一个一个下载的：</p> 
+<p>![](https://img-blog.csdnimg.cn/img_convert/ead8a324a0cb571e743843f9eeb221ff.png#clientId=u5cb3c810-ca34-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=541&amp;id=ue6782fec&amp;margin=[object Object]&amp;name=image.png&amp;originHeight=811&amp;originWidth=881&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=77016&amp;status=done&amp;style=none&amp;taskId=udb4e5d05-4ca7-4a76-b0b4-8f58da1b2ba&amp;title=&amp;width=587.3333333333334)</p> 
+<p>改起来稍微麻烦，还需要注意，要改特定commit分支的git地址：</p> 
+<p>![](https://img-blog.csdnimg.cn/img_convert/f6fe16ba78b5e5362e3d9ffc75a67f3b.png#clientId=u5cb3c810-ca34-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=505&amp;id=u49e6d683&amp;margin=[object Object]&amp;name=image.png&amp;originHeight=757&amp;originWidth=1321&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=144895&amp;status=done&amp;style=none&amp;taskId=u35887c33-d0ab-4ba2-8f6c-92d8902886b&amp;title=&amp;width=880.6666666666666)</p> 
+<p>如果有部分第三方库下载太慢下来不下来，我们可以手动进入<code>/tmp/tritonbuild/tritonserver/build/_deps/repo-third-party-build/grpc-repo/src/grpc/third_part</code>目录然后手动<code>git clone xxx</code>，然后执行一下<code>git submodule init / git submodule update</code>下就可以带进去。</p> 
+<p>示例：</p> 
+<pre><code class="prism language-bash">root@64da25af2629:/tmp/tritonbuild/tritonserver/build/_deps/repo-third-party-build/grpc-repo/src/grpc<span class="token comment"># git submodule init</span>
+root@64da25af2629:/tmp/tritonbuild/tritonserver/build/_deps/repo-third-party-build/grpc-repo/src/grpc<span class="token comment"># git submodule update</span>
+Submodule path <span class="token string">'third_party/googletest'</span><span class="token builtin class-name">:</span> checked out <span class="token string">'c9ccac7cb7345901884aabf5d1a786cfa6e2f397'</span>
+</code></pre> 
+<p>太麻烦了，不过确实为一种办法呃呃。</p> 
+<p>还有一点，triton每次build都会clone，是因为其用了cmake中的<code>ExternalProject_Add</code>指令，假如我们已经有下载好的grpc，那么直接替换到<code>server/build/_deps/repo-third-party-build/grpc-repo/src</code>中然后将<code>/data/oldpan/software/server/build/_deps/repo-third-party-src/CMakeLists.txt</code>：</p> 
+<p>注释掉git下载部分，修改自己本地的就行，就不需要每次再clone一遍了。</p> 
+<pre><code class="prism language-c">#
+<span class="token macro property"><span class="token directive-hash">#</span> <span class="token expression">Get the protobuf and grpc source used <span class="token keyword">for</span> the GRPC endpoint<span class="token punctuation">.</span> We must</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span> <span class="token directive keyword">use</span> <span class="token expression">v1<span class="token punctuation">.</span><span class="token number">25.0</span> because later GRPC has significant performance</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span> <span class="token directive keyword">regressions</span> <span class="token expression"><span class="token punctuation">(</span>e<span class="token punctuation">.</span>g<span class="token punctuation">.</span> resnet50 bs128<span class="token punctuation">)</span><span class="token punctuation">.</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span>
+<span class="token expression"><span class="token function">ExternalProject_Add</span><span class="token punctuation">(</span>grpc<span class="token operator">-</span>repo</span></span>
+  PREFIX grpc<span class="token operator">-</span>repo
+  <span class="token macro property"><span class="token directive-hash">#</span> <span class="token expression">GIT_REPOSITORY </span><span class="token string">"https://gitee.com/Oldpann/grpc.git"</span></span>
+  <span class="token macro property"><span class="token directive-hash">#</span> <span class="token expression">GIT_TAG </span><span class="token string">"v1.25.x"</span></span>
+  SOURCE_DIR <span class="token string">"${CMAKE_CURRENT_BINARY_DIR}/grpc-repo/src/grpc"</span>
+  CONFIGURE_COMMAND <span class="token string">""</span>
+  BUILD_COMMAND <span class="token string">""</span>
+  INSTALL_COMMAND <span class="token string">""</span>
+  TEST_COMMAND <span class="token string">""</span>
+  PATCH_COMMAND python3 $<span class="token punctuation">{<!-- --></span>CMAKE_CURRENT_SOURCE_DIR<span class="token punctuation">}</span><span class="token operator">/</span>tools<span class="token operator">/</span>install_src<span class="token punctuation">.</span>py <span class="token operator">--</span>src <span class="token operator">&lt;</span>SOURCE_DIR<span class="token operator">&gt;</span> $<span class="token punctuation">{<!-- --></span>INSTALL_SRC_DEST_ARG<span class="token punctuation">}</span> <span class="token operator">--</span>dest<span class="token operator">-</span>basename<span class="token operator">=</span>grpc_1<span class="token punctuation">.</span><span class="token number">25.0</span>
+<span class="token punctuation">)</span>
+</code></pre> 
+<p>说了这么多，总之，最好的办法当然还是<strong>开科学，全局一下就OK，省去那么多麻烦事儿。</strong></p> 
+<p>搞定好网络问题，编译triton就很简单了！</p> 
+<pre><code class="prism language-bash"><span class="token function">git</span> clone --recursive https://github.com/triton-inference-server/server.git
+<span class="token builtin class-name">cd</span> server
+python build.py  --enable-logging --enable-stats --enable-tracing --enable-gpu  --endpoint<span class="token operator">=</span>http --repo-tag<span class="token operator">=</span>common:r22.06 --repo-tag<span class="token operator">=</span>core:r22.06 --repo-tag<span class="token operator">=</span>backend:r22.06 --repo-tag<span class="token operator">=</span>thirdparty:r22.06 --backend<span class="token operator">=</span>ensemble --backend<span class="token operator">=</span>tensorrt
+</code></pre> 
+<p>在克隆好的server的目录下执行以上命令(下面是我的设置,我们可以个根据自己的需求进行修改)就可以了。</p> 
+<p>执行这个命令后triton就会构建<code>docker</code>在docker中编译，最终会创建3个镜像:</p> 
+<ul><li>tritonserver:latest</li><li>tritonserver_buildbase:latest</li><li>tritonserver_cibase:latest</li></ul> 
+<p>最终编译好的<code>tritonserver_buildbase:latest</code>镜像，我们可以在其中开发，因为环境都帮忙配好了，只需要再执行编译命令，就可以编译了，我们也可以自定义源码进行个性功能的开发。</p> 
+<h4><a id="_194"></a>在镜像中开发</h4> 
+<p>需要注意，在编译的时候需要pull官方默认的镜像，而这个镜像是有显卡驱动限制的，比如<code>r22.06</code>需要显卡驱动版本为470。</p> 
+<blockquote> 
+ <p>同志们看看自己的显卡驱动，别下了不能用hhh</p> 
+</blockquote> 
+<p>可以通过<a href="https://docs.nvidia.com/deeplearning/triton-inference-server/release-notes/rel_22-06.html" rel="nofollow">triton镜像历史</a>查看镜像版本要求：</p> 
+<p>![](https://img-blog.csdnimg.cn/img_convert/68096477996b0de6b336e2968e25ad19.png#clientId=u5cb3c810-ca34-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=159&amp;id=ufb62d563&amp;margin=[object Object]&amp;name=image.png&amp;originHeight=239&amp;originWidth=2051&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=92220&amp;status=done&amp;style=none&amp;taskId=u5400a15a-02e1-4dcc-8a5a-1b23d2edd65&amp;title=&amp;width=1367.3333333333333)</p> 
+<p>接上，我们不是编译好了triton镜像，直接进去就可以开发了：</p> 
+<pre><code class="prism language-bash"><span class="token function">docker</span> run -v/home/oldpan/code:/code -v/home/oldpan/software:/software  -d tritonserver_buildbase:latest /usr/bin/sh -c <span class="token string">"while true; do echo hello world; sleep 20;done"</span>
+</code></pre> 
+<p>在docker中修改triton的源码，继续执行以下命令就可以编译，和之前的区别就是加了<code> --no-container-build</code>参数。</p> 
+<pre><code>python build.py  --enable-logging --enable-stats --enable-tracing --enable-gpu  --endpoint=http --repo-tag=common:r22.06 --repo-tag=core:r22.06 --repo-tag=backend:r22.06 --repo-tag=thirdparty:r22.06 --backend=ensemble --no-container-build --build-dir=./build
+</code></pre> 
+<p>我们如果想编译debug版本的triton,可以在命令中添加:<code>--build-type=Debug</code>。</p> 
+<p>另外，原始triton镜像中已经有tensorrt，如果想换版本，可以删除原始docker中的旧的tensorrt，自行安装新的tensorrt即可：</p> 
+<ul><li><a href="https://docs.nvidia.com/deeplearning/tensorrt/install-guide/index.html" rel="nofollow">https://docs.nvidia.com/deeplearning/tensorrt/install-guide/index.html</a></li></ul> 
+<h3><a id="_215"></a>说下运行流程吧！</h3> 
+<p>讲了这么多铺垫，接下来简单说下运行流程。</p> 
+<p>这里通过代码简单梳理下triton运行的<strong>整体流程，之后的具体细节，放到接下来的篇章讲解</strong>。</p> 
+<p>首先一开始，main函数在<code>servers/main.cc</code>下，triton在启动的时候会执行以下函数：</p> 
+<pre><code class="prism language-cpp"><span class="token comment">// src/servers/main.cc 经过简化</span>
+<span class="token keyword">int</span>
+<span class="token function">main</span><span class="token punctuation">(</span><span class="token keyword">int</span> argc<span class="token punctuation">,</span> <span class="token keyword">char</span><span class="token operator">*</span><span class="token operator">*</span> argv<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// 解析参数</span>
+  TRITONSERVER_ServerOptions<span class="token operator">*</span> server_options <span class="token operator">=</span> <span class="token keyword">nullptr</span><span class="token punctuation">;</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">Parse</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>server_options<span class="token punctuation">,</span> argc<span class="token punctuation">,</span> argv<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token function">exit</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+  <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+  <span class="token comment">// 这里创建server</span>
+  TRITONSERVER_Server<span class="token operator">*</span> server_ptr <span class="token operator">=</span> <span class="token keyword">nullptr</span><span class="token punctuation">;</span>
+  <span class="token function">FAIL_IF_ERR</span><span class="token punctuation">(</span>
+      <span class="token function">TRITONSERVER_ServerNew</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>server_ptr<span class="token punctuation">,</span> server_options<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token string">"creating server"</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 这里创建server</span>
+  <span class="token function">FAIL_IF_ERR</span><span class="token punctuation">(</span>
+      <span class="token function">TRITONSERVER_ServerOptionsDelete</span><span class="token punctuation">(</span>server_options<span class="token punctuation">)</span><span class="token punctuation">,</span>
+      <span class="token string">"deleting server options"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  std<span class="token double-colon punctuation">::</span>shared_ptr<span class="token operator">&lt;</span>TRITONSERVER_Server<span class="token operator">&gt;</span> <span class="token function">server</span><span class="token punctuation">(</span>
+      server_ptr<span class="token punctuation">,</span> TRITONSERVER_ServerDelete<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+  <span class="token comment">// 启动HTTP, GRPC, 以及性能统计的端口</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">StartEndpoints</span><span class="token punctuation">(</span>server<span class="token punctuation">,</span> trace_manager<span class="token punctuation">,</span> shm_manager<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token function">exit</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+  <span class="token comment">// Trap SIGINT and SIGTERM to allow server to exit gracefully</span>
+  <span class="token function">signal</span><span class="token punctuation">(</span>SIGINT<span class="token punctuation">,</span> SignalHandler<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token function">signal</span><span class="token punctuation">(</span>SIGTERM<span class="token punctuation">,</span> SignalHandler<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token comment">// 等待kill信号区关闭triton </span>
+  <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token operator">!</span>exiting_<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+   <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+      <span class="token comment">// 做一些监控模型仓库是否变动的操作</span>
+  <span class="token punctuation">}</span>
+  <span class="token comment">// 优雅地关闭triton</span>
+  TRITONSERVER_Error<span class="token operator">*</span> stop_err <span class="token operator">=</span> <span class="token function">TRITONSERVER_ServerStop</span><span class="token punctuation">(</span>server_ptr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token comment">// 如果无法优雅地关掉，旧直接exit即可</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>stop_err <span class="token operator">!=</span> <span class="token keyword">nullptr</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token function">LOG_TRITONSERVER_ERROR</span><span class="token punctuation">(</span>stop_err<span class="token punctuation">,</span> <span class="token string">"failed to stop server"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">exit</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+  <span class="token comment">// 停止监控http、grpc</span>
+  <span class="token function">StopEndpoints</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+  <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><code>TRITONSERVER_ServerNew</code>这个函数中，会：</p> 
+<ul><li>new一个triton类<code>InferenceServer</code>对象</li><li>根据参数设置配置一下，执行一堆Set函数</li><li>配置好参数后，<code>Init</code>服务，这里初始化服务的状态，校验参数</li><li>创建各种模块，经常使用的有后端管理<code>TritonBackendManager</code>以及模型仓库管理<code>ModelRepositoryManager</code></li><li>再进行一些检查、配置一些状态</li></ul> 
+<p>在启动过程中最重要的是模型仓库，运行triton当然你要有模型，要不然你开它干嘛？</p> 
+<p>这里我使用的模型仓库目录结构如下（是一个识别姿态的hrnet，hrnet官方有很多预训练模型，转tensorrt也很简单）：</p> 
+<p>![](https://img-blog.csdnimg.cn/img_convert/43eddc92448751e301700b050d868514.png#clientId=u55a09481-d7ce-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=401&amp;id=u7c2dedd0&amp;margin=[object Object]&amp;name=image.png&amp;originHeight=484&amp;originWidth=824&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=73997&amp;status=done&amp;style=none&amp;taskId=u66470599-9230-424b-9c2f-9e5daf49f6f&amp;title=&amp;width=682)</p> 
+<p>debug目录下有一个模型文件夹叫做<code>hrnet-pose-estimate-debug</code>的模型文件夹，<strong>这个文件夹地址（/path/to/hrnet-pose-estimate-debug）需要传给triton启动命令行</strong>，文件夹内的四个子模型文件夹，会被triton检测到并且一一加载。</p> 
+<p>需要注意的是，除了<code>hrnet_pose_estimate</code>这个其余三个在目录的<code>1</code>子目录下有个<code>so</code>或者<code>model.plan</code>，这代表<code>hrnet-trt-static</code>和<code>image_preprocess</code>还有<code>pose_postprocess</code>**都属于model，使用了backend，**backend会在各自的config中指明：</p> 
+<pre><code class="prism language-cpp">name<span class="token operator">:</span> <span class="token string">"hrnet-trt-static"</span>
+backend<span class="token operator">:</span> <span class="token string">"tensorrt"</span>
+</code></pre> 
+<p>因为<code>hrnet-trt-static</code>是tensorrt的模型，所以backend设置为tensorrt，model.plan就是tensorrt的engine。其backend的so文件我放到了其他位置（放到和model.plan同目录也是可以的），而另外两个预处理和后处理的backend就放到了模型仓库中，也就是<code>libtorch_image_preprocess.so</code>和<code>libtriton_pose_postprocess</code>，包含了你的backend代码，封装成so供triton调用</p> 
+<p>关于backend、model以及modelinstanc的关系，说实话稍微复杂点，各自有完整的生命周期，这个嘛，之后文章说，感兴趣的也可以提前看官方文档的介绍：</p> 
+<ul><li><a href="https://github.com/triton-inference-server/backend">https://github.com/triton-inference-server/backend</a></li></ul> 
+<p>然后我们就启动triton吧！</p> 
+<pre><code class="prism language-bash"><span class="token comment"># 执行以下函数，模型目录通过 --model-repository 指定     tensorrt的backend通过  --backend-directory 指定</span>
+./tritonserver --model-repository<span class="token operator">=</span>/path/to/hrnet-pose-estimate-debug --backend-directory<span class="token operator">=</span>/workspace/backends/tensorrt_backend/ 
+</code></pre> 
+<p>模型加载成功之后会输出：</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">..</span>.
+I1016 08:25:37.952055 <span class="token number">51771</span> server.cc:587<span class="token punctuation">]</span> 
++------------------+----------------------------------------------------------------+----------------------------------------------------------------+
+<span class="token operator">|</span> Backend          <span class="token operator">|</span> Path                                                           <span class="token operator">|</span> Config                                                         <span class="token operator">|</span>
++------------------+----------------------------------------------------------------+----------------------------------------------------------------+
+<span class="token operator">|</span> image_preprocess <span class="token operator">|</span> /workspace/triton-models/debug/hrnet-pose-estimate-debug/image <span class="token operator">|</span> <span class="token punctuation">{<!-- --></span><span class="token string">"cmdline"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"auto-complete-config"</span><span class="token builtin class-name">:</span><span class="token string">"false"</span>,<span class="token string">"min-compute-capabi |
+|                  | _preprocess/1/libtriton_image_preprocess.so                    | lity"</span><span class="token builtin class-name">:</span><span class="token string">"6.000000"</span>,<span class="token string">"backend-directory"</span><span class="token builtin class-name">:</span><span class="token string">"/workspace/backends/tens |
+|                  |                                                                | orrt_backend/"</span>,<span class="token string">"default-max-batch-size"</span><span class="token builtin class-name">:</span><span class="token string">"4"</span><span class="token punctuation">}</span><span class="token punctuation">}</span>     <span class="token operator">|</span>
+<span class="token operator">|</span>                  <span class="token operator">|</span>                                                                <span class="token operator">|</span>                                                                <span class="token operator">|</span>
+<span class="token operator">|</span> pose_postprocess <span class="token operator">|</span> /workspace/triton-models/debug/hrnet-pose-estimate-debug/pose_ <span class="token operator">|</span> <span class="token punctuation">{<!-- --></span><span class="token string">"cmdline"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"auto-complete-config"</span><span class="token builtin class-name">:</span><span class="token string">"false"</span>,<span class="token string">"min-compute-capabi |
+|                  | postprocess/1/libtriton_pose_postprocess.so                    | lity"</span><span class="token builtin class-name">:</span><span class="token string">"6.000000"</span>,<span class="token string">"backend-directory"</span><span class="token builtin class-name">:</span><span class="token string">"/workspace/backends/tens |
+|                  |                                                                | orrt_backend/"</span>,<span class="token string">"default-max-batch-size"</span><span class="token builtin class-name">:</span><span class="token string">"4"</span><span class="token punctuation">}</span><span class="token punctuation">}</span>     <span class="token operator">|</span>
+<span class="token operator">|</span>                  <span class="token operator">|</span>                                                                <span class="token operator">|</span>                                                                <span class="token operator">|</span>
+<span class="token operator">|</span> tensorrt         <span class="token operator">|</span> /workspace/backends/tensorrt_backend/li 											  <span class="token operator">|</span> <span class="token punctuation">{<!-- --></span><span class="token string">"cmdline"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"auto-complete-config"</span><span class="token builtin class-name">:</span><span class="token string">"false"</span>,<span class="token string">"min-compute-capabi |
+|                  | btriton_tensorrt.so                                            | lity"</span><span class="token builtin class-name">:</span><span class="token string">"6.000000"</span>,<span class="token string">"backend-directory"</span><span class="token builtin class-name">:</span><span class="token string">"/workspace/backends/tens |
+|                  |                                                                | orrt_backend/"</span>,<span class="token string">"default-max-batch-size"</span><span class="token builtin class-name">:</span><span class="token string">"4"</span><span class="token punctuation">}</span><span class="token punctuation">}</span>     <span class="token operator">|</span>
+<span class="token operator">|</span>                  <span class="token operator">|</span>                                                                <span class="token operator">|</span>                                                                <span class="token operator">|</span>
++------------------+----------------------------------------------------------------+----------------------------------------------------------------+
+
+I1016 08:25:37.952252 <span class="token number">51771</span> server.cc:630<span class="token punctuation">]</span> 
++---------------------+---------+--------+
+<span class="token operator">|</span> Model               <span class="token operator">|</span> Version <span class="token operator">|</span> Status <span class="token operator">|</span>
++---------------------+---------+--------+
+<span class="token operator">|</span> hrnet-trt-static    <span class="token operator">|</span> <span class="token number">1</span>       <span class="token operator">|</span> READY  <span class="token operator">|</span>
+<span class="token operator">|</span> hrnet_pose_estimate <span class="token operator">|</span> <span class="token number">1</span>       <span class="token operator">|</span> READY  <span class="token operator">|</span>
+<span class="token operator">|</span> image_preprocess    <span class="token operator">|</span> <span class="token number">1</span>       <span class="token operator">|</span> READY  <span class="token operator">|</span>
+<span class="token operator">|</span> pose_postprocess    <span class="token operator">|</span> <span class="token number">1</span>       <span class="token operator">|</span> READY  <span class="token operator">|</span>
++---------------------+---------+--------+
+
+I1016 08:25:38.051742 <span class="token number">51771</span> metrics.cc:650<span class="token punctuation">]</span> Collecting metrics <span class="token keyword">for</span> GPU <span class="token number">0</span>: NVIDIA GeForce RTX <span class="token number">3080</span>
+I1016 08:25:38.055197 <span class="token number">51771</span> tritonserver.cc:2159<span class="token punctuation">]</span> 
++----------------------------------+------------------------------------------------------------------------------------------------------------------+
+<span class="token operator">|</span> Option                           <span class="token operator">|</span> Value                                                                                                            <span class="token operator">|</span>
++----------------------------------+------------------------------------------------------------------------------------------------------------------+
+<span class="token operator">|</span> server_id                        <span class="token operator">|</span> triton                                                                                                           <span class="token operator">|</span>
+<span class="token operator">|</span> server_version                   <span class="token operator">|</span> <span class="token number">2.23</span>.0                                                                                                           <span class="token operator">|</span>
+<span class="token operator">|</span> server_extensions                <span class="token operator">|</span> classification sequence model_repository model_repository<span class="token punctuation">(</span>unload_dependents<span class="token punctuation">)</span> schedule_policy model_configuration <span class="token operator">|</span>
+<span class="token operator">|</span>                                  <span class="token operator">|</span>  system_shared_memory cuda_shared_memory binary_tensor_data statistics trace                                     <span class="token operator">|</span>
+<span class="token operator">|</span> model_repository_path<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>         <span class="token operator">|</span> /workspace/triton-models/debug/hrnet-pose-estimate-debug                                                         <span class="token operator">|</span>
+<span class="token operator">|</span> model_control_mode               <span class="token operator">|</span> MODE_NONE                                                                                                        <span class="token operator">|</span>
+<span class="token operator">|</span> strict_model_config              <span class="token operator">|</span> <span class="token number">1</span>                                                                                                                <span class="token operator">|</span>
+<span class="token operator">|</span> rate_limit                       <span class="token operator">|</span> OFF                                                                                                              <span class="token operator">|</span>
+<span class="token operator">|</span> pinned_memory_pool_byte_size     <span class="token operator">|</span> <span class="token number">268435456</span>                                                                                                        <span class="token operator">|</span>
+<span class="token operator">|</span> cuda_memory_pool_byte_size<span class="token punctuation">{<!-- --></span><span class="token number">0</span><span class="token punctuation">}</span>    <span class="token operator">|</span> <span class="token number">300021772</span>                                                                                                        <span class="token operator">|</span>
+<span class="token operator">|</span> response_cache_byte_size         <span class="token operator">|</span> <span class="token number">0</span>                                                                                                                <span class="token operator">|</span>
+<span class="token operator">|</span> min_supported_compute_capability <span class="token operator">|</span> <span class="token number">6.0</span>                                                                                                              <span class="token operator">|</span>
+<span class="token operator">|</span> strict_readiness                 <span class="token operator">|</span> <span class="token number">1</span>                                                                                                                <span class="token operator">|</span>
+<span class="token operator">|</span> exit_timeout                     <span class="token operator">|</span> <span class="token number">30</span>                                                                                                               <span class="token operator">|</span>
++----------------------------------+------------------------------------------------------------------------------------------------------------------+
+
+I1016 08:25:38.055627 <span class="token number">51771</span> http_server.cc:3303<span class="token punctuation">]</span> Started HTTPService at <span class="token number">0.0</span>.0.0:8000
+I1016 08:25:38.097213 <span class="token number">51771</span> http_server.cc:178<span class="token punctuation">]</span> Started Metrics Service at <span class="token number">0.0</span>.0.0:8001
+</code></pre> 
+<p>加载好之后，我们开启了http端口，端口号为8000，另一个是metric接口，端口号8001</p> 
+<p>此时可以使用http请求试一下。</p> 
+<h3><a id="_357"></a>简单请求</h3> 
+<p>请求的话有http和grpc协议，我对http协议熟悉些，所以就搞http吧。</p> 
+<p>官方也提供了客户端，C++和python的都可以有，可以直接使用官方的，也可以根据官方提供的http协议构造自己的客户端，只要会构造body，一切都很简单。</p> 
+<p>请求协议可以参考官方：</p> 
+<ul><li><a href="https://github.com/kserve/kserve/blob/master/docs/predict-api/v2/required_api.md">https://github.com/kserve/kserve/blob/master/docs/predict-api/v2/required_api.md</a></li></ul> 
+<p>这里我们用python简单构造一个<code>body</code>：</p> 
+<pre><code class="prism language-python"><span class="token comment"># 构造triton的输入body</span>
+json_buf <span class="token operator">=</span> <span class="token string">b'{\"inputs\":[{\"name\":\"INPUT\",\"datatype\":\"BYTES\",\"shape\":[1],\"parameters\":{\"binary_data_size\":'</span> <span class="token operator">+</span> \
+        <span class="token builtin">bytes</span><span class="token punctuation">(</span><span class="token builtin">str</span><span class="token punctuation">(</span><span class="token builtin">len</span><span class="token punctuation">(</span>data<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span> encoding <span class="token operator">=</span> <span class="token string">"utf8"</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">b'}}],\"outputs\":[{\"name\":\"RESULT\",\"parameters\":{\"binary_data\":true}}]}'</span>
+push_data <span class="token operator">=</span> json_buf <span class="token operator">+</span> data
+
+<span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"Inference-Header-Content-Length "</span><span class="token punctuation">,</span><span class="token builtin">str</span><span class="token punctuation">(</span><span class="token builtin">len</span><span class="token punctuation">(</span>json_buf<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token string">" Content-Length "</span><span class="token punctuation">,</span><span class="token builtin">str</span><span class="token punctuation">(</span><span class="token builtin">len</span><span class="token punctuation">(</span>data<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token builtin">len</span><span class="token punctuation">(</span>json_buf<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token comment"># 构造triton-header</span>
+header <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">"Content-Type"</span><span class="token punctuation">:</span> <span class="token string">"application/octet-stream"</span><span class="token punctuation">,</span> <span class="token string">"Accept"</span><span class="token punctuation">:</span> <span class="token string">"*/*"</span><span class="token punctuation">,</span>
+          <span class="token string">"Inference-Header-Content-Length"</span><span class="token punctuation">:</span><span class="token builtin">str</span><span class="token punctuation">(</span><span class="token builtin">len</span><span class="token punctuation">(</span>json_buf<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+          <span class="token string">"Content-Length"</span><span class="token punctuation">:</span><span class="token builtin">str</span><span class="token punctuation">(</span><span class="token builtin">len</span><span class="token punctuation">(</span>data<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token builtin">len</span><span class="token punctuation">(</span>json_buf<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">}</span>
+
+server_url <span class="token operator">=</span> <span class="token string">"127.0.0.1:8000"</span>
+model_name <span class="token operator">=</span> <span class="token string">"hrnet_pose_estimate"</span>
+
+<span class="token comment"># 请求</span>
+response <span class="token operator">=</span> post<span class="token punctuation">(</span><span class="token string">'http://'</span> <span class="token operator">+</span> server_url <span class="token operator">+</span> <span class="token string">'/v2/models/'</span> <span class="token operator">+</span> model_name <span class="token operator">+</span> <span class="token string">'/infer'</span><span class="token punctuation">,</span> data<span class="token operator">=</span>push_data<span class="token punctuation">,</span> headers<span class="token operator">=</span>header<span class="token punctuation">)</span>
+</code></pre> 
+<p>就可以发送请求，结果也会传回response里。我们也可以使用curl命令，直接传递构造好的body（这个body将上述的push_data写到本地即可）：</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>oldpan@have-fun client<span class="token punctuation">]</span>$ <span class="token function">curl</span> -v --max-time <span class="token number">1</span> --request POST <span class="token string">'http://192.168.1.102:9006/v2/models/hrnet_pose_estimate/infer'</span> --header <span class="token string">'Inference-Header-Content-Length: 230'</span> --header <span class="token string">'Content-Type: application/octet-stream'</span> --data-binary <span class="token string">'@data.txt'</span> --output temp_res
+Note: Unnecessary use of -X or --request, POST is already inferred.
+*   Trying <span class="token number">192.168</span>.1.102:9006<span class="token punctuation">..</span>.
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  <span class="token number">0</span>     <span class="token number">0</span>    <span class="token number">0</span>     <span class="token number">0</span>    <span class="token number">0</span>     <span class="token number">0</span>      <span class="token number">0</span>      <span class="token number">0</span> --:--:-- --:--:-- --:--:--     <span class="token number">0</span>* Connected to <span class="token number">172.29</span>.210.105 <span class="token punctuation">(</span><span class="token number">172.29</span>.210.105<span class="token punctuation">)</span> port <span class="token number">9006</span> <span class="token punctuation">(</span><span class="token comment">#0)</span>
+<span class="token operator">&gt;</span> POST /v2/models/aocr_cnprint_trt8p/infer HTTP/1.1
+<span class="token operator">&gt;</span> Host: <span class="token number">192.168</span>.1.102:9006
+<span class="token operator">&gt;</span> User-Agent: curl/7.71.1
+<span class="token operator">&gt;</span> Accept: */*
+<span class="token operator">&gt;</span> Inference-Header-Content-Length: <span class="token number">230</span>
+<span class="token operator">&gt;</span> Content-Type: application/octet-stream
+<span class="token operator">&gt;</span> Content-Length: <span class="token number">1573102</span>
+<span class="token operator">&gt;</span> Expect: <span class="token number">100</span>-continue
+<span class="token operator">&gt;</span> 
+* Mark bundle as not supporting multiuse
+<span class="token operator">&lt;</span> HTTP/1.1 <span class="token number">100</span> Continue
+<span class="token punctuation">}</span> <span class="token punctuation">[</span><span class="token number">56480</span> bytes data<span class="token punctuation">]</span>
+* We are completely uploaded and fine
+* Mark bundle as not supporting multiuse
+<span class="token operator">&lt;</span> HTTP/1.1 <span class="token number">200</span> OK
+<span class="token operator">&lt;</span> Content-Type: application/json
+<span class="token operator">&lt;</span> Inference-Header-Content-Length: <span class="token number">394</span>
+<span class="token operator">&lt;</span> Content-Length: <span class="token number">6794</span>
+<span class="token operator">&lt;</span> 
+<span class="token punctuation">{<!-- --></span> <span class="token punctuation">[</span><span class="token number">6794</span> bytes data<span class="token punctuation">]</span>
+<span class="token number">100</span> 1542k  <span class="token number">100</span>  <span class="token number">6794</span>  <span class="token number">100</span> 1536k   127k  <span class="token number">28</span>.8M --:--:-- --:--:-- --:--:-- <span class="token number">28</span>.9M
+</code></pre> 
+<p>结果就不发了，验证没啥问题。</p> 
+<p>关于如何使用curl直接请求triton，有一些相关链接可以参考：</p> 
+<ul><li><a href="https://github.com/triton-inference-server/server/issues/2563">https://github.com/triton-inference-server/server/issues/2563</a></li><li><a href="https://github.com/triton-inference-server/server/issues/1822">https://github.com/triton-inference-server/server/issues/1822</a></li></ul> 
+<h3><a id="_421"></a>后记</h3> 
+<p>算是开triton的新坑了，已经有一些草稿了，正在填充文件中：</p> 
+<p>![](https://img-blog.csdnimg.cn/img_convert/d69ef21ea628e4ad992caf8388e9ca78.png#clientId=u42e116a2-4612-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=329&amp;id=ue4ea9e9a&amp;margin=[object Object]&amp;name=image.png&amp;originHeight=493&amp;originWidth=428&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=35189&amp;status=done&amp;style=none&amp;taskId=ub7513a9f-d622-41ee-90ea-1da2d3550eb&amp;title=&amp;width=285.3333333333333)</p> 
+<p>triton inference server，很好用的服务框架，开源免费，经过了各大厂的验证，用于生产环境是没有任何问题。各位发愁flask性能不够好的，或者自建服务框架功能不够全的，可以试试triton，老潘很推荐的哦。</p> 
+<h3><a id="_427"></a>参考资料</h3> 
+<ul><li><a href="https://www.bilibili.com/video/BV1KS4y1v7zd/?spm_id_from=333.788&amp;vd_source=eec038509607175d58cdfe2e824e8ba2" rel="nofollow">https://www.bilibili.com/video/BV1KS4y1v7zd/?spm_id_from=333.788&amp;vd_source=eec038509607175d58cdfe2e824e8ba2</a></li><li><a href="https://github.com/triton-inference-server/server/releases">https://github.com/triton-inference-server/server/releases</a></li><li><a href="https://docs.nvidia.com/deeplearning/triton-inference-server/release-notes/index.html" rel="nofollow">https://docs.nvidia.com/deeplearning/triton-inference-server/release-notes/index.html</a></li><li><a href="https://zhuanlan.zhihu.com/p/462817679" rel="nofollow">https://zhuanlan.zhihu.com/p/462817679</a></li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/88786f96fe72d0f4a13e1b08091d0571/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">See Finer, See More！腾讯&amp;上交提出IVT，越看越精细，进行精细全面的跨模态对比！</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/e2d0c5e264c521faae5eebf2aba9ff93/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">webpack-bundle-analyzer 插件配置</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

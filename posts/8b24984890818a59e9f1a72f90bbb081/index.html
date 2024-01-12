@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Redis源码分析（一）内存池-zmalloc - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Redis源码分析（一）内存池-zmalloc" />
+<meta property="og:description" content="Redis 源码分析（一）内存池-zmalloc 概述内存管理zmalloc 内存分配结构图malloc库重要宏定义全局变量update_zmalloc_stat_add(__n) 增加记录使用的内存大小update_zmalloc_stat_alloc 增加已经分配的内存大小update_zmalloc_stat_add(__n) 减小记录使用内存大小update_zmalloc_stat_free 减小已经分配的内存大小OOM内存溢出处理zmalloc 分配内存zcalloc 分配内存空间，并且初始化zrealloc 重新开辟空间的大小zmalloc_size 当前分配的空间大小zfree 内存回收zmalloc_used_memory 获取已经使用的内存zmalloc_get_rss 获取内存碎片大小zmalloc_get_fragmentation_ratio 获取内存碎片率zmalloc_get_private_dirty 获取私有的被占有的脏内存 概述 大家好，我是一名萌新，在文章分享有不正确的、语言比较晦涩的地方，欢迎大家明确提出来。
+本人经历：过去一年在某高校的Java方向的科研团队工作学习，今年在武汉做图像算法方向的工作。自己比较喜欢玩特性数据库比如Elasticsearch、Redis。对数据结构方面极其敏感，就从今天开始立一个flag，一个一个分析。
+内存管理 zmalloc 内存分配结构图 malloc库 malloc是C语言的标准库函数，但是Redis并未使用标准malloc。在Redis源码src\Makefile中间有一段源码是这样写的： ifeq ($(uname_S),Linux) MALLOC = jemalloc，从次可以发现，Redis默认使用了 &lt;jemalloc/jemalloc.h&gt; 第三方内存池框架，它的官方描述它可以避免碎片和可扩展的高性能并发支持。除了此套框架外，同时它给出了其他两套内存分配回收方案。其中一套解决方案是google的 &lt;google/tcmalloc.h&gt; ，它是基于C&#43;&#43;实现的，性能上比其他的框架都要好，但是与C语言存在一定的兼容性。另外一套就是标准库的 &lt;malloc/malloc.h&gt;，最不佳的选择，因为malloc进行的动态内存分配和嵌入式系统中使用到堆区的内存分配会产生内存碎片。
+重要宏定义 HAVE_MALLOC_SIZE这个宏定义是会判断当前的操作系统是否有 malloc_size() 函数，也就是判断当前指针malloc开辟空间后指向空间的大小。PREFIX_SIZE 作为新开辟空间的头部信息，这块内存空间主要是存放size_t类型的开辟空间的大小信息。在Redis高版本中，如果是Mac平台，PREFIX_SIZE的大小就是有默认值固定的。
+全局变量 已经使用的内存
+static size_t used_memory = 0; 判断当前是否线程安全
+static int zmalloc_thread_safe = 0; 有两种方法创建互斥锁，静态方式和动态方式。
+POSIX定义了一个宏PTHREAD_MUTEX_INITIALIZER来静态初始化互斥锁。在LinuxThreads实现中，pthread_mutex_t是一个结构，而PTHREAD_MUTEX_INITIALIZER则是一个结构常量。
+PTHREAD_MUTEX_NORMAL ： 不提供死锁检测PTHREAD_MUTEX_ERRORCHECK ：提供错误检查，尝试重新锁定的互斥锁已经由该线程锁定 或者
+解除锁定的互斥锁不是由该线程锁定或者未锁定 返回错误PTHREAD_MUTEX_RECURSIVE ：锁定计数，锁住 &#43;1 ，解除 -1 ，0可以获取PTHREAD_MUTEX_DEFAULT ： 以递归方式锁定，尝试解除对它的锁定、解除锁定尚未锁定的互斥锁，则会产生不确定的行为 POSIX这个名称是由理查德·斯托曼（RMS）应IEEE的要求而提议的一个易于记忆的名称。它基本上是Portable Operating System Interface（可移植操作系统接口）的缩写，而X则表明其对Unix API的传承。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/8b24984890818a59e9f1a72f90bbb081/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-04-19T14:02:56+08:00" />
+<meta property="article:modified_time" content="2022-04-19T14:02:56+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Redis源码分析（一）内存池-zmalloc</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>Redis 源码分析（一）内存池-zmalloc</h4> 
+ <ul><li><a href="#_2" rel="nofollow">概述</a></li><li><ul><li><a href="#_5" rel="nofollow">内存管理</a></li><li><ul><li><a href="#zmalloc__6" rel="nofollow">zmalloc 内存分配结构图</a></li><li><a href="#malloc_9" rel="nofollow">malloc库</a></li><li><a href="#_12" rel="nofollow">重要宏定义</a></li><li><a href="#_15" rel="nofollow">全局变量</a></li><li><a href="#update_zmalloc_stat_add__n__43" rel="nofollow">update_zmalloc_stat_add(__n) 增加记录使用的内存大小</a></li><li><a href="#update_zmalloc_stat_alloc__54" rel="nofollow">update_zmalloc_stat_alloc 增加已经分配的内存大小</a></li><li><a href="#update_zmalloc_stat_add__n__68" rel="nofollow">update_zmalloc_stat_add(__n) 减小记录使用内存大小</a></li><li><a href="#update_zmalloc_stat_free__78" rel="nofollow">update_zmalloc_stat_free 减小已经分配的内存大小</a></li><li><a href="#OOM_93" rel="nofollow">OOM内存溢出处理</a></li><li><a href="#zmalloc__115" rel="nofollow">zmalloc 分配内存</a></li><li><a href="#zcalloc__131" rel="nofollow">zcalloc 分配内存空间，并且初始化</a></li><li><a href="#zrealloc__148" rel="nofollow">zrealloc 重新开辟空间的大小</a></li><li><a href="#zmalloc_size__186" rel="nofollow">zmalloc_size 当前分配的空间大小</a></li><li><a href="#zfree__200" rel="nofollow">zfree 内存回收</a></li><li><a href="#zmalloc_used_memory__226" rel="nofollow">zmalloc_used_memory 获取已经使用的内存</a></li><li><a href="#zmalloc_get_rss__249" rel="nofollow">zmalloc_get_rss 获取内存碎片大小</a></li><li><a href="#zmalloc_get_fragmentation_ratio__289" rel="nofollow">zmalloc_get_fragmentation_ratio 获取内存碎片率</a></li><li><a href="#zmalloc_get_private_dirty__299" rel="nofollow">zmalloc_get_private_dirty 获取私有的被占有的脏内存</a></li></ul> 
+  </li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h2><a id="_2"></a>概述</h2> 
+<p>大家好，我是一名萌新，在文章分享有不正确的、语言比较晦涩的地方，欢迎大家明确提出来。<br> 本人经历：过去一年在某高校的Java方向的科研团队工作学习，今年在武汉做图像算法方向的工作。自己比较喜欢玩特性数据库比如Elasticsearch、Redis。对数据结构方面极其敏感，就从今天开始立一个flag，一个一个分析。</p> 
+<h3><a id="_5"></a>内存管理</h3> 
+<h4><a id="zmalloc__6"></a>zmalloc 内存分配结构图</h4> 
+<p><img src="https://images2.imgbox.com/0c/b5/meidBoQJ_o.png" alt="zmalloc的内存分配图"></p> 
+<h4><a id="malloc_9"></a>malloc库</h4> 
+<p>malloc是C语言的标准库函数，但是Redis并未使用标准malloc。在Redis源码src\Makefile中间有一段源码是这样写的： <strong>ifeq ($(uname_S),Linux) MALLOC = jemalloc</strong>，从次可以发现，Redis默认使用了 <strong>&lt;jemalloc/jemalloc.h&gt;</strong> 第三方内存池框架，它的官方描述它可以避免碎片和可扩展的高性能并发支持。除了此套框架外，同时它给出了其他两套内存分配回收方案。其中一套解决方案是google的 <strong>&lt;google/tcmalloc.h&gt;</strong> ，它是基于C++实现的，性能上比其他的框架都要好，但是与C语言存在一定的兼容性。另外一套就是标准库的 <strong>&lt;malloc/malloc.h&gt;</strong>，最不佳的选择，因为malloc进行的动态内存分配和嵌入式系统中使用到堆区的内存分配会产生内存碎片。<br> <img src="https://images2.imgbox.com/03/ba/f0CspJLz_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="_12"></a>重要宏定义</h4> 
+<p><strong>HAVE_MALLOC_SIZE</strong>这个宏定义是会判断当前的操作系统是否有 <strong>malloc_size()</strong> 函数，也就是判断当前指针malloc开辟空间后指向空间的大小。<strong>PREFIX_SIZE</strong> 作为新开辟空间的头部信息，这块内存空间主要是存放size_t类型的开辟空间的大小信息。在Redis高版本中，如果是<strong>Mac</strong>平台，<strong>PREFIX_SIZE</strong>的大小就是有默认值固定的。<br> <img src="https://images2.imgbox.com/98/a2/b6v91cJC_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="_15"></a>全局变量</h4> 
+<p>已经使用的内存</p> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token class-name">size_t</span> used_memory <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>判断当前是否线程安全</p> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">int</span> zmalloc_thread_safe <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>有两种方法创建<strong>互斥锁</strong>，静态方式和动态方式。<br> POSIX定义了一个宏PTHREAD_MUTEX_INITIALIZER来静态初始化互斥锁。在LinuxThreads实现中，<strong>pthread_mutex_t</strong>是一个结构，而<strong>PTHREAD_MUTEX_INITIALIZER</strong>则是一个结构常量。</p> 
+<ol><li>PTHREAD_MUTEX_NORMAL ： 不提供死锁检测</li><li>PTHREAD_MUTEX_ERRORCHECK ：提供错误检查，尝试重新锁定的互斥锁已经由该线程锁定 或者<br> 解除锁定的互斥锁不是由该线程锁定或者未锁定 返回错误</li><li>PTHREAD_MUTEX_RECURSIVE ：锁定计数，锁住 +1 ，解除 -1 ，0可以获取</li><li>PTHREAD_MUTEX_DEFAULT ： 以递归方式锁定，尝试解除对它的锁定、解除锁定尚未锁定的互斥锁，则会产生不确定的行为</li></ol> 
+<p><em><strong>POSIX这个名称是由理查德·斯托曼（RMS）应IEEE的要求而提议的一个易于记忆的名称。它基本上是Portable Operating System Interface（可移植操作系统接口）的缩写，而X则表明其对Unix API的传承。</strong></em></p> 
+<pre><code class="prism language-c"><span class="token class-name">pthread_mutex_t</span> used_memory_mutex <span class="token operator">=</span> PTHREAD_MUTEX_INITIALIZER<span class="token punctuation">;</span>
+</code></pre> 
+<h4><a id="update_zmalloc_stat_add__n__43"></a>update_zmalloc_stat_add(__n) 增加记录使用的内存大小</h4> 
+<p>Linux和其它代码库里的宏都用do/while(0)来包围执行逻辑，因为它能确保宏的行为总是相同的，而不管在调用代码中使用了多少分号和大括号。_n可以是任意类型。<br> POSIX定义的线程同步函数， 调用本地方法的互斥锁<strong>pthread_mutex(&amp;used_memory_mutex)</strong>，为了保证全局变量used_memory 的增加内存是原子性操作。</p> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">update_zmalloc_stat_add</span><span class="token expression"><span class="token punctuation">(</span>__n<span class="token punctuation">)</span> <span class="token keyword">do</span> <span class="token punctuation">{<!-- --></span> </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token function">pthread_mutex_lock</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>used_memory_mutex<span class="token punctuation">)</span><span class="token punctuation">;</span> </span><span class="token punctuation">\</span>
+    <span class="token expression">used_memory <span class="token operator">+=</span> <span class="token punctuation">(</span>__n<span class="token punctuation">)</span><span class="token punctuation">;</span> </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token function">pthread_mutex_unlock</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>used_memory_mutex<span class="token punctuation">)</span><span class="token punctuation">;</span> </span><span class="token punctuation">\</span>
+<span class="token expression"><span class="token punctuation">}</span> <span class="token keyword">while</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span></span></span>
+</code></pre> 
+<h4><a id="update_zmalloc_stat_alloc__54"></a>update_zmalloc_stat_alloc 增加已经分配的内存大小</h4> 
+<p>在64为的Linux环境下，第二行位运算代码可以替换为 if (_n&amp;7==0) -n+=8-（-n&amp;7）。这段代码判断内存空间的大小是不是8的倍数。malloc()本身能够保证所分配的内存是8字节对齐的：如果你要分配的内存不是8的倍数，那么malloc就会多分配一点，来凑成8的倍数。所以update_zmalloc_stat_alloc函数（或者说zmalloc()相对malloc()而言）真正要实现的功能并不是进行8字节对齐（malloc已经保证了），它的真正目的是使变量used_memory精确的维护实际已分配内存的大小，如果64位系统种 内存大小不是8的倍数，就加上相应的偏移量使之变成8的倍数。第三行if分支是为了判断是否使用线程安全，zmalloc_thread_safe默认值为1，是启用线程安全函数的。</p> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">update_zmalloc_stat_alloc</span><span class="token expression"><span class="token punctuation">(</span>__n<span class="token punctuation">)</span> <span class="token keyword">do</span> <span class="token punctuation">{<!-- --></span> </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token class-name">size_t</span> _n <span class="token operator">=</span> <span class="token punctuation">(</span>__n<span class="token punctuation">)</span><span class="token punctuation">;</span> </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token keyword">if</span> <span class="token punctuation">(</span>_n<span class="token operator">&amp;</span><span class="token punctuation">(</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">long</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span> _n <span class="token operator">+=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">long</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token punctuation">(</span>_n<span class="token operator">&amp;</span><span class="token punctuation">(</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">long</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span> </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token keyword">if</span> <span class="token punctuation">(</span>zmalloc_thread_safe<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> </span><span class="token punctuation">\</span>
+        <span class="token expression"><span class="token function">update_zmalloc_stat_add</span><span class="token punctuation">(</span>_n<span class="token punctuation">)</span><span class="token punctuation">;</span> </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span> </span><span class="token punctuation">\</span>
+        <span class="token expression">used_memory <span class="token operator">+=</span> _n<span class="token punctuation">;</span> </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token punctuation">}</span> </span><span class="token punctuation">\</span>
+<span class="token expression"><span class="token punctuation">}</span> <span class="token keyword">while</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span></span></span>
+</code></pre> 
+<h4><a id="update_zmalloc_stat_add__n__68"></a>update_zmalloc_stat_add(__n) 减小记录使用内存大小</h4> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">update_zmalloc_stat_sub</span><span class="token expression"><span class="token punctuation">(</span>__n<span class="token punctuation">)</span> <span class="token keyword">do</span> <span class="token punctuation">{<!-- --></span> </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token function">pthread_mutex_lock</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>used_memory_mutex<span class="token punctuation">)</span><span class="token punctuation">;</span> </span><span class="token punctuation">\</span>
+    <span class="token expression">used_memory <span class="token operator">-=</span> <span class="token punctuation">(</span>__n<span class="token punctuation">)</span><span class="token punctuation">;</span> </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token function">pthread_mutex_unlock</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>used_memory_mutex<span class="token punctuation">)</span><span class="token punctuation">;</span> </span><span class="token punctuation">\</span>
+<span class="token expression"><span class="token punctuation">}</span> <span class="token keyword">while</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span></span></span>
+</code></pre> 
+<h4><a id="update_zmalloc_stat_free__78"></a>update_zmalloc_stat_free 减小已经分配的内存大小</h4> 
+<p>update_zmalloc_sub与zmalloc()中的update_zmalloc_add相对应，但功能相反，提供线程安全地used_memory减法操作。</p> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">update_zmalloc_stat_free</span><span class="token expression"><span class="token punctuation">(</span>__n<span class="token punctuation">)</span> <span class="token keyword">do</span> <span class="token punctuation">{<!-- --></span> </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token class-name">size_t</span> _n <span class="token operator">=</span> <span class="token punctuation">(</span>__n<span class="token punctuation">)</span><span class="token punctuation">;</span> </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token keyword">if</span> <span class="token punctuation">(</span>_n<span class="token operator">&amp;</span><span class="token punctuation">(</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">long</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span> _n <span class="token operator">+=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">long</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token punctuation">(</span>_n<span class="token operator">&amp;</span><span class="token punctuation">(</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">long</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span> </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token keyword">if</span> <span class="token punctuation">(</span>zmalloc_thread_safe<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> </span><span class="token punctuation">\</span>
+        <span class="token expression"><span class="token function">update_zmalloc_stat_sub</span><span class="token punctuation">(</span>_n<span class="token punctuation">)</span><span class="token punctuation">;</span> </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span> </span><span class="token punctuation">\</span>
+        <span class="token expression">used_memory <span class="token operator">-=</span> _n<span class="token punctuation">;</span> </span><span class="token punctuation">\</span>
+    <span class="token expression"><span class="token punctuation">}</span> </span><span class="token punctuation">\</span>
+<span class="token expression"><span class="token punctuation">}</span> <span class="token keyword">while</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span></span></span>
+</code></pre> 
+<h4><a id="OOM_93"></a>OOM内存溢出处理</h4> 
+<p>OOM溢出的异常处理使用的是函数的指针，把zmalloc_default_oom指向了名称为zmalloc_oom_handler的函数指针。优秀的松耦合设计，方便扩展时自定义处理错误。</p> 
+<pre><code class="prism language-c">	<span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token punctuation">(</span><span class="token operator">*</span>zmalloc_oom_handler<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token class-name">size_t</span><span class="token punctuation">)</span> <span class="token operator">=</span> zmalloc_default_oom<span class="token punctuation">;</span>
+	
+	<span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">zmalloc_default_oom</span><span class="token punctuation">(</span><span class="token class-name">size_t</span> size<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	    <span class="token function">fprintf</span><span class="token punctuation">(</span><span class="token constant">stderr</span><span class="token punctuation">,</span> <span class="token string">"zmalloc: Out of memory trying to allocate %zu bytes\n"</span><span class="token punctuation">,</span>
+	        size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	    <span class="token function">fflush</span><span class="token punctuation">(</span><span class="token constant">stderr</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	    <span class="token function">abort</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	
+	<span class="token comment">// 设置OOM内存溢出后的方法</span>
+	<span class="token keyword">void</span> <span class="token function">zmalloc_set_oom_handler</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token punctuation">(</span><span class="token operator">*</span>oom_handler<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token class-name">size_t</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	    zmalloc_oom_handler <span class="token operator">=</span> oom_handler<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+
+</code></pre> 
+<h4><a id="zmalloc__115"></a>zmalloc 分配内存</h4> 
+<p>首先调用函数malloc分配size+PREFIX_SIZE(Linux 64位等于8个字节)，这个malloc函数也是通过 <strong>#define</strong> 定义的，使用tc_mlloc或者je_malloc，以及其他的tc_、je开头的第三方函数都会替换为C标准库风格的函数。 如果操作系统有malloc_size（）函数，救调用Redis封装的zmalloc_size（）函数计算出size_t的大小，再去修改全局的used_memory 的大小。如果没有，需要把ptr指针的头部放置此次分配的内存块的大小，接着修改全局used_memory 的大小，最后返回prt的首指针。</p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token operator">*</span><span class="token function">zmalloc</span><span class="token punctuation">(</span><span class="token class-name">size_t</span> size<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">void</span> <span class="token operator">*</span>ptr <span class="token operator">=</span> <span class="token function">malloc</span><span class="token punctuation">(</span>size<span class="token operator">+</span>PREFIX_SIZE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>ptr<span class="token punctuation">)</span> <span class="token function">zmalloc_oom_handler</span><span class="token punctuation">(</span>size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">HAVE_MALLOC_SIZE</span></span>
+    <span class="token function">update_zmalloc_stat_alloc</span><span class="token punctuation">(</span><span class="token function">zmalloc_size</span><span class="token punctuation">(</span>ptr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> ptr<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+    <span class="token operator">*</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token class-name">size_t</span><span class="token operator">*</span><span class="token punctuation">)</span>ptr<span class="token punctuation">)</span> <span class="token operator">=</span> size<span class="token punctuation">;</span>
+    <span class="token function">update_zmalloc_stat_alloc</span><span class="token punctuation">(</span>size<span class="token operator">+</span>PREFIX_SIZE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> <span class="token punctuation">(</span><span class="token keyword">char</span><span class="token operator">*</span><span class="token punctuation">)</span>ptr<span class="token operator">+</span>PREFIX_SIZE<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="zcalloc__131"></a>zcalloc 分配内存空间，并且初始化</h4> 
+<p>与zmalloc函数实现相似，calloc()会对分配的空间做初始化工作（初始化为0），而malloc()不会</p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token operator">*</span><span class="token function">zcalloc</span><span class="token punctuation">(</span><span class="token class-name">size_t</span> size<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">void</span> <span class="token operator">*</span>ptr <span class="token operator">=</span> <span class="token function">calloc</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> size<span class="token operator">+</span>PREFIX_SIZE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>ptr<span class="token punctuation">)</span> <span class="token function">zmalloc_oom_handler</span><span class="token punctuation">(</span>size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">HAVE_MALLOC_SIZE</span></span>
+    <span class="token function">update_zmalloc_stat_alloc</span><span class="token punctuation">(</span><span class="token function">zmalloc_size</span><span class="token punctuation">(</span>ptr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> ptr<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+    <span class="token operator">*</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token class-name">size_t</span><span class="token operator">*</span><span class="token punctuation">)</span>ptr<span class="token punctuation">)</span> <span class="token operator">=</span> size<span class="token punctuation">;</span>
+    <span class="token function">update_zmalloc_stat_alloc</span><span class="token punctuation">(</span>size<span class="token operator">+</span>PREFIX_SIZE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> <span class="token punctuation">(</span><span class="token keyword">char</span><span class="token operator">*</span><span class="token punctuation">)</span>ptr<span class="token operator">+</span>PREFIX_SIZE<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="zrealloc__148"></a>zrealloc 重新开辟空间的大小</h4> 
+<p>realloc()要完成的功能是给首地址ptr的内存空间，重新分配大小。如果失败了，则在其它位置新建一块大小为size字节的空间，将原先的数据复制到新的内存空间，并返回这段内存首地址【原内存会被系统自然释放】。zrealloc()要完成的功能也类似。</p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token operator">*</span><span class="token function">zrealloc</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span>ptr<span class="token punctuation">,</span> <span class="token class-name">size_t</span> size<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifndef</span> <span class="token expression">HAVE_MALLOC_SIZE</span></span>
+    <span class="token keyword">void</span> <span class="token operator">*</span>realptr<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+    <span class="token class-name">size_t</span> oldsize<span class="token punctuation">;</span>
+    <span class="token keyword">void</span> <span class="token operator">*</span>newptr<span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>ptr <span class="token operator">==</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token keyword">return</span> <span class="token function">zmalloc</span><span class="token punctuation">(</span>size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">HAVE_MALLOC_SIZE</span></span>
+    oldsize <span class="token operator">=</span> <span class="token function">zmalloc_size</span><span class="token punctuation">(</span>ptr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    newptr <span class="token operator">=</span> <span class="token function">realloc</span><span class="token punctuation">(</span>ptr<span class="token punctuation">,</span>size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>newptr<span class="token punctuation">)</span> <span class="token function">zmalloc_oom_handler</span><span class="token punctuation">(</span>size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">update_zmalloc_stat_free</span><span class="token punctuation">(</span>oldsize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">update_zmalloc_stat_alloc</span><span class="token punctuation">(</span><span class="token function">zmalloc_size</span><span class="token punctuation">(</span>newptr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> newptr<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+	<span class="token comment">// 1、减去头部8字节的信息</span>
+    realptr <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">char</span><span class="token operator">*</span><span class="token punctuation">)</span>ptr<span class="token operator">-</span>PREFIX_SIZE<span class="token punctuation">;</span>
+	<span class="token comment">// 2、获取原来的大小</span>
+    oldsize <span class="token operator">=</span> <span class="token operator">*</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token class-name">size_t</span><span class="token operator">*</span><span class="token punctuation">)</span>realptr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">// 3、调用 realloc 函数重新分配空间</span>
+    newptr <span class="token operator">=</span> <span class="token function">realloc</span><span class="token punctuation">(</span>realptr<span class="token punctuation">,</span>size<span class="token operator">+</span>PREFIX_SIZE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">// 4、如果为空 out of memory</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>newptr<span class="token punctuation">)</span> <span class="token function">zmalloc_oom_handler</span><span class="token punctuation">(</span>size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">// 5、重新分配空间的newptr空间</span>
+    <span class="token operator">*</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token class-name">size_t</span><span class="token operator">*</span><span class="token punctuation">)</span>newptr<span class="token punctuation">)</span> <span class="token operator">=</span> size<span class="token punctuation">;</span>
+	<span class="token comment">// 6、use_memory减去旧空间</span>
+    <span class="token function">update_zmalloc_stat_free</span><span class="token punctuation">(</span>oldsize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">// 7、use_memory加上新的空间</span>
+    <span class="token function">update_zmalloc_stat_alloc</span><span class="token punctuation">(</span>size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">// 8 、返回新开辟的空间  newptr + 向右偏移位8指针</span>
+    <span class="token keyword">return</span> <span class="token punctuation">(</span><span class="token keyword">char</span><span class="token operator">*</span><span class="token punctuation">)</span>newptr<span class="token operator">+</span>PREFIX_SIZE<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="zmalloc_size__186"></a>zmalloc_size 当前分配的空间大小</h4> 
+<p>malloc 基础库操作系统本身不提供此 malloc_size() 函数，引入了第三方的malloc库后为每个分配的指针，增加带有信息的指针头（分配的64位 8首字节；32位4字节）。判断新开辟的空间是不是8（64位）的倍数，如果不是就会进行内存对其。</p> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifndef</span> <span class="token expression">HAVE_MALLOC_SIZE</span></span>
+<span class="token class-name">size_t</span> <span class="token function">zmalloc_size</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span>ptr<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">void</span> <span class="token operator">*</span>realptr <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">char</span><span class="token operator">*</span><span class="token punctuation">)</span>ptr<span class="token operator">-</span>PREFIX_SIZE<span class="token punctuation">;</span>
+    <span class="token class-name">size_t</span> size <span class="token operator">=</span> <span class="token operator">*</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token class-name">size_t</span><span class="token operator">*</span><span class="token punctuation">)</span>realptr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>size<span class="token operator">&amp;</span><span class="token punctuation">(</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">long</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span> size <span class="token operator">+=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">long</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token punctuation">(</span>size<span class="token operator">&amp;</span><span class="token punctuation">(</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">long</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> size<span class="token operator">+</span>PREFIX_SIZE<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+</code></pre> 
+<h4><a id="zfree__200"></a>zfree 内存回收</h4> 
+<p>Redis在回收内存时，与开辟内存函数zmalloc一样，会判断操作系统是否有malloc_size函数，如果有调用zmalloc_size函数获取当前指针ptr的大小，调用宏定义函数free经行回收，否者需要自行在指针的头部获取长度信息来进行回收。</p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token function">zfree</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span>ptr<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifndef</span> <span class="token expression">HAVE_MALLOC_SIZE</span></span>
+    <span class="token keyword">void</span> <span class="token operator">*</span>realptr<span class="token punctuation">;</span>
+    <span class="token class-name">size_t</span> oldsize<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>ptr <span class="token operator">==</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token keyword">return</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">HAVE_MALLOC_SIZE</span></span>
+    <span class="token function">update_zmalloc_stat_free</span><span class="token punctuation">(</span><span class="token function">zmalloc_size</span><span class="token punctuation">(</span>ptr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">free</span><span class="token punctuation">(</span>ptr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+	<span class="token comment">// 1 、指针ptr 64位下 向前偏移8个字节的长度</span>
+    realptr <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">char</span><span class="token operator">*</span><span class="token punctuation">)</span>ptr<span class="token operator">-</span>PREFIX_SIZE<span class="token punctuation">;</span>
+	<span class="token comment">// 2 、得到最初需要分配的内存大小</span>
+    oldsize <span class="token operator">=</span> <span class="token operator">*</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token class-name">size_t</span><span class="token operator">*</span><span class="token punctuation">)</span>realptr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">//3 、在线程安全的情况下，减去use_memory 总消耗的内存量</span>
+    <span class="token function">update_zmalloc_stat_free</span><span class="token punctuation">(</span>oldsize<span class="token operator">+</span>PREFIX_SIZE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">// 4、清除空间</span>
+    <span class="token function">free</span><span class="token punctuation">(</span>realptr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="zmalloc_used_memory__226"></a>zmalloc_used_memory 获取已经使用的内存</h4> 
+<p><strong>HAVE_ATOMIC</strong> 判断是否拥有<strong>原子函数库</strong>，<strong>__sync_add_and_fetch</strong>是原子操作函数：对于多线程对全局变量进行自加1 ，返回没有自增1之前的值，使用此函数，就不用怕线程锁，锁住资源。pthread_mutex_lock、pthread_mutex_unlock是linux的<strong>互斥锁</strong>，调用全局变量 used_memory_mutex来锁定或者解锁当前资源。</p> 
+<pre><code class="prism language-c"><span class="token class-name">size_t</span> <span class="token function">zmalloc_used_memory</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token class-name">size_t</span> um<span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>zmalloc_thread_safe<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">HAVE_ATOMIC</span></span>
+        um <span class="token operator">=</span> <span class="token function">__sync_add_and_fetch</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>used_memory<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+		<span class="token comment">// linux 互斥锁 锁定当前的  used_memory_mutex</span>
+        <span class="token function">pthread_mutex_lock</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>used_memory_mutex<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        um <span class="token operator">=</span> used_memory<span class="token punctuation">;</span>
+	    <span class="token comment">// linux 互斥锁 解锁当前的  used_memory_mutex</span>
+        <span class="token function">pthread_mutex_unlock</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>used_memory_mutex<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        um <span class="token operator">=</span> used_memory<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">return</span> um<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="zmalloc_get_rss__249"></a>zmalloc_get_rss 获取内存碎片大小</h4> 
+<p>获取内存碎片大小主要是调用<strong>sysconf()<strong>系统库函数，查看在</strong>/proc//stat</strong>文件下的内存消耗</p> 
+<pre><code class="prism language-c"><span class="token class-name">size_t</span> <span class="token function">zmalloc_get_rss</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> page <span class="token operator">=</span> <span class="token function">sysconf</span><span class="token punctuation">(</span>_SC_PAGESIZE<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//调用库函数sysconf()【大家可以man sysconf查看详细内容】来查询内存页的大小</span>
+    <span class="token class-name">size_t</span> rss<span class="token punctuation">;</span>
+    <span class="token keyword">char</span> buf<span class="token punctuation">[</span><span class="token number">4096</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token keyword">char</span> filename<span class="token punctuation">[</span><span class="token number">256</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token keyword">int</span> fd<span class="token punctuation">,</span> count<span class="token punctuation">;</span>
+    <span class="token keyword">char</span> <span class="token operator">*</span>p<span class="token punctuation">,</span> <span class="token operator">*</span>x<span class="token punctuation">;</span>
+
+	<span class="token comment">//是在当前进程的 /proc/&lt;pid&gt;/stat （&lt;pid&gt;指代当前进程实际id）文件中进行检索</span>
+	<span class="token comment">// 把检索出的绝对路径保存到filename中</span>
+    <span class="token function">snprintf</span><span class="token punctuation">(</span>filename<span class="token punctuation">,</span><span class="token number">256</span><span class="token punctuation">,</span><span class="token string">"/proc/%d/stat"</span><span class="token punctuation">,</span><span class="token function">getpid</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>fd <span class="token operator">=</span> <span class="token function">open</span><span class="token punctuation">(</span>filename<span class="token punctuation">,</span>O_RDONLY<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span><span class="token comment">// 以只读模式打开 /proc/&lt;pid&gt;/stat 文件，然后从中读入4096个字符到字符数组buf中</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">read</span><span class="token punctuation">(</span>fd<span class="token punctuation">,</span>buf<span class="token punctuation">,</span><span class="token number">4096</span><span class="token punctuation">)</span> <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">close</span><span class="token punctuation">(</span>fd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token function">close</span><span class="token punctuation">(</span>fd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    p <span class="token operator">=</span> buf<span class="token punctuation">;</span>
+	<span class="token comment">// 该文件的第24个字段是RSS的信息，它的单位是pages（内存页的数目）</span>
+    count <span class="token operator">=</span> <span class="token number">23</span><span class="token punctuation">;</span> <span class="token comment">/* RSS is the 24th field in /proc/&lt;pid&gt;/stat */</span>
+    <span class="token keyword">while</span><span class="token punctuation">(</span>p <span class="token operator">&amp;&amp;</span> count<span class="token operator">--</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        p <span class="token operator">=</span> <span class="token function">strchr</span><span class="token punctuation">(</span>p<span class="token punctuation">,</span><span class="token string">' '</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>p<span class="token punctuation">)</span> p<span class="token operator">++</span><span class="token punctuation">;</span> <span class="token comment">//p++原因是因为，p当前指向的是空格，在执行自增操作之后就指向下一个字段的首地址</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>p<span class="token punctuation">)</span> <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span> <span class="token comment">// 判断是否是空指针</span>
+    x <span class="token operator">=</span> <span class="token function">strchr</span><span class="token punctuation">(</span>p<span class="token punctuation">,</span><span class="token string">' '</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 查找空格在p指针数组中首次出现的地址</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>x<span class="token punctuation">)</span> <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span><span class="token comment">// 如果为NULL就是查询失败</span>
+    <span class="token operator">*</span>x <span class="token operator">=</span> <span class="token string">'\0'</span><span class="token punctuation">;</span> <span class="token comment">//把最后一个字符设置为 c字符串风格的 ’\0‘</span>
+
+    rss <span class="token operator">=</span> <span class="token function">strtoll</span><span class="token punctuation">(</span>p<span class="token punctuation">,</span><span class="token constant">NULL</span><span class="token punctuation">,</span><span class="token number">10</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//string 转 为10进制的long long类型</span>
+    rss <span class="token operator">*=</span> page<span class="token punctuation">;</span> <span class="token comment">//rss  page相乘并返回，rss获得的实际上是内存页的页数，page保存的是每个内存页的大小（单位字节），相乘之后就表示RSS实际的内存大小了</span>
+    <span class="token keyword">return</span> rss<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="zmalloc_get_fragmentation_ratio__289"></a>zmalloc_get_fragmentation_ratio 获取内存碎片率</h4> 
+<p>获取内存碎片率，用专业术语来形容：RSS与所分配总内存空间的比值。内存碎片分为内部碎片和外部碎片。内部碎片是已经被分配出去（能明确指出属于哪个进程）却不能被利用的内存空间，直到进程释放掉，才能被系统利用。外部碎片是还没有被分配出去（不属于任何进程），但由于太小了无法分配给申请内存空间的新进程的内存空闲区域。<br> 获取内存碎片率公式为：<strong>zmalloc_get_rss（）/ used_memory</strong></p> 
+<pre><code class="prism language-c"><span class="token keyword">float</span> <span class="token function">zmalloc_get_fragmentation_ratio</span><span class="token punctuation">(</span><span class="token class-name">size_t</span> rss<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> <span class="token punctuation">(</span><span class="token keyword">float</span><span class="token punctuation">)</span>rss<span class="token operator">/</span><span class="token function">zmalloc_used_memory</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="zmalloc_get_private_dirty__299"></a>zmalloc_get_private_dirty 获取私有的被占有的脏内存</h4> 
+<p>如果操作系统有smaps文件，完成的操作就是扫描 <strong>/proc/self/smaps</strong>文件，统计其中所有 <strong>Private_Dirty</strong>字段的和。如果没有返回内存碎片为0。</p> 
+<p><strong>Rss=Shared_Clean+Shared_Dirty+Private_Clean+Private_Dirty</strong></p> 
+<ol><li>Shared_Clean:多进程共享的内存，且其内容未被任意进程修改</li><li>Shared_Dirty:多进程共享的内存，但其内容被某个进程修改</li><li>Private_Clean:某个进程独享的内存，且其内容没有修改</li><li>Private_Dirty:某个进程独享的内存，但其内容被该进程修改</li></ol> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">if</span> <span class="token expression"><span class="token function">defined</span><span class="token punctuation">(</span>HAVE_PROC_SMAPS<span class="token punctuation">)</span></span></span>
+<span class="token class-name">size_t</span> <span class="token function">zmalloc_get_private_dirty</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">char</span> line<span class="token punctuation">[</span><span class="token number">1024</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token class-name">size_t</span> pd <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    FILE <span class="token operator">*</span>fp <span class="token operator">=</span> <span class="token function">fopen</span><span class="token punctuation">(</span><span class="token string">"/proc/self/smaps"</span><span class="token punctuation">,</span><span class="token string">"r"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>fp<span class="token punctuation">)</span> <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">while</span><span class="token punctuation">(</span><span class="token function">fgets</span><span class="token punctuation">(</span>line<span class="token punctuation">,</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span>line<span class="token punctuation">)</span><span class="token punctuation">,</span>fp<span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">strncmp</span><span class="token punctuation">(</span>line<span class="token punctuation">,</span><span class="token string">"Private_Dirty:"</span><span class="token punctuation">,</span><span class="token number">14</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">char</span> <span class="token operator">*</span>p <span class="token operator">=</span> <span class="token function">strchr</span><span class="token punctuation">(</span>line<span class="token punctuation">,</span><span class="token string">'k'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>p<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token operator">*</span>p <span class="token operator">=</span> <span class="token string">'\0'</span><span class="token punctuation">;</span>
+                pd <span class="token operator">+=</span> <span class="token function">strtol</span><span class="token punctuation">(</span>line<span class="token operator">+</span><span class="token number">14</span><span class="token punctuation">,</span><span class="token constant">NULL</span><span class="token punctuation">,</span><span class="token number">10</span><span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token number">1024</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    <span class="token function">fclose</span><span class="token punctuation">(</span>fp<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> pd<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+<span class="token class-name">size_t</span> <span class="token function">zmalloc_get_private_dirty</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/2fde141759d8804f826cfcc9660d2117/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">AlmaLinux Centos 8.5 如何进入单用户模式并重置root密码？</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/a109c0d76acf553ff5ea38e6af65dfaf/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Python from import导包ModuleNotFoundError No module named,找不到模块问题</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

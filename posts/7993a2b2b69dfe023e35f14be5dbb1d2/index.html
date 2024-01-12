@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>视觉SLAM（一）——视觉SLAM框架 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="视觉SLAM（一）——视觉SLAM框架" />
+<meta property="og:description" content="1.简介及说明 SLAM（Simultaneous Localization And Mapping）——同时定位与地图构建。因此SLAM是研究“定位”和“地图构建”问题的。
+目前多用于机器人导航、无人车驾驶、跟踪建模。对于不同应用场景，精度要求、鲁棒性等有所差异，此时选择传感器、运算侧重环节也往往不同。但是基本框架几乎一致。
+本系列主要研究以视觉为主的SLAM系统，主要是系统的学习基础的SLAM相关内容。本人从事三维机器视觉相关工作，主要在交通行业应用，由于项目侧重于跟踪建模，研究过ORB-SLAM（特征点匹配法）、DSO（光度恒定直接法）源代码，各有优缺点。主要工作内容是对高速场景下的多车道车辆实时跟踪三维建模，为了保证准确、实时、同时跟踪多目标并建模，所有运算环节均在Nvidia GPU中完成，产品已经满足设计要求，且工作稳定，下图为自主研发产品检测建模结果。现在作为回顾，系统学习SLAM的相关内容。
+主要参考书目是高翔博士的《视觉SLAM十四讲》，中间会记录一些个人实践经验和思考。
+2.SLAM基础框架 SLAM伴随着机器视觉发展和机器人导航已经相对成熟，形成了合理高效的基本框架。
+主要包含：
+传感器数据、前端视觉里程计、后端优化、回环检测、建图。
+传感器数据 采集根据不同应用场景和需求进行选择，主要有如下几种传感器：
+1.单目： 也就是单独一个摄像机，应用于手机AR场景。
+单目第一个问题是没有像素点的深度信息，在DSO初始化环节中，通过小位移假设对有效的像素点进行试探扫描，进而对深度初始化。ORB-SLAM中初始化对特征点匹配进行，运Homography和Fundamental Matrix，选择较好的运算位姿，最后进行Full Bundle Adjustment。
+单目第二个问题是尺度不确定，测试过单目DSO，建图会出现突然场景变大好多倍的现象。
+2.双目： 双目的好处是受光线影响较小在户外场景可以使用，按照场景可以选择不同基线距离和分辨率的双目相机。分辨率高时，运算量会非常大，并且目前双目匹配优化比较消耗内存或显存；分辨率低时，远处准确度会变差；基线小时，远处准确率难以保证；基线大时，近处测量不到，增大视差扫描范围可部分解决，但性价比不高，64像素与128像素，可能只是增加近处0.5m的深度检测范围，但是视差运算时运算量会增加近一倍。
+需要根据应用场景特点，在分辨率和基线参数上权衡。
+市面上目前消费级双目相机有：
+ZED（一代）：分辨率高，深度由SDK优化过，速度和精度均为顶尖水平，需要在带有GPU的主机上运算，深度范围：0.3-25m（实际10m处精度已经比较差了），视场角大：90x60，卷帘快门：对快速运动物体会有拖影，效果可能比较差。
+RealSense（D435）：基线距离短，Intel的产品！所以片上运算出深度数据，不必消耗太多计算机资源，但是实际测试3m以外，测量误差几乎超过20cm了。
+自主设计双目相机：
+匹配算法主要有OpenCV——BM、SGBM，开源的有libSGM；opencv的BM有GPU实现，但是无亚像素级，远处深度直接分段，几乎可以认为GPU的BM算法不可用（截至目前）。SGBM运算效果很好，但是运算速度太慢，无GPU版本，github上有个国内的大佬实现了SGBM的GPU版本，只支持640*480分辨率，测试效果与CPU运算结果几乎一致！但是工程使用中，还是不太敢用，毕竟没有深入研究代码，怕有bug（逃。。。）。libSGM是日本的fixstar做的开源版本具有GPU版本的双目匹配算法，一直都有维护，youtube上看该团队做的项目很高大上，也研究并改动过源代码，效果虽然没有SGBM好，但是运算效率高且稳定，支持64\128像素视差，居家必备良心推荐。
+3.RGB-D相机： KinectV1:结构光，年代太早，现在几乎已经找不到了。
+KinectV2：Tof，效果很棒，在室内非常好用，精度高，数据稳定。官方SDK只支持一台相机连接到计算机，使用libfreenect开源库，可以同时连接多台，之前专门编写了多路libfreenect的采集同步，但由于KinectV2没有同步触发方式，多台相机会存在同步采集问题。目前已经停产有两年了，以后可能想用也用不上了。
+Kinect Azure：第三代Kinect，也是Tof。与KinectV2对比测试过，KinectV2有三个激光发射模块（后边只装了两个，另一个空着没有焊接发射模块，可能是节约成本或者怕引起过曝），而Kinect Azure只有一个激光发射模块。由于激光模块功率变小，对于反射率低的空洞会变多。但是总体来说，Kinect Azure各方面性能都接近完美，可惜只适用于室内场景。
+RealSense（L515）：MEMS，没有测评过，但是看youtube上的演示视频，只给出伪彩深度图的室内场景测试结果，目测精度没有Kinect Azure高，并且发现对于测试场景中有个人人腿处大面积空洞，应当对于反射率低或黑色的效果比较差，失去了测评的兴趣。
+总体来说，RGB-D相机多数为室内场景设计，一般850nm左右的波长就是针对室内场景了，905nm或者940nm左右的应当是室外自然光条件下也可以使用的。（阳光中该波长的光含量少，对于传感器来讲噪音就少了很多）
+4.激光雷达： 激光雷达目前多应用于无人车驾驶，价格昂贵，点云稀疏。但是好在测量结果稳定性好、测量深度范围大，对于低反射率或者室外阳光下环境效果也保持稳定、准确。仅测评过DJI的Livox Mid-100，室内外测量效果没得说，棒！价格也比较亲民，只要9999！但是，机械式单点扫描速度较慢，100ms的采样周期，相对比较稀疏，1s时很稠密，对于具体应用场景需要权衡。多线激光雷达采样周期短，但就是太贵，造价不降下来的话，产品难以大量推广应用，预研、demo都没问题，量产产品就很心疼了。
+5.IMU（惯性测量单元）： 基于各种视觉导航的都会在特定场景下失效，比如少纹理时，所有基于视觉的都无法正常跟踪。惯性导航作为数据融合补充项，在视觉失效的场景下，能够提供粗略的位姿信息。
+实际用于定位导航的产品，几乎都需要增加IMU作为补充，提高产品环境适应性。但是视觉SLAM中暂时没有研究这块内容，开源项目VINS很好的对视觉和IMU进行融合，大神做的工作很充分了，值得学习研究。
+前端视觉里程计（VO-Visual Odometry） 根据视觉特征，对相邻帧间的位姿进行拟合运算。不同方式，最终结果都是完成相机平移、旋转的运算。
+后端优化（Optimization） 通过大量观测点的拟合，最终针对平移、旋转6个参数进行寻优，往往得到结果准确度是比较高的。但准确度再高，也会有误差，小误差累计起来，会对建图准确性产生很大影响。为了得到准确的建图结果，VO环节得到的位姿都输入到优化器内，当优化器收到回环检测信息时，即可对所有中间输入位姿全局优化，减小累计误差对建图准确性的影响。
+回环检测（Loop Closing） 通过关键帧的特征匹配，检测到相机回到之前走过的场景，此时就可以作为先验知识，使用优化器去将之前的位姿人为闭合。
+这里没有专门研究过，想到了两个问题：
+1.如果遇上相似场景，导致匹配误报，那场景岂不就大错特错了，是不是就得增加其他手段进行干预，比如GPS？对场景进行关联，限定当前帧匹配范围？
+2.即使使用Bow，对特征匹配进行加速，当场景很大时，关键帧就会变得非常多，此时匹配的速度一定会变慢，并且误匹配的概率也会增加。应该也是需要分区域，限定匹配范围。
+建图（Mapping） 根据需求，构建相应性质的地图。
+侧重于定位时，多采用稀疏的路标地图。
+侧重于路径规划自主导航时，则需要稠密的地图，二维Grid、三维Voxel。
+侧重于实景建模时，需要对三维地图进一步网格化。
+关于传感器数据就在本章完成讨论，对于视觉里程计、后端优化、回环检测、建图后续单独分章节记述。
+The End." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/7993a2b2b69dfe023e35f14be5dbb1d2/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-04-26T12:57:01+08:00" />
+<meta property="article:modified_time" content="2020-04-26T12:57:01+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">视觉SLAM（一）——视觉SLAM框架</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="1_0"></a>1.简介及说明</h2> 
+<p><strong>SLAM（Simultaneous Localization And Mapping）</strong>——同时定位与地图构建。因此SLAM是研究“<strong>定位</strong>”和“<strong>地图构建</strong>”问题的。<br> 目前多用于机器人导航、无人车驾驶、跟踪建模。对于不同应用场景，精度要求、鲁棒性等有所差异，此时选择传感器、运算侧重环节也往往不同。但是基本框架几乎一致。</p> 
+<p>本系列主要研究以视觉为主的SLAM系统，主要是系统的学习基础的SLAM相关内容。本人从事三维机器视觉相关工作，主要在交通行业应用，由于项目侧重于跟踪建模，研究过ORB-SLAM（特征点匹配法）、DSO（光度恒定直接法）源代码，各有优缺点。主要工作内容是对高速场景下的多车道车辆实时跟踪三维建模，为了保证准确、实时、同时跟踪多目标并建模，所有运算环节均在Nvidia GPU中完成，产品已经满足设计要求，且工作稳定，下图为自主研发产品检测建模结果。现在作为回顾，系统学习SLAM的相关内容。<br> <img src="https://images2.imgbox.com/22/b2/2VcIEdKz_o.png" alt="Measure Result"></p> 
+<p>主要参考书目是高翔博士的《视觉SLAM十四讲》，中间会记录一些个人实践经验和思考。</p> 
+<h2><a id="2SLAM_10"></a>2.SLAM基础框架</h2> 
+<p>SLAM伴随着机器视觉发展和机器人导航已经相对成熟，形成了合理高效的基本框架。<br> 主要包含：<br> <em><strong>传感器数据、前端视觉里程计、后端优化、回环检测、建图。</strong></em></p> 
+<h3><a id="_14"></a>传感器数据</h3> 
+<p>采集根据不同应用场景和需求进行选择，主要有如下几种传感器：</p> 
+<h4><a id="1_16"></a>1.单目：</h4> 
+<p>也就是单独一个摄像机，应用于手机AR场景。<br> 单目第一个问题是没有像素点的深度信息，在DSO初始化环节中，通过小位移假设对有效的像素点进行试探扫描，进而对深度初始化。ORB-SLAM中初始化对特征点匹配进行，运Homography和Fundamental Matrix，选择较好的运算位姿，最后进行Full Bundle Adjustment。<br> 单目第二个问题是尺度不确定，测试过单目DSO，建图会出现突然场景变大好多倍的现象。</p> 
+<h4><a id="2_20"></a>2.双目：</h4> 
+<p>双目的好处是受光线影响较小在户外场景可以使用，按照场景可以选择不同基线距离和分辨率的双目相机。分辨率高时，运算量会非常大，并且目前双目匹配优化比较消耗内存或显存；分辨率低时，远处准确度会变差；基线小时，远处准确率难以保证；基线大时，近处测量不到，增大视差扫描范围可部分解决，但性价比不高，64像素与128像素，可能只是增加近处0.5m的深度检测范围，但是视差运算时运算量会增加近一倍。</p> 
+<p>需要根据应用场景特点，在分辨率和基线参数上权衡。</p> 
+<p><strong>市面上目前消费级双目相机有</strong>：<br> <strong>ZED（一代）</strong>：分辨率高，深度由SDK优化过，速度和精度均为顶尖水平，需要在带有GPU的主机上运算，深度范围：0.3-25m（实际10m处精度已经比较差了），视场角大：90x60，卷帘快门：对快速运动物体会有拖影，效果可能比较差。<br> <strong>RealSense（D435）</strong>：基线距离短，Intel的产品！所以片上运算出深度数据，不必消耗太多计算机资源，但是实际测试3m以外，测量误差几乎超过20cm了。</p> 
+<p><strong>自主设计双目相机</strong>：<br> 匹配算法主要有OpenCV——<strong>BM</strong>、<strong>SGBM</strong>，开源的有<strong>libSGM</strong>；opencv的BM有GPU实现，但是无亚像素级，远处深度直接分段，几乎可以认为GPU的BM算法不可用（截至目前）。SGBM运算效果很好，但是运算速度太慢，无GPU版本，github上有个国内的大佬实现了SGBM的GPU版本，只支持640*480分辨率，测试效果与CPU运算结果几乎一致！但是工程使用中，还是不太敢用，毕竟没有深入研究代码，怕有bug（逃。。。）。libSGM是日本的fixstar做的开源版本具有GPU版本的双目匹配算法，一直都有维护，youtube上看该团队做的项目很高大上，也研究并改动过源代码，效果虽然没有SGBM好，但是运算效率高且稳定，支持64\128像素视差，居家必备良心推荐。</p> 
+<h4><a id="3RGBD_31"></a>3.RGB-D相机：</h4> 
+<p><strong>KinectV1</strong>:结构光，年代太早，现在几乎已经找不到了。<br> <strong>KinectV2</strong>：Tof，效果很棒，在室内非常好用，精度高，数据稳定。官方SDK只支持一台相机连接到计算机，使用libfreenect开源库，可以同时连接多台，之前专门编写了多路libfreenect的采集同步，但由于KinectV2没有同步触发方式，多台相机会存在同步采集问题。目前已经停产有两年了，以后可能想用也用不上了。<br> <strong>Kinect Azure</strong>：第三代Kinect，也是Tof。与KinectV2对比测试过，KinectV2有三个激光发射模块（后边只装了两个，另一个空着没有焊接发射模块，可能是节约成本或者怕引起过曝），而Kinect Azure只有一个激光发射模块。由于激光模块功率变小，对于反射率低的空洞会变多。但是总体来说，Kinect Azure各方面性能都接近完美，可惜只适用于室内场景。<br> <strong>RealSense（L515）</strong>：MEMS，没有测评过，但是看youtube上的演示视频，只给出伪彩深度图的室内场景测试结果，目测精度没有Kinect Azure高，并且发现对于测试场景中有个人人腿处大面积空洞，应当对于反射率低或黑色的效果比较差，失去了测评的兴趣。<br> 总体来说，RGB-D相机多数为室内场景设计，一般850nm左右的波长就是针对室内场景了，905nm或者940nm左右的应当是室外自然光条件下也可以使用的。（阳光中该波长的光含量少，对于传感器来讲噪音就少了很多）</p> 
+<h4><a id="4_37"></a>4.激光雷达：</h4> 
+<p>激光雷达目前多应用于无人车驾驶，价格昂贵，点云稀疏。但是好在测量结果稳定性好、测量深度范围大，对于低反射率或者室外阳光下环境效果也保持稳定、准确。仅测评过DJI的<strong>Livox Mid-100</strong>，室内外测量效果没得说，棒！价格也比较亲民，只要9999！但是，机械式单点扫描速度较慢，100ms的采样周期，相对比较稀疏，1s时很稠密，对于具体应用场景需要权衡。多线激光雷达采样周期短，但就是太贵，造价不降下来的话，产品难以大量推广应用，预研、demo都没问题，量产产品就很心疼了。</p> 
+<h4><a id="5IMU_39"></a>5.IMU（惯性测量单元）：</h4> 
+<p>基于各种视觉导航的都会在特定场景下失效，比如少纹理时，所有基于视觉的都无法正常跟踪。惯性导航作为数据融合补充项，在视觉失效的场景下，能够提供粗略的位姿信息。<br> 实际用于定位导航的产品，几乎都需要增加IMU作为补充，提高产品环境适应性。但是视觉SLAM中暂时没有研究这块内容，开源项目<strong>VINS</strong>很好的对视觉和IMU进行融合，大神做的工作很充分了，值得学习研究。</p> 
+<h3><a id="VOVisual_Odometry_42"></a>前端视觉里程计（VO-Visual Odometry）</h3> 
+<p>根据视觉特征，对相邻帧间的位姿进行拟合运算。不同方式，最终结果都是完成相机平移、旋转的运算。</p> 
+<h3><a id="Optimization_45"></a>后端优化（Optimization）</h3> 
+<p>通过大量观测点的拟合，最终针对平移、旋转6个参数进行寻优，往往得到结果准确度是比较高的。但准确度再高，也会有误差，小误差累计起来，会对建图准确性产生很大影响。为了得到准确的建图结果，VO环节得到的位姿都输入到优化器内，当优化器收到回环检测信息时，即可对所有中间输入位姿全局优化，减小累计误差对建图准确性的影响。</p> 
+<h3><a id="Loop_Closing_48"></a>回环检测（Loop Closing）</h3> 
+<p>通过关键帧的特征匹配，检测到相机回到之前走过的场景，此时就可以作为先验知识，使用优化器去将之前的位姿人为闭合。<br> 这里没有专门研究过，想到了两个问题：<br> 1.如果遇上相似场景，导致匹配误报，那场景岂不就大错特错了，是不是就得增加其他手段进行干预，比如GPS？对场景进行关联，限定当前帧匹配范围？<br> 2.即使使用Bow，对特征匹配进行加速，当场景很大时，关键帧就会变得非常多，此时匹配的速度一定会变慢，并且误匹配的概率也会增加。应该也是需要分区域，限定匹配范围。</p> 
+<h3><a id="Mapping_53"></a>建图（Mapping）</h3> 
+<p>根据需求，构建相应性质的地图。<br> 侧重于定位时，多采用稀疏的路标地图。<br> 侧重于路径规划自主导航时，则需要稠密的地图，二维Grid、三维Voxel。<br> 侧重于实景建模时，需要对三维地图进一步网格化。</p> 
+<p>关于传感器数据就在本章完成讨论，对于视觉里程计、后端优化、回环检测、建图后续单独分章节记述。</p> 
+<p>The End.</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/4a68bb3f3fb750ab4e138cef2d3a3239/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Win10默认输入法中英文标点切换：快捷键【Ctrl&#43;.】Ctrl&#43;句点</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/5bc4b1e35931f97d1034e390915ed403/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">vim将文本中的tab替换为4个空格</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

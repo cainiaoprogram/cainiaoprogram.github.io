@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>消息队列——引入的问题：重复消费&amp;顺序消费&amp;分布式事务 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="消息队列——引入的问题：重复消费&amp;顺序消费&amp;分布式事务" />
+<meta property="og:description" content="上篇文章《消息队列入门》里面提到，技术是把双刃剑！使用消息队列是因为他带给我们很多好处：系统间解耦、异步执行、削峰限流，但是使用消息队列可能带来一些问题：消息队列的消息被重复消费、消息的顺序保证、异步执行导致的数据不一致；
+本篇就来介绍一下这几个引入消费队列后可能带来的问题，以及常见的解决方案；
+1. 消息重复消费问题 消息重复消费是使用消息队列之后，必须考虑的一个问题，也是比较严重和常见的问题；
+例如，对于订单场景，订单结果的通知一般都是异步方式，由订单中台接收第三方支付渠道的回执，然后封装成业务订单结果投递给业务方；目前我接触的投递方式有HTTP/DUBBO回调和消息队列MQ；
+考虑到下游业务方的消费能力（消费速度），使用消息队列是比较好的选择；例如一个累计消费活动的页面，你下单完成了立刻去看一眼活动页面，有时候累计金额马上就加上去了，有时候却延迟有很久，为啥？这个速度取决于消息队列的消费速度，消费慢堵塞了就迟点看到呗；
+一般来说，消息队列的接收模式往往是手动确认的，这意味着如果消费者的处理逻辑中抛出了异常，该消息会被重新投递；
+此外，支付结果消息的下游监听服务一般是多个，当某个下游业务方出现短期不可用，当它恢复时可能希望某个时间区间消息重新投递，这时其他系统也会收到这些被消费过的消息，就需要考虑其他系统收到重复消息时，是否会产生脏数据？如同一条支付成功的消息投递了两次，会不会出现发两个奖品的情况；
+事实上，消息重发是很常见的，服务的网络抖动，开发人员代码Bug等都可能处理失败，并要求消息重发的；这就需要让我们的接口具备一个特性——幂等；
+幂等（idempotent、idempotence）是一个数学与计算机学概念，常见于抽象代数中；
+在编程中一个幂等操作的特点是其任意多次执行所产生的影响均与一次执行的影响相同；
+幂等函数，或幂等方法，是指可以使用相同参数重复执行，并能获得相同结果的函数；这些函数不会影响系统状态，也不用担心重复执行会对系统造成改变；
+——《幂等 百度百科》
+如何实现幂等？ 一般幂等，需要分场景去考虑，看是强校验还是弱校验；比如跟金钱相关的场景那就很关键，就做强校验，别不是很重要的场景如消息频控（疲劳度控制），就可以做弱校验；
+（1）强校验：比如你监听到用户支付成功的消息，然后执行业务订单更新、权益发放、下游消息本地持久化这一系列DB操作，可以将这些操作放在一个事务内；
+每次消息过来都要拿着业务订单号这样的唯一标识去订单流水表查，看看有没有已经处理过这条流水，处理过就直接终止流程返回，不用走下面的流程了，没有就执行后面的后置处理逻辑；
+（2）弱校验：这个简单，一些不重要的场景，比如短信发放消息的处理，可以把{接收者ID&#43;业务场景ID}作为唯一标识作为Redis的key放到缓存里面，设置失效时间（做疲劳度控制），每次接收到执行短信发放消息时就去Redis判断，看当前是否还需要给用户发短信；
+之所以是弱校验，是因为用KV就算Redis内数据清空了也没关系，最多是多消费一次多发一条短信，业务也无关痛痒；
+2. 消息顺序消费问题 关于顺序消费，开发过程中这样的场景不多，网上更多的都是介绍binlog的同步，好像更多的场景就没了；正常的业务场景就是按照步骤执行，天然的时序的，很难出现并行投递消息的场景；
+举个例子，我们都知道数据量大的时候，数据同步压力还是很大的，有时候数据量大的表需要同步几个亿的数据给下游，这种情况可以将需要同步的数据怼到队列里面去，然后下游慢慢消费的；
+这时就可能出现同时对库里的一条数据进行了增、改、删三个操作，但是你消息发过去消费的时候变成了改、删、增，这样数据就不对了；
+如何解决消息顺序消费？ 几种不同MQ实现顺序消息的方式可以参考这篇《几种MQ顺序消息的实现方式》；这里简单的说一下RocketMQ里面的一个简单实现；
+RocketMQ的官方文档里面给出了&#34;消息有序性&#34;的定义——
+消息有序指的是一类消息消费时，能按照发送的顺序来消费；
+例如：一个订单产生了三条消息分别是订单创建、订单付款、订单完成，消费时要按照这个顺序消费才能有意义，但是同时订单之间是可以并行消费的；RocketMQ可以严格的保证消息有序；
+顺序消息分为全局顺序消息与分区顺序消息，全局顺序是指某个Topic下的所有消息都要保证顺序；部分顺序消息只要保证每一组消息被顺序消费即可。
+全局顺序 对于指定的一个 Topic，所有消息按照严格的先入先出（FIFO）的顺序进行发布和消费；适用场景：性能要求不高，所有的消息严格按照 FIFO 原则进行消息发布和消费的场景；分区顺序 对于指定的一个 Topic，所有消息根据 sharding key 进行区块分区； 同一个分区内的消息按照严格的 FIFO 顺序进行发布和消费；Sharding key 是顺序消息中用来区分不同分区的关键字段，和普通消息的 Key 是完全不同的概念； 适用场景：性能要求高，以 sharding key 作为分区字段，在同一个区块中严格的按照 FIFO 原则进行消息发布和消费的场景。 如果想要实现全局顺序消息，那么只能使用一个队列，以及单个生产者，这会严重影响性能；
+因此，我们常说的顺序消息通常是只的部分顺序消息，就上面的例子来说，我们不用管不同的订单ID的消息之间的总体消费顺序，只需要保证同样订单ID的消息能按照订单创建、订单付款、订单完成这个顺序消费就可以了；
+顺序消费实际上有两个核心点，一个是生产者有序存储，另一个是消费者有序消费；
+（1）生产者有序发送
+我们知道RocketMQ中生产者生产的消息会放置在某个队列中，基于队列FIFO先进先出的特性天然的可以保证存入队列的消息顺序和拉取的消息顺序是一致的，因此，我们只需要保证一组相同的消息按照给定的顺序存入同一个队列中，就能保证生产者有序存储；
+普通发送消息的模式下，一个topic下有多个队列，生产者会采用轮询的方式将消费均匀的分发到不同的队列中，然后被不同的消费者消费；因为一组消息在不同的队列，此时就无法使用队列天然的FIFO特性来保证消息有序性了；
+RocketMQ支持生产者在投放消息的时候自定义投放策略，即为当前消息选择投放到的队列；RocketMQ提供MessageQueueSelector队列选择机制，他有三种实现：
+我们实现一个MessageQueueSelector接口（使用Hash取模法），来保证同一个订单在同一个队列中就行了，即通过订单ID%队列数量得到该ID的订单所投放的队列在队列列表中的索引，然后该订单的所有消息都会被投放到这个队列中；
+另外，对于消息生产方，顺序消息必须使用同步发送的方式才能保证生产者发送的消息有序，这个也很好理解吧；
+举个例子，有2个队列，那么订单ID为1,2,3的三组消息中，1、3组消息根据Hash取模结果存放于第一个队列，而2组消息存放于第二个队列，如下图是一种消息可能的消息存放顺序：
+注意：实际上，采用队列选择器的方法有时也会存在问题；我们的目的是将消息发送到同一个队列中，试想如果某个broker挂了，那么队列数就会减少一部分，如果采用Hash取余的方式投递，可能导致同一个业务中的不同消息在队列数发生变化前后，分别被发送到不同的队列中，导致短暂的部分消息无序；同样的，如果增加了队列服务器数，那么也会造成短暂的造成部分消息无序；
+（2）消费者有序消费
+生产者有序存储实现了，那么该如何实现消费者有序消费呢？
+RockerMQ的MessageListener回调函数提供了两种消费模式，有序消费模式MessageListenerOrderly和并发消费模式MessageListenerConcurrently；" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/9d9d6b004cceebe03206d52d2868ac96/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-07-26T10:50:12+08:00" />
+<meta property="article:modified_time" content="2022-07-26T10:50:12+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">消息队列——引入的问题：重复消费&amp;顺序消费&amp;分布式事务</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>上篇文章<a href="https://blog.csdn.net/minghao0508/article/details/125856965" title="《消息队列入门》">《消息队列入门》</a>里面提到，<strong>技术是把双刃剑</strong>！使用消息队列是因为他带给我们很多好处：系统间解耦、异步执行、削峰限流，但是使用消息队列可能带来一些问题：消息队列的消息被重复消费、消息的顺序保证、异步执行导致的数据不一致；</p> 
+<p>本篇就来介绍一下这几个引入消费队列后可能带来的问题，以及常见的解决方案；</p> 
+<p></p> 
+<h3>1. 消息重复消费问题</h3> 
+<p>消息重复消费是使用消息队列之后，必须考虑的一个问题，也是比较严重和常见的问题；</p> 
+<p>例如，对于订单场景，订单结果的通知一般都是异步方式，由订单中台接收第三方支付渠道的回执，然后封装成业务订单结果投递给业务方；目前我接触的投递方式有HTTP/DUBBO回调和消息队列MQ；</p> 
+<p>考虑到下游业务方的消费能力（消费速度），使用消息队列是比较好的选择；例如一个累计消费活动的页面，你下单完成了立刻去看一眼活动页面，有时候累计金额马上就加上去了，有时候却延迟有很久，为啥？这个速度取决于消息队列的消费速度，消费慢堵塞了就迟点看到呗；</p> 
+<p>一般来说，消息队列的接收模式往往是手动确认的，这意味着如果消费者的处理逻辑中抛出了异常，该消息会被重新投递；</p> 
+<p>此外，支付结果消息的下游监听服务一般是多个，当某个下游业务方出现短期不可用，当它恢复时可能希望某个时间区间消息重新投递，这时其他系统也会收到这些被消费过的消息，就需要考虑其他系统收到重复消息时，是否会产生脏数据？如同一条支付成功的消息投递了两次，会不会出现发两个奖品的情况；</p> 
+<p>事实上，消息重发是很常见的，服务的<strong>网络抖动</strong>，<strong>开发人员代码Bug</strong>等都可能处理失败，并要求消息重发的；这就需要让我们的接口具备一个特性——<span style="color:#1c7331;"><strong>幂等</strong></span>；</p> 
+<blockquote> 
+ <p>幂等（idempotent、idempotence）是一个数学与计算机学概念，常见于抽象代数中；</p> 
+ <p>在编程中一个幂等操作的特点是其任意多次执行所产生的影响均与一次执行的影响相同；</p> 
+ <p>幂等函数，或幂等方法，是指可以使用相同参数重复执行，并能获得相同结果的函数；这些函数不会影响系统状态，也不用担心重复执行会对系统造成改变；</p> 
+ <p>——<a href="https://baike.baidu.com/item/%E5%B9%82%E7%AD%89/8600688?fr=aladdin" rel="nofollow" title="《幂等 百度百科》">《幂等 百度百科》</a></p> 
+</blockquote> 
+<h4><strong>如何实现幂等？</strong></h4> 
+<p>一般幂等，需要分场景去考虑，看是强校验还是弱校验；比如跟金钱相关的场景那就很关键，就做强校验，别不是很重要的场景如消息频控（疲劳度控制），就可以做弱校验；</p> 
+<p><strong>（1）强校验</strong>：比如你监听到用户支付成功的消息，然后执行业务订单更新、权益发放、下游消息本地持久化这一系列DB操作，可以将这些操作放在一个事务内；</p> 
+<p>每次消息过来都要拿着业务订单号这样的唯一标识去订单流水表查，看看有没有已经处理过这条流水，处理过就直接终止流程返回，不用走下面的流程了，没有就执行后面的后置处理逻辑；</p> 
+<p><strong>（2）弱校验</strong>：这个简单，一些不重要的场景，比如短信发放消息的处理，可以把{接收者ID+业务场景ID}作为唯一标识作为Redis的key放到缓存里面，设置失效时间（做疲劳度控制），每次接收到执行短信发放消息时就去Redis判断，看当前是否还需要给用户发短信；</p> 
+<p>之所以是弱校验，是因为用KV就算Redis内数据清空了也没关系，最多是多消费一次多发一条短信，业务也无关痛痒；<br>  </p> 
+<h3>2. 消息顺序消费问题</h3> 
+<p>关于顺序消费，开发过程中这样的场景不多，网上更多的都是介绍binlog的同步，好像更多的场景就没了；正常的业务场景就是按照步骤执行，天然的时序的，很难出现并行投递消息的场景；</p> 
+<p>举个例子，我们都知道数据量大的时候，数据同步压力还是很大的，有时候数据量大的表需要同步几个亿的数据给下游，这种情况可以将需要同步的数据怼到队列里面去，然后下游慢慢消费的；</p> 
+<p>这时就可能出现同时对库里的一条数据进行了增、改、删三个操作，但是你消息发过去消费的时候变成了改、删、增，这样数据就不对了；</p> 
+<h4 id="h-10"><strong>如何解决消息顺序消费？</strong></h4> 
+<p>几种不同MQ实现顺序消息的方式可以参考这篇<a href="https://www.modb.pro/db/149777" rel="nofollow" title="《几种MQ顺序消息的实现方式》">《几种MQ顺序消息的实现方式》</a>；这里简单的说一下<strong>RocketMQ</strong>里面的一个简单实现；</p> 
+<p>RocketMQ的<a href="https://github.com/apache/rocketmq/blob/master/docs/cn/features.md" title="官方文档">官方文档</a>里面给出了"消息有序性"的定义——</p> 
+<blockquote> 
+ <p>消息有序指的是一类消息消费时，能按照发送的顺序来消费；</p> 
+</blockquote> 
+<p>例如：一个订单产生了三条消息分别是订单创建、订单付款、订单完成，消费时要按照这个顺序消费才能有意义，但是同时订单之间是可以并行消费的；RocketMQ可以严格的保证消息有序；</p> 
+<p>顺序消息分为<strong>全局顺序消息</strong>与<strong>分区顺序消息</strong>，全局顺序是指某个Topic下的所有消息都要保证顺序；部分顺序消息只要保证每一组消息被顺序消费即可。</p> 
+<ul><li>全局顺序 对于指定的一个 Topic，所有消息按照严格的先入先出（FIFO）的顺序进行发布和消费；适用场景：性能要求不高，所有的消息严格按照 FIFO 原则进行消息发布和消费的场景；</li><li>分区顺序 对于指定的一个 Topic，所有消息根据 sharding key 进行区块分区； 同一个分区内的消息按照严格的 FIFO 顺序进行发布和消费；Sharding key 是顺序消息中用来区分不同分区的关键字段，和普通消息的 Key 是完全不同的概念； 适用场景：性能要求高，以 sharding key 作为分区字段，在同一个区块中严格的按照 FIFO 原则进行消息发布和消费的场景。</li></ul> 
+<p> 如果想要实现全局顺序消息，那么只能使用一个队列，以及单个生产者，这会严重影响性能；</p> 
+<p><img alt="" height="165" src="https://images2.imgbox.com/fc/b1/iUHoDMq7_o.png" width="1200"></p> 
+<p>因此，我们常说的顺序消息通常是只的部分顺序消息，就上面的例子来说，我们不用管不同的订单ID的消息之间的总体消费顺序，只需要保证同样订单ID的消息能按照订单创建、订单付款、订单完成这个顺序消费就可以了；</p> 
+<p><strong>顺序消费实际上有两个核心点，一个是<span style="color:#1c7331;">生产者有序存储</span>，另一个是<span style="color:#1c7331;">消费者有序消费</span>；</strong></p> 
+<p><strong>（1）生产者有序发送</strong></p> 
+<p>我们知道RocketMQ中生产者生产的消息会放置在某个队列中，基于队列FIFO先进先出的特性天然的可以保证存入队列的消息顺序和拉取的消息顺序是一致的，因此，我们只需要保证一组相同的消息按照给定的顺序存<strong>入同一个队列中</strong>，就能保证生产者有序存储；</p> 
+<p>普通发送消息的模式下，一个topic下有多个队列，生产者会采用轮询的方式将消费均匀的分发到不同的队列中，然后被不同的消费者消费；因为一组消息在不同的队列，此时就无法使用队列天然的FIFO特性来保证消息有序性了；</p> 
+<p>RocketMQ支持生产者在投放消息的时候自定义投放策略，即为当前消息选择投放到的队列；RocketMQ提供MessageQueueSelector队列选择机制，他有三种实现：</p> 
+<p><img alt="" height="198" src="https://images2.imgbox.com/46/82/JkLp6MOH_o.png" width="558"></p> 
+<p>我们实现一个MessageQueueSelector接口（使用Hash取模法），来保证同一个订单在同一个队列中就行了，即通过订单ID%队列数量得到该ID的订单所投放的队列在队列列表中的索引，然后该订单的所有消息都会被投放到这个队列中；</p> 
+<p>另外，对于消息生产方，顺序消息必须使用同步发送的方式才能保证生产者发送的消息有序，这个也很好理解吧；</p> 
+<p>举个例子，有2个队列，那么订单ID为1,2,3的三组消息中，1、3组消息根据Hash取模结果存放于第一个队列，而2组消息存放于第二个队列，如下图是一种消息可能的消息存放顺序：</p> 
+<p><img alt="" height="495" src="https://images2.imgbox.com/1d/e6/9fnoRILD_o.png" width="1200"></p> 
+<p><span style="color:#fe2c24;"><strong>注意</strong></span>：实际上，采用队列选择器的方法有时也会存在问题；我们的目的是将消息发送到同一个队列中，试想如果某个broker挂了，那么队列数就会减少一部分，如果采用Hash取余的方式投递，可能导致同一个业务中的不同消息在队列数发生变化前后，分别被发送到不同的队列中，导致短暂的部分消息无序；同样的，如果增加了队列服务器数，那么也会造成短暂的造成部分消息无序；</p> 
+<p><strong>（2）消费者有序消费</strong></p> 
+<p>生产者有序存储实现了，那么该如何实现消费者有序消费呢？</p> 
+<p>RockerMQ的MessageListener回调函数提供了两种消费模式，有序消费模式MessageListenerOrderly和并发消费模式MessageListenerConcurrently；</p> 
+<p>消费者可以通过注册MessageListenerOrderly类型的回调接口来实现顺序消费；如果消费者采用Concurrently并行消费，则仍然不能保证消息消费顺序；</p> 
+<p>实际上，每一个消费者的的消费端都是采用线程池实现多线程消费的模式，即消费端是多线程消费；虽然MessageListenerOrderly被称为有序消费模式，但是仍然是使用的线程池去消费消息；</p> 
+<p>MessageListenerConcurrently是拉取到新消息之后就提交到线程池去消费，而MessageListenerOrderly则是通过<strong>加分布式锁</strong>和<strong>本地锁</strong>保证同时只有一条线程去消费一个队列上的数据；</p> 
+<p><strong>MessageListenerOrderly的加锁机制：</strong></p> 
+<ol><li>消费者在进行某个队列的消息拉取时首先向Broker服务器申请队列锁，如果申请到锁，则拉取消息，否则放弃消息拉取，等到下一个队列负载周期(20s)再试；<strong>这个锁使得一个MessageQueue同一个时刻只能被一个消费客户端消费</strong>；</li><li>假设消费者对messageQueue的加锁已经成功，那么会开始拉取消息，拉取到消息后同样会提交到消费端的线程池进行消费；但在本地消费之前，会先获取该messageQueue对应的锁对象，每一个messageQueue对应一个锁对象，获取到锁对象后，使用synchronized阻塞式的申请线程级独占锁；<strong>这个锁使得来自同一个messageQueue的消息在本地的同一个时刻只能被一个消费客户端中的一个线程顺序的消费</strong>；</li><li>在本地加synchronized锁成功之后，还会判断：如果是广播模式，则直接进行消费，如果是集群模式，则判断如果messagequeue没有锁住或者锁过期(默认30000ms)，那么延迟100ms后再次尝试向Broker申请锁定messageQueue，锁定成功后重新提交消费请求；</li></ol> 
+<p>目前来说，消费者使用MessageListenerOrderly顺序消费有个两个问题：</p> 
+<ol><li>使用了很多的锁，降低了吞吐量；</li><li>前一个消息消费阻塞时后面消息都会被阻塞；如果遇到消费失败的消息，会自动对当前消息进行重试（每次间隔时间为1秒），无法自动跳过，重试最大次数是Integer.MAX_VALUE，这将导致当前队列消费暂停，因此通常需要设定有一个最大消费次数，以及处理好所有可能的异常情况；<br>  </li></ol> 
+<h3>3. 消息与分布式事务</h3> 
+<p><strong>什么是事务？</strong></p> 
+<p>事务就是一系列操作，要么同时成功，要么同时失败；事务就是为了保证一系列操作可以正常执行，它必须同时满足ACID特性；</p> 
+<p><strong>什么是分布式事务？</strong></p> 
+<p>可以想一下，你下单流程可能涉及到10多个环节，你下单付钱都成功了，但是你优惠券扣减失败了，积分新增失败了，前者公司会被薅羊毛，后者用户会不开心，但是这些都在不同的服务怎么保证大家都成功呢？——使用分布式事务；</p> 
+<p>分布式事务的实现大概分为：</p> 
+<ul><li>2pc（两段式提交）</li><li>3pc（三段式提交）</li><li>TCC（Try、Confirm、Cancel）</li><li>最大努力通知</li><li>XA</li><li>本地消息表（ebay研发出的）</li><li>半消息/最终一致性（MQ）</li></ul> 
+<p>分布式事务的引入是为了解决分布式环境下的某个业务场景的事务问题，当然也都有种种弊端，例如：<br> （1）长时间锁定数据库资源，导致系统的响应不快，并发上不去。<br> （2）网络抖动出现脑裂情况，导致事物参与者，不能很好地执行协调者的指令，导致数据不一致。<br> （3）单点故障，例如事物协调者，在某一时刻宕机，虽然可以通过选举机制产生新的Leader，但是这过程中，必然出现问题；</p> 
+<p>这里介绍下最简单的2pc（两段式）方案，以及订单场景下结合MQ中间件比较常用的最终一致性方案，目的是理解下分布式事务以及其中消息中间件的作用；</p> 
+<p><strong> 2pc（两段式提交） </strong></p> 
+<p><img alt="" height="671" src="https://images2.imgbox.com/fe/2d/Qhw7abC7_o.jpg" width="760"></p> 
+<p>2pc（两段式提交）可以说是分布式事务的最开始的样子了；如图，通过消息中间件协调多个系统，在两个系统操作事务的时候都锁定资源但是不提交事务，等两者都准备好了，告诉消息中间件，然后再分别提交事务；</p> 
+<p>但是问题也很明细，如果A系统事务提交成功了，但是B系统在提交的时候网络波动或者各种原因提交失败了，其实还是会导致事务失效的；</p> 
+<p><strong>最终一致性</strong></p> 
+<p><img alt="" height="882" src="https://images2.imgbox.com/46/1f/hx68qgeF_o.jpg" width="1200"></p> 
+<p>如图，整个流程中，我们能保证是：</p> 
+<ul><li>业务推送方本地事务提交失败，业务接收方不会收到消息的投递；</li><li>只要业务主动方本地事务执行成功，那么消息服务一定会投递消息给下游的业务被动方，并最终保证业务被动方一定能成功消费该消息（消费成功或失败，即最终一定会有一个最终态）；<br>  </li></ul> 
+<blockquote> 
+ <p>技术就是这样，各种极端的情况我们都需要考虑，也很难有完美的方案，所以才会有这么多的方案三段式、TCC、最大努力通知等等分布式事务方案，大家只需要知道为啥要做，做了有啥好处，有啥坏处，在实际开发的时候都注意下就好好了，系统都是根据业务场景设计出来的，离开业务的技术没有意义，离开技术的业务没有底气；</p> 
+ <p>——<a href="https://aobing.blog.csdn.net/?type=blog" rel="nofollow" title="《敖丙的博客》">《敖丙的博客》</a></p> 
+</blockquote> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p>参考：</p> 
+<p><a href="https://blog.csdn.net/qq_35190492/article/details/103232854?ops_request_misc=%257B%2522request%255Fid%2522%253A%2522165814578716782395329934%2522%252C%2522scm%2522%253A%252220140713.130102334.pc%255Fblog.%2522%257D&amp;request_id=165814578716782395329934&amp;biz_id=0&amp;utm_medium=distribute.pc_search_result.none-task-blog-2~blog~first_rank_ecpm_v1~rank_v31_ecpm-2-103232854-null-null.185%5Ev2%5Econtrol&amp;utm_term=%E6%B6%88%E6%81%AF%E9%98%9F%E5%88%97&amp;spm=1018.2226.3001.4450" title="《字节跳动面试官这样问消息队列：分布式事务、重复消费、顺序消费》">《字节跳动面试官这样问消息队列：分布式事务、重复消费、顺序消费》</a></p> 
+<p><a href="https://learn.lianglianglee.com/%E4%B8%93%E6%A0%8F/%E5%88%86%E5%B8%83%E5%BC%8F%E6%8A%80%E6%9C%AF%E5%8E%9F%E7%90%86%E4%B8%8E%E5%AE%9E%E6%88%9845%E8%AE%B2-%E5%AE%8C/32%20%E4%B8%9A%E5%8A%A1%E4%B8%8A%E9%9C%80%E8%A6%81%E9%A1%BA%E5%BA%8F%E6%B6%88%E8%B4%B9%EF%BC%8C%E6%80%8E%E4%B9%88%E4%BF%9D%E8%AF%81%E6%97%B6%E5%BA%8F%E6%80%A7%EF%BC%9F.md" rel="nofollow" title="《业务上需要顺序消费，怎么保证时序性？》">《业务上需要顺序消费，怎么保证时序性？》</a></p> 
+<p><a href="https://blog.csdn.net/weixin_43767015/article/details/121028059" title="《RocketMQ的顺序消息（顺序消费）》">《RocketMQ的顺序消息（顺序消费）》</a>本文的图多来自这篇文章，写的很好！</p> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/2e580b5f89da66d8269099fe1efce1cf/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">移动Web开发学习笔记 流式布局-百分比布局-flex布局-rem布局</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/8667216149efdbdc3974976c1236f87a/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">IDEA一些常用设置及插件</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

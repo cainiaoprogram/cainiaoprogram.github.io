@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>ZYNQ-XADC使用 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="ZYNQ-XADC使用" />
+<meta property="og:description" content="学习内容 本文首先介绍了ZYNQ的XADC的相关内容，并学习使用ZYNQ芯片中的XADC测量芯片内部的温度电压等参数，然后进行串口打印输出。
+开发环境 vivado 18.3&amp;SDK，PYNQ-Z2开发板。
+XADC介绍 简介 Xilinx模拟信号转换模块，称为XADC，是一个硬核。它具有JTAG和DRP接口用于访问7系列FPGA中的XADC状态和控制寄存器。Zynq-7000 SoC器件添加了第三个接口，即PS-XADC接口，用于PS软件进行控制XADC。 ZYNQ器件将XADC与可编程逻辑融合，解决了对模拟数据采集和监视要求。
+XADC具有两个12位的ADC，具有独立的跟踪和保持放大器，模拟多路复用器（最多17个外部模拟输入通道）以及片上散热和片上电压传感器。可以将两个ADC配置为同时采样两个外部输入模拟通道。采样保持放大器支持一系列模拟输入信号类型，包括单端输入，双端输入和差分输入。模拟输入可以支持信号带宽在1M SPS的采样率下为500 KHz。可以使用外部模拟多路复用器来增加支持的外部通道数量，无需额外的封装引脚。XADC可选地使用片上参考电路，从而无需外部有源元件，用于温度和电源轨的基本片上监控。实现12位的ADC的全部性能，建议使用外部1.25V作为参考电压。最新的测量结果（连同最大和最小读数）存储在专用寄存器。用户可以根据自己的需要进行自定义的警报阈值（例如80°C），可以自动指示温度过高事件和不可接受的电源变化，并启动软件控制的系统掉电。
+控制方式 PS端可以通过以下两种方式之一与XADC通信：
+PS-XADC接口：PS互连上的32位APB从接口，该接口使用FIFO，并进行了串行化。通过PS to PL AXI的主接口，此时要使用AXI XADC Logic IP核来控制XADC。 需要注意的是，对PS端控制ADC对性能要求较高的程序，要使用相关连接的逻辑IP连接到M_AXI_GP接口（并行数据路径）。使用PS_XADC接口时，FIFO用于命令和读取数据，以允许软件快速排队命令，而不必等待序列化，但是对于PS to PL AXI主接口访问，数据像PL-JTAG一样被序列化到XADC 中（串行数据路径），相对来说速度慢得多。
+系统框图 PL-JTAG接口和内部PS-XADC接口不能同时使用。 这些接口之间的选择由devcfg.XADCIF_CFG [ENABLE]位控制。 XADC可以进行接口选择，即对（PL-JTAG或PS-XADC）和DRP接口之间进行仲裁选择。下图为XADC的系统框图。
+由上图可知，XADC是通过硬逻辑实现的，并且位于PL电源域中。 PS-XADC接口是PS的一部分，所以无需编程PL就可以由PS APU访问。 但是必须打开PL的电源以配置PS-XADC接口，使用PL-JTAG或DRP接口以及操作XADC。同时由图上可以清楚看出对于PL-JTAG或PS-XADC这两个接口经过了一个二选一选择器，所以这两个不能同时进行驱动。
+接口说明 XADC在DRP接口与PS-XADC或PL-JTAG接口之间进行仲裁。
+PS-XADC Interface： PS-XADC接口是PS中运行的软件使用devcfg寄存器配置接口。 软件将命令写入接口，然后将其推入命令FIFO。 这些由DRP命令，地址和数据组成的32位写入被串行化，并以回送路径发送到XADC，该回送路径填充了软件读取的返回读取数据FIFO。
+DRP Interface： DRP接口是一个并行的16位双向接口，可以使用AXI4-Lite接口通过AXI XADC IP核连接到主机上，以使处理器能够控制XADC。IP内核通过每个AXI4-Lite读/写事务接收16位数据。
+PL JTAG Interface： XADC使用完整的JTAG接口扩展到DRP接口。 这允许通过现有的片上JTAG基础结构对XADC DRP进行读/写访问。 通过JTAG访问DRP接口不需要实例化。 边界扫描指令（6位指令= 110111）称为XADC_DRP，已添加到7系列FPGA中，允许通过JTAG TAP访问DRP。 所有XADC JTAG指令均为32位宽。
+PS-XADC接口编程指南 本文主要使用的是PS-XADC接口对XADC进行编程控制，下面给出相关操作的编程指导步骤。
+通过PS-XADC接口初始化XADC 对通道和XADC进行复位操作，并刷新FIFO，操作顺序如下：
+复位串行通讯通道。 先后把1和0到devcfg.XADCIF_MCTL[RESET]寄存器位中；复位XADC。 把16位任意值写入DRP地址0x03（复位寄存器）。接着写08030000h到devcfg.XADCIF_CMDFIFO寄存器中；刷新FIFO。 这里刷新FIFO没有复位信号，而是将15个NOOP写入到FIFO；然后等待命令FIFO清空。 最后一个命令应该是NOOP（虚拟写入），最后读取读取数据FIFO，直到为空。 命令准备 准备要写入XADC寄存器的数据配置顺序：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/2cae69dee17edd59bd894dd83dbeb80b/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-05-23T21:52:53+08:00" />
+<meta property="article:modified_time" content="2021-05-23T21:52:53+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">ZYNQ-XADC使用</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="_0"></a>学习内容</h2> 
+<p>本文首先介绍了ZYNQ的XADC的相关内容，并学习使用ZYNQ芯片中的XADC测量芯片内部的温度电压等参数，然后进行串口打印输出。</p> 
+<h2><a id="_3"></a>开发环境</h2> 
+<p>vivado 18.3&amp;SDK，PYNQ-Z2开发板。</p> 
+<h2><a id="XADC_6"></a>XADC介绍</h2> 
+<h3><a id="_7"></a>简介</h3> 
+<p>Xilinx模拟信号转换模块，称为XADC，是一个硬核。它具有JTAG和DRP接口用于访问7系列FPGA中的XADC状态和控制寄存器。Zynq-7000 SoC器件添加了第三个接口，即PS-XADC接口，用于PS软件进行控制XADC。 ZYNQ器件将XADC与可编程逻辑融合，解决了对模拟数据采集和监视要求。</p> 
+<p>XADC具有两个12位的ADC，具有独立的跟踪和保持放大器，模拟多路复用器（最多17个外部模拟输入通道）以及片上散热和片上电压传感器。可以将两个ADC配置为同时采样两个外部输入模拟通道。采样保持放大器支持一系列模拟输入信号类型，包括单端输入，双端输入和差分输入。模拟输入可以支持信号带宽在1M SPS的采样率下为500 KHz。可以使用外部模拟多路复用器来增加支持的外部通道数量，无需额外的封装引脚。XADC可选地使用片上参考电路，从而无需外部有源元件，用于温度和电源轨的基本片上监控。实现12位的ADC的全部性能，建议使用外部1.25V作为参考电压。最新的测量结果（连同最大和最小读数）存储在专用寄存器。用户可以根据自己的需要进行自定义的警报阈值（例如80°C），可以自动指示温度过高事件和不可接受的电源变化，并启动软件控制的系统掉电。</p> 
+<h3><a id="_12"></a>控制方式</h3> 
+<p>PS端可以通过以下两种方式之一与XADC通信：</p> 
+<ol><li>PS-XADC接口：PS互连上的32位APB从接口，该接口使用FIFO，并进行了串行化。</li><li>通过PS to PL AXI的主接口，此时要使用AXI XADC Logic IP核来控制XADC。</li></ol> 
+<p>需要注意的是，对PS端控制ADC对性能要求较高的程序，要使用相关连接的逻辑IP连接到M_AXI_GP接口（并行数据路径）。使用PS_XADC接口时，FIFO用于命令和读取数据，以允许软件快速排队命令，而不必等待序列化，但是对于PS to PL AXI主接口访问，数据像PL-JTAG一样被序列化到XADC 中（串行数据路径），相对来说速度慢得多。</p> 
+<h3><a id="_18"></a>系统框图</h3> 
+<p>PL-JTAG接口和内部PS-XADC接口不能同时使用。 这些接口之间的选择由devcfg.XADCIF_CFG [ENABLE]位控制。 XADC可以进行接口选择，即对（PL-JTAG或PS-XADC）和DRP接口之间进行仲裁选择。下图为XADC的系统框图。<br> <img src="https://images2.imgbox.com/1a/b1/jHw0U9l9_o.png" alt="在这里插入图片描述"><br> 由上图可知，XADC是通过硬逻辑实现的，并且位于PL电源域中。 PS-XADC接口是PS的一部分，所以无需编程PL就可以由PS APU访问。 但是必须打开PL的电源以配置PS-XADC接口，使用PL-JTAG或DRP接口以及操作XADC。同时由图上可以清楚看出对于PL-JTAG或PS-XADC这两个接口经过了一个二选一选择器，所以这两个不能同时进行驱动。</p> 
+<h3><a id="_22"></a>接口说明</h3> 
+<p>XADC在DRP接口与PS-XADC或PL-JTAG接口之间进行仲裁。</p> 
+<p><strong>PS-XADC Interface：</strong> PS-XADC接口是PS中运行的软件使用devcfg寄存器配置接口。 软件将命令写入接口，然后将其推入命令FIFO。 这些由DRP命令，地址和数据组成的32位写入被串行化，并以回送路径发送到XADC，该回送路径填充了软件读取的返回读取数据FIFO。</p> 
+<p><strong>DRP Interface：</strong> DRP接口是一个并行的16位双向接口，可以使用AXI4-Lite接口通过AXI XADC IP核连接到主机上，以使处理器能够控制XADC。IP内核通过每个AXI4-Lite读/写事务接收16位数据。</p> 
+<p><strong>PL JTAG Interface：</strong> XADC使用完整的JTAG接口扩展到DRP接口。 这允许通过现有的片上JTAG基础结构对XADC DRP进行读/写访问。 通过JTAG访问DRP接口不需要实例化。 边界扫描指令（6位指令= 110111）称为XADC_DRP，已添加到7系列FPGA中，允许通过JTAG TAP访问DRP。 所有XADC JTAG指令均为32位宽。</p> 
+<h3><a id="PSXADC_31"></a>PS-XADC接口编程指南</h3> 
+<p>本文主要使用的是PS-XADC接口对XADC进行编程控制，下面给出相关操作的编程指导步骤。</p> 
+<h4><a id="PSXADCXADC_33"></a>通过PS-XADC接口初始化XADC</h4> 
+<p>对通道和XADC进行复位操作，并刷新FIFO，操作顺序如下：</p> 
+<ol><li><strong>复位串行通讯通道。</strong> 先后把1和0到devcfg.XADCIF_MCTL[RESET]寄存器位中；</li><li><strong>复位XADC。</strong> 把16位任意值写入DRP地址0x03（复位寄存器）。接着写08030000h到devcfg.XADCIF_CMDFIFO寄存器中；</li><li><strong>刷新FIFO。</strong> 这里刷新FIFO没有复位信号，而是将15个NOOP写入到FIFO；然后等待命令FIFO清空。 最后一个命令应该是NOOP（虚拟写入），最后读取读取数据FIFO，直到为空。</li></ol> 
+<h4><a id="_39"></a>命令准备</h4> 
+<p>准备要写入XADC寄存器的数据配置顺序：<br> 本示例格式化了用于写入XADC配置寄存器1的数据，以将XADC设置为独立模式。</p> 
+<ol><li>DRP数据。 将XADC设置为独立模式的数据为8000h。</li><li>DRP地址。 XADC配置寄存器1的地址为0x41。</li><li>编写命令。 写入操作的命令为0010b。 在XADC配置寄存器1（0x41）中写入8000h的命令为08418000h。</li></ol> 
+<p>准备从XADC寄存器读取的数据配置顺序：<br> 本示例格式化了用于读取XADC VCCPAUX状态寄存器0x0E的数据。</p> 
+<ol><li>DRP数据。 数据可以是用于读取操作（0）的任何任意数据。</li><li>DRP地址。 XADC VCCPAUX状态寄存器的地址为0x0E。</li><li>编写命令。 读取操作的命令为0001b。 读取XADC VCCPAUX状态寄存器0x0E的命令为040E0000h。</li></ol> 
+<h4><a id="FIFO_51"></a>读写FIFO数据</h4> 
+<p><strong>向XADC写入命令</strong><br> 以下编程顺序为写入XADC 电压警报上限阈值寄存器。</p> 
+<ol><li>准备命令。 执行上面的命令准备的部分，写入具有所需阈值的XADC VCCPAUX警报上限阈值寄存器（0x5A）。</li><li>用数据填充命令FIFO。 将步骤1中格式化的数据写入devcfg.XADCIF_CMDFIFO寄存器。</li><li>等待命令FIFO变空。 等待，直到devcfg.XADCIF_MSTS [CFIFOE] = 1。</li></ol> 
+<p><strong>从XADC读取VCCPAUX值:</strong><br> 从XADC VCCPAUX状态寄存器读取当前VCCPAUX值顺序如下：</p> 
+<ol><li>准备命令。执行上面的命令准备的部分，读取XADC VCCPAUX状态寄存器（0x0E）。</li><li>将数据写入命令FIFO。将步骤1中格式化的数据写入devcfg.XADCIF_CMDFIFO寄存器。</li><li>等待命令FIFO变空。等待，直到devcfg.XADCIF_MSTS [CFIFOE] = 1。</li><li>从读取数据FIFO读取伪数据。读取devcfg.XADCIF_RDFIFO寄存器。</li><li>格式化数据。执行上面的命令准备的部分，以使其不进行任何操作。</li><li>将数据写入命令FIFO。将步骤5中的格式化数据写入devcfg.XADCIF_CMDFIFO寄存器。</li><li>读取读取数据FIFO。读取devcfg.XADCIF_RDFIFO寄存器。</li></ol> 
+<h4><a id="_67"></a>中断</h4> 
+<p><strong>配置和管理Alarm5（VCCPAUX）</strong><br> 本示例将XADC寄存器配置为设置警报阈值，操作模式并启用<br> PS-XADC接口中的警报5（VCCPAUX）中断。</p> 
+<ol><li>准备命令。执行上面的命令准备的部分，写入XADC硬宏警报阈值寄存器（VCCPAUX Upper-0x5A和VCCPAUX具有所需阈值的低0x5E）和XADC Config_Reg1（0x41）来将XADC设置为独立模式。</li><li>将命令写入命令​​FIFO。将步骤1中准备的命令写到devcfg.XADCIF_CMDFIFO寄存器。</li><li>在PS-XADC接口中启用Alarm5中断。写devcfg.XADCIF_INT_MASK[M_ALM] = 7Eh。</li><li>检查是否触发了Alarm5。 devcfg.XADCIF_INT_STS [M_ALM] = 1的轮询。</li><li>清除Alarm5中断。写入devcfg.XADCIF_INT_STS [M_ALM] = 1。</li><li>禁用Alarm0中断。写入devcfg.XADCIF_INT_MASK [M_ALM] = 7Fh</li></ol> 
+<h4><a id="PSXADC_77"></a>通过PS-XADC接口的启动顺序</h4> 
+<p>通过PS-XADC接口的启动并设置各种接口参数，并包括中断和数据传输的步骤如下。</p> 
+<ol><li>完成初始化XADC；</li><li>配置PS-XADC接口：<br> 对配置寄存器进行编程。将80001114h写入devcfg.XADCIF_CFG寄存器：<br> 使用默认的最小空闲间隙，[IGAP] = 14h（20个串行时钟）。<br> 使用默认的XADC串行时钟频率为PCAP_2x时钟频率的1/4，[TCKRATE] = 01。<br> 使用默认的FIFO串行读取捕获边沿（上升），[REDGE] = 1。<br> 使用默认的FIFO串行写启动边沿（下降），[WEDGE] = 0。<br> 使用默认的读取数据FIFO阈值级别，[DFIFOTH] = 0x0。<br> 使用默认的命令FIFO阈值级别，[CFIFOTH] = 0。<br> 启用XADC的PS访问。将0x1写入devcfg.XADCIF_CFG [ENABLE]。</li><li>配置中断：中断用于管理来自XADC和操作FIFO/读取FIFO数据；</li><li>数据传输到XADC。</li></ol> 
+<h2><a id="_91"></a>系统框图</h2> 
+<p>根据本次工程，画出相应的系统框图，如下图所示：<br> <img src="https://images2.imgbox.com/6a/91/uPr0yssY_o.png" alt="在这里插入图片描述"><br> 本次工程，使用了UART和XADC部分，使用XADC对芯片内部的电压和温度进行检测，并用串口打印输出。</p> 
+<h2><a id="_95"></a>硬件平台搭建</h2> 
+<p>因为不需要使用其他资源，可以在原来的UART测试工程下进行开发搭建，直接保存即可。<br> 新建步骤如下，首先新建工程，创建 block design。添加ZYNQ7 ip，根据本次工程需要对IP进行配置。勾选本次工程使用的资源。<br> <img src="https://images2.imgbox.com/aa/d5/A3n9wmb9_o.png" alt="在这里插入图片描述"><br> 这里只要勾选UART资源即可，取消多余资源，然后点击OK。<br> 硬件系统构建完成如下：<br> <img src="https://images2.imgbox.com/ba/04/YoxUR8g7_o.png" alt="在这里插入图片描述"><br> 然后我们进行generate output product 然后生成HDL封装。这里用到了UART，是MIO引脚，所以不需要进行管脚分配，XADC测量是内部的电压信息，并且使用的是PS_XADC接口。点击导出硬件资源（可以不包含bit流文件，因为只用到了PS资源），接着launch SDK。</p> 
+<h2><a id="SDK_103"></a>SDK软件部分</h2> 
+<p>打开SDK后，新建application project。<br> 在system.mss中可以打开相关参考文档辅助设计。<br> <img src="https://images2.imgbox.com/1f/2a/iUERs0Lo_o.png" alt="在这里插入图片描述"><br> 参考给出的示例，在main.c中写入以下代码：</p> 
+<pre><code class="prism language-cpp"><span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">"xparameters.h"</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">"xadcps.h"</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">"stdio.h"</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">"xil_printf.h"</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">"sleep.h"</span></span>
+<span class="token macro property">#<span class="token directive keyword">define</span> XADC_DEVICE_ID	XPAR_XADCPS_0_DEVICE_ID</span>
+<span class="token keyword">static</span> XAdcPs XAdc_Inst<span class="token punctuation">;</span>
+u32 Temp_RawData<span class="token punctuation">;</span>
+<span class="token comment">//芯片温度、最大、最小温度</span>
+<span class="token keyword">float</span> TempData<span class="token punctuation">;</span>
+<span class="token keyword">float</span> TempmaxData<span class="token punctuation">;</span>
+<span class="token keyword">float</span> TempminData<span class="token punctuation">;</span>
+<span class="token comment">//内核各部分电压值</span>
+<span class="token keyword">float</span> VccPintData<span class="token punctuation">;</span>
+<span class="token keyword">float</span> VccPauxData<span class="token punctuation">;</span>
+<span class="token keyword">float</span> VccPdroData<span class="token punctuation">;</span>
+<span class="token keyword">float</span> VccBramData<span class="token punctuation">;</span>
+<span class="token keyword">void</span> <span class="token function">Xadc_init</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">void</span> <span class="token function">Xadc_test</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+	<span class="token comment">//初始化XADC</span>
+	<span class="token function">Xadc_init</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">while</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+		<span class="token function">Xadc_test</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">sleep</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">void</span> <span class="token function">Xadc_init</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">int</span> status<span class="token punctuation">;</span>
+	XAdcPs_Config <span class="token operator">*</span>ConfigPtr<span class="token punctuation">;</span>
+	ConfigPtr <span class="token operator">=</span> <span class="token function">XAdcPs_LookupConfig</span><span class="token punctuation">(</span>XADC_DEVICE_ID<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">XAdcPs_CfgInitialize</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>XAdc_Inst<span class="token punctuation">,</span> ConfigPtr<span class="token punctuation">,</span>ConfigPtr<span class="token operator">-</span><span class="token operator">&gt;</span>BaseAddress<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">//自测</span>
+	status <span class="token operator">=</span> <span class="token function">XAdcPs_SelfTest</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>XAdc_Inst<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>status <span class="token operator">!=</span> XST_SUCCESS<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token function">xil_printf</span><span class="token punctuation">(</span><span class="token string">"xadc selftest failed!\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token comment">//设置启动模式</span>
+	<span class="token function">XAdcPs_SetSequencerMode</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>XAdc_Inst<span class="token punctuation">,</span> XADCPS_SEQ_MODE_SAFE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token keyword">void</span> <span class="token function">Xadc_test</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+
+	Temp_RawData <span class="token operator">=</span> <span class="token function">XAdcPs_GetAdcData</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>XAdc_Inst<span class="token punctuation">,</span> XADCPS_CH_TEMP<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	TempData <span class="token operator">=</span> <span class="token function">XAdcPs_RawToTemperature</span><span class="token punctuation">(</span>Temp_RawData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	Temp_RawData <span class="token operator">=</span> <span class="token function">XAdcPs_GetMinMaxMeasurement</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>XAdc_Inst<span class="token punctuation">,</span> XADCPS_MAX_TEMP<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	TempmaxData <span class="token operator">=</span> <span class="token function">XAdcPs_RawToTemperature</span><span class="token punctuation">(</span>Temp_RawData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	Temp_RawData <span class="token operator">=</span> <span class="token function">XAdcPs_GetMinMaxMeasurement</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>XAdc_Inst<span class="token punctuation">,</span> XADCPS_MIN_TEMP<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	TempminData <span class="token operator">=</span> <span class="token function">XAdcPs_RawToTemperature</span><span class="token punctuation">(</span>Temp_RawData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	Temp_RawData <span class="token operator">=</span> <span class="token function">XAdcPs_GetAdcData</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>XAdc_Inst<span class="token punctuation">,</span> XADCPS_CH_VCCPINT<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	VccPintData <span class="token operator">=</span> <span class="token function">XAdcPs_RawToVoltage</span><span class="token punctuation">(</span>Temp_RawData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	Temp_RawData <span class="token operator">=</span> <span class="token function">XAdcPs_GetAdcData</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>XAdc_Inst<span class="token punctuation">,</span> XADCPS_CH_VCCPAUX<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	VccPauxData <span class="token operator">=</span> <span class="token function">XAdcPs_RawToVoltage</span><span class="token punctuation">(</span>Temp_RawData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	Temp_RawData <span class="token operator">=</span> <span class="token function">XAdcPs_GetAdcData</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>XAdc_Inst<span class="token punctuation">,</span> XADCPS_CH_VCCPDRO<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	VccPdroData <span class="token operator">=</span> <span class="token function">XAdcPs_RawToVoltage</span><span class="token punctuation">(</span>Temp_RawData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	Temp_RawData <span class="token operator">=</span> <span class="token function">XAdcPs_GetAdcData</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>XAdc_Inst<span class="token punctuation">,</span> XADCPS_CH_VBRAM<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	VccBramData <span class="token operator">=</span> <span class="token function">XAdcPs_RawToVoltage</span><span class="token punctuation">(</span>Temp_RawData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"============================\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"Current Temperature:%0.4fC\n"</span><span class="token punctuation">,</span>TempData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"Maximum Temperature:%0.4fC\n"</span><span class="token punctuation">,</span>TempmaxData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"Minimum Temperature:%0.4fC\n"</span><span class="token punctuation">,</span>TempminData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"           VccPSint:%0.4fV\n"</span><span class="token punctuation">,</span>VccPintData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"           VccPSaux:%0.4fV\n"</span><span class="token punctuation">,</span>VccPauxData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"           VccPSdro:%0.4fV\n"</span><span class="token punctuation">,</span>VccPdroData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"          VccPSBram:%0.4fV\n"</span><span class="token punctuation">,</span>VccBramData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"============================\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<p>整体代码比较简单，主要还是使用相关的函数进行开发设计，这里打印了相关温度和电压信息。</p> 
+<h3><a id="_183"></a>运行效果</h3> 
+<p>在SDK的串口终端中正确显示各个参数信息。<br> <img src="https://images2.imgbox.com/ef/90/LQ79C5yv_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="Reference_186"></a>Reference</h2> 
+<ol><li>UG585</li><li>正点原子开发视频教程</li></ol>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e8fed8e133fd71c0d049c8096328aa2e/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Prometheus源码学习(9) scrape-target</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/488f9f537f9099a89aad7653b52b11a4/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">DW网页设计大作业成品品分享，Div&#43;Css，主题如风景、校园、美食、动漫、lol、咖啡...</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

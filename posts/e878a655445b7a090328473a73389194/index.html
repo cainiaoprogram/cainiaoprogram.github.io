@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>操作系统 读者写者问题的实现（C&#43;&#43;  读者优先、写者优先） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="操作系统 读者写者问题的实现（C&#43;&#43;  读者优先、写者优先）" />
+<meta property="og:description" content="通过信号量机制和相应的系统调用，用于线程的互斥和同步，实现读者写者问题。利用信号量机制，实现读者写者问题。
+在windows 10环境下，创建一个控制台进程，此进程包含n个线程。用这n个线程来表示n个读者或写者。每个线程按照设定进行读写操作。用信号量机制分别实现读者优先和写者优先的读者写者问题。
+读者和写者问题的读写操作限制（包括读者优先和写者优先）：
+写写互斥：即不能有两个写者同时进行写操作。
+读写互斥：即不能同时有一个线程在读，而另一个线程在写。
+读读允许：即可以有一个或多个读者在读。
+读者优先的附加限制：如果一个读者申请进行读操作时已有另一个读者正在进行读操作，则该读者可直接开始读操作。
+写者优先的附加限制：如果一个读者申请进行读操作时已有另一写者在等待访问共享资源，则该读者必须等到没有写者处于等待状态才能开始读操作。
+读者优先：
+如果没有写者正在操作，则读者并不需要等待，用一个整型变量readercount表示正在读的进程数目。由于只要有一个Reader进程在读，便不允许Writer进程去写，于是仅当readercount=0时，说明尚无读者进程在读，Reader进程才需要执行wait(book)操作。若该操作成功了，Reader进程便可去读，相应地，做readercount&#43;1操作。同理，仅当Reader进程在执行了readercount减一操作后其值为0时，才须执行signal（book）操作，以便让Writer进程写操作。，每个读者开始读之前都要修改readercount,为了互斥的实现对readercount 的修改，需要一个互斥对象rc_mutex来实现互斥。
+为实现Reader与Writer进程间在读或在写的互斥而设置一个互斥的信号量book，表示对资源的访问。当写者发出写的请求时，必须先得到允许。通过这种方法，可以实现读写互斥，当readcount=0时，（即第一个读者的到来时，），读者线程也必须申请。
+当读者拥有所有权，写者都阻塞在信号量对象book上。当写者拥有所有权时，第一个判断完readcount==0 后，其余的读者由于等待对readcount的判断，阻塞在rc_mutex上。
+写者优先：
+写者优先和读者优先有相同之处，不同的地方在：一旦有一个写者到来时，应该尽快让写者进行写，如果有一个写者在等待，则新到的读者操作不能读操作，为此添加一个整型变量writercount,记录写者的数目，当writercount=0时才可以释放读者进行读操作。
+为了实现对全局变量writercount的互斥访问，设置了一个互斥信号量wc_mutex,同时，读者线程要对全局变量readercount实现操作上的互斥，必须有一个互斥对象命名为。
+为了实现写者优先，设置一个临界区对象read,当有写者在写或等待时，读者必须阻塞在临界区对象read上。同样，有读者读时，写者必须等待。于是，必须有一个互斥对象book来实现这个互斥。
+写者的操作应该优先于读者，则信号量一直被占用着，直到没有写者的时候才会释放，即当writerCount等于1的时候，申请信号量book，其余的写者无需再次申请，但是写者是不能同时进行写操作的，则需要设置一个信号量wrt来保证每次只有一个写者进行写操作，当写者的数量writeCount等于0的时候，则证明此时没有没有读者了，释放信号量book。当readCount为1的时候，为阻止写者进行写操作，申请信号量wrt，则写者就无法进行写操作了。信号量mutex的主要用处就是避免写者同时与多个读者进行竞争，读者中信号量book比mutex先释放，则一旦有写者，写者可马上获得资源。
+实现效果图：
+读者写者测试文本
+读者优先：
+写者优先：
+最后给出源码：
+#include&lt;iostream&gt; #include&lt;string&gt; #include &lt;conio.h&gt; #include &lt;stdlib.h&gt; #include &lt;stdio.h&gt; #include &lt;fstream&gt; #include &lt;io.h&gt; #include &lt;string.h&gt; #include&lt;algorithm&gt; #include&lt;Windows.h&gt; //多线程编程 #include&lt;process.h&gt; using namespace std; #define READER &#39;R&#39; //读者 #define WRITER &#39;W&#39; //写者 #define INTE_PER_SEC 1000 //每秒时钟中断的数目 #define MAX_THREAD_NUM 64 //最大线程数目 //变量声明初始化 int readercount = 0;//记录等待的读者数目 int writercount = 0;//记录等待的写者数目 HANDLE rc_mutex;//因为读者数量而添加的互斥信号量，用于读者优先 HANDLE rc2_mutex;//因为读者数量而添加的互斥信号量，用于写者优先 HANDLE wc_mutex;//因为写者数量而添加的互斥信号量 HANDLE book;//互斥访问信号量 HANDLE wrt;//保证每次只有一个写者进行写操作，当写者的数量writercount等于0的时候，则证明此时没有没有读者了,释放信号量book HANDLE mutex;//避免写者同时与多个读者进行竞争，读者中信号量RWMutex比mutex3先释放，则一旦有写者，写者可马上获得资源 struct thread_info { int id;	//线程序号 char entity; //线程类别(判断是读者线程还是写者线程) double delay;	//线程延迟时间 double lastTime;	//线程读写操作时间 }; /*****************/ //读者优先 //进程管理-读者线程 void rp_threadReader(void *p) { DWORD m_delay; //延迟时间 DWORD m_persist; //读文件持续时间 int m_serial; //线程序号 //从参数中获得信息 m_serial = ((thread_info*)(p))-&gt;id; m_delay = (DWORD)(((thread_info*)(p))-&gt;delay *INTE_PER_SEC); m_persist = (DWORD)(((thread_info*)(p))-&gt;lastTime *INTE_PER_SEC); Sleep(m_delay); //延迟等待 printf(&#34;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/e878a655445b7a090328473a73389194/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-07-06T09:51:34+08:00" />
+<meta property="article:modified_time" content="2020-07-06T09:51:34+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">操作系统 读者写者问题的实现（C&#43;&#43;  读者优先、写者优先）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>通过信号量机制和相应的系统调用，用于线程的互斥和同步，实现读者写者问题。利用信号量机制，实现读者写者问题。</p> 
+<p>在windows 10环境下，创建一个控制台进程，此进程包含n个线程。用这n个线程来表示n个读者或写者。每个线程按照设定进行读写操作。用信号量机制分别实现读者优先和写者优先的读者写者问题。<br> 读者和写者问题的读写操作限制（包括读者优先和写者优先）：<br> <strong>写写互斥</strong>：即不能有两个写者同时进行写操作。<br> <strong>读写互斥</strong>：即不能同时有一个线程在读，而另一个线程在写。<br> <strong>读读允许</strong>：即可以有一个或多个读者在读。<br> <strong>读者优先的附加限制</strong>：如果一个读者申请进行读操作时已有另一个读者正在进行读操作，则该读者可直接开始读操作。<br> <strong>写者优先的附加限制</strong>：如果一个读者申请进行读操作时已有另一写者在等待访问共享资源，则该读者必须等到没有写者处于等待状态才能开始读操作。</p> 
+<p><strong>读者优先：</strong><br> 如果没有写者正在操作，则读者并不需要等待，用一个整型变量readercount表示正在读的进程数目。由于只要有一个Reader进程在读，便不允许Writer进程去写，于是仅当readercount=0时，说明尚无读者进程在读，Reader进程才需要执行wait(book)操作。若该操作成功了，Reader进程便可去读，相应地，做readercount+1操作。同理，仅当Reader进程在执行了readercount减一操作后其值为0时，才须执行signal（book）操作，以便让Writer进程写操作。，每个读者开始读之前都要修改readercount,为了互斥的实现对readercount 的修改，需要一个互斥对象rc_mutex来实现互斥。<br> 为实现Reader与Writer进程间在读或在写的互斥而设置一个互斥的信号量book，表示对资源的访问。当写者发出写的请求时，必须先得到允许。通过这种方法，可以实现读写互斥，当readcount=0时，（即第一个读者的到来时，），读者线程也必须申请。<br> 当读者拥有所有权，写者都阻塞在信号量对象book上。当写者拥有所有权时，第一个判断完readcount==0 后，其余的读者由于等待对readcount的判断，阻塞在rc_mutex上。</p> 
+<p><strong>写者优先：</strong><br> 写者优先和读者优先有相同之处，不同的地方在：一旦有一个写者到来时，应该尽快让写者进行写，如果有一个写者在等待，则新到的读者操作不能读操作，为此添加一个整型变量writercount,记录写者的数目，当writercount=0时才可以释放读者进行读操作。<br> 为了实现对全局变量writercount的互斥访问，设置了一个互斥信号量wc_mutex,同时，读者线程要对全局变量readercount实现操作上的互斥，必须有一个互斥对象命名为。<br> 为了实现写者优先，设置一个临界区对象read,当有写者在写或等待时，读者必须阻塞在临界区对象read上。同样，有读者读时，写者必须等待。于是，必须有一个互斥对象book来实现这个互斥。<br> 写者的操作应该优先于读者，则信号量一直被占用着，直到没有写者的时候才会释放，即当writerCount等于1的时候，申请信号量book，其余的写者无需再次申请，但是写者是不能同时进行写操作的，则需要设置一个信号量wrt来保证每次只有一个写者进行写操作，当写者的数量writeCount等于0的时候，则证明此时没有没有读者了，释放信号量book。当readCount为1的时候，为阻止写者进行写操作，申请信号量wrt，则写者就无法进行写操作了。信号量mutex的主要用处就是避免写者同时与多个读者进行竞争，读者中信号量book比mutex先释放，则一旦有写者，写者可马上获得资源。</p> 
+<p>实现效果图：</p> 
+<p><strong>读者写者测试文本</strong><br> <img src="https://images2.imgbox.com/f1/d7/8JXxKLVb_o.png" alt="在这里插入图片描述"><br> <strong>读者优先：</strong><br> <img src="https://images2.imgbox.com/6e/c7/cCEJY30C_o.png" alt="在这里插入图片描述"><br> <strong>写者优先：</strong><br> <img src="https://images2.imgbox.com/0a/6c/tzfSeNmo_o.png" alt="在这里插入图片描述"></p> 
+<p>最后给出源码：</p> 
+<pre><code class="prism language-cpp"><span class="token macro property">#<span class="token directive keyword">include</span><span class="token string">&lt;iostream&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span><span class="token string">&lt;string&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;conio.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;stdlib.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span> </span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;fstream&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;io.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;string.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span><span class="token string">&lt;algorithm&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span><span class="token string">&lt;Windows.h&gt;</span> </span><span class="token comment">//多线程编程</span>
+<span class="token macro property">#<span class="token directive keyword">include</span><span class="token string">&lt;process.h&gt;</span></span>
+<span class="token keyword">using</span> <span class="token keyword">namespace</span> std<span class="token punctuation">;</span>
+
+<span class="token macro property">#<span class="token directive keyword">define</span> READER 'R'                   </span><span class="token comment">//读者</span>
+<span class="token macro property">#<span class="token directive keyword">define</span> WRITER 'W'                   </span><span class="token comment">//写者</span>
+<span class="token macro property">#<span class="token directive keyword">define</span> INTE_PER_SEC 1000            </span><span class="token comment">//每秒时钟中断的数目</span>
+<span class="token macro property">#<span class="token directive keyword">define</span> MAX_THREAD_NUM 64            </span><span class="token comment">//最大线程数目</span>
+
+<span class="token comment">//变量声明初始化</span>
+<span class="token keyword">int</span> readercount <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span><span class="token comment">//记录等待的读者数目</span>
+<span class="token keyword">int</span> writercount <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span><span class="token comment">//记录等待的写者数目</span>
+
+HANDLE rc_mutex<span class="token punctuation">;</span><span class="token comment">//因为读者数量而添加的互斥信号量，用于读者优先</span>
+
+HANDLE rc2_mutex<span class="token punctuation">;</span><span class="token comment">//因为读者数量而添加的互斥信号量，用于写者优先</span>
+HANDLE wc_mutex<span class="token punctuation">;</span><span class="token comment">//因为写者数量而添加的互斥信号量</span>
+HANDLE book<span class="token punctuation">;</span><span class="token comment">//互斥访问信号量</span>
+HANDLE wrt<span class="token punctuation">;</span><span class="token comment">//保证每次只有一个写者进行写操作，当写者的数量writercount等于0的时候，则证明此时没有没有读者了,释放信号量book</span>
+HANDLE mutex<span class="token punctuation">;</span><span class="token comment">//避免写者同时与多个读者进行竞争，读者中信号量RWMutex比mutex3先释放，则一旦有写者，写者可马上获得资源</span>
+
+<span class="token keyword">struct</span> thread_info <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">int</span> id<span class="token punctuation">;</span>		      <span class="token comment">//线程序号</span>
+	<span class="token keyword">char</span> entity<span class="token punctuation">;</span>      <span class="token comment">//线程类别(判断是读者线程还是写者线程)</span>
+	<span class="token keyword">double</span> delay<span class="token punctuation">;</span>		 <span class="token comment">//线程延迟时间</span>
+	<span class="token keyword">double</span> lastTime<span class="token punctuation">;</span>	 <span class="token comment">//线程读写操作时间</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+<span class="token comment">/*****************/</span>
+<span class="token comment">//读者优先</span>
+<span class="token comment">//进程管理-读者线程</span>
+<span class="token keyword">void</span> <span class="token function">rp_threadReader</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span>p<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	DWORD m_delay<span class="token punctuation">;</span>                   <span class="token comment">//延迟时间</span>
+	DWORD m_persist<span class="token punctuation">;</span>                 <span class="token comment">//读文件持续时间</span>
+	<span class="token keyword">int</span> m_serial<span class="token punctuation">;</span>                    <span class="token comment">//线程序号</span>
+									 <span class="token comment">//从参数中获得信息</span>
+	m_serial <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>thread_info<span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>id<span class="token punctuation">;</span>
+	m_delay <span class="token operator">=</span> <span class="token punctuation">(</span>DWORD<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span>thread_info<span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>delay <span class="token operator">*</span>INTE_PER_SEC<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	m_persist <span class="token operator">=</span> <span class="token punctuation">(</span>DWORD<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span>thread_info<span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>lastTime <span class="token operator">*</span>INTE_PER_SEC<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">Sleep</span><span class="token punctuation">(</span>m_delay<span class="token punctuation">)</span><span class="token punctuation">;</span>                  <span class="token comment">//延迟等待</span>
+
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"读者进程%d申请读文件.\n"</span><span class="token punctuation">,</span> m_serial<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">//cout &lt;&lt; "读者进程"&lt;&lt; m_serial&lt;&lt;"申请读文件." &lt;&lt; endl;</span>
+
+	<span class="token function">WaitForSingleObject</span><span class="token punctuation">(</span>rc_mutex<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//对readercount互斥访问</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>readercount <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token function">WaitForSingleObject</span><span class="token punctuation">(</span>book<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//第一位读者申请书</span>
+	readercount<span class="token operator">++</span><span class="token punctuation">;</span>
+	<span class="token function">ReleaseSemaphore</span><span class="token punctuation">(</span>rc_mutex<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//释放互斥信号量rc_mutex</span>
+
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"读者进程%d开始读文件.\n"</span><span class="token punctuation">,</span> m_serial<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">Sleep</span><span class="token punctuation">(</span>m_persist<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"读者进程%d完成读文件.\n"</span><span class="token punctuation">,</span> m_serial<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token function">WaitForSingleObject</span><span class="token punctuation">(</span>rc_mutex<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//修改readercount</span>
+	readercount<span class="token operator">--</span><span class="token punctuation">;</span><span class="token comment">//读者读完</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>readercount <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token function">ReleaseSemaphore</span><span class="token punctuation">(</span>book<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//释放书籍，写者可写</span>
+	<span class="token function">ReleaseSemaphore</span><span class="token punctuation">(</span>rc_mutex<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//释放互斥信号量rc_mutex</span>
+<span class="token punctuation">}</span>
+<span class="token comment">/*****************/</span>
+<span class="token comment">//读者优先</span>
+<span class="token comment">//进程管理-写者线程</span>
+<span class="token keyword">void</span> <span class="token function">rp_threadWriter</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span>p<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	DWORD m_delay<span class="token punctuation">;</span>                   <span class="token comment">//延迟时间</span>
+	DWORD m_persist<span class="token punctuation">;</span>                 <span class="token comment">//读文件持续时间</span>
+	<span class="token keyword">int</span> m_serial<span class="token punctuation">;</span>                    <span class="token comment">//线程序号</span>
+									 <span class="token comment">//从参数中获得信息</span>
+	m_serial <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>thread_info<span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>id<span class="token punctuation">;</span>
+	m_delay <span class="token operator">=</span> <span class="token punctuation">(</span>DWORD<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span>thread_info<span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>delay <span class="token operator">*</span>INTE_PER_SEC<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	m_persist <span class="token operator">=</span> <span class="token punctuation">(</span>DWORD<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span>thread_info<span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>lastTime <span class="token operator">*</span>INTE_PER_SEC<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">Sleep</span><span class="token punctuation">(</span>m_delay<span class="token punctuation">)</span><span class="token punctuation">;</span>                  <span class="token comment">//延迟等待</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"写者进程%d申请写文件.\n"</span><span class="token punctuation">,</span> m_serial<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">WaitForSingleObject</span><span class="token punctuation">(</span>book<span class="token punctuation">,</span> INFINITE<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//申请资源</span>
+	<span class="token comment">/*write is performed*/</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"写者进程%d开始读文件.\n"</span><span class="token punctuation">,</span> m_serial<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">Sleep</span><span class="token punctuation">(</span>m_persist<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"写者进程%d完成读文件.\n"</span><span class="token punctuation">,</span> m_serial<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">ReleaseSemaphore</span><span class="token punctuation">(</span>book<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//释放资源</span>
+<span class="token punctuation">}</span>
+<span class="token comment">//读者优先</span>
+<span class="token keyword">void</span> <span class="token function">ReaderPriority</span><span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span>file<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	DWORD n_thread <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>           <span class="token comment">//线程数目</span>
+	DWORD thread_ID<span class="token punctuation">;</span>            <span class="token comment">//线程ID</span>
+	DWORD wait_for_all<span class="token punctuation">;</span>         <span class="token comment">//等待所有线程结束</span>
+
+								<span class="token comment">//创建信号量</span>
+	rc_mutex <span class="token operator">=</span> <span class="token function">CreateSemaphore</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token string">"mutex_for_readcount"</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//读者对count修改互斥信号量，初值为1,最大为1</span>
+	book <span class="token operator">=</span> <span class="token function">CreateSemaphore</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//书籍互斥访问信号量，初值为1,最大值为1</span>
+
+	HANDLE h_Thread<span class="token punctuation">[</span>MAX_THREAD_NUM<span class="token punctuation">]</span><span class="token punctuation">;</span><span class="token comment">//线程句柄,线程对象的数组</span>
+	thread_info thread_info<span class="token punctuation">[</span>MAX_THREAD_NUM<span class="token punctuation">]</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">int</span> id <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	readercount <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>               <span class="token comment">//初始化readcount</span>
+	ifstream inFile<span class="token punctuation">;</span>
+	inFile<span class="token punctuation">.</span><span class="token function">open</span><span class="token punctuation">(</span>file<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	cout <span class="token operator">&lt;&lt;</span> <span class="token string">"读者优先:"</span> <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+	<span class="token keyword">while</span> <span class="token punctuation">(</span>inFile<span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token comment">//读入每一个读者,写者的信息</span>
+		inFile <span class="token operator">&gt;&gt;</span> thread_info<span class="token punctuation">[</span>n_thread<span class="token punctuation">]</span><span class="token punctuation">.</span>id<span class="token punctuation">;</span>
+		inFile <span class="token operator">&gt;&gt;</span> thread_info<span class="token punctuation">[</span>n_thread<span class="token punctuation">]</span><span class="token punctuation">.</span>entity<span class="token punctuation">;</span>
+		inFile <span class="token operator">&gt;&gt;</span> thread_info<span class="token punctuation">[</span>n_thread<span class="token punctuation">]</span><span class="token punctuation">.</span>delay<span class="token punctuation">;</span>
+		inFile <span class="token operator">&gt;&gt;</span> thread_info<span class="token punctuation">[</span>n_thread<span class="token operator">++</span><span class="token punctuation">]</span><span class="token punctuation">.</span>lastTime<span class="token punctuation">;</span>
+		inFile<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i<span class="token operator">&lt;</span><span class="token punctuation">(</span><span class="token keyword">int</span><span class="token punctuation">)</span><span class="token punctuation">(</span>n_thread<span class="token punctuation">)</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>thread_info<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>entity <span class="token operator">==</span> READER <span class="token operator">||</span> thread_info<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>entity <span class="token operator">==</span> <span class="token string">'r'</span><span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token comment">//创建读者进程</span>
+			h_Thread<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token function">CreateThread</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token punctuation">(</span>LPTHREAD_START_ROUTINE<span class="token punctuation">)</span><span class="token punctuation">(</span>rp_threadReader<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>thread_info<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>thread_ID<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">else</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token comment">//创建写线程</span>
+			h_Thread<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token function">CreateThread</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token punctuation">(</span>LPTHREAD_START_ROUTINE<span class="token punctuation">)</span><span class="token punctuation">(</span>rp_threadWriter<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>thread_info<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>thread_ID<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+	<span class="token comment">//等待子线程结束</span>
+
+	<span class="token comment">//关闭句柄</span>
+	wait_for_all <span class="token operator">=</span> <span class="token function">WaitForMultipleObjects</span><span class="token punctuation">(</span>n_thread<span class="token punctuation">,</span> h_Thread<span class="token punctuation">,</span> TRUE<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	cout <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+	cout <span class="token operator">&lt;&lt;</span> <span class="token string">"所有读者写者已经完成操作！！"</span> <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+	<span class="token keyword">for</span><span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i<span class="token operator">&lt;</span><span class="token punctuation">(</span><span class="token keyword">int</span><span class="token punctuation">)</span><span class="token punctuation">(</span>n_thread<span class="token punctuation">)</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span>
+		<span class="token function">CloseHandle</span><span class="token punctuation">(</span>h_Thread<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">CloseHandle</span><span class="token punctuation">(</span>rc_mutex<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">CloseHandle</span><span class="token punctuation">(</span>book<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token comment">/*****************/</span>
+<span class="token comment">//写者优先</span>
+<span class="token comment">//进程管理-读者线程</span>
+<span class="token keyword">void</span> <span class="token function">wp_threadReader</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span>p<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	DWORD m_delay<span class="token punctuation">;</span>                   <span class="token comment">//延迟时间</span>
+	DWORD m_persist<span class="token punctuation">;</span>                 <span class="token comment">//读文件持续时间</span>
+	<span class="token keyword">int</span> m_serial<span class="token punctuation">;</span>                    <span class="token comment">//线程序号</span>
+									 <span class="token comment">//从参数中获得信息</span>
+	m_serial <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>thread_info<span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>id<span class="token punctuation">;</span>
+	m_delay <span class="token operator">=</span> <span class="token punctuation">(</span>DWORD<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span>thread_info<span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>delay <span class="token operator">*</span>INTE_PER_SEC<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	m_persist <span class="token operator">=</span> <span class="token punctuation">(</span>DWORD<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span>thread_info<span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>lastTime <span class="token operator">*</span>INTE_PER_SEC<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">Sleep</span><span class="token punctuation">(</span>m_delay<span class="token punctuation">)</span><span class="token punctuation">;</span>                  <span class="token comment">//延迟等待</span>
+
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"读者进程%d申请读文件.\n"</span><span class="token punctuation">,</span> m_serial<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">WaitForSingleObject</span><span class="token punctuation">(</span>mutex<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">WaitForSingleObject</span><span class="token punctuation">(</span>book<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">WaitForSingleObject</span><span class="token punctuation">(</span>rc2_mutex<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//对readercount互斥访问</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>readercount <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token function">WaitForSingleObject</span><span class="token punctuation">(</span>wrt<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//第一位读者申请书,同时防止写者进行写操作</span>
+	readercount<span class="token operator">++</span><span class="token punctuation">;</span>
+
+	<span class="token function">ReleaseSemaphore</span><span class="token punctuation">(</span>rc2_mutex<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//释放互斥信号量rc_mutex</span>
+	<span class="token function">ReleaseSemaphore</span><span class="token punctuation">(</span>book<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//释放互斥信号量book</span>
+	<span class="token function">ReleaseSemaphore</span><span class="token punctuation">(</span>mutex<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//释放互斥信号量mutex</span>
+									 <span class="token comment">/* reading is performed */</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"读者进程%d开始读文件.\n"</span><span class="token punctuation">,</span> m_serial<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">Sleep</span><span class="token punctuation">(</span>m_persist<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"读者进程%d完成读文件.\n"</span><span class="token punctuation">,</span> m_serial<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">WaitForSingleObject</span><span class="token punctuation">(</span>rc2_mutex<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//修改readercount</span>
+	readercount<span class="token operator">--</span><span class="token punctuation">;</span><span class="token comment">//读者读完</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>readercount <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token function">ReleaseSemaphore</span><span class="token punctuation">(</span>wrt<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//释放资源，写者可写</span>
+	<span class="token function">ReleaseSemaphore</span><span class="token punctuation">(</span>rc2_mutex<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//释放互斥信号量rc_mutex</span>
+<span class="token punctuation">}</span>
+<span class="token comment">/*****************/</span>
+<span class="token comment">//写者优先</span>
+<span class="token comment">//进程管理-写者线程</span>
+<span class="token keyword">void</span> <span class="token function">wp_threadWriter</span><span class="token punctuation">(</span><span class="token keyword">void</span> <span class="token operator">*</span>p<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	DWORD m_delay<span class="token punctuation">;</span>                   <span class="token comment">//延迟时间</span>
+	DWORD m_persist<span class="token punctuation">;</span>                 <span class="token comment">//读文件持续时间</span>
+	<span class="token keyword">int</span> m_serial<span class="token punctuation">;</span>                    <span class="token comment">//线程序号</span>
+									 <span class="token comment">//从参数中获得信息</span>
+	m_serial <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>thread_info<span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>id<span class="token punctuation">;</span>
+	m_delay <span class="token operator">=</span> <span class="token punctuation">(</span>DWORD<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span>thread_info<span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>delay <span class="token operator">*</span>INTE_PER_SEC<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	m_persist <span class="token operator">=</span> <span class="token punctuation">(</span>DWORD<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span>thread_info<span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>lastTime <span class="token operator">*</span>INTE_PER_SEC<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">Sleep</span><span class="token punctuation">(</span>m_delay<span class="token punctuation">)</span><span class="token punctuation">;</span>                  <span class="token comment">//延迟等待</span>
+
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"写者进程%d申请写文件.\n"</span><span class="token punctuation">,</span> m_serial<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">WaitForSingleObject</span><span class="token punctuation">(</span>wc_mutex<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//对writercount互斥访问</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>writercount <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token function">WaitForSingleObject</span><span class="token punctuation">(</span>book<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//第一位写者申请资源</span>
+	writercount<span class="token operator">++</span><span class="token punctuation">;</span>
+	<span class="token function">ReleaseSemaphore</span><span class="token punctuation">(</span>wc_mutex<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//释放资源</span>
+
+	<span class="token function">WaitForSingleObject</span><span class="token punctuation">(</span>wrt<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">/*write is performed*/</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"写者进程%d开始写文件.\n"</span><span class="token punctuation">,</span> m_serial<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">Sleep</span><span class="token punctuation">(</span>m_persist<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"写者进程%d完成写文件.\n"</span><span class="token punctuation">,</span> m_serial<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">ReleaseSemaphore</span><span class="token punctuation">(</span>wrt<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//释放资源</span>
+
+	<span class="token function">WaitForSingleObject</span><span class="token punctuation">(</span>wc_mutex<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//对writercount互斥访问</span>
+	writercount<span class="token operator">--</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>writercount <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token function">ReleaseSemaphore</span><span class="token punctuation">(</span>book<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//释放资源</span>
+	<span class="token function">ReleaseSemaphore</span><span class="token punctuation">(</span>wc_mutex<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//释放资源</span>
+<span class="token punctuation">}</span>
+<span class="token comment">//写者优先</span>
+<span class="token keyword">void</span> <span class="token function">WriterPriority</span><span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token operator">*</span>file<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	DWORD n_thread <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>           <span class="token comment">//线程数目</span>
+	DWORD thread_ID<span class="token punctuation">;</span>            <span class="token comment">//线程ID</span>
+	DWORD wait_for_all<span class="token punctuation">;</span>         <span class="token comment">//等待所有线程结束</span>
+
+								<span class="token comment">//创建信号量</span>
+	rc2_mutex <span class="token operator">=</span> <span class="token function">CreateSemaphore</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token string">"mutex_for_readercount"</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//读者对count修改互斥信号量，初值为1,最大为1</span>
+	wc_mutex <span class="token operator">=</span> <span class="token function">CreateSemaphore</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token string">"mutex_for_writercount"</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//写者对count修改互斥信号量，初值为1,最大为1</span>
+	wrt <span class="token operator">=</span> <span class="token function">CreateSemaphore</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//</span>
+	mutex <span class="token operator">=</span> <span class="token function">CreateSemaphore</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//</span>
+	book <span class="token operator">=</span> <span class="token function">CreateSemaphore</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//书籍互斥访问信号量，初值为1,最大值为1</span>
+
+	HANDLE h_Thread<span class="token punctuation">[</span>MAX_THREAD_NUM<span class="token punctuation">]</span><span class="token punctuation">;</span><span class="token comment">//线程句柄,线程对象的数组</span>
+	thread_info thread_info<span class="token punctuation">[</span>MAX_THREAD_NUM<span class="token punctuation">]</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">int</span> id <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	readercount <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>               <span class="token comment">//初始化readcount</span>
+	writercount <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	ifstream inFile<span class="token punctuation">;</span>
+	inFile<span class="token punctuation">.</span><span class="token function">open</span><span class="token punctuation">(</span>file<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	cout <span class="token operator">&lt;&lt;</span> <span class="token string">"写者优先:"</span> <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+	<span class="token keyword">while</span> <span class="token punctuation">(</span>inFile<span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token comment">//读入每一个读者,写者的信息</span>
+		inFile <span class="token operator">&gt;&gt;</span> thread_info<span class="token punctuation">[</span>n_thread<span class="token punctuation">]</span><span class="token punctuation">.</span>id<span class="token punctuation">;</span>
+		inFile <span class="token operator">&gt;&gt;</span> thread_info<span class="token punctuation">[</span>n_thread<span class="token punctuation">]</span><span class="token punctuation">.</span>entity<span class="token punctuation">;</span>
+		inFile <span class="token operator">&gt;&gt;</span> thread_info<span class="token punctuation">[</span>n_thread<span class="token punctuation">]</span><span class="token punctuation">.</span>delay<span class="token punctuation">;</span>
+		inFile <span class="token operator">&gt;&gt;</span> thread_info<span class="token punctuation">[</span>n_thread<span class="token operator">++</span><span class="token punctuation">]</span><span class="token punctuation">.</span>lastTime<span class="token punctuation">;</span>
+		inFile<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i<span class="token operator">&lt;</span><span class="token punctuation">(</span><span class="token keyword">int</span><span class="token punctuation">)</span><span class="token punctuation">(</span>n_thread<span class="token punctuation">)</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>thread_info<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>entity <span class="token operator">==</span> READER <span class="token operator">||</span> thread_info<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>entity <span class="token operator">==</span> <span class="token string">'r'</span><span class="token punctuation">)</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token comment">//创建读者进程</span>
+			h_Thread<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token function">CreateThread</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token punctuation">(</span>LPTHREAD_START_ROUTINE<span class="token punctuation">)</span><span class="token punctuation">(</span>wp_threadReader<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>thread_info<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>thread_ID<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">else</span>
+		<span class="token punctuation">{<!-- --></span>
+			<span class="token comment">//创建写线程</span>
+			h_Thread<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token function">CreateThread</span><span class="token punctuation">(</span><span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token punctuation">(</span>LPTHREAD_START_ROUTINE<span class="token punctuation">)</span><span class="token punctuation">(</span>wp_threadWriter<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>thread_info<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>thread_ID<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+	<span class="token comment">//等待子线程结束</span>
+
+	<span class="token comment">//关闭句柄</span>
+	wait_for_all <span class="token operator">=</span> <span class="token function">WaitForMultipleObjects</span><span class="token punctuation">(</span>n_thread<span class="token punctuation">,</span> h_Thread<span class="token punctuation">,</span> TRUE<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	cout <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+	cout <span class="token operator">&lt;&lt;</span> <span class="token string">"所有读者写者已经完成操作！！"</span> <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+	<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i<span class="token operator">&lt;</span><span class="token punctuation">(</span><span class="token keyword">int</span><span class="token punctuation">)</span><span class="token punctuation">(</span>n_thread<span class="token punctuation">)</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span>
+		<span class="token function">CloseHandle</span><span class="token punctuation">(</span>h_Thread<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">CloseHandle</span><span class="token punctuation">(</span>wc_mutex<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">CloseHandle</span><span class="token punctuation">(</span>rc2_mutex<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">CloseHandle</span><span class="token punctuation">(</span>book<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token comment">//主函数</span>
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">char</span> choice<span class="token punctuation">;</span>
+	cout <span class="token operator">&lt;&lt;</span> <span class="token string">"    欢迎进入读者写者模拟程序    "</span> <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+	<span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token comment">//打印提示信息</span>
+		cout <span class="token operator">&lt;&lt;</span> <span class="token string">"     请输入你的选择       "</span> <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+		cout <span class="token operator">&lt;&lt;</span> <span class="token string">"     1、读者优先"</span> <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+		cout <span class="token operator">&lt;&lt;</span> <span class="token string">"     2、写者优先"</span> <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+		cout <span class="token operator">&lt;&lt;</span> <span class="token string">"     3、退出程序"</span> <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+		cout <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+		<span class="token comment">//如果输入信息不正确，继续输入</span>
+		<span class="token keyword">do</span> <span class="token punctuation">{<!-- --></span>
+			choice <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">char</span><span class="token punctuation">)</span><span class="token function">_getch</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span> <span class="token keyword">while</span> <span class="token punctuation">(</span>choice <span class="token operator">!=</span> <span class="token string">'1'</span><span class="token operator">&amp;&amp;</span>choice <span class="token operator">!=</span> <span class="token string">'2'</span><span class="token operator">&amp;&amp;</span>choice <span class="token operator">!=</span> <span class="token string">'3'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+		<span class="token function">system</span><span class="token punctuation">(</span><span class="token string">"cls"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token comment">//选择1，读者优先</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>choice <span class="token operator">==</span> <span class="token string">'1'</span><span class="token punctuation">)</span>
+			<span class="token comment">//ReaderPriority("thread.txt");</span>
+			<span class="token function">ReaderPriority</span><span class="token punctuation">(</span><span class="token keyword">const_cast</span><span class="token operator">&lt;</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token string">"thread.txt"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token comment">//选择2，写者优先</span>
+		<span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>choice <span class="token operator">==</span> <span class="token string">'2'</span><span class="token punctuation">)</span>
+			<span class="token function">WriterPriority</span><span class="token punctuation">(</span><span class="token keyword">const_cast</span><span class="token operator">&lt;</span><span class="token keyword">char</span> <span class="token operator">*</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token string">"thread.txt"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token comment">//选择3，退出</span>
+		<span class="token keyword">else</span>
+			<span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+		<span class="token comment">//结束</span>
+		<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"\nPress Any Key to Coutinue"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">_getch</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">system</span><span class="token punctuation">(</span><span class="token string">"cls"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/6985a5e552782ac057c9a9fd7e560fba/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">MySQL复制表的三种方式</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/c997ec82791afa0930a55b4c1b164aeb/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">centos7 怎么让命令行显示中文</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

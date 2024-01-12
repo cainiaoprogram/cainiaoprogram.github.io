@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>mmap 内存映射详解 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="mmap 内存映射详解" />
+<meta property="og:description" content="目录 mmap基础概念
+mmap内存映射原理
+mmap示例代码
+mmap和常规文件操作的区别
+mmap使用的细节
+前言 原文对 mmap 内存映射已经表述的很清楚了，我只是在原文的基础上，附上了 mmap 代码实例。
+mmap基础概念 mmap是一种内存映射的方法，这一功能可以用在文件的处理上，即将一个文件或者其它对象映射到进程的地址空间，实现文件磁盘地址和进程虚拟地址空间中一段虚拟地址的一一对映关系。在编程时可以使某个磁盘文件的内容看起来像是内存中的一个数组。如果文件由记录组成，而这些记录又能够用结构体来描述的话，可以通过访问结构数组来更新文件的内容。
+实现这样的映射关系后，进程就可以采用指针的方式读写操作这一段内存，而系统会自动回写脏页面到对应的文件磁盘上，即完成了对文件的操作而不必再调用read,write等系统调用函数。内核空间对这段区域的修改也直接反映用户空间，从而可以实现不同进程间的文件共享。如图所示：
+进程的虚拟地址空间，由多个虚拟内存区域构成。虚拟内存区域是进程的虚拟地址空间中的一个同质区间，即具有同样特性的连续地址范围。上图中所示的text数据段（代码段）、初始数据段、BSS数据段、堆、栈和内存映射，都是一个独立的虚拟内存区域。而为内存映射服务的地址空间处在堆栈之间的空余部分。
+内核为系统中的每个进程维护一个单独的任务结构（task_struct）。任务结构中的元素包含或者指向内核运行该进程所需的所有信息(PID、指向用户栈的指针、可执行目标文件的名字、程序计数器等)。Linux内核使用vm_area_struct结构来表示一个独立的虚拟内存区域，由于每个不同质的虚拟内存区域功能和内部机制都不同，因此一个进程使用多个vm_area_struct结构来分别表示不同类型的虚拟内存区域。各个vm_area_struct结构使用链表或者树形结构链接，方便进程快速访问，如下图所示：
+vm_area_struct结构中包含区域起始和终止地址以及其他相关信息，同时也包含一个vm_ops指针，其内部可引出所有针对这个区域可以使用的系统调用函数。这样，进程对某一虚拟内存区域的任何操作需要用要的信息，都可以从vm_area_struct中获得。mmap函数就是要创建一个新的vm_area_struct结构，并将其与文件的物理磁盘地址相连。
+mm_struct：描述了虚拟内存的当前状态。pgd指向一级页表的基址（当内核运行这个进程时， pgd会被存放在CR3控制寄存器，也就是页表基址寄存器中），mmap指向一个vm_area_structs 的链表，其中每个vm_area_structs都描述了当前虚拟地址空间的一个区域。 vm_starts 指向这个区域的起始处。 vm_end 指向这个区域的结束处。 vm_prot 描述这个区域内包含的所有页的读写许可权限。 vm_flags 描述这个区域内的页面是与其他进程共享的，还是这个进程私有的以及一些其他信息。 vm_next 指向链表的下一个区域结构。 mmap内存映射原理 mmap内存映射的实现过程，总的来说可以分为三个阶段：
+(一)进程启动映射过程，并在虚拟地址空间中为映射创建虚拟映射区域
+1. 进程在用户空间调用库函数mmap，原型：void *mmap(void *start, size_t length, int prot, int flags, int fd, off_t offset);
+2. 在当前进程的虚拟地址空间中，寻找一段空闲的满足要求的连续的虚拟地址。
+3. 为此虚拟区分配一个vm_area_struct结构，接着对这个结构的各个域进行了初始化。
+4. 将新建的虚拟区结构（vm_area_struct）插入进程的虚拟地址区域链表或树中。
+(二)调用内核空间的系统调用函数mmap（不同于用户空间函数），实现文件物理地址和进程虚拟地址的一一映射关系
+5. 为映射分配了新的虚拟地址区域后，通过待映射的文件指针，在文件描述符表中找到对应的文件描述符，通过文件描述符，链接到内核“已打开文件集”中该文件的文件结构体（struct file），每个文件结构体维护着和这个已打开文件相关各项信息。
+6. 通过该文件的文件结构体，链接到file_operations模块，调用内核函数mmap，其原型为：int mmap(struct file *filp, struct vm_area_struct *vma)，不同于用户空间库函数。
+7. 内核mmap函数通过虚拟文件系统inode模块定位到文件磁盘物理地址。
+8. 通过remap_pfn_range函数建立页表，即实现了文件地址和虚拟地址区域的映射关系。此时，这片虚拟地址并没有任何数据关联到主存中。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/a08895a66035ac79287bb79fafd5318d/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-04-23T20:05:30+08:00" />
+<meta property="article:modified_time" content="2020-04-23T20:05:30+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">mmap 内存映射详解</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h2 id="main-toc">目录</h2> 
+<p id="mmap%E5%9F%BA%E7%A1%80%E6%A6%82%E5%BF%B5-toc" style="margin-left:40px;"><a href="#mmap%E5%9F%BA%E7%A1%80%E6%A6%82%E5%BF%B5" rel="nofollow">mmap基础概念</a></p> 
+<p id="mmap%E5%86%85%E5%AD%98%E6%98%A0%E5%B0%84%E5%8E%9F%E7%90%86-toc" style="margin-left:40px;"><a href="#mmap%E5%86%85%E5%AD%98%E6%98%A0%E5%B0%84%E5%8E%9F%E7%90%86" rel="nofollow">mmap内存映射原理</a></p> 
+<p id="mmap%E7%A4%BA%E4%BE%8B%E4%BB%A3%E7%A0%81-toc" style="margin-left:40px;"><a href="#mmap%E7%A4%BA%E4%BE%8B%E4%BB%A3%E7%A0%81" rel="nofollow">mmap示例代码</a></p> 
+<p id="mmap%E5%92%8C%E5%B8%B8%E8%A7%84%E6%96%87%E4%BB%B6%E6%93%8D%E4%BD%9C%E7%9A%84%E5%8C%BA%E5%88%AB-toc" style="margin-left:40px;"><a href="#mmap%E5%92%8C%E5%B8%B8%E8%A7%84%E6%96%87%E4%BB%B6%E6%93%8D%E4%BD%9C%E7%9A%84%E5%8C%BA%E5%88%AB" rel="nofollow">mmap和常规文件操作的区别</a></p> 
+<p id="mmap%E4%BD%BF%E7%94%A8%E7%9A%84%E7%BB%86%E8%8A%82-toc" style="margin-left:40px;"><a href="#mmap%E4%BD%BF%E7%94%A8%E7%9A%84%E7%BB%86%E8%8A%82" rel="nofollow">mmap使用的细节</a></p> 
+<hr id="hr-toc"> 
+<h3 style="margin-left:0pt;"><strong><span style="color:#0c0c0c;">前言</span></strong></h3> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">原文对 mmap 内存映射已经表述的很清楚了，我只是在原文的基础上，附上了 mmap 代码实例。</span></p> 
+<p style="margin-left:0pt;"> </p> 
+<h3 id="mmap%E5%9F%BA%E7%A1%80%E6%A6%82%E5%BF%B5" style="margin-left:0pt;"><strong><span style="color:#0c0c0c;">mmap基础概念</span></strong></h3> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">mmap</span><span style="color:#0c0c0c;">是一种内存映射的方法</span><span style="color:#0c0c0c;">，这一功能可以用在文件的处理上，即将一个文件或者其它对象映射到进程的地址空间，</span><span style="color:#c00000;">实现文件磁盘地址和进程虚拟地址空间中一段虚拟地址的一一对映关系。</span><span style="color:#0c0c0c;">在编程时可以使某个磁盘文件的内容看起来像是内存中的一个数组。如果文件由记录组成，而这些记录又能够用结构体来描述的话，可以通过访问结构数组来更新文件的内容。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">实现这样的映射关系后，进程就可以采用指针的方式读写操作这一段内存，而系统会自动回写脏页面到对应的文件磁盘上，即完成了对文件的操作而不必再调用read,write等系统调用函数。内核空间对这段区域的修改也直接反映用户空间，从而可以实现不同进程间的文件共享。如图所示：</span></p> 
+<p style="margin-left:0pt;"><img alt="" src="https://images2.imgbox.com/38/39/T1PD9Imc_o.png"></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">进程的虚拟地址空间，由多个虚拟内存区域构成。虚拟内存区域是进程的虚拟地址空间中的一个同质区间，即具有同样特性的连续地址范围。上图中所示的text数据段（代码段）、初始数据段、BSS数据段、堆、栈和内存映射，都是一个独立的虚拟内存区域。而为内存映射服务的地址空间处在堆栈之间的空余部分。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">内核为系统中的每个进程维护一个单独的任务结构（task_struct）。任务结构中的元素包含或者指向内核运行该进程所需的所有信息(PID、指向用户栈的指针、可执行目标文件的名字、程序计数器等)。Linux内核使用vm_area_struct结构来表示一个独立的虚拟内存区域，由于每个不同质的虚拟内存区域功能和内部机制都不同，因此一个进程使用多个vm_area_struct结构来分别表示不同类型的虚拟内存区域。各个vm_area_struct结构使用链表或者树形结构链接，方便进程快速访问，如下图所示：</span></p> 
+<p style="margin-left:0pt;"><img alt="" src="https://images2.imgbox.com/d8/a9/LYneA2yQ_o.png"></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">vm_area_struct结构中包含区域起始和终止地址以及其他相关信息，同时也包含一个vm_ops指针，其内部可引出所有针对这个区域可以使用的系统调用函数。这样，进程对某一虚拟内存区域的任何操作需要用要的信息，都可以从vm_area_struct中获得。mmap函数就是要创建一个新的vm_area_struct结构，并将其与文件的物理磁盘地址相连。</span></p> 
+<pre><code>mm_struct：描述了虚拟内存的当前状态。pgd指向一级页表的基址（当内核运行这个进程时，
+pgd会被存放在CR3控制寄存器，也就是页表基址寄存器中），mmap指向一个vm_area_structs
+的链表，其中每个vm_area_structs都描述了当前虚拟地址空间的一个区域。
+vm_starts    指向这个区域的起始处。
+vm_end       指向这个区域的结束处。
+vm_prot      描述这个区域内包含的所有页的读写许可权限。
+vm_flags     描述这个区域内的页面是与其他进程共享的，还是这个进程私有的以及一些其他信息。
+vm_next      指向链表的下一个区域结构。</code></pre> 
+<p style="margin-left:0pt;"> </p> 
+<h3 id="mmap%E5%86%85%E5%AD%98%E6%98%A0%E5%B0%84%E5%8E%9F%E7%90%86" style="margin-left:0pt;"><strong><span style="color:#0c0c0c;">mmap内存映射原理</span></strong></h3> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">mmap内存映射的实现过程，总的来说可以分为三个阶段：</span></p> 
+<p style="margin-left:0pt;"><strong><span style="color:#0c0c0c;">(一)进程启动映射过程，并在虚拟地址空间中为映射创建虚拟映射区域</span></strong></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">1. 进程在用户空间调用库函数mmap，原型：void *mmap(void *start, size_t length, int prot, int flags, int fd, off_t offset);</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">2. 在当前进程的虚拟地址空间中，寻找一段空闲的满足要求的连续的虚拟地址。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">3. 为此虚拟区分配一个vm_area_struct结构，接着对这个结构的各个域进行了初始化。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">4. 将新建的虚拟区结构（vm_area_struct）插入进程的虚拟地址区域链表或树中。</span></p> 
+<p style="margin-left:0pt;"> </p> 
+<p style="margin-left:0pt;"><strong><span style="color:#0c0c0c;">(二)调用内核空间的系统调用函数mmap（不同于用户空间函数），实现文件物理地址和进程虚拟地址的一一映射关系</span></strong></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">5. 为映射分配了新的虚拟地址区域后，通过待映射的文件指针，在文件描述符表中找到对应的文件描述符，通过文件描述符，链接到内核“已打开文件集”中该文件的文件结构体（struct file），每个文件结构体维护着和这个已打开文件相关各项信息。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">6. 通过该文件的文件结构体，链接到file_operations模块，调用内核函数mmap，其原型为：int mmap(struct file *filp, struct vm_area_struct *vma)，不同于用户空间库函数。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">7. 内核mmap函数通过虚拟文件系统inode模块定位到文件磁盘物理地址。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">8. 通过remap_pfn_range函数建立页表，即实现了文件地址和虚拟地址区域的映射关系。此时，这片虚拟地址并没有任何数据关联到主存中。</span></p> 
+<p style="margin-left:0pt;"> </p> 
+<p style="margin-left:0pt;"><strong><span style="color:#0c0c0c;">(三)进程发起对这片映射空间的访问，引发缺页异常，实现文件内容到物理内存（主存）的拷贝</span></strong></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">注：前两个阶段仅在于创建虚拟区间并完成地址映射，但是并没有将任何文件数据的拷贝至主存。真正的文件读取是当进程发起读或写操作时。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">9. 进程的读或写操作访问虚拟地址空间这一段映射地址，通过查询页表，发现这一段地址并不在物理页面上。因为目前只建立了地址映射，真正的硬盘数据还没有拷贝到内存中，因此引发缺页异常。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">10. 缺页异常进行一系列判断，确定无非法操作后，内核发起请求调页过程。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">11. 调页过程先在交换缓存空间（swap cache）中寻找需要访问的内存页，如果没有则调用nopage函数把所缺的页从磁盘装入到主存中。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">12. 之后进程即可对这片主存进行读或者写的操作，如果写操作改变了其内容，一定时间后系统会自动回写脏页面到对应磁盘地址，也即完成了写入到文件的过程。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;"><strong>注意：</strong>修改过的脏页面并不会立即更新回文件中，而是有一段时间的延迟，可以调用msync()来强制同步, 这样所写的内容就能立即保存到文件里了。</span></p> 
+<p style="margin-left:0pt;"> </p> 
+<p style="margin-left:0pt;"> </p> 
+<h3 id="mmap%E7%A4%BA%E4%BE%8B%E4%BB%A3%E7%A0%81" style="margin-left:0pt;"><strong><span style="color:#0c0c0c;">mmap 示例代码</span></strong></h3> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">mmap (内存映射)函数的作用是建立一段可以被两个或更多个程序读写的内存。一个程序对它所做出的修改可以被其他程序看见。这要通过使用带有特殊权限集的虚拟内存段来实现。对这类虚拟内存段的读写会使操作系统去读写磁盘文件中与之对应的部分。 mmap 函数创建一个指向一段内存区域的指针，该内存区域与可以通过一个打开的文件描述符访问的文件的内容相关联。mmap 函数原型如下：</span></p> 
+<pre><code class="language-cpp">#include &lt;sys/mman.h&gt;
+void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);</code></pre> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">可以通过传递 </span><span style="color:#0c0c0c;">off 参数来改变经共享内存段访问的文件中数据的起始偏移值。打开的文件描述符由 fildes 参数给出。可以访问的数据量(即内存段的长度)由 len 参数设置。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#c00000;">可以通过 addr 参数来请求使用某个特定的内存地址。如果它的取值是零，结果指针就将自动分配。这是推荐的做法，否则会降低程序的可移植性，因为不同系统上的可用地址范围是不一样的。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">prot 参数用于设置内存段的访问权限。它是下列常数值的按位或的结果：</span></p> 
+<pre><code>PROT_READ       内存段可读。
+PROT_WRITE      内存段可写。
+PROT_EXEC       内存段可执行。
+PROT_NONE       内存段不能被访问。</code></pre> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">flags 参数控制程序对该内存段的改变所造成的影响：</span></p> 
+<p style="margin-left:0pt;"><img alt="" src="https://images2.imgbox.com/b9/49/7XlGkvwN_o.png"></p> 
+<p style="margin-left:0pt;"> </p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;"><strong>msync 函数</strong>的作用是：把在该内存段的某个部分或整段中的修改写回到被映射的文件中(或者从被映射文件里读出)。</span></p> 
+<pre><code class="language-cpp">#include &lt;sys/mman.h&gt;
+int msync(void *addr, size_t len, int flags);</code></pre> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">内存段需要修改的部分由作为参数传递过来的起始地址 addr 和长度 len 确定。flags 参数控制着执行修改的具体方式，可以使用的选项如下：</span></p> 
+<pre><code>MS_ASYNC                    采用异步写方式
+MS_SYNC                     采用同步写方式
+MS_INVALIDATE               从文件中读回数据</code></pre> 
+<p style="margin-left:0pt;"> </p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;"><strong>munmap 函数</strong>的作用是释放内存段：</span></p> 
+<pre><code class="language-cpp">#include &lt;sys/mman.h&gt;
+int munmap(void *addr, size_t length);</code></pre> 
+<p style="margin-left:0pt;"> </p> 
+<p style="margin-left:0pt;"><strong><span style="color:#0c0c0c;">示例代码：</span></strong></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">(1) 定义一个 RECORD 数据结构，然后创建出 NRECORDS 个记录，每个记录中保存着它们各自的编号。然后把这些记录都追加到文件 records.dat 里去。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">(2) 接着，把第 43 条记录中的整数值由 43 修改为 143，并把它写入第 43 条记录中的字符串。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">(3) 把这些记录映射到内存中，然后访问第 43 条记录，把它的整数值修改为 243 (同时更新该记录中的字符串)，使用的还是内存映射的方法。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">可以将上述 (2) (3) 分别编写程序验证结果。 </span></p> 
+<pre><code class="language-cpp">#include &lt;unistd.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;stdlib.h&gt;
+
+typedef struct{
+	int integer;
+	char string[24];
+}RECORD;
+
+#define NRECORDS (100)
+
+int main()
+{
+	RECORD record, *mapped;
+	int i, f;
+	FILE *fp;
+	
+	fp = fopen("records.dat", "w+");
+	for( i = 0; i &lt; NRECORDS; i++)
+	{
+		record.integer = i;
+		sprintf(record.string, "[RECORD-%d]", i);
+		fwrite(&amp;record, sizeof(record), 1, fp);
+		}
+	fclose(fp);
+	
+	fp = fopen("records.dat", "r+");
+	fseek(fp, 43 * sizeof(record), SEEK_SET);
+	fread(&amp;record, sizeof(record), 1, fp);
+	
+	record.integer = 143;
+	sprintf(record.string, "[RECORD-%d]", record.integer);
+	fseek(fp, 43 * sizeof(record), SEEK_SET);
+	fwrite(&amp;record, sizeof(record), 1, fp);
+	fclose(fp);
+	
+	f = open("records.dat", O_RDWR);
+	mapped = (RECORD*)mmap(0, NRECORDS * sizeof(record), 
+	                        PROT_READ | PROT_WRITE, MAP_SHARED, f, 0);
+	
+	printf("f:[%d]\n", f);
+	//open是系统调用，返回文件描述符。fopen是库函数，返回指针。                        
+	mapped[43].integer = 243;
+	sprintf(mapped[43].string, "[RECORD-%d]", mapped[43].integer);
+	
+	msync((void *) mapped, NRECORDS * sizeof(record), MS_ASYNC);
+	munmap((void *)mapped, NRECORDS * sizeof(record));
+	close(f);
+	
+	return 0;	
+}</code></pre> 
+<p style="margin-left:0pt;"> </p> 
+<h3 id="mmap%E5%92%8C%E5%B8%B8%E8%A7%84%E6%96%87%E4%BB%B6%E6%93%8D%E4%BD%9C%E7%9A%84%E5%8C%BA%E5%88%AB" style="margin-left:0pt;"><strong><span style="color:#0c0c0c;">mmap 和常规文件操作的区别</span></strong></h3> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">使用</span><span style="color:#0c0c0c;">系统</span><span style="color:#0c0c0c;">调用，函数的调用</span><span style="color:#0c0c0c;">过程：</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">1. 进程发起读文件请求。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">2. 内核通过查找进程文件描述符表，定位到内核已打开文件集上的文件信息，从而找到此文件的inode。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">3. inode在address_space上查找要请求的文件页是否已经缓存在页缓存中。如果存在，则直接返回这片文件页的内容。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">4. 如果不存在，则通过inode定位到文件磁盘地址，将数据从磁盘复制到页缓存。之后再次发起读页面过程，进而将页缓存中的数据发给用户进程。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">总结来说，常规文件操作为了提高读写效率和保护磁盘，使用了页缓存机制。这样造成读文件时需要先将文件页从磁盘拷贝到页缓存中，由于页缓存处在内核空间，不能被用户进程直接寻址，所以还需要将页缓存中数据页再次拷贝到内存对应的用户空间中。这样，通过了两次数据拷贝过程，才能完成进程对文件内容的获取任务。写操作也是一样，待写入的buffer在内核空间不能直接访问，必须要先拷贝至内核空间对应的主存，再写回磁盘中（延迟写回），也是需要两次数据拷贝。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">而使用mmap操作文件中，创建新的虚拟内存区域和建立文件磁盘地址和虚拟内存区域映射这两步，没有任何文件拷贝操作。而之后访问数据时发现内存中并无数据而发起的缺页异常过程，可以通过已经建立好的映射关系，只使用一次数据拷贝，就从磁盘中将数据传入内存的用户空间中，供进程使用。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#c00000;">总而言之，常规文件操作需要从磁盘到页缓存再到用户主存的两次数据拷贝。而mmap操控文件，只需要从磁盘到用户主存的一次数据拷贝过程。</span><span style="color:#0c0c0c;">说白了，mmap的关键点是实现了用户空间和内核空间的数据直接交互而省去了空间不同、数据不通的繁琐过程。因此mmap效率更高。</span></p> 
+<p style="margin-left:0pt;"> </p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">由上文讨论可知，mmap优点共有一下几点：</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">1. 对文件的读取操作跨过了页缓存，减少了数据的拷贝次数，用内存读写取代I/O读写，提高了文件读取效率。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">2. 实现了用户空间和内核空间的高效交互方式。两空间的各自修改操作可以直接反映在映射的区域内，从而被对方空间及时捕捉。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">3. 提供进程间共享内存及相互通信的方式。不管是父子进程还是无亲缘关系的进程，都可以将自身用户空间映射到同一个文件或匿名映射到同一片区域。从而通过各自对映射区域的改动，达到进程间通信和进程间共享的目的。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">同时，如果进程A和进程B都映射了区域C，当A第一次读取C时通过缺页从磁盘复制文件页到内存中；但当B再读C的相同页面时，虽然也会产生缺页异常，但是不再需要从磁盘中复制文件过来，而可直接使用已经保存在内存中的文件数据。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">4. 可用于实现高效的大规模数据传输。内存空间不足，是制约大数据操作的一个方面，解决方案往往是借助硬盘空间协助操作，补充内存的不足。但是进一步会造成大量的文件I/O操作，极大影响效率。这个问题可以通过mmap映射很好的解决。换句话说，但凡是需要用磁盘空间代替内存的时候，mmap都可以发挥其功效。</span></p> 
+<p style="margin-left:0pt;"> </p> 
+<h3 id="mmap%E4%BD%BF%E7%94%A8%E7%9A%84%E7%BB%86%E8%8A%82" style="margin-left:0pt;"><strong><span style="color:#0c0c0c;">mmap 使用的细节</span></strong></h3> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">1. 使用mmap需要注意的一个关键点是，mmap映射区域大小必须是物理页大小(page_size)的整倍数（32位系统中通常是4k字节）。原因是，内存的最小粒度是页，而进程虚拟地址空间和内存的映射也是以页为单位。为了匹配内存的操作，mmap从磁盘到虚拟地址空间的映射也必须是页。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">2</span><span style="color:#0c0c0c;">.</span> <span style="color:#0c0c0c;">内核可以跟踪被内存映射的底层对象（文件）的大小，进程可以合法的访问在当前文件大小以内又在内存映射区以内的那些字节。也就是说，如果文件的大小一直在扩张，只要在映射区域范围内的数据，进程都可以合法得到，这和映射建立时文件的大小无关。</span></p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">3</span><span style="color:#0c0c0c;">.</span> <span style="color:#0c0c0c;">映射建立之后，即使文件关闭，映射依然存在。因为映射的是磁盘的地址，不是文件本身，和文件句柄无关。同时可用于进程间通信的有效地址空间不完全受限于被映射文件的大小，因为是按页映射。</span></p> 
+<p style="margin-left:0pt;"> </p> 
+<p style="margin-left:0pt;"><span style="color:#0c0c0c;">原文：https://www.cnblogs.com/huxiao-tee/p/4660352.html</span></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/d1ae3fde4df012963067083d089e653b/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">单细胞分析R包monocle3服务器安装教程</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/c6282b82d220a6b09dae364a3cbf01b9/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">win10家庭版升级为专业版详解 --- 0xC004C003问题详解</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>八. 实战：CUDA-BEVFusion部署分析-spconv原理 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="八. 实战：CUDA-BEVFusion部署分析-spconv原理" />
+<meta property="og:description" content="目录 前言0. 简述1. 举例分析spconv的计算流程2. 导出带有spconv网络的onnx需要考虑的事情总结下载链接参考 前言 自动驾驶之心推出的 《CUDA与TensorRT部署实战课程》，链接。记录下个人学习笔记，仅供自己参考
+本次课程我们来学习下课程第八章——实战：CUDA-BEVFusion部署分析，一起来学习 spconv 原理
+Note：之前在学习杜老师的课程中有简单记录过 Sparse Convolution 的一些基础知识，感兴趣的可以看下：复杂onnx解决方案（以sparseconv为例）
+课程大纲可以看下面的思维导图
+0. 简述 本小节的目标：理解 spconv 与普通的 conv 的区别，计算原理与流程，以及导出 onnx 需要考虑的事情
+这节课给大家讲解第八章第 2 小节学习 spconv 的原理，通过这一小节我们去理解一下我们用 3D Sparse Convolution 对稀疏性的点云做卷积的时候我们应该怎么去做，spconv 的算法和流程是什么样的，它和普通卷积的区别有哪些，这是我们接下来需要去理解的。
+最后我们作为第 3 小节的前述部分，会去给大家讲一下导出带有 Sparse Convolution 网络的 ONNX 的时候需要注意哪些事情
+OK，我们下面正式开始
+1. 举例分析spconv的计算流程 首先为了理解 spconv 的流程，我们把这个问题简单化，先看一个最简单的例子，我们假设现在有一个输入，大小是 1x5x5，同时经过一个 1x1x3x3 大小的卷积核得到 1x3x3 大小的输出，如下图所示：
+卷积的整个过程 stride 是 1，padding 是 0，同时我们假设输入的 1x5x5 大小的数据中除了 in0 点以外其他的所有数据都为 0，也就是说只有 in0 点它是有值的，那么通过一个卷积之后我们知道输出的数据只有 out0 和 out1 有值，其他输出的数据全为 0" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/7373b7e6f0453b9b31990ba8fbbf1de3/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-07T11:16:54+08:00" />
+<meta property="article:modified_time" content="2024-01-07T11:16:54+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">八. 实战：CUDA-BEVFusion部署分析-spconv原理</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>目录</h4> 
+ <ul><li><ul><li><a href="#_1" rel="nofollow">前言</a></li><li><a href="#0__14" rel="nofollow">0. 简述</a></li><li><a href="#1_spconv_24" rel="nofollow">1. 举例分析spconv的计算流程</a></li><li><a href="#2_spconvonnx_286" rel="nofollow">2. 导出带有spconv网络的onnx需要考虑的事情</a></li><li><a href="#_305" rel="nofollow">总结</a></li><li><a href="#_311" rel="nofollow">下载链接</a></li><li><a href="#_317" rel="nofollow">参考</a></li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h3><a id="_1"></a>前言</h3> 
+<blockquote> 
+ <p>自动驾驶之心推出的 《CUDA与TensorRT部署实战课程》，<a href="https://www.zdjszx.com/p/t_pc/goods_pc_detail/goods_detail/course_2Qzh2CekDJZMNuZq1Gfp3HOgIqx" rel="nofollow">链接</a>。记录下个人学习笔记，<strong>仅供自己参考</strong></p> 
+ <p>本次课程我们来学习下课程第八章——实战：CUDA-BEVFusion部署分析，一起来学习 spconv 原理</p> 
+ <p><strong>Note</strong>：之前在学习杜老师的课程中有简单记录过 Sparse Convolution 的一些基础知识，感兴趣的可以看下：<a href="https://blog.csdn.net/qq_40672115/article/details/131480952">复杂onnx解决方案（以sparseconv为例）</a></p> 
+ <p>课程大纲可以看下面的思维导图</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/e5/ca/7t1lXGvf_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="0__14"></a>0. 简述</h3> 
+<blockquote> 
+ <p>本小节的目标：<strong>理解 spconv 与普通的 conv 的区别，计算原理与流程，以及导出 onnx 需要考虑的事情</strong></p> 
+</blockquote> 
+<p>这节课给大家讲解第八章第 2 小节学习 spconv 的原理，通过这一小节我们去理解一下我们用 3D Sparse Convolution 对稀疏性的点云做卷积的时候我们应该怎么去做，spconv 的算法和流程是什么样的，它和普通卷积的区别有哪些，这是我们接下来需要去理解的。</p> 
+<p>最后我们作为第 3 小节的前述部分，会去给大家讲一下导出带有 Sparse Convolution 网络的 ONNX 的时候需要注意哪些事情</p> 
+<p>OK，我们下面正式开始</p> 
+<h3><a id="1_spconv_24"></a>1. 举例分析spconv的计算流程</h3> 
+<p>首先为了理解 spconv 的流程，我们把这个问题简单化，先看一个最简单的例子，我们假设现在有一个输入，大小是 1x5x5，同时经过一个 1x1x3x3 大小的卷积核得到 1x3x3 大小的输出，如下图所示：</p> 
+<p><img src="https://images2.imgbox.com/d2/dc/yNGUDGXK_o.png" alt="在这里插入图片描述"></p> 
+<p>卷积的整个过程 stride 是 1，padding 是 0，同时我们假设输入的 1x5x5 大小的数据中除了 in0 点以外其他的所有数据都为 0，也就是说只有 in0 点它是有值的，那么通过一个卷积之后我们知道输出的数据只有 out0 和 out1 有值，其他输出的数据全为 0</p> 
+<p>in0 跟 k1 计算得到 out0，in0 和 k0 计算得到 out1，卷积核每进行一次滑动计算，是需要做 9 次乘加法的，此外这个卷积核滑动完整个输入是需要 9 次，那也就意味着我们一共要做 9x9=81 次乘加法</p> 
+<p>那 81 次乘加法中其实只有 2 次乘加法是有必要的，那剩余的 79 次的计算其实都是在跟 0 做计算，都是没有必要的计算，我们其实可以 skip 掉</p> 
+<p>OK，那么我们要想办法把这两个计算给保存下来，我们先把这两个计算叫 <strong>atomic operation</strong> 也就是两个<strong>原子操作</strong>，那我们想要去保存这两个原子操作的话，我们需要怎么办呢</p> 
+<p><img src="https://images2.imgbox.com/49/1b/J436HTS3_o.png" alt="在这里插入图片描述"></p> 
+<p>首先我们得需要知道 input 中 25 个数据哪个点它是有意义的，我们需要一个 table 来保存它，<strong>那么在 spconv 中我们会用 hash table 的方式去把 in0 这个点的坐标和它的一个编号给保存下来</strong>，也就是图中的 P_in</p> 
+<p>同理 output 也是一样的，它其实是只有两个数据是有意义的，那么把这两个数据也用 hash table 的方式给保存下来，保存它的一个坐标和编号，也就是图中的 P_out</p> 
+<p>OK，这两个 table 就完成了，那下一步要做什么呢，下一步就是说让两个 table 的各个元素给做出一个关联性，也就是说 input table 中的哪一个值和 output 中的哪个值是一一对应的，同时它这个对应的所需要的 kernel 的值是哪一个</p> 
+<p>那么这个对应关系我们可以用一个叫 <strong>Rulebook</strong> 的方式去保存，图中 Rulebook 有四列，分别代表的含义如下：</p> 
+<ul><li><strong>(i,j)</strong>：<strong>代表的是 Kernel 的相对坐标</strong>，它相对坐标是以中间这个点为 (0,0) 原点的，来计算每一个点距离中心点的一个相对位置，如下图所示。比如 K0 这个点它距离中心点 (0,0) 的位置是 (-1,-1)，K1 这个点它距离中心点 (0,0) 的位置就是 (0,-1)</li><li><strong>count</strong>：<strong>代表的是编号</strong>，表示是这个点它要涉及的计算它的编号是第几个，那比如说 K0 它所涉及到的计算只有一个，那就是 count 等于 0，如果 K0 还涉及到另一个计算的话，那这个 count 就是 1</li><li><strong>v_in、v_out</strong>：<strong>代表着输入输出中非零点的对应的 index</strong></li></ul> 
+<p><img src="https://images2.imgbox.com/dc/c3/kCSWG2cL_o.png" alt="在这里插入图片描述"></p> 
+<p>对于 Rulebook 我们可以这么理解，我们先看第一行，v_in 中 index 等于 0 这个点也就是位置坐标是 (0,1) 的这个点（即 in0），它和 Kernel 中 (-1,-1) 这个点（即 K0）计算得到 v_out1（即 out1），同理第二行就是 v_in 也就是 in0 它跟需要跟 Kernel 的 (0,-1) 位置（即 K1）做计算 v_out0（即 out0），这样就可以把输入、输出和 Kernel 的计算关系给保存下来。</p> 
+<p>为了方便说明，图中我们也进行了举例说明，比如 in0 的值是 0.3，K0，K1 分别就是 0.4 和 0.9，最终得到的输出 out1 和 out0 分别是 0.27 和 0.12，那所以通过 rulebook 就可以把这个对应关系给绑定起来，这个是比较简单的例子</p> 
+<p>那下一步我们把这个问题再稍微复杂化一点，我们之前一直讨论的是输入 channel 等于 1，那么我们给它扩充一下把它变成三个维度，那么 input 就是 3x5x5，意味着 Kernel 它是 1x3x3x3，output 是没有发生变化的，因为 Kernel 数量没变，整个过程就如下图所示：</p> 
+<p><img src="https://images2.imgbox.com/d7/e9/e3D6YDjO_o.png" alt="在这里插入图片描述"></p> 
+<p>那么其实这个过程中虽然 input 和 kernel 的 channel 发生了变化，但是它坐标和坐标间的关系并没有改变，还是该哪个坐标跟哪个坐标乘，这个是不会发生变化的。那变化在哪呢，之前是一个元素和一个元素之间相乘得到一个元素，现在变成一个 vector 和一个 vector 相乘得到一个元素</p> 
+<p>那么理解这个之后我们再进一步扩展，下一步我们来扩展 kernel，那我们之前 Kernel 不是只有一个吗，现在我们扩充成两个，那么相应的 output 的 channel 也会变成 2，如下图所示：</p> 
+<p><img src="https://images2.imgbox.com/d8/af/hruwjree_o.png" alt="在这里插入图片描述"></p> 
+<p>那么在这种情况下它的坐标对应关系会发生改变吗，那也不会发生改变，哪个坐标跟哪个坐标相乘得到哪个坐标，这个关系是不会变的。那么变得是什么呢，变的是 kernel 它现在已经不再是一个 vector 而是一个 matrix 了，那么输出就是一个 vector 跟一个 Matrix 相乘</p> 
+<p>到目前为止我们一直聊的都是一个点，就是 input 中只有一个点做计算，那现在我们把问题再给它复杂化一点，input 中如果有两个点或者多个点时的情形，如下图所示：</p> 
+<p><img src="https://images2.imgbox.com/05/64/a8QPOpoM_o.png" alt="在这里插入图片描述"></p> 
+<p>那多点情况下，它的 rulebook 就会发生改变了，因为它的坐标发生了改变，新多了一个新坐标，那新多的坐标也会参与计算，因此最终的关系会变成图中的样子，这个大家稍微推一下就好了</p> 
+<p>那么所以说我们可以通过 rulebook 得到一系列的 atomic operation，我们把这一系列 atomic operation 放一起，可以把这个带有 sparse 的 convolution 很多没有意义的点最后给它全部都 skip 掉，就只保留我们真正想要做计算的点，这样可以将一个 sparse 的 convolution 计算变成 dense 的 matmul 计算</p> 
+<p><img src="https://images2.imgbox.com/68/3d/4ZQapqPH_o.png" alt="在这里插入图片描述"></p> 
+<p>那么其实这个也就意味着如果说我们的 input size 变得非常大，如上图所示，那 input 的 size 越大 input 的稀疏性也越大，也就是输入中不为 0 的点就越少，比如上图中真正参与计算的只有 6 个点，那么我们只要把这 6 个点的信息给放入到 rulebook 里面去，之后让它去得到那个输入输出和 Filter 之间的对应关系，我们就可以把它变成一个密集的矩阵乘法计算，这个其实就是 Sparse Convolution 的一个计算原理</p> 
+<p>OK，我们稍微总结一下 3D Sparse Convolution 的特点，如下所示：</p> 
+<ul><li>input/output 的 tensor 是具有稀疏性的</li><li>将 input 和 output 中的所有点都进行计算的话，计算会很冗长 
+  <ul><li>有很多点是无效点，可以 skip 掉</li></ul> </li><li>需要通过某种方式建立起 input-weight-output 的关系 
+  <ul><li><strong>hash table</strong>：保存 input 和 output 中有数据的点</li><li><strong>rulebook</strong>：保存 table 中的点和点的对应关系，以及参与计算的权重位置信息</li></ul> </li><li>计算时可以通过 rulebook 来选择性的计算 
+  <ul><li>可以将 sparse 的 conv 转换为 dense 的 matmul，从而得到加速</li></ul> </li></ul> 
+<p>以上就是 spconv 的一个整体流程，下面我们看一下 BEVFusion 是怎么实现 spconv</p> 
+<p>BEVFusion 中使用的 spconv 的实现是节选自 CenterPoint 的实现，核心代码是：<a href="https://github.com/tianweiy/CenterPoint/blob/master/det3d/models/backbones/scn.py">https://github.com/tianweiy/CenterPoint/blob/master/det3d/models/backbones/scn.py</a></p> 
+<pre><code class="prism language-python"><span class="token decorator annotation punctuation">@BACKBONES<span class="token punctuation">.</span>register_module</span>
+<span class="token keyword">class</span> <span class="token class-name">SpMiddleResNetFHD</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>
+        self<span class="token punctuation">,</span> num_input_features<span class="token operator">=</span><span class="token number">128</span><span class="token punctuation">,</span> norm_cfg<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">,</span> name<span class="token operator">=</span><span class="token string">"SpMiddleResNetFHD"</span><span class="token punctuation">,</span> <span class="token operator">**</span>kwargs
+    <span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>SpMiddleResNetFHD<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>name <span class="token operator">=</span> name
+
+        self<span class="token punctuation">.</span>dcn <span class="token operator">=</span> <span class="token boolean">None</span>
+        self<span class="token punctuation">.</span>zero_init_residual <span class="token operator">=</span> <span class="token boolean">False</span>
+
+        <span class="token keyword">if</span> norm_cfg <span class="token keyword">is</span> <span class="token boolean">None</span><span class="token punctuation">:</span>
+            norm_cfg <span class="token operator">=</span> <span class="token builtin">dict</span><span class="token punctuation">(</span><span class="token builtin">type</span><span class="token operator">=</span><span class="token string">"BN1d"</span><span class="token punctuation">,</span> eps<span class="token operator">=</span><span class="token number">1e-3</span><span class="token punctuation">,</span> momentum<span class="token operator">=</span><span class="token number">0.01</span><span class="token punctuation">)</span>
+
+        <span class="token comment"># input: # [1600, 1200, 41]</span>
+        self<span class="token punctuation">.</span>conv_input <span class="token operator">=</span> spconv<span class="token punctuation">.</span>SparseSequential<span class="token punctuation">(</span>
+            SubMConv3d<span class="token punctuation">(</span>num_input_features<span class="token punctuation">,</span> <span class="token number">16</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> bias<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> indice_key<span class="token operator">=</span><span class="token string">"res0"</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            build_norm_layer<span class="token punctuation">(</span>norm_cfg<span class="token punctuation">,</span> <span class="token number">16</span><span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+            nn<span class="token punctuation">.</span>ReLU<span class="token punctuation">(</span>inplace<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+        <span class="token punctuation">)</span>
+
+        self<span class="token punctuation">.</span>conv1 <span class="token operator">=</span> spconv<span class="token punctuation">.</span>SparseSequential<span class="token punctuation">(</span>        
+            SparseBasicBlock<span class="token punctuation">(</span><span class="token number">16</span><span class="token punctuation">,</span> <span class="token number">16</span><span class="token punctuation">,</span> norm_cfg<span class="token operator">=</span>norm_cfg<span class="token punctuation">,</span> indice_key<span class="token operator">=</span><span class="token string">"res0"</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            SparseBasicBlock<span class="token punctuation">(</span><span class="token number">16</span><span class="token punctuation">,</span> <span class="token number">16</span><span class="token punctuation">,</span> norm_cfg<span class="token operator">=</span>norm_cfg<span class="token punctuation">,</span> indice_key<span class="token operator">=</span><span class="token string">"res0"</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">)</span>
+
+        self<span class="token punctuation">.</span>conv2 <span class="token operator">=</span> spconv<span class="token punctuation">.</span>SparseSequential<span class="token punctuation">(</span>
+            SparseConv3d<span class="token punctuation">(</span>
+                <span class="token number">16</span><span class="token punctuation">,</span> <span class="token number">32</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> bias<span class="token operator">=</span><span class="token boolean">False</span>
+            <span class="token punctuation">)</span><span class="token punctuation">,</span>  <span class="token comment"># [1600, 1200, 41] -&gt; [800, 600, 21]</span>
+            build_norm_layer<span class="token punctuation">(</span>norm_cfg<span class="token punctuation">,</span> <span class="token number">32</span><span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+            nn<span class="token punctuation">.</span>ReLU<span class="token punctuation">(</span>inplace<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            SparseBasicBlock<span class="token punctuation">(</span><span class="token number">32</span><span class="token punctuation">,</span> <span class="token number">32</span><span class="token punctuation">,</span> norm_cfg<span class="token operator">=</span>norm_cfg<span class="token punctuation">,</span> indice_key<span class="token operator">=</span><span class="token string">"res1"</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            SparseBasicBlock<span class="token punctuation">(</span><span class="token number">32</span><span class="token punctuation">,</span> <span class="token number">32</span><span class="token punctuation">,</span> norm_cfg<span class="token operator">=</span>norm_cfg<span class="token punctuation">,</span> indice_key<span class="token operator">=</span><span class="token string">"res1"</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">)</span>
+
+        self<span class="token punctuation">.</span>conv3 <span class="token operator">=</span> spconv<span class="token punctuation">.</span>SparseSequential<span class="token punctuation">(</span>
+            SparseConv3d<span class="token punctuation">(</span>
+                <span class="token number">32</span><span class="token punctuation">,</span> <span class="token number">64</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> bias<span class="token operator">=</span><span class="token boolean">False</span>
+            <span class="token punctuation">)</span><span class="token punctuation">,</span>  <span class="token comment"># [800, 600, 21] -&gt; [400, 300, 11]</span>
+            build_norm_layer<span class="token punctuation">(</span>norm_cfg<span class="token punctuation">,</span> <span class="token number">64</span><span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+            nn<span class="token punctuation">.</span>ReLU<span class="token punctuation">(</span>inplace<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            SparseBasicBlock<span class="token punctuation">(</span><span class="token number">64</span><span class="token punctuation">,</span> <span class="token number">64</span><span class="token punctuation">,</span> norm_cfg<span class="token operator">=</span>norm_cfg<span class="token punctuation">,</span> indice_key<span class="token operator">=</span><span class="token string">"res2"</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            SparseBasicBlock<span class="token punctuation">(</span><span class="token number">64</span><span class="token punctuation">,</span> <span class="token number">64</span><span class="token punctuation">,</span> norm_cfg<span class="token operator">=</span>norm_cfg<span class="token punctuation">,</span> indice_key<span class="token operator">=</span><span class="token string">"res2"</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">)</span>
+
+        self<span class="token punctuation">.</span>conv4 <span class="token operator">=</span> spconv<span class="token punctuation">.</span>SparseSequential<span class="token punctuation">(</span>
+            SparseConv3d<span class="token punctuation">(</span>
+                <span class="token number">64</span><span class="token punctuation">,</span> <span class="token number">128</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">,</span> bias<span class="token operator">=</span><span class="token boolean">False</span>
+            <span class="token punctuation">)</span><span class="token punctuation">,</span>  <span class="token comment"># [400, 300, 11] -&gt; [200, 150, 5]</span>
+            build_norm_layer<span class="token punctuation">(</span>norm_cfg<span class="token punctuation">,</span> <span class="token number">128</span><span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+            nn<span class="token punctuation">.</span>ReLU<span class="token punctuation">(</span>inplace<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            SparseBasicBlock<span class="token punctuation">(</span><span class="token number">128</span><span class="token punctuation">,</span> <span class="token number">128</span><span class="token punctuation">,</span> norm_cfg<span class="token operator">=</span>norm_cfg<span class="token punctuation">,</span> indice_key<span class="token operator">=</span><span class="token string">"res3"</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            SparseBasicBlock<span class="token punctuation">(</span><span class="token number">128</span><span class="token punctuation">,</span> <span class="token number">128</span><span class="token punctuation">,</span> norm_cfg<span class="token operator">=</span>norm_cfg<span class="token punctuation">,</span> indice_key<span class="token operator">=</span><span class="token string">"res3"</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">)</span>
+
+
+        self<span class="token punctuation">.</span>extra_conv <span class="token operator">=</span> spconv<span class="token punctuation">.</span>SparseSequential<span class="token punctuation">(</span>
+            SparseConv3d<span class="token punctuation">(</span>
+                <span class="token number">128</span><span class="token punctuation">,</span> <span class="token number">128</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">,</span> bias<span class="token operator">=</span><span class="token boolean">False</span>
+            <span class="token punctuation">)</span><span class="token punctuation">,</span>  <span class="token comment"># [200, 150, 5] -&gt; [200, 150, 2]</span>
+            build_norm_layer<span class="token punctuation">(</span>norm_cfg<span class="token punctuation">,</span> <span class="token number">128</span><span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+            nn<span class="token punctuation">.</span>ReLU<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> voxel_features<span class="token punctuation">,</span> coors<span class="token punctuation">,</span> batch_size<span class="token punctuation">,</span> input_shape<span class="token punctuation">)</span><span class="token punctuation">:</span>
+
+        <span class="token comment"># input: # [41, 1600, 1408]</span>
+        sparse_shape <span class="token operator">=</span> np<span class="token punctuation">.</span>array<span class="token punctuation">(</span>input_shape<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">:</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">]</span>
+
+        coors <span class="token operator">=</span> coors<span class="token punctuation">.</span><span class="token builtin">int</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        ret <span class="token operator">=</span> spconv<span class="token punctuation">.</span>SparseConvTensor<span class="token punctuation">(</span>voxel_features<span class="token punctuation">,</span> coors<span class="token punctuation">,</span> sparse_shape<span class="token punctuation">,</span> batch_size<span class="token punctuation">)</span>
+
+        x <span class="token operator">=</span> self<span class="token punctuation">.</span>conv_input<span class="token punctuation">(</span>ret<span class="token punctuation">)</span>
+
+        x_conv1 <span class="token operator">=</span> self<span class="token punctuation">.</span>conv1<span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+        x_conv2 <span class="token operator">=</span> self<span class="token punctuation">.</span>conv2<span class="token punctuation">(</span>x_conv1<span class="token punctuation">)</span>
+        x_conv3 <span class="token operator">=</span> self<span class="token punctuation">.</span>conv3<span class="token punctuation">(</span>x_conv2<span class="token punctuation">)</span>
+        x_conv4 <span class="token operator">=</span> self<span class="token punctuation">.</span>conv4<span class="token punctuation">(</span>x_conv3<span class="token punctuation">)</span>
+
+        ret <span class="token operator">=</span> self<span class="token punctuation">.</span>extra_conv<span class="token punctuation">(</span>x_conv4<span class="token punctuation">)</span>
+
+        ret <span class="token operator">=</span> ret<span class="token punctuation">.</span>dense<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+        N<span class="token punctuation">,</span> C<span class="token punctuation">,</span> D<span class="token punctuation">,</span> H<span class="token punctuation">,</span> W <span class="token operator">=</span> ret<span class="token punctuation">.</span>shape
+        ret <span class="token operator">=</span> ret<span class="token punctuation">.</span>view<span class="token punctuation">(</span>N<span class="token punctuation">,</span> C <span class="token operator">*</span> D<span class="token punctuation">,</span> H<span class="token punctuation">,</span> W<span class="token punctuation">)</span>
+
+        multi_scale_voxel_features <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token string">'conv1'</span><span class="token punctuation">:</span> x_conv1<span class="token punctuation">,</span>
+            <span class="token string">'conv2'</span><span class="token punctuation">:</span> x_conv2<span class="token punctuation">,</span>
+            <span class="token string">'conv3'</span><span class="token punctuation">:</span> x_conv3<span class="token punctuation">,</span>
+            <span class="token string">'conv4'</span><span class="token punctuation">:</span> x_conv4<span class="token punctuation">,</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token keyword">return</span> ret<span class="token punctuation">,</span> multi_scale_voxel_features
+</code></pre> 
+<p>以上就是 SCN 网络的 forward 代码，前向过程无非是几个 conv 的叠加，从上面的代码中也能看到 conv1、conv2、conv3、conv4 的实现是通过 SparseSequential 这一个序列将多个块堆叠，其中包含 SubMConv3d、SparseConv3d、SparseBasicBlock 等等</p> 
+<p>值得注意的是 SCN 网络前向传播的输入尺寸是 41x1600x1200，输出尺寸是 2x200x150；而在 CUDA-BEVFusion 中它在 SCN 网络的 forward 最后又添加了 scatter 和 reshape 操作，所以 CUDA-BEVFusion 中 SCN 网络前向传播的输入尺寸是 41x1440x1440，输出尺寸是 1x256x180x180</p> 
+<p>下面我们再来看下核心的 SparseBasicBlock 的具体实现，代码如下：</p> 
+<pre><code class="prism language-python"><span class="token keyword">class</span> <span class="token class-name">SparseBasicBlock</span><span class="token punctuation">(</span>spconv<span class="token punctuation">.</span>SparseModule<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    expansion <span class="token operator">=</span> <span class="token number">1</span>
+
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>
+        self<span class="token punctuation">,</span>
+        inplanes<span class="token punctuation">,</span>
+        planes<span class="token punctuation">,</span>
+        stride<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span>
+        norm_cfg<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">,</span>
+        downsample<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">,</span>
+        indice_key<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">,</span>
+    <span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>SparseBasicBlock<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+        <span class="token keyword">if</span> norm_cfg <span class="token keyword">is</span> <span class="token boolean">None</span><span class="token punctuation">:</span>
+            norm_cfg <span class="token operator">=</span> <span class="token builtin">dict</span><span class="token punctuation">(</span><span class="token builtin">type</span><span class="token operator">=</span><span class="token string">"BN1d"</span><span class="token punctuation">,</span> eps<span class="token operator">=</span><span class="token number">1e-3</span><span class="token punctuation">,</span> momentum<span class="token operator">=</span><span class="token number">0.01</span><span class="token punctuation">)</span>
+
+        bias <span class="token operator">=</span> norm_cfg <span class="token keyword">is</span> <span class="token keyword">not</span> <span class="token boolean">None</span>
+
+        self<span class="token punctuation">.</span>conv1 <span class="token operator">=</span> conv3x3<span class="token punctuation">(</span>inplanes<span class="token punctuation">,</span> planes<span class="token punctuation">,</span> stride<span class="token punctuation">,</span> indice_key<span class="token operator">=</span>indice_key<span class="token punctuation">,</span> bias<span class="token operator">=</span>bias<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>bn1 <span class="token operator">=</span> build_norm_layer<span class="token punctuation">(</span>norm_cfg<span class="token punctuation">,</span> planes<span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span>
+        self<span class="token punctuation">.</span>relu <span class="token operator">=</span> nn<span class="token punctuation">.</span>ReLU<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>conv2 <span class="token operator">=</span> conv3x3<span class="token punctuation">(</span>planes<span class="token punctuation">,</span> planes<span class="token punctuation">,</span> indice_key<span class="token operator">=</span>indice_key<span class="token punctuation">,</span> bias<span class="token operator">=</span>bias<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>bn2 <span class="token operator">=</span> build_norm_layer<span class="token punctuation">(</span>norm_cfg<span class="token punctuation">,</span> planes<span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span>
+        self<span class="token punctuation">.</span>downsample <span class="token operator">=</span> downsample
+        self<span class="token punctuation">.</span>stride <span class="token operator">=</span> stride
+
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> x<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        identity <span class="token operator">=</span> x
+
+        out <span class="token operator">=</span> self<span class="token punctuation">.</span>conv1<span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+        out <span class="token operator">=</span> replace_feature<span class="token punctuation">(</span>out<span class="token punctuation">,</span> self<span class="token punctuation">.</span>bn1<span class="token punctuation">(</span>out<span class="token punctuation">.</span>features<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        out <span class="token operator">=</span> replace_feature<span class="token punctuation">(</span>out<span class="token punctuation">,</span> self<span class="token punctuation">.</span>relu<span class="token punctuation">(</span>out<span class="token punctuation">.</span>features<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+        out <span class="token operator">=</span> self<span class="token punctuation">.</span>conv2<span class="token punctuation">(</span>out<span class="token punctuation">)</span>
+        out <span class="token operator">=</span> replace_feature<span class="token punctuation">(</span>out<span class="token punctuation">,</span> self<span class="token punctuation">.</span>bn2<span class="token punctuation">(</span>out<span class="token punctuation">.</span>features<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+        <span class="token keyword">if</span> self<span class="token punctuation">.</span>downsample <span class="token keyword">is</span> <span class="token keyword">not</span> <span class="token boolean">None</span><span class="token punctuation">:</span>
+            identity <span class="token operator">=</span> self<span class="token punctuation">.</span>downsample<span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+
+        out <span class="token operator">=</span> replace_feature<span class="token punctuation">(</span>out<span class="token punctuation">,</span> out<span class="token punctuation">.</span>features <span class="token operator">+</span> identity<span class="token punctuation">.</span>features<span class="token punctuation">)</span>
+        out <span class="token operator">=</span> replace_feature<span class="token punctuation">(</span>out<span class="token punctuation">,</span> self<span class="token punctuation">.</span>relu<span class="token punctuation">(</span>out<span class="token punctuation">.</span>features<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+        <span class="token keyword">return</span> out
+</code></pre> 
+<p>我们可以在 SparseBasicBlock 模块的 forward 前向传播中看到它是 conv1、conv2、bn、relu 等模块的堆叠，核心就是 conv1 和 conv2，而 conv1、conv2 的实现又来自 conv3x3，conv3x3 实现代码如下所示：</p> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">conv3x3</span><span class="token punctuation">(</span>in_planes<span class="token punctuation">,</span> out_planes<span class="token punctuation">,</span> stride<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> indice_key<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">,</span> bias<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token triple-quoted-string string">"""3x3 convolution with padding"""</span>
+    <span class="token keyword">return</span> spconv<span class="token punctuation">.</span>SubMConv3d<span class="token punctuation">(</span>
+        in_planes<span class="token punctuation">,</span>
+        out_planes<span class="token punctuation">,</span>
+        kernel_size<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span>
+        stride<span class="token operator">=</span>stride<span class="token punctuation">,</span>
+        padding<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span>
+        bias<span class="token operator">=</span>bias<span class="token punctuation">,</span>
+        indice_key<span class="token operator">=</span>indice_key<span class="token punctuation">,</span>
+    <span class="token punctuation">)</span>
+</code></pre> 
+<p>可以看到它最终会调用 spconv 中的 SubMConv3d 这个模块，这个模块其实就是我们前面一直在讲的<strong>稀疏卷积</strong>，值得注意的是在 spconv 中有 SparseConv3d 和 SubMConv3d 两种稀疏卷积形式：</p> 
+<p>一种是 Spatially Sparse Convolution，在 spconv 中为 <strong>SparseConv3D</strong>。就像普通的卷积一样，只要卷积核 kernel 覆盖了一个非零输入点，就会计算出对应的输出。对应论文：<a href="https://pdfs.semanticscholar.org/5125/a16039cabc6320c908a4764f32596e018ad3.pdf" rel="nofollow">SECOND:Sparsely Embedded Convolutional Detection</a></p> 
+<p>另外一种是 Submanifold Sparse Convolution，在 spconv 中为 <strong>SubMConv3D</strong>。只有当卷积核 kernel <strong>中心覆盖</strong>了一个非零输入点时，卷积输出才会被计算。对应论文：<a href="https://arxiv.org/pdf/1711.10275.pdf" rel="nofollow">3D Sematic Segmentation with Submanifold Sparse Convolutional Networks</a></p> 
+<p>两种稀疏卷积的区别如下图所示：</p> 
+<p><img src="https://images2.imgbox.com/4f/d9/mJoX6Lle_o.png" alt="在这里插入图片描述"></p> 
+<p>从图中可以看到输入 Input 上只有 P1 和 P2 位置上是有值的，其它位置全为 0，有两一个卷积核参与计算，输出中 A1 表示是由 P1 计算出来的结果，A2 表示是由 P2 计算出来的结果，A1A2 表示是由 P1 和 P2 共同计算出来的结果</p> 
+<p>可以看到 <strong>SparseConv3D</strong> 的输出中只有一个地方没有值，因为只要卷积核覆盖一个非零输入的就会去计算，而相反 <strong>SubMConv3D</strong> 的输出中仅仅只有两个地方有值，这是因为 <strong>SubMConv3D</strong> 只有当卷积核中心点覆盖到非零输入时才会去计算，那么以上就是这两种稀疏卷积的一个区别了，相对而言还是比较好理解的</p> 
+<h3><a id="2_spconvonnx_286"></a>2. 导出带有spconv网络的onnx需要考虑的事情</h3> 
+<p>在 BEVFusion 部署中，我们需要将 SCN 导出为 ONNX，使用 CUDA、TensorRT 进行加速部署，但值得注意的是我们并不能按照以往的方式进行 onnx 的 eport 导出，原因是 spconv 的节点并不是常规的像 conv、bn、relu 一样，这个节点它在 onnx 中并不存在，需要我们自己创建。</p> 
+<p>我们自己创建好 spconv 节点后导出也依旧存在问题，这是因为 pytorch 转 onnx 的过程中会对网络的 forward 前向传播过程进行 trace 跟踪，从而得到 onnx 相对应的计算节点，但是 spconv 内部处理复杂并且 layer 间的 tensor 的形式比较特殊，导致在 forward 过程中没有办法 trace 到内部的一些计算方法和逻辑，这也就意味着 pytorch 官方实现的 jit trace 已无法满足我们的需求，所以没有办法正常导出。</p> 
+<p>解决方案杜老师在 <a href="https://blog.csdn.net/qq_40672115/article/details/131480952">复杂onnx解决方案（以sparseconv为例）</a> 课程中也提到过，<strong>自己来实现 trace</strong>，利用 python 最核心的特性，直接替换特定函数的实现，以实现挂钩到自己函数中。具体来说对 spconv.conv.SparseConvolution.forward 的实现进行重定位（hook 钩子函数实现），取出 spconv 推理需要的信息，通过 onnx_helper 创建自定义 node 和 graph，实现导出。</p> 
+<p>导出后的 onnx 模型如下图所示：</p> 
+<p><img src="https://images2.imgbox.com/99/00/qgiVvoHN_o.png" alt="在这里插入图片描述"></p> 
+<p>上图中的 SparseConvolution 这个节点是 onnx 中不存在的，这是自己创建的一个 onnx 节点，我们可以看到这个 onnx 节点中包含了非常多的属性，比如 kernel_size、padding、rulebook、stride 等等，我们把这些信息给它导出出去，之后在读取 onnx 的时候再把这些信息给 parse 出来，再做个前向推理，整个过程就完成了</p> 
+<p>NVIDIA-AI-IOT 中开源了 SCN 的 onnx 导出方法，里面使用到了 onnx_helper 中的 make_node、make_tensor、make_graph 等内容，具体导出实现代码在：<a href="https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution/blob/master/libraries/3DSparseConvolution/tool/centerpoint-export/exptool.py">https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution/blob/master/libraries/3DSparseConvolution/tool/centerpoint-export/exptool.py</a></p> 
+<p>下节课我们会详细分析导出 onnx 的代码，大家感兴趣的可以先看一下这部分</p> 
+<h3><a id="_305"></a>总结</h3> 
+<blockquote> 
+ <p>这节课程我们学习了 spconv 的原理，它通过 hash table 将输入输出中不为 0 的点的位置坐标保存下来，并通过 rulebook 记录输入输出和 filter 之间的对应关系，把没有意义的点全部 skip 掉，只保留真正想做计算的点，从而将一个稀疏的卷积计算变成密集的矩阵乘法计算，实现加速。最后我们还简单的介绍了带有 spconv 的 SCN 网络导出 onnx 的难点以及对应的解决方案</p> 
+ <p>OK，以上就是第 2 小节有关 spconv 原理的全部内容了，下节我们将去学习导出带有 spconv 的 SCN 网络的 onnx，敬请期待😄</p> 
+</blockquote> 
+<h3><a id="_311"></a>下载链接</h3> 
+<ul><li><a href="https://pan.baidu.com/s/1QmH51czKVOyVDmD_m_n2CA" rel="nofollow">论文下载链接【提取码：6463】</a></li><li><a href="https://pan.baidu.com/s/1MS_A2-YRvFj1LsL85RuQiQ" rel="nofollow">数据集下载链接【提取码：data】</a></li><li><a href="https://pan.baidu.com/s/1BjaKZh7XuzBehMvvGKnglQ" rel="nofollow">代码和安装包下载链接【提取码：cuda】</a></li></ul> 
+<h3><a id="_317"></a>参考</h3> 
+<ul><li><a href="https://blog.csdn.net/qq_40672115/article/details/131480952">复杂onnx解决方案（以sparseconv为例）</a></li><li><a href="https://pdfs.semanticscholar.org/5125/a16039cabc6320c908a4764f32596e018ad3.pdf" rel="nofollow">SECOND:Sparsely Embedded Convolutional Detection</a></li><li><a href="https://arxiv.org/pdf/1711.10275.pdf" rel="nofollow">3D Sematic Segmentation with Submanifold Sparse Convolutional Networks</a></li><li><a href="https://github.com/tianweiy/CenterPoint/blob/master/det3d/models/backbones/scn.py">https://github.com/tianweiy/CenterPoint/blob/master/det3d/models/backbones/scn.py</a></li><li><a href="https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution/blob/master/libraries/3DSparseConvolution/tool/centerpoint-export/exptool.py">https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution/blob/master/libraries/3DSparseConvolution/tool/centerpoint-export/exptool.py</a></li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/f4c41b603bccecb6974a2237018a62b8/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">四. 基于环视Camera的BEV感知算法-BEVDistill</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/c622304716c24ea007f2fae11d33a538/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Django5&#43;DRF入门教程</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

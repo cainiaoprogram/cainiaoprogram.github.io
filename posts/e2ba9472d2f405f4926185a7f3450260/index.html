@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>图解Redis数据同步（全量 &#43; 增量） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="图解Redis数据同步（全量 &#43; 增量）" />
+<meta property="og:description" content="全量同步和增量同步概述： 全量同步：master将完整内存数据生成RDB，发送RDB到slave。后续命令则记录在repl_baklog，逐个发送给slave。
+增量同步：slave提交自己的offset到master，master获取repl_baklog中从offset之后的命令给slave
+什么时候执行全量同步？ slave节点第一次连接master节点时
+slave节点断开时间太久，repl_baklog中的offset已经被覆盖时
+什么时候执行增量同步？ slave节点断开又恢复，并且在repl_baklog中能找到offset时
+增量同步 rel_baklog：可以理解为是一个数据存储的集合
+offset：偏移量，随着记录在repl_baklog中的数据增多而逐渐增大。slave完成同步时也会记录当前同步的offset。 如果slave的offset小于master的offset，说明slave数据落后于master，需要更新
+replid：当前master节点的唯一标识，在同步前确保该slave节点对应的master节点的同一个
+rel_baklog底层是一个数组，他有一个特点是超出下标范围就会从0下标开始覆写，如果slave对于覆写部分已经进行了读取那还好，如果没有进行读取，那么就不能再在repl_baklog中通过offset来读取新数据，而是将原数据全部删除，再对主节点进行全量同步操作才行 slave做数据同步，必须向master声明自己的replication id 和offset，master才可以判断到底需要同步哪些数据
+全量同步 基本流程： 1.从节点向主节点发送 SYNC 命令请求进行同步。
+该命令请求包含了一个参数，表示从节点的复制偏移量repl_offset以及目标master节点的idreplid。该偏移量指定了从节点需要获取的数据起始点，master节点的id指定了具体同步的master节点
+2.主节点收到 SYNC 请求后，开始执行 BGSAVE 命令生成 RDB 文件，并使用缓冲区记录所有接收到的写命令操作。
+主节点接收到 SYNC 命令请求后，会执行 BGSAVE 命令生成 RDB 文件，并将所有接收到的写命令操作记录在主节点的 Replication Buffer 中。
+Replication Buffer 是 Redis 主节点用来缓存新的写操作的内存区域，它位于主节点的服务器状态结构体 server 中。通常情况下，主节点会将所有的写操作持久化保存在 AOF 日志文件中，但是在进行全量同步时，为了减少网络传输的压力，主节点将新的写操作暂时保存在 Replication Buffer 中。
+3.当 BGSAVE 命令执行完毕并成功生成 RDB 文件后，主节点通过网络将这个 RDB 文件发送给从节点，并将缓冲区中记录的所有写命令也一起发送给从节点。
+当 BGSAVE 命令执行完毕并成功生成 RDB 文件后，主节点将该RDB文件发送给从节点，并将缓冲区中记录的所有写命令也一起发送给从节点。
+在全量同步时，主节点不仅需要将自己保存的数据发送给从节点，还需要记录接下来的写操作。因此，主节点通过网络将 RDB 文件和缓冲区中的所有写命令发送给从节点，以确保从节点可以获取到最新的数据状态。
+4.从节点接收到主节点发送的 RDB 文件和写命令缓冲区后，先加载 RDB 文件，然后再执行缓冲区中的写命令，以达到与主节点相同的数据状态。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/e2ba9472d2f405f4926185a7f3450260/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-06-09T11:12:44+08:00" />
+<meta property="article:modified_time" content="2023-06-09T11:12:44+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">图解Redis数据同步（全量 &#43; 增量）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h2>全量同步和增量同步概述：</h2> 
+<p>      <span style="color:#ff9900;"><strong>  全量同步</strong></span>：master将完整内存数据生成RDB，发送RDB到slave。后续命令则记录在repl_baklog，逐个发送给slave。</p> 
+<p>     <span style="color:#ff9900;"><strong>   增量同步</strong></span>：slave提交自己的offset到master，master获取repl_baklog中从offset之后的命令给slave</p> 
+<h3>什么时候执行全量同步？</h3> 
+<p>        slave节点第一次连接master节点时</p> 
+<p>        slave节点断开时间太久，repl_baklog中的offset已经被覆盖时</p> 
+<h3>什么时候执行增量同步？</h3> 
+<p>        slave节点断开又恢复，并且在repl_baklog中能找到offset时</p> 
+<hr> 
+<h2>增量同步</h2> 
+<p><img alt="" height="711" src="https://images2.imgbox.com/af/76/NnNJB28C_o.png" width="1200"></p> 
+<p><strong><span style="color:#fe2c24;">  rel_baklog：</span></strong>可以理解为是一个数据存储的集合</p> 
+<p><span style="color:#fe2c24;"><strong>  offset：</strong></span>偏移量，随着记录在repl_baklog中的数据增多而逐渐增大。slave完成同步时也会记录当前同步的offset。 如果slave的offset小于master的offset，说明slave数据落后于master，需要更新</p> 
+<p><span style="color:#fe2c24;"><strong>  replid：</strong></span>当前master节点的唯一标识，在同步前确保该slave节点对应的master节点的同一个</p> 
+<blockquote> 
+ <p>        rel_baklog底层是一个数组，他有一个特点是<span style="color:#ff9900;"><strong>超出下标范围就会从0下标开始覆写</strong></span>，如果slave对于覆写部分已经进行了读取那还好，如果没有进行读取，那么就不能再在repl_baklog中通过offset来读取新数据，<strong><span style="color:#0d0016;"><span style="background-color:#38d8f0;">而是将原数据全部删除，再对主节点进行全量同步操作才行 </span></span></strong></p> 
+</blockquote> 
+<p><strong><span style="color:#a2e043;">slave做数据同步，必须向master声明自己的replication id 和offset，master才可以判断到底需要同步哪些数据</span></strong></p> 
+<hr> 
+<h2>全量同步</h2> 
+<p><img alt="" height="962" src="https://images2.imgbox.com/a4/ea/r3mHQDNi_o.png" width="1200"></p> 
+<h3>基本流程： </h3> 
+<p>1.从节点向主节点发送 SYNC 命令请求进行同步。</p> 
+<blockquote> 
+ <p>该命令请求包含了一个参数，表示从节点的复制偏移量<span style="color:#fe2c24;"><strong>repl_offset</strong></span>以及目标master节点的id<span style="color:#fe2c24;"><strong>replid</strong></span>。该偏移量指定了从节点需要获取的数据起始点，master节点的id指定了具体同步的master节点</p> 
+</blockquote> 
+<p>2.主节点收到 SYNC 请求后，开始执行 BGSAVE 命令生成 RDB 文件，并使用缓冲区记录所有接收到的写命令操作。</p> 
+<blockquote> 
+ <p>        主节点接收到 SYNC 命令请求后，会执行 BGSAVE 命令生成 RDB 文件，并将所有接收到的写命令操作记录在主节点的 Replication Buffer 中。</p> 
+ <p>      <strong><span style="color:#ff9900;">  Replication Buffer 是 Redis 主节点用来缓存新的写操作的内存区域</span></strong>，它位于主节点的服务器状态结构体 server 中。通常情况下，主节点会将所有的写操作持久化保存在 AOF 日志文件中，但是在进行全量同步时，为了减少网络传输的压力，主节点将新的写操作暂时保存在 Replication Buffer 中。</p> 
+</blockquote> 
+<p>3.当 BGSAVE 命令执行完毕并成功生成 RDB 文件后，主节点通过网络将这个 RDB 文件发送给从节点，并将缓冲区中记录的所有写命令也一起发送给从节点。</p> 
+<blockquote> 
+ <p>        当 BGSAVE 命令执行完毕并成功生成 RDB 文件后，主节点将<strong><span style="color:#ff9900;">该RDB文件</span></strong>发送给从节点，并将<span style="color:#ff9900;"><strong>缓冲区中记录的所有写命令</strong></span>也一起发送给从节点。</p> 
+ <p>        在全量同步时，主节点不仅需要将自己保存的数据发送给从节点，还需要记录接下来的写操作。因此，<strong><span style="color:#ff9900;">主节点通过网络将 RDB 文件和缓冲区中的所有写命令发送给从节点，以确保从节点可以获取到最新的数据状态。</span></strong></p> 
+</blockquote> 
+<p>4.从节点接收到主节点发送的 RDB 文件和写命令缓冲区后，先加载 RDB 文件，然后再执行缓冲区中的写命令，以达到与主节点相同的数据状态。</p> 
+<blockquote> 
+ <p>        当从节点接收到主节点发送的数据之后，<span style="color:#ff9900;"><strong>首先会进行 RDB 文件的加载</strong></span>。RDB 文件包含了主节点的快照数据，是从节点用于恢复自身数据的重要文件。</p> 
+ <p>        完成 RDB 文件加载后，从节点开始处理主节点发送的写命令缓冲区。<span style="color:#ff9900;"><strong>从节点依次执行这些写命令</strong></span>，更新自身的数据状态，以达到与主节点相同的数据状态。</p> 
+ <p> </p> 
+</blockquote> 
+<hr> 
+<h2>master如何判断slave节点是不是第一次来做数据同步？</h2> 
+<p>       <span style="color:#fe2c24;"> <strong>首先看slave的offset，如果为空就直接全局同步，如果不为空就去判断Replocation id是否一致，不一致就全局同步，一致就根据offset的位置来同步后边新的数据</strong></span></p> 
+<p><span style="color:#fe2c24;"> </span></p> 
+<p> </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/efbd852f2e0f13bc3cc42462a906d348/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">QT 中使用QFile如何识别txt文件的编码格式：utf-8 ANSI</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/40d17e3946001db6289f4815addd3aa5/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">windows python TA-Lib 库 源码安装 Python安装talib库</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>（redis）zmalloc.h/zmalloc.c理解 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="（redis）zmalloc.h/zmalloc.c理解" />
+<meta property="og:description" content="版权最终解释权归Leonjhan所有，要引述麻烦添加下作者博客leonjhan，thanks～
+因为各处都有用到zmalloc这个函数进行内存的分配，所以这里讲下zmalloc的具体内部实现
+作者是这样简介的：zmalloc-total amount of allocated memory version of malloc()
+zmalloc：Redis内存分配策略，作者将不同平台下的内存分配malloc()进行了一个统一，和统计内存占有量，是对以前平台下内存分配函数的一个封装
+/********************************** Part1：zmalloc.h *****************************************/
+为了不让分段阅读吃力，我将整个代码的理解用注释标明出来...
+#ifndef __ZMALLOC__H #define __ZMALLOC__H #define __xstr(s) __str(s) //此处使用#将宏(这里是#紧跟的那个s)“字符串化”；使用##能将左右两边的标签组合在一起，而且两个标签之间不存在空格 #define __str(s) #s //分别判断使用tcmalloc库/jemalloc库/苹果库哪个作为底层的malloc函数调用 #if defined(USED_TCMALLOC) #define ZMALLOC_LIB(&#34;tcmalloc-&#34; __xstr(TC_VERSION_MAJOR) &#34;.&#34; __xstr(TC_VERSION_MINOR)) #include &lt;google/tcmalloc.h&gt; #if (TC_VERSION_MAJOR == 1 &amp;&amp; TC_VERSION_MINOR &gt;=6) || (TC_VERSION_MAJOR &gt; 1) #define HAVE_MALLOC＿SIZE 1 //分别定义出内存占有量的计算方法 #define zmalloc_size(p) tc_malloc_size(p) #else #error &#34;new version of tcmalloc required&#34; #endif #elif defined(USE_JEMALLOC) #define ZMALLOC_LIB(&#34;jemalloc-&#34; __xstr(JEMALLOC_VERSION_MAJOR) &#34;.&#34; __xstr(JEMAOOLC_VERSION_MINOR) &#34;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/8fad12faa7000c9bcf6b7d8770fd6286/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2014-01-12T23:22:41+08:00" />
+<meta property="article:modified_time" content="2014-01-12T23:22:41+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">（redis）zmalloc.h/zmalloc.c理解</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p style="color:rgb(54,46,43); line-height:26px; font-family:Arial; font-size:14px"> 版权最终解释权归Leonjhan所有，要引述麻烦添加下作者博客<a target="_blank" href="http://blog.csdn.net/jinjinstudy/" rel="noopener noreferrer">leonjhan</a>，thanks～<br> </p> 
+<p style="color:rgb(54,46,43); line-height:26px; font-family:Arial; font-size:14px"> 因为各处都有用到zmalloc这个函数进行内存的分配，所以这里讲下zmalloc的具体内部实现</p> 
+<p style="color:rgb(54,46,43); line-height:26px; font-family:Arial; font-size:14px"> 作者是这样简介的：zmalloc-total amount of allocated memory version of malloc()</p> 
+<p style="color:rgb(54,46,43); line-height:26px; font-family:Arial; font-size:14px"> zmalloc：Redis内存分配策略，作者将不同平台下的内存分配malloc()进行了一个统一，和统计内存占有量，是对以前平台下内存分配函数的一个封装</p> 
+<p style="color:rgb(54,46,43); line-height:26px; font-family:Arial"><strong><span style="font-size:14px">/**********************************  Part1：zmalloc.h  *****************************************/</span></strong></p> 
+<p style="color:rgb(54,46,43); line-height:26px; font-family:Arial; font-size:14px"> <span style="font-family:Arial,Helvetica,sans-serif; font-size:12px">为了不让分段阅读吃力，我将整个代码的理解用注释标明出来...</span></p> 
+<p></p> 
+<pre><code class="language-cpp">#ifndef __ZMALLOC__H
+#define __ZMALLOC__H
+#define __xstr(s)  __str(s)
+//此处使用#将宏(这里是#紧跟的那个s)“字符串化”；使用##能将左右两边的标签组合在一起，而且两个标签之间不存在空格
+#define __str(s)  #s    
+//分别判断使用tcmalloc库/jemalloc库/苹果库哪个作为底层的malloc函数调用 
+#if defined(USED_TCMALLOC)
+#define ZMALLOC_LIB("tcmalloc-" __xstr(TC_VERSION_MAJOR) "." __xstr(TC_VERSION_MINOR))
+#include &lt;google/tcmalloc.h&gt;
+#if (TC_VERSION_MAJOR == 1 &amp;&amp; TC_VERSION_MINOR &gt;=6) || (TC_VERSION_MAJOR &gt; 1)
+#define HAVE_MALLOC＿SIZE 1     //分别定义出内存占有量的计算方法
+#define zmalloc_size(p) tc_malloc_size(p)
+#else
+#error "new version of tcmalloc required"
+#endif
+
+#elif defined(USE_JEMALLOC)
+#define ZMALLOC_LIB("jemalloc-" __xstr(JEMALLOC_VERSION_MAJOR) "." __xstr(JEMAOOLC_VERSION_MINOR) "." __xstr(JEMALLOC_VERSION_BUGFIX))
+#include &lt;jemalloc/jemalloc.h&gt;
+#if (JEMALLOC_VERSION_MAJOR == 2 &amp;&amp; JEMALLOC_VERSION_MINOR &gt;= 1) || (JEMALLOC_VERSION_MAJOR &gt; 2)
+#define HAVE_MALLOC_SIZE 1
+#define zmalloc_size(p) je_malloc_usable_size(p)
+#else
+#error "Newer version of jemalloc required"
+#endif
+
+#elif defined(__APPLE__)
+#include &lt;malloc/malloc.h&gt;
+#define HAVE_MALLOC_SIZE 1
+#define zmalloc_size(p) malloc_size(p)
+#endif
+
+#ifndef ZMALLOC_LIB
+#define ZMALLOC_LIB "libc"
+#endif
+
+//定义一些函数的原型
+void *zmalloc(size_t size);
+void zcalloc(size_t size);
+void zrealloc(void *ptr,size_t size);
+void zfree(void *ptr);
+char *zstrdup(const char *s);
+void zmalloc_used_memory(void);
+void zmalloc_enable_thread_safeness(void);
+void zmalloc_set_oom_handler(void(*oom_handler)(size_t));
+float zmalloc_get_fragmentation_ratio(void);
+size_t zmalloc_get_rss(void);
+size_t zmalloc_get_private_dirty(void);
+void zlibc_free(void *ptr);
+
+#ifndef HAVE_MALLOC_SIZE
+size_t zmalloc_size(void *ptr);
+#endif
+
+#endif </code></pre> 
+<p><span style="font-size:14px"><strong>/**********************************  Part2：zmalloc.c  *****************************************/</strong></span></p> 
+<p></p> 
+<pre><code class="language-cpp">#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+
+//将这个函数定义在"zmalloc.h"之前就是为了避免调用jemallor或者是其他库的标准操作器，而且调用原始C语言函数库"libc"中的free()函数
+void zlibc_free(void *ptr)
+{
+	free(ptr);
+}
+
+#include &lt;string.h&gt;
+#include &lt;pthread.h&gt;
+#include "config.h"
+#include "zmalloc.h"
+
+//PREFIX_SIZE用来记录malloc已分配到的内存大小
+//tc_malloc/je_malloc/Mac平台分别采用tc_malloc_size/malloc_size/je_malloc_usable_size（不需要单独开空间计算得到的内存大小，PREFIX_SIZE值置为0）
+//linux和sun平台分别采用sizeof(size_t)=8字节和sizeof(long long)定长字段记录，所以要记录分配空间的大小
+#ifdef HAVE_MALLOC_SIZE
+#define PREFIX_SIZE (0)
+#else
+#if defined(__sun) || defined(__sparc) || defined(__sparc__)
+#define PREFIX_SIZE (sizeof(long long))
+#else
+#define PREFIX_SIZE (sizeof(size_t))
+#endif
+#endif
+
+//当使用tcmalloc库/jemalloc库的时候，显式覆盖malloc/calloc/realloc/free的方法
+#if defined(USE_TCMALLOC)
+#define malloc(size) tc_malloc(size)
+#define calloc(count,size) tc_malloc(count,size)
+#define realloc(ptr,size) tc_realloc(ptr,size)
+#define free(ptr) tc_free(ptr)
+#elif defined(USE_JEMALLOC)
+#define malloc(size) je_malloc(size)
+#define calloc(count,size) je_calloc(count,size)
+#define realloc(ptr,size) je_realloc(ptr,size)
+#define free(prt) je_free(ptr)
+#endif
+
+#ifdef HAVE_ATOMIC
+#define update_zmalloc_stat_add(__n) __sync_add_and_fetch(&amp;used_mempry,(__n))
+#define update_zmalloc_stat_sub(__n) __sync_sub_and_fetch(&amp;used_memory,(__n))
+#else
+#define update_zmalloc_stat_add(__n) do{ \
+	pthread_mutex_lock(&amp;used_memory_mutex); \
+	used_memory += (__n); \
+	pthread_mutex_unlock(&amp;used_memory_mutex); \
+} while(0)   //只执行1次
+#define  update_zmalloc_stat_sub(__n) do{ \
+	//进程中存在多线程的话，需要加锁进行变量的修改
+	pthread_mutex_lock(&amp;used_memory_mutex); \
+	used_memory -= (__n); \
+	pthread_mutex_unlock(&amp;used_memory_mutex); \
+} while(0)
+#endif
+
+//定义在分配和释放内存的时候更新used_memory的值（用到上面内存分配的原子操作add和sub函数）
+//if结构判断语句中返回的是对_n末两位进行截断的结果：sizeof(long)在32位系统下的二进制表现形式为：100
+//if结构成立证明当前分配的内存大小有碎片（即_n值不是内存分配单元的整数倍），所以后面有个+=sizeof(long)...的过程就是为了补齐
+#define  update_zmalloc_stat_alloc(__n) do{ \
+	size_t _n = (__n); \
+	if(_n&amp;(sizeof(long)-1))\
+ 		_n += sizeof(long) -(_n&amp;(sizeof(long)-1)); \
+	if(zmalloc_thread_safe){ \
+		update_zmalloc_stat_add(_n); \
+	}else{ \
+		used_memory += _n; \
+	} \
+	} while(0)
+#define  update_zmalloc_stat_free(__n) do{ \
+	size_t _n = (__n); \
+	if(_n&amp;(sizeof(long)-1)) 
+		_n += sizeof(long) -(_n&amp;(sizeof(long)-1)); \
+	if(zmalloc_thread_safe){ \
+		update_zmalloc_stat_sub(_n); \
+	}else{ \
+		used_memory -= _n; \
+	} \
+	} while(0)
+
+static size_t used_memory = 0;   //定义当前进程使用的内存总量
+static int zmalloc_thread_safe = 0;
+pthread_mutex_t used_memory_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+//异常处理函数
+static void zmalloc_default_oom(size_t size)
+{
+	fprintf(stderr,"zmalloc：Out of memoty trying to allocate %zu bytes\n",size);
+	fflush(stderr);
+	abort();
+}
+
+static void (*zmalloc_oom_handler)(size_t) = zmalloc_default_oom;
+
+void *zmalloc(size_t size){
+	//PREFIX_SIZE代表是否需要存储额外的变量prefix所占的内存字节数：Linux下为sizeof(size_t)=8
+	void *ptr = malloc(size+PREFIX_SIZE);
+	if(!ptr)  zmalloc_oom_handler(size);
+#ifdef HAVE_MALLOC_SIZE    //如果在有size函数能够返回当前内存分配量情况下
+	update_zmalloc_stat_alloc(zmalloc_size(ptr));   //此时PREFIX_SIZE=0，更新used_memory
+	return ptr;
+#else                
+	//在只知道内存分配单元大小，没有size函数来获取当前使用的内存大小情况下（如Linux+sun平台等）
+	*((size_t*)ptr) = size;     //给当前分配空间的起始位置先存储变量size
+	update_zmalloc_stat_alloc(size+PREFIX_SIZE);     //更新used_memory
+	//将分配指针位置向后移动PREFIX_SIZE尺寸，因为先保存size_t size，其占空间为PREFIX_SIZE大小，移动后返回的是能用空间的起始位置
+	return (char*)ptr+PREFIX_SIZE;   
+#endif
+}
+
+void *zcalloc(size_t size)
+{
+	void *ptr = calloc(1,size+PREFIX_SIZE);  //分配1个长度为size+PREFIX_SIZE大小的连续空间
+	
+	if(!ptr) zmalloc_oom_handler(size);
+#ifdef HAVE_MALLOC_SIZE
+	update_zmalloc_stat_alloc(zmalloc_size(ptr));
+	return ptr;
+#else
+	*((size_t*)ptr) = size;
+	update_zmalloc_stat_alloc(size+PREFIX_SIZE);
+	return (char*)ptr+PREFIX_SIZE;
+#endif
+}
+
+//给一个内存块分配一个新的长度的连续空间
+void *zrealloc(void *ptr,size_t size)
+{
+#ifndef HAVE_MALLOC_SIZE
+	void *realptr;
+#endif
+	size_t oldsize;
+	void *newptr;
+#ifdef HAVE_MALLOC_SIZE
+	oldsize = zmalloc_size(ptr);
+	newptr = realloc(ptr,size);
+	if(!newptr) zmalloc_oom_handler(size);
+	
+	update_zmalloc_stat_free(oldsize);
+	update_zmalloc_stat_alloc(zmalloc_size(newptr));
+	return newptr;
+#else
+	//内存块向前移动PREFIX_SIZE字节的位置（存储的是内存分配的size大小值）
+	realptr = (char*)ptr-PREFIX_SIZE;
+	oldsize = *((size_t*)realptr)；
+	newptr = realloc(realptr,size+PREFIX_SIZE);
+	if(!newptr) zmalloc_oom_handler(size);
+
+	//给新的内存块设值数据
+        *((size_t*)newptr) = size;
+	update_zmalloc_stat_free(oldsize);
+	update_zmalloc_stat_alloc(size);      //这里为什么不要加上PREFIX_SIZE？
+	return (char*)newptr+PREFIX_SIZE;
+#endif
+}
+
+//返回当前分配内存块的大小
+#ifndef HAVE_MALLOC_SIZE
+size_t zmalloc_size(void *ptr)
+{
+	void *realptr = (char*)ptr - PREFIX_SIZE;
+	size_t size = *((size_t*)realptr);
+	if(size&amp;(sizeof(long)-1))
+		size += sizeof(long) - (size&amp;(sizeof(long)-1));
+	return size+PREFIX_SIZE;
+}
+#endif
+
+//释放指定的内存空间
+void zfree(void *ptr)
+{
+#ifndef HAVE_MALLOC_SIZE
+	void *realptr;
+	size_t oldsize;
+#endif
+	if(ptr == NULL) return;
+#ifdef HAVE_MALLOC_SIZE
+	update_zmalloc_stat_free(zmalloc_size(ptr));
+	free(ptr);
+#else
+	realptr = (char*)ptr - PREFIX_SIZE;
+	oldsize = *((size_t*)realptr);      //前面这两行是否位置反了？
+	update_zmalloc_stat_free(oldsize+PREFIX_SIZE);
+	free(realptr);
+#endif
+}
+
+//复制一个字符串
+char *zstrdup(const char *s)
+{
+	size_t l = strlen(s)+1;    //memcpy不会遇到‘/0’停止，增加额外的一个字节存储'/0'的内容
+	char *p = zmalloc(l);
+	memcpy(p,s,l);
+	return p;
+}
+//返回当前已经使用的内存大小
+size_t zmalloc_used_memory(void)
+{
+	size_t um;
+	if(zmalloc_thread_safe){
+#ifdef HAVE_ATOMIC
+		um = __sync_add_and_fetch(&amp;used_memory,0);
+#else
+		pthread_mutex_lock(&amp;used_memory_mutex);
+		um = used_memory;
+		pthread_mutex_unlock(&amp;used_memory_mutex);
+#endif
+	}
+	else{
+		um = used_memory;
+	}
+	return um;
+}
+
+void zmalloc_enable_thread_safeness(void)
+{
+	zmalloc_thread_safe = 1;
+}
+
+//设置异常处理的函数
+void zmalloc_set_oom_handler(void(*oom_handler)(size_t))
+{
+	zmalloc_oom_handler = oom_handler;
+}</code></pre> 
+<p><br> </p> 
+<p>下面是获取特定操作系统下的RSS信息：</p> 
+<p><br> </p> 
+<p><br> </p> 
+<p>//如果定义了可以获取进程的状态</p> 
+<p>#if defined(HAV＿PROC_STAT)      </p> 
+<p>#include &lt;unistd.h&gt;</p> 
+<p>#include &lt;sys/types.h&gt;</p> 
+<p>#include &lt;sys/stat.h&gt;</p> 
+<p>#include &lt;fcntl.h&gt;</p> 
+<p><br> </p> 
+<p>size_t zmalloc_get_rss(void)</p> 
+<p></p> 
+<p><br> </p> 
+<p><br> </p> 
+<p><br> </p> 
+<p><br> </p> 
+<p><br> </p> 
+<p><br> </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/8cf531c6a8ae93c9d181250cc52ba229/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">cc2530 串口实验--控制led灯</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/a133e93bb40f6e25df86e0be912060b6/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">source file does not belong to the project being debugged</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

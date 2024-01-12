@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>神操作：教你用Python识别恶意软件 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="神操作：教你用Python识别恶意软件" />
+<meta property="og:description" content="导读：本文将利用静态分析技术揭示这些恶意软件的功能。
+作者：约书亚·萨克斯（Joshua Saxe）、希拉里·桑德斯（Hillary Sanders）
+来源：大数据DT（ID：hzdashuju）
+在本文中，我们将介绍恶意软件静态分析的基础知识。静态分析是对程序文件的反汇编代码、图形图像、可打印字符串和其他磁盘资源进行分析，是一种不需要实际运行程序的逆向工程。虽然静态分析技术有欠缺之处，但是它可以帮助我们理解各种各样的恶意软件。
+通过细致的逆向工程，你将能够更好地理解恶意软件二进制文件在攻击目标后为攻击者提供的好处，以及攻击者可以隐藏并继续攻击受感染计算机的方式。正如你将看到的，本文结合了描述和实例，每个部分都介绍了静态分析技术，然后说明其在实际分析中的应用。
+本文的代码和数据，可以在公众号后台回复恶意软件获取下载方式。你将在数据目录/ch1中找到本文示例中使用的恶意软件示例。为了演示本文讨论的技术，我们在演示中使用ircbot.exe，这是一个互联网中继聊天（Internet Relay Chat，IRC）机器人，也在日常广泛监测中最常见的恶意软件的示例之一。
+严格来说，当连接到IRC服务器时，这个程序被设计常驻在目标计算机上。在ircbot.exe控制目标后，攻击者可以通过IRC控制目标计算机，执行控制指令，例如打开网络摄像头偷偷捕获视频、提取目标的地理位置和桌面的截图，以及从目标机器中提取相关文件等。
+01 微软Windows可移植可执行文件格式
+要进行恶意软件静态分析，你需要了解Windows PE文件格式，该格式描述了如.exe、.dll和.sys等当今Windows程序文件的结构，并定义了它们存储数据的方式。PE文件包含x86指令、图像和文本等数据，以及程序运行所需的元数据。
+PE格式最初的设计是用来进行下面的操作。
+1）告诉Windows如何将程序加载到内存中
+PE格式描述了文件的哪些块应该加载到内存中，以及在哪里加载。它还告诉你，Windows应该在程序代码里的哪个位置开始执行程序，以及哪些动态链接代码库应该加载到内存中。
+2）为运行程序提供在执行过程中可能使用的媒体（或资源）
+这些资源可以包括字符串，如GUI对话框或控制台输出的字符串，以及图像或视频。
+3）提供安全数据，例如数字代码签名
+Windows使用这些安全数据来确保代码出自受信任的来源。
+PE格式通过利用图1-1中所示的一系列结构来完成以上工作。
+▲图1-1 PE文件格式
+如图1-1所示，PE文件格式包括一系列头（header），用来告诉操作系统如何将程序加载到内存中。它还包括一系列节（p）用来包含实际的程序数据。Windows将这些节加载到内存中，使其在内存中的偏移量与它们在磁盘上的显示位置相对应。
+让我们从PE头开始，来更详细地探讨这个文件结构。我们将略过对DOS头的讨论，这是20世纪80年代微软DOS操作系统的遗留产物，仅仅出于兼容性原因而存在。
+1. PE头
+如图1-1底部所示，在DOS头❶的上面是PE头❷，它定义了程序的一般属性，如二进制代码、图像、压缩数据和其他程序属性。它还告诉我们程序是否是针对32位或64位系统而设计的。
+PE头为恶意软件分析师提供了基本但有用的情景信息。例如，头里包括了时间戳字段，这个字段可以给出恶意软件作者编译文件的时间。通常恶意软件作者会使用伪造的值替换这个字段，但是有时恶意软件作者会忘记替换，就会发生这种情况。
+2. 可选头
+可选头❸实际上在今天的PE可执行程序中无处不在，恰恰与其名称的含义相反。它定义了PE文件中程序入口点的位置，该位置指的是程序加载后运行的第一个指令。
+它还定义了Windows在加载PE文件、Windows子系统、目标程序（例如Windows GUI或Windows命令行）时加载到内存中的数据大小，以及有关该程序其他的高级详细信息。由于程序的入口点告诉了逆向工程师该从哪里开始进行逆向工程，这个头信息对逆向工程师来说是非常宝贵的。
+3. 节头
+节（p）头❹描述了PE文件中包含的数据节。PE文件中的一个节是一块数据，它们在操作系统加载程序时将被映射到内存中，或者包含有关如何将程序加载到内存中的指令。
+换句话说，一个节是磁盘上的字节序列，它要么成为内存中一串连续字节的字符串，要么告知操作系统关于加载过程的某些方面。
+节头还告诉Windows应该授予节哪些权限，比如程序在执行时，是否应该可读、可写或可执行。例如，包含x86代码的.text节通常被标记为可读和可执行的，但是不可写的，以防止程序代码在执行过程中意外修改自身。
+图1-1描述了许多节，如.text和.rsrc。执行PE文件时，它们会被映射到内存中。其他如.reloc节的特殊节不会被映射到内存中，我们也将讨论这些节。下面我们来浏览图1-1中显示的节。
+1）.text节
+每个PE程序在其节头中包含了至少一个标记为可执行的x86代码节；这些节几乎总是命名为.text❺。
+2）.idata节
+.idata节❻，也被称为导入节，包含导入地址表（IAT），它列出了动态链接库和它们的函数。IAT是最重要的PE结构之一，在对PE二进制文件进行最初的分析时需要查看它，因为它指出了程序所调用的库，然而这些调用反过来又可能会泄露恶意软件的高级功能。
+3）数据节
+在PE文件结构中的数据节可以包括.rsrc、.data和.rdata等节，它们存储程序使用的鼠标光标图像、按钮图标、音频和其他媒体等。例如，图1-1中的.rsrc节❼包含了程序用于将文本呈现为字符串的可打印字符串。
+.rsrc（资源）节中的信息对恶意软件分析师是非常重要的，因为通过检查PE文件中的可打印字符串、图形图像和其他资产，他们可以获得关于文件功能的重要线索。
+在03节中，你将了解如何使用icoutils工具包（包括icotool和wrestool）从恶意软件二进制文件的资源节中提取图形图像。然后，在04节中，你将学习如何从恶意软件资源节中提取可打印的字符串。
+4）.reloc节
+PE二进制文件的代码并非是与位置独立的，这意味着如果将它从预期的内存位置移动到新的内存位置，它将无法正确执行。.reloc❽在不破坏代码的情况下通过允许移动代码来解决这个问题。
+如果一个PE文件的代码已被移动，它就告诉Windows操作系统将该文件的代码中进行内存地址转换，这样代码仍可以正确运行。这些转换通常涉及在内存地址中添加或减去偏移量。
+02 使用pefile解析PE文件格式
+由Ero Carerra编写和维护的Python模块pefile已经成为解析PE文件的一个行业标准的恶意软件分析库。在本节中，我将向你展示如何使用pefile来解析ircbot.exe。代码清单1-1假设ircbot.exe已位于你当前的工作目录中。
+输入以下命令安装pefile库，以便我们可以在Python中导入它：
+$ pip install pefile 现在，使用代码清单1-1中的命令启动Python，导入pefile模块，然后使用pefile打开并解析PE文件ircbot.exe。
+代码清单1-1 加载pefile模块并解析PE文件（ircbot.exe）
+$ python &gt;&gt;&gt; import pefile &gt;&gt;&gt; pe = pefile." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/d4ff08ec1539e2c4ba4b085a78a4be18/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-04-08T21:15:00+08:00" />
+<meta property="article:modified_time" content="2020-04-08T21:15:00+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">神操作：教你用Python识别恶意软件</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div id="js_content"> 
+ <p><img src="https://images2.imgbox.com/55/43/FfGoA97B_o.png"><br></p> 
+ <p><strong>导读：</strong>本文将利用静态分析技术揭示这些恶意软件的功能。</p> 
+ <p>作者：约书亚·萨克斯（Joshua Saxe）、希拉里·桑德斯（Hillary Sanders）</p> 
+ <p>来源：大数据DT（ID：hzdashuju）</p> 
+ <p style="text-align: center"><img src="https://images2.imgbox.com/4b/74/gxMe5G8F_o.png"></p> 
+ <p style="text-align: justify">在本文中，我们将介绍恶意软件静态分析的基础知识。<strong>静态分析是对程序文件的反汇编代码、图形图像、可打印字符串和其他磁盘资源进行分析，是一种不需要实际运行程序的逆向工程。</strong>虽然静态分析技术有欠缺之处，但是它可以帮助我们理解各种各样的恶意软件。</p> 
+ <p style="text-align: justify">通过细致的逆向工程，你将能够更好地理解恶意软件二进制文件在攻击目标后为攻击者提供的好处，以及攻击者可以隐藏并继续攻击受感染计算机的方式。正如你将看到的，本文结合了描述和实例，每个部分都介绍了静态分析技术，然后说明其在实际分析中的应用。</p> 
+ <p style="text-align: justify">本文的代码和数据，可以在公众号后台回复<strong>恶意软件</strong>获取下载方式。你将在数据目录/ch1中找到本文示例中使用的恶意软件示例。为了演示本文讨论的技术，我们在演示中使用ircbot.exe，这是一个互联网中继聊天（Internet Relay Chat，IRC）机器人，也在日常广泛监测中最常见的恶意软件的示例之一。</p> 
+ <p style="text-align: justify">严格来说，当连接到IRC服务器时，这个程序被设计常驻在目标计算机上。在ircbot.exe控制目标后，攻击者可以通过IRC控制目标计算机，执行控制指令，例如打开网络摄像头偷偷捕获视频、提取目标的地理位置和桌面的截图，以及从目标机器中提取相关文件等。</p> 
+ <p style="text-align: justify"><strong>01 微软Windows可移植可执行文件格式</strong></p> 
+ <p style="text-align: justify">要进行恶意软件静态分析，<strong>你需要了解Windows PE文件格式，该格式描述了如.exe、.dll和.sys等当今Windows程序文件的结构，并定义了它们存储数据的方式。</strong>PE文件包含x86指令、图像和文本等数据，以及程序运行所需的元数据。</p> 
+ <p style="text-align: justify">PE格式最初的设计是用来进行下面的操作。</p> 
+ <p style="text-align: justify"><strong>1）告诉Windows如何将程序加载到内存中</strong></p> 
+ <p style="text-align: justify">PE格式描述了文件的哪些块应该加载到内存中，以及在哪里加载。它还告诉你，Windows应该在程序代码里的哪个位置开始执行程序，以及哪些动态链接代码库应该加载到内存中。</p> 
+ <p style="text-align: justify"><strong>2）为运行程序提供在执行过程中可能使用的媒体（或资源）</strong></p> 
+ <p style="text-align: justify">这些资源可以包括字符串，如GUI对话框或控制台输出的字符串，以及图像或视频。</p> 
+ <p style="text-align: justify"><strong>3）提供安全数据，例如数字代码签名</strong></p> 
+ <p style="text-align: justify">Windows使用这些安全数据来确保代码出自受信任的来源。</p> 
+ <p style="text-align: justify">PE格式通过利用图1-1中所示的一系列结构来完成以上工作。</p> 
+ <p style="text-align: center"><img src="https://images2.imgbox.com/2d/99/z6uMXBY7_o.png"></p> 
+ <p style="text-align: center">▲图1-1 PE文件格式</p> 
+ <p style="text-align: justify">如图1-1所示，PE文件格式包括一系列<strong>头</strong>（header），用来告诉操作系统如何将程序加载到内存中。它还包括一系列<strong>节</strong>（p）用来包含实际的程序数据。Windows将这些节加载到内存中，使其在内存中的偏移量与它们在磁盘上的显示位置相对应。</p> 
+ <p style="text-align: justify">让我们从PE头开始，来更详细地探讨这个文件结构。我们将略过对DOS头的讨论，这是20世纪80年代微软DOS操作系统的遗留产物，仅仅出于兼容性原因而存在。</p> 
+ <p style="text-align: justify"><strong>1. PE头</strong></p> 
+ <p style="text-align: justify">如图1-1底部所示，在DOS头❶的上面是PE头❷，它定义了程序的一般属性，如二进制代码、图像、压缩数据和其他程序属性。它还告诉我们程序是否是针对32位或64位系统而设计的。</p> 
+ <p style="text-align: justify"><strong>PE头为恶意软件分析师提供了基本但有用的情景信息。</strong>例如，头里包括了时间戳字段，这个字段可以给出恶意软件作者编译文件的时间。通常恶意软件作者会使用伪造的值替换这个字段，但是有时恶意软件作者会忘记替换，就会发生这种情况。</p> 
+ <p style="text-align: justify"><strong>2. 可选头</strong></p> 
+ <p style="text-align: justify">可选头❸实际上在今天的PE可执行程序中无处不在，<strong>恰恰与其名称的含义相反。</strong>它定义了PE文件中程序入口点的位置，该位置指的是程序加载后运行的第一个指令。</p> 
+ <p style="text-align: justify">它还定义了Windows在加载PE文件、Windows子系统、目标程序（例如Windows GUI或Windows命令行）时加载到内存中的数据大小，以及有关该程序其他的高级详细信息。由于程序的入口点告诉了逆向工程师该从哪里开始进行逆向工程，这个头信息对逆向工程师来说是非常宝贵的。</p> 
+ <p style="text-align: justify"><strong>3. 节头</strong></p> 
+ <p style="text-align: justify">节（p）头❹描述了PE文件中包含的数据节。PE文件中的一个节是一块数据，它们在操作系统加载程序时将被映射到内存中，或者包含有关如何将程序加载到内存中的指令。</p> 
+ <p style="text-align: justify">换句话说，一个节是磁盘上的字节序列，它要么成为内存中一串连续字节的字符串，要么告知操作系统关于加载过程的某些方面。</p> 
+ <p style="text-align: justify"><strong>节头还告诉Windows应该授予节哪些权限</strong>，比如程序在执行时，是否应该可读、可写或可执行。例如，包含x86代码的.text节通常被标记为可读和可执行的，但是不可写的，以防止程序代码在执行过程中意外修改自身。</p> 
+ <p style="text-align: justify">图1-1描述了许多节，如.text和.rsrc。执行PE文件时，它们会被映射到内存中。其他如.reloc节的特殊节不会被映射到内存中，我们也将讨论这些节。下面我们来浏览图1-1中显示的节。</p> 
+ <p style="text-align: justify"><strong>1）.text节</strong></p> 
+ <p style="text-align: justify">每个PE程序在其节头中包含了至少一个标记为可执行的x86代码节；这些节几乎总是命名为.text❺。</p> 
+ <p style="text-align: justify"><strong>2）.idata节</strong></p> 
+ <p style="text-align: justify">.idata节❻，也被称为导入节，包含导入地址表（IAT），它列出了动态链接库和它们的函数。IAT是最重要的PE结构之一，在对PE二进制文件进行最初的分析时需要查看它，因为它指出了程序所调用的库，然而这些调用反过来又可能会泄露恶意软件的高级功能。</p> 
+ <p style="text-align: justify"><strong>3）数据节</strong></p> 
+ <p style="text-align: justify">在PE文件结构中的数据节可以包括.rsrc、.data和.rdata等节，它们存储程序使用的鼠标光标图像、按钮图标、音频和其他媒体等。例如，图1-1中的.rsrc节❼包含了程序用于将文本呈现为字符串的可打印字符串。</p> 
+ <p style="text-align: justify">.rsrc（资源）节中的信息对恶意软件分析师是非常重要的，因为<strong>通过检查PE文件中的可打印字符串、图形图像和其他资产，他们可以获得关于文件功能的重要线索。</strong></p> 
+ <p style="text-align: justify">在03节中，你将了解如何使用icoutils工具包（包括icotool和wrestool）从恶意软件二进制文件的资源节中提取图形图像。然后，在04节中，你将学习如何从恶意软件资源节中提取可打印的字符串。</p> 
+ <p style="text-align: justify"><strong>4）.reloc节</strong></p> 
+ <p style="text-align: justify">PE二进制文件的代码并非是与位置独立的，这意味着如果将它从预期的内存位置移动到新的内存位置，它将无法正确执行。.reloc❽在不破坏代码的情况下通过允许移动代码来解决这个问题。</p> 
+ <p style="text-align: justify">如果一个PE文件的代码已被移动，它就告诉Windows操作系统将该文件的代码中进行内存地址转换，这样代码仍可以正确运行。这些转换通常涉及在内存地址中添加或减去偏移量。</p> 
+ <p style="text-align: justify"><strong>02 使用pefile解析PE文件格式</strong></p> 
+ <p style="text-align: justify">由Ero Carerra编写和维护的Python模块pefile已经成为解析PE文件的一个行业标准的恶意软件分析库。在本节中，我将向你展示如何使用pefile来解析ircbot.exe。代码清单1-1假设ircbot.exe已位于你当前的工作目录中。</p> 
+ <p style="text-align: justify">输入以下命令安装pefile库，以便我们可以在Python中导入它：</p> 
+ <pre class="has"><code class="language-go">$ pip install pefile
+</code></pre> 
+ <p style="text-align: justify">现在，使用代码清单1-1中的命令启动Python，导入pefile模块，然后使用pefile打开并解析PE文件ircbot.exe。</p> 
+ <ul><li><p style="text-align: justify"><strong>代码清单1-1 加载pefile模块并解析PE文件（ircbot.exe）</strong></p></li></ul> 
+ <pre class="has"><code class="language-go">$ python
+&gt;&gt;&gt; import pefile
+&gt;&gt;&gt; pe = pefile.PE("ircbot.exe")
+</code></pre> 
+ <p style="text-align: justify">我们实例化pefile.PE，它是PE模块实现的核心类。它解析PE文件，以便我们可以查看它们的属性。通过调用PE构造函数，我们加载并解析指定的PE文件，在本例中为ircbot.exe。现在我们已经加载并解析了这个文件，运行代码清单1-2中的代码从ircbot.exe的pe字段中提取信息。</p> 
+ <ul><li><p style="text-align: justify"><strong>代码清单1-2 遍历PE文件的各个节并打印有关它们的信息</strong></p></li></ul> 
+ <pre class="has"><code class="language-go">#基于 Ero Carrera的示例代码(pefile库的作者)
+for p in pe.ps:
+  print(p.Name, hex(p.VirtualAddress),
+    hex(p.Misc_VirtualSize), p.SizeOfRawData)</code></pre> 
+ <p style="text-align: justify">代码清单1-3显示了打印输出的内容。</p> 
+ <ul><li><p style="text-align: justify"><strong>代码清单1-3 使用Python的pefile模块从ircbot.exe中提取节数据</strong></p></li></ul> 
+ <p style="text-align: center"><img src="https://images2.imgbox.com/d9/85/QgdPA5Wp_o.png"></p> 
+ <p style="text-align: justify">如代码清单1-3所示，我们从PE文件五个不同的节中提取了数据：.text、.rdata、.data、.idata和.reloc。输出是以五元组的形式给出，每提取一个PE节对应一个元素。每一行的第一个条目标识PE节。（你可以忽略一系列的\x00空字节，它们只是C语言样式的空字符串终止符。）其余字段告诉我们，一旦将每个节被加载到内存中，它的内存利用率将是多少，以及一旦被加载，它将在内存中的何处被找到。</p> 
+ <p style="text-align: justify">例如，0x1000❶是加载这些节的虚拟内存地址基址，也可以将其视为节的内存地址基址。在虚拟大小（virtual size）字段中的0x32830❷指定了节被加载后所需的内存大小。第三个字段中的207360❸表示该节将在该内存块中所占用的数据量。</p> 
+ <p style="text-align: justify">除了使用pefile解析程序的节之外，我们还可以使用它列出二进制文件将加载的DLL文件，以及它将在这些DLL文件中所请求的函数调用。我们可以通过镜像（dump）PE文件的IAT来实现这一点。代码清单1-4显示了如何使用pefile镜像ircbot.exe的IAT。</p> 
+ <ul><li><p><strong>代码清单1-4 从ircbot.exe中提取导入信息</strong></p></li></ul> 
+ <pre class="has"><code class="language-go">$ python
+pe = pefile.PE("ircbot.exe")
+for entry in pe.DIRECTORY_ENTRY_IMPORT:
+    print entry.dll
+    for function in entry.imports:
+        print '\t', function.name
+</code></pre> 
+ <p style="text-align: justify">代码清单1-4会生成如代码清单1-5所示的输出（为了简洁起见，输出进行了截断）。</p> 
+ <ul><li><p><strong>代码清单1-5 ircbot.exe的IAT表内容，其显示了这个恶意软件使用的库函数</strong></p></li></ul> 
+ <p style="text-align: center"><img src="https://images2.imgbox.com/51/57/xQFMfITo_o.png"></p> 
+ <p style="text-align: justify">如代码清单1-5所示，这个输出对于恶意软件分析很有价值，因为它列出了恶意软件声明和将引用的丰富的函数数组。</p> 
+ <p style="text-align: justify">例如，输出的前几行告诉我们，恶意软件将使用WriteFile❶写入文件，使用CreateFileA❷打开文件，并使用CreateProcessA❸创建新的进程。<strong>虽然这些只是关于恶意软件的基本信息，但它们是了解恶意软件更为详细行为的开始。</strong></p> 
+ <p style="text-align: justify"><strong>03 检查恶意软件的图片</strong></p> 
+ <p style="text-align: justify">要了解恶意软件是如何设计来捉弄攻击目标的，让我们看看在它的.rsrc节中所包含的图标。例如，恶意软件二进制文件常常被设计成伪装的Word文档、游戏安装程序、PDF文件等常用软件的图标来欺骗用户点击它们。</p> 
+ <p style="text-align: justify"><strong>你还可以在恶意软件中找到攻击者自己感兴趣程序中的图像，例如攻击者为远程控制受感染机器而运行的网络攻击工具和程序。</strong></p> 
+ <p style="text-align: justify">回到我们的样本图像分析，你可以在本文的数据目录中找到名为fakepdfmalware.exe的这个恶意软件样本。这个样本使用Adobe Acrobat图标诱骗用户认为它是一个Adobe Acrobat文档，而实际上它是一个恶意的PE可执行文件。</p> 
+ <p style="text-align: justify">在我们使用Linux命令行工具wrestool从二进制文件fakepdfmalware.exe中提取图像之前，我们首先需要创建一个目录来保存我们将提取的图像。代码清单1-6显示了如何完成所有这些操作。</p> 
+ <ul><li><p><strong>代码清单1-6 从恶意软件样本中提取图像的Shell命令</strong></p></li></ul> 
+ <pre class="has"><code class="language-go">$ mkdir images
+$ wrestool -x fakepdfmalware.exe -output=images
+$ icotool -x -o images images/*.ico
+</code></pre> 
+ <p style="text-align: justify">我们首先使用mkdir images创建一个目录来保存提取的图像。接下来，我们使用wrestool从fakepdfmalware.exe中提取图像资源（-x）到/images目录，然后使用icotool提取（-x）并将Adobe中.ico图标格式中的所有资源转换（-o）为.png图形，以便我们可以使用标准的图像浏览工具查看它们。</p> 
+ <p style="text-align: justify">如果你的系统上没有安装wrestool，你可以从这里下载：</p> 
+ <p style="text-align: justify">http://www.nongnu.org/icoutils/</p> 
+ <p style="text-align: justify">一旦你使用wrestool将目标可执行文件中的图像转换为PNG格式，你就可以在你喜欢的图像浏览工具中打开它们，并以各种分辨率查看Adobe Acrobat图标。</p> 
+ <p style="text-align: justify">正如我在这里给出的例子所示，从PE文件中提取图像和图标相对简单，可以快速显示与恶意软件二进制文件相关的有趣且又有用的信息。同样地，我们可以轻松地从恶意软件中提取可打印字符串来获取更多信息，我们接下来会做这项工作。</p> 
+ <p><strong>04 检查恶意软件的字符串</strong><br></p> 
+ <p style="text-align: justify">字符串是程序二进制文件中可打印字符的序列。恶意软件分析师通常依赖恶意样本中的字符串来快速了解其中可能发生的情况。这些字符串通常包含下载网页和文件的HTTP和FTP命令，用于告诉你恶意软件连接到的地址的IP地址和主机名等类似信息。</p> 
+ <p style="text-align: justify">有时，即使用于编写字符串的语言也有可能暗示恶意软件二进制文件的来源国，尽管这可能是伪造的。你甚至可以在一个字符串中找到一些文本，它们用网络用语解释了恶意二进制文件的用途。</p> 
+ <p style="text-align: justify"><strong>字符串还可以显示有关二进制文件的更多技术信息。</strong>例如，你可能会发现有关用于创建二进制文件的编译器、编写二进制文件所使用的编程语言、嵌入式脚本或HTML等信息。</p> 
+ <p style="text-align: justify">虽然恶意软件作者可以对所有这些痕迹进行混淆、加密和压缩等处理，但是即便是高水平的恶意软件作者也经常会暴露并留下一些痕迹，因此在分析恶意软件时，对镜像的字符串进行细致检查显得尤为重要。</p> 
+ <p style="text-align: justify"><strong>1. 使用字符串程序</strong></p> 
+ <p style="text-align: justify">查看文件中所有字符串的标准方法是使用命令行工具strings，按照以下语法进行使用：</p> 
+ <pre class="has"><code class="language-go">$ strings filepath | less
+</code></pre> 
+ <p style="text-align: justify">该命令将文件中的所有字符串逐行打印到终端上。在末尾添加 | less可以防止字符串在终端上跨屏显示。默认情况下，strings命令查找所有最小长度为4字节的可打印字符串，但是你可以设置不同的最小长度并更改“命令手册”中所列各种其他参数。</p> 
+ <p style="text-align: justify">我建议只使用默认的最小字符串长度4，但是你可以使用-n选项更改最小字符串长度。例如，“string -n 10 filepath”只提取最小长度为10字节的字符串。</p> 
+ <p style="text-align: justify"><strong>2. 分析镜像字符串</strong></p> 
+ <p style="text-align: justify">现在我们镜像了一个恶意软件程序的可打印字符串，但是挑战在于要理解这些字符串的含义。例如，假设我们将ircbot.exe中的字符串镜像到ircbotstring.txt文件中，这在本文前面的内容中，我们使用pefile库已经进行了探讨，如下所示：</p> 
+ <pre class="has"><code class="language-go">$ strings ircbot.exe &gt; ircbotstring.txt
+</code></pre> 
+ <p style="text-align: justify">ircbotstring.txt的内容包含数千行文本，但其中一些行应该突出显示出来。例如，代码清单1-7显示了从字符串镜像中提取出来的一串以单词DOWNLOAD开头的行。</p> 
+ <ul><li><p><strong>代码清单1-7 显示恶意软件可以将攻击者指定的文件下载到目标计算机的字符串输出</strong></p></li></ul> 
+ <p style="text-align: center"><img src="https://images2.imgbox.com/dd/e3/3XNGlugx_o.png"></p> 
+ <p style="text-align: justify">这些行表示ircbot.exe将尝试把攻击者指定的文件下载到目标计算机上。</p> 
+ <p style="text-align: justify">我们来尝试分析另一个。代码清单1-8所示的字符串镜像表明ircbot.exe可以起到Web服务器的作用，在目标机器上侦听来自攻击者的连接。</p> 
+ <ul><li><p><strong>代码清单1-8 显示恶意软件有一个攻击者可以连接的HTTP服务器的字符串输出</strong></p></li></ul> 
+ <p style="text-align: center"><img src="https://images2.imgbox.com/31/79/Sevvzdh4_o.png"></p> 
+ <p style="text-align: justify">代码清单1-8显示了ircbot.exe用于实现HTTP服务器的各种HTTP样板程序。此HTTP服务器可能允许攻击者通过HTTP连接到目标计算机以发出命令，例如获取受害者桌面的屏幕截图并将其回传给攻击者的命令。</p> 
+ <p style="text-align: justify">我们在整个代码清单中看到了HTTP功能的证据。例如，从Internet资源请求数据的GET方法❶。HTTP/1.0 200 OK❷这一行是一个返回状态代码200的HTTP字符串，表明HTTP网络事务都运行良好，而Server:myBot❸表明HTTP服务器的名称是myBot，这是ircbot.exe附加的一个内置HTTP服务器。</p> 
+ <p style="text-align: justify">所有这些信息都有助于理解和阻止特定的恶意软件样本或恶意活动。例如，知道恶意软件样本有一个HTTP服务器，当你连接到它时，它会输出特定的字符串，这样你就可以借此扫描你的网络来识别受感染的主机。</p> 
+ <p style="text-align: justify"><strong>05 小结</strong></p> 
+ <p style="text-align: justify">在本文中，你大致对静态恶意软件分析有了一定的认识，其中包括在不实际运行的情况下检查恶意软件程序。</p> 
+ <p style="text-align: justify">你了解了定义Windows操作系统.exe和.dll文件的PE文件格式，还了解了如何使用Python库pefile解析实际场景中的恶意软件ircbot.exe二进制文件。</p> 
+ <p style="text-align: justify">你还使用图像分析和字符串分析等静态分析技术，从恶意软件样本中提取更多的信息。</p> 
+ <p><strong>关于作者：约书亚·萨克斯</strong>（Joshua Saxe）是专业安全企业Sophos的首席数据科学家，他在Sophos公司负责领导一个安全数据科学研究团队。他还是Sophos公司基于神经网络的恶意软件检测器的主要发明者，它可以保护数以千万计的Sophos客户防范恶意软件。</p> 
+ <p><strong>希拉里·桑德斯</strong>（Hillary Sanders）是Sophos公司的高级软件工程师和数据科学家，她在为Sophos公司发明和产品化神经网络、机器学习和恶意软件相似性分析安全技术方面发挥了关键作用。她曾在加州大学伯克利分校学习统计学。</p> 
+ <p>本文摘编自《基于数据科学的恶意软件分析》，经出版方授权发布。</p> 
+ <p style="text-align: center">延伸阅读《基于数据科学的恶意软件分析》<br></p> 
+ <p style="text-align: center">点击上方链接了解及购买</p> 
+ <p style="text-align: center">转载请联系微信：DoctorData</p> 
+ <p><strong>推荐语：</strong>本书侧重在将数据科学应用于恶意软件，旨在更全面地展示如何将数据科学技术应用于解决重大的网络安全问题。通过了解恶意软件的数据科学，你将能够更好地将数据科学应用到其他网络安全领域，比如网络攻击、钓鱼邮件或可疑用户行为等检测工作。</p> 
+ <p style="text-align: center"><img src="https://images2.imgbox.com/09/6c/8qmiVg7u_o.png" title="音符"></p> 
+ <p style="text-align: center"><strong>有话要说<strong>????</strong></strong></p> 
+ <p style="text-align: center"><strong>Q: <strong>恶意软件还有哪些特征</strong>？</strong></p> 
+ <p style="text-align: center">欢迎留言与大家分享</p> 
+ <p style="text-align: center"><strong>猜你想看<strong><strong>????</strong></strong></strong></p> 
+ <ul><li><p><a href="http://mp.weixin.qq.com/s?__biz=MzI5OTk5OTM2Mw%3D%3D&amp;chksm=ec8c83d0dbfb0ac62a63a6903f4b51219dee2050f5b8778d7fd3245d45e4057088a3ec94e623&amp;idx=2&amp;mid=2247502396&amp;scene=21&amp;sn=8efb5181d80ea2c669ee015f38817f4d#wechat_redirect" rel="nofollow">用户画像标签体系包括哪些维度？有哪些应用场景？（附完整导图）</a><br></p></li><li><p><a href="http://mp.weixin.qq.com/s?__biz=MzI5OTk5OTM2Mw%3D%3D&amp;chksm=ec8c83c8dbfb0adebd69e65266fee33625dac1f27c6f998f72b50ef2f613dad607fe5e777a09&amp;idx=2&amp;mid=2247502372&amp;scene=21&amp;sn=cbdd652f4417a9657c2656c4503b7a13#wechat_redirect" rel="nofollow">创建字节跳动之前，张一鸣读过哪些硬核技术书？</a><br></p></li><li><p><a href="http://mp.weixin.qq.com/s?__biz=MzI5OTk5OTM2Mw%3D%3D&amp;chksm=ec8c8040dbfb0956b2d2d2ecbc22261a0b8761b09c3060fb0be2d7a3464a0ee09056a830681b&amp;idx=2&amp;mid=2247502252&amp;scene=21&amp;sn=2eabaee6fba3fe926afd64382d6dc725#wechat_redirect" rel="nofollow">手把手教你做用户画像：3种标签类型、8大系统模块</a><br></p></li><li><p><a href="http://mp.weixin.qq.com/s?__biz=MzI5OTk5OTM2Mw%3D%3D&amp;chksm=ec8c8074dbfb09627c77e9e047a7a7286bb0b442a0a204ab147b2b5c5c7970af25390d97fcbf&amp;idx=2&amp;mid=2247502232&amp;scene=21&amp;sn=b4c66cc6e0ae494974c26f7f6247097d#wechat_redirect" rel="nofollow">怎样成为一名真正的数据科学家？这10本书就是答案</a></p></li></ul> 
+ <p><strong>更多精彩????</strong></p> 
+ <p style="text-align: center">在公众号对话框输入以下<strong>关键词</strong></p> 
+ <p style="text-align: center">查看更多优质内容！</p> 
+ <p><strong>PPT</strong> | <strong>读书</strong> | <strong>书单</strong> | <strong>硬核</strong> | <strong>干货</strong><strong><strong> </strong></strong></p> 
+ <p><strong>大数据</strong> | <strong>揭秘</strong> | <strong>Python</strong> | <strong>可视化</strong></p> 
+ <p><strong>AI</strong> | <strong>人工智能</strong> | <strong>5G</strong> | <strong>中台</strong></p> 
+ <p><strong>机器学习</strong> | <strong>深度学习</strong> | <strong>神经网络</strong></p> 
+ <p><strong>合伙人</strong><strong> </strong>| <strong>1024</strong> | <strong>大神</strong> | <strong>数学</strong></p> 
+ <p style="text-align: center">据统计，99%的大咖都完成了这个神操作</p> 
+ <p style="text-align: center"><strong>????</strong></p> 
+ <p style="text-align: center"><img src="https://images2.imgbox.com/9d/f0/QPChflcV_o.png"></p> 
+ <p style="text-align: center"><img src="https://images2.imgbox.com/44/6f/UteCc1cv_o.png"></p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/2594389508fce95dacdbfb0976fdc767/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">OBS-25版本支持srt推流</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/6f23740f098fdcdbbeb70c0c83a2794a/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Pytorch 报错：RuntimeError: invalid argument 0: Tensors must have same number of dimensions: got 2 and</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

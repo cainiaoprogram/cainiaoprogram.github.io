@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>kvm虚拟机vcpu资源绑定 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="kvm虚拟机vcpu资源绑定" />
+<meta property="og:description" content="kvm虚拟出来的虚拟机（vm）是运行在单独的一个逻辑cpu还是可以分别在各个cpu之间运行？虚拟机cpu（vcpu）是什么概念？物理机（host）怎么看待kvm和vcpu? 为了搞懂这个概念我们还是要回到命令行中看。举例说明：
+我这里有一个虚拟机叫core8，它含有8个虚拟cpu它的进程编号是20736。就是说core8在host看来就是一个进程而已，这个集成的编号是20736.那么现在提出一个问题，这个core8的8个vcpu是怎么个情况呢？在哪里运行呢？这时还是得借助命令行。我们在host里使用ps指令，但是不能单纯用ps，还要借助于参数： ps -eL （e的意思是打印所有进程，L的意思是连县城也不放过）。我这里只显示一下和我们的20736进程相关的信息：
+你会看到和20736相关的有九行，那么这九行是什么呢？首先第一列都是20736，第二列里只有第一行是20736，后面的都不是。那么我们这时就应该明白了，对于host来说，kvm虚拟机是一个进程（20736），虚拟机的vcpu都是这个进程衍生出来的线程。这就是为什么除了20736还有另外八行的原因。
+那么我们接着询问，这八个线程是跑在同一个逻辑cpu里吗？为了回答这个问题，我们接着做实验：
+还是借助于ps指令 ：ps -eLo ruser,pid,ppid,lwp,psr| awk ‘{if($5==1) print $0}’。解释为：ps命令显示当前系统的进程信息的状态，它的“-e”参数用于显示所有的进程，“-L”参 数用于将线程（LWP，light-weight process）也显示出来，“-o”参数表示以用户自定义的格式输出（其中“psr”这列表示当前分配给进程运行的处理器编号，“lwp”列表示线程的 ID，“ruser”表示运行进程的用户，“pid”表示进程的ID，“ppid”表示父进程的ID，）。结合ps和 awk工具的使用，是为了分别打印出来运行在不同的逻辑cpu上的进程线程情况。上面的指令就是打印出1号（从0开始编号）cpu的进行线程情况，我们这里只列出和我们相关的：
+这时看到，20736号进程衍生出来的线程只有一部分运行在逻辑cpu1上，其它的线程在其它的cpu上了。
+这时就大概明白了，不同的vcpu只是不同的线程，而不同的线程是跑在不同的cpu上的。
+Qemu/kvm为客户机提供一套完整的硬件系统环境，在客户机看来其所拥有的cpu即是vcpu（virtual CPU）。在KVM环境中，每个客户机都是一个标准的Linux进程（qemu进程），而每一个vCPU在宿主机中是Qemu进程派生的一个普通线程。
+KVM中的一个客户机作为一个用户空间进程（qemu-kvm）运行的，它和其他普通的用户进程一样由内核来调度使其运行在物理cpu上，不过它由KVM模块控制。多个客户机就是宿主机中的多个QEMU进程，而一个客户机的多个vCPU就是一个QEMU进程中的多个线程。在客户机系统中，同样分别运行着客户机的内核和客户机的用户空间应用程序。
+疑问：
+KVM环境下的smp的架构是如何处理时限的，也就是cores * 2，socket * 2 ，threads * 2与 cores * 1，socket * 8，thread * 1 有什么本质的区别？
+因为为虚拟机提供计算的vcpu在宿主机上实际为一个线程，线程上并不会对cores、sockets或者threads做明确区分，也就是整体设置2*2*2 和 1*8*1是没区别的。
+不过在虚拟机内部，可能会有系统倾向于（服务器的设别程度）多物理插槽，或者多物理核心。（之前遇到的win2k8（非Datacenter）的情况就是，无法识别超过8个的vcpu，但是设置成2*6*1 即可实现12个vcpu的服务器）
+进程的处理器亲和性和VCPU绑定
+什么是进程亲和性：简单的一句话就是我这个Linux进程到底可以在哪几个cpu上做负载均衡。
+KVM虚拟机是一个普通的linux进程，vcpu是一个线程，我们可以在宿主机上将vcpu线程对应的tid绑定到指定的cpu上。
+应用场景 用户希望把虚拟机的VCPU绑定在特定物理CPU上，VCPU只在绑定的物理CPU上调度，达到隔离VCPU并提升虚拟机性能的目的。如果没有作VCPU绑定，则虚拟机的VCPU可以在所有物理CPU上调度。
+绑定vcpu到指定的cpu上，的确会提高性能，因为在vcpu的线程在物理cpu做负载均衡的时候，会有一些必要的数据结构初始化（vmlaunch）相对于VM-Entry来说是比较奢侈的，加上cache的命中，性能必然会有所提高，但破坏了负载均衡。当绑定在同一cpu上的两个vcpu同时高负载的时候，性能就会大打折扣，而其他的cpu也没有得到充分的利用。
+在KVM环境中，一般并不推荐手动设置qemu进程的处理器亲和性来绑定vCPU，但是，在非常了解系统硬件架构的基础上，根据实际应用的需求，可以将其绑定到特定的CPU上，从而提高客户机中的CPU执行效率或实现CPU资源独享的隔离性。
+为了实现这个功能，你首先得会 taskset命令，直观上来说，taskset就是设置任务，也就是制定任务运行的情况，是一个很好用的工具。
+taskset -p [mask] pid
+taskset绑定进程到某个CPU是很方便的： #taskset -pc 0,1 1249 这会绑定1249进程到0号跟1号cpu上。 #cat /proc/1249/status Cpus_allowed: 3 Cpus_allowed_list: 0-1 重新绑定下： #taskset -pc 1 1249 #cat /proc/1249/status Cpus_allowed: 2 Cpus_allowed_list: 1 注意这里的Cpu_allowed用的是 二进制掩码，3的二进制是11，2的二进制是10。前一个表示可在两个CPU上运行，第二个表示仅在第二个CPU上运行。 那么我们这里就可以使用taskset了，只需把这九个线程都绑定在同一个cpu上即可。假设我们把这个虚拟机绑定到1号cpu上：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/28d82c012d95f0a330f22d6558933fec/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2015-04-30T16:40:19+08:00" />
+<meta property="article:modified_time" content="2015-04-30T16:40:19+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">kvm虚拟机vcpu资源绑定</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p style="text-align:justify"><span style="color:rgb(51,51,51); font-family:Arial; line-height:26px; font-size:14px; white-space:pre"><span style="white-space:pre"></span>kvm虚拟出来的虚拟机（vm）是运行在单独的一个逻辑cpu还是可以分别在各个cpu之间运行？虚拟机cpu（vcpu）是什么概念？物理机（host）怎么看待kvm和vcpu? 为了搞懂这个概念我们还是要回到命令行中看。举例说明：</span></p> 
+<p style="text-align:justify"><span style="white-space:pre"><span style="font-size:14px"></span></span></p> 
+<p style="text-align:justify; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-size:14px"><span style="white-space:pre"></span><span style="white-space:pre"></span>我这里有一个虚拟机叫core8，它含有8个虚拟cpu它的进程编号是20736。就是说core8在host看来就是一个进程而已，这个集成的编号是20736.那么现在提出一个问题，这个core8的8个vcpu是怎么个情况呢？在哪里运行呢？这时还是得借助命令行。我们在host里使用ps指令，但是不能单纯用ps，还要借助于参数： ps -eL （e的意思是打印所有进程，L的意思是连县城也不放过）。我这里只显示一下和我们的20736进程相关的信息：</span></p> 
+<p style="text-align:justify; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-size:14px"><img src="https://images2.imgbox.com/6f/d5/hyv3OafX_o.jpg" alt="" style="max-width:100%; border:none"><br> </span></p> 
+<p style="text-align:justify; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-size:14px"><span style="white-space:pre"></span>你会看到和20736相关的有九行，那么这九行是什么呢？首先第一列都是20736，第二列里只有第一行是20736，后面的都不是。那么我们这时就应该明白了，对于host来说，kvm虚拟机是一个进程（20736），虚拟机的vcpu都是这个进程衍生出来的线程。这就是为什么除了20736还有另外八行的原因。</span></p> 
+<p style="text-align:justify; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-size:14px"><span style="white-space:pre"></span><span style="white-space:pre"></span>那么我们接着询问，这八个线程是跑在同一个逻辑cpu里吗？为了回答这个问题，我们接着做实验：</span></p> 
+<p style="text-align:justify; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-size:14px"><span style="white-space:pre"></span><span style="white-space:pre"></span>还是借助于ps指令 ：ps -eLo ruser,pid,ppid,lwp,psr| awk ‘{if($5==1) print $0}’。解释为：ps命令显示当前系统的进程信息的状态，它的“-e”参数用于显示所有的进程，“-L”参 数用于将线程（LWP，light-weight process）也显示出来，“-o”参数表示以用户自定义的格式输出（其中“psr”这列表示当前分配给进程运行的处理器编号，“lwp”列表示线程的 ID，“ruser”表示运行进程的用户，“pid”表示进程的ID，“ppid”表示父进程的ID，）。结合ps和 awk工具的使用，是为了分别打印出来运行在不同的逻辑cpu上的进程线程情况。上面的指令就是打印出1号（从0开始编号）cpu的进行线程情况，我们这里只列出和我们相关的：</span></p> 
+<p style="text-align:justify; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-size:14px"><img src="https://images2.imgbox.com/c2/40/GZgeCU5u_o.jpg" alt="" style="max-width:100%; border:none"><br> </span></p> 
+<p style="text-align:justify; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-size:14px"><span style="white-space:pre"></span><span style="white-space:pre"></span>这时看到，20736号进程衍生出来的线程只有一部分运行在逻辑cpu1上，其它的线程在其它的cpu上了。</span></p> 
+<p style="text-align:justify; font-family:Arial; line-height:26px"><span style="font-size:14px"><span style="color:#333333"><span style="white-space:pre"></span></span><span style="color:rgb(51,51,51); white-space:pre"></span><span style="color:#ff0000">这时就大概明白了，不同的vcpu只是不同的线程，而不同的线程是跑在不同的cpu上的。</span></span></p> 
+<p style="text-align:justify"></p> 
+<p style="text-align:justify"><span style="font-family:Verdana,Arial,Helvetica,sans-serif; line-height:21.6000003814697px; white-space:pre"><span style="font-size:14px">Qemu/kvm为客户机提供一套完整的硬件系统环境，在客户机看来其所拥有的cpu即是vcpu（virtual CPU）。在KVM环境中，<span style="color:#ff0000">每个客户机都是一个标准的Linux进程</span>（qemu进程），而<span style="color:#ff0000">每一个vCPU在宿主机中是Qemu进程派生的一个普通线程。</span></span></span></p> 
+<p style="text-align:justify"><span style="font-family:Verdana,Arial,Helvetica,sans-serif; font-size:14px"><span style="line-height:21.6000003814697px; white-space:pre"><span style="color:#ff0000"></span></span></span><span style="font-size:14px; line-height:1.5; font-family:Verdana,Arial,Helvetica,sans-serif; white-space:pre">KVM中的一个客户机作为一个用户空间进程（qemu-kvm）运行的，它和其他普通的用户进程一样由内核来调度使其运行在物理cpu上，不过它由KVM模块控制。</span><span style="font-size:14px; font-family:Verdana,Arial,Helvetica,sans-serif; line-height:21.6000003814697px; white-space:pre">多个客户机就是宿主机中的多个QEMU进程，而一个客户机的多个vCPU就是一个QEMU进程中的多个线程。</span><span style="font-size:14px; font-family:Verdana,Arial,Helvetica,sans-serif; line-height:21.6000003814697px; white-space:pre">在客户机系统中，同样分别运行着客户机的内核和客户机的用户空间应用程序。</span><span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="line-height:21.6000003814697px; white-space:pre"></span></span></p> 
+<p style="text-align:justify; margin:10px auto; padding-top:0px; padding-bottom:0px; font-size:14px; font-family:Verdana,Arial,Helvetica,sans-serif; line-height:21.6000003814697px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif">疑问：</span></p> 
+<p style="text-align:justify; margin:10px auto; padding-top:0px; padding-bottom:0px; font-size:14px; font-family:Verdana,Arial,Helvetica,sans-serif; line-height:21.6000003814697px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif">　　KVM环境下的smp的架构是如何处理时限的，也就是cores * 2，socket * 2 ，threads * 2与 cores * 1，socket * 8，thread * 1  有什么本质的区别？</span></p> 
+<p style="text-align:justify; margin:10px auto; padding-top:0px; padding-bottom:0px; font-size:14px; font-family:Verdana,Arial,Helvetica,sans-serif; line-height:21.6000003814697px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif">　　因为为虚拟机提供计算的vcpu在宿主机上实际为一个线程，线程上并不会对cores、sockets或者threads做明确区分，也就是整体设置2*2*2 和 1*8*1是没区别的。</span></p> 
+<p style="text-align:justify; margin:10px auto; padding-top:0px; padding-bottom:0px; font-size:14px; font-family:Verdana,Arial,Helvetica,sans-serif; line-height:21.6000003814697px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="margin:0px; padding:0px">　　不过在虚拟机内部，可能会有系统倾向于（服务器的设别程度）多物理插槽，或者多物理核心。（之前遇到的win2k8（非Datacenter）的情况就是，无法识别超过8个的vcpu，但是设置成2*6*1 即可实现12个vcpu的服务器</span>）</span></p> 
+<p style="text-align:justify; margin:10px auto; padding-top:0px; padding-bottom:0px; font-size:14px; font-family:Verdana,Arial,Helvetica,sans-serif; line-height:21.6000003814697px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><br> </span></p> 
+<p style="text-align:justify; margin:10px auto; padding-top:0px; padding-bottom:0px; font-family:Verdana,Arial,Helvetica,sans-serif; line-height:21.6000003814697px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="font-size:18px"><strong>进程的处理器亲和性和VCPU绑定</strong></span></span></p> 
+<p style="margin:10px auto; padding-top:0px; padding-bottom:0px; font-size:14px; font-family:Verdana,Arial,Helvetica,sans-serif; line-height:21.6000003814697px"> </p> 
+<p style="margin:10px auto; padding-top:0px; padding-bottom:0px; font-family:Verdana,Arial,Helvetica,sans-serif; line-height:21.6000003814697px"> </p> 
+<p style="text-align:justify; margin:10px auto; padding-top:0px; padding-bottom:0px; font-family:Verdana,Arial,Helvetica,sans-serif; line-height:21.6000003814697px; white-space:pre"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif">什么是<span style="color:rgb(255,0,0)">进程亲和性</span>：简单的一句话就是我这个Linux进程到底可以在哪几个cpu上做负载均衡。</span></p> 
+<p style="text-align:justify; margin:10px auto; padding-top:0px; padding-bottom:0px; font-family:Verdana,Arial,Helvetica,sans-serif; line-height:21.6000003814697px; white-space:pre"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif">　　KVM虚拟机是一个普通的linux进程，vcpu是一个线程，我们可以在宿主机上将vcpu线程对应的tid绑定到指定的cpu上。</span></p> 
+<div style="text-align:justify"> 
+ <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="line-height:21.6000003814697px">应用场景 </span></span> 
+</div> 
+<p style="text-align:justify"></p> 
+<p style="text-align:justify; margin:10px auto; padding-top:0px; padding-bottom:0px; font-family:Verdana,Arial,Helvetica,sans-serif; line-height:21.6000003814697px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="white-space:pre"></span>用户希望把虚拟机的VCPU绑定在特定物理CPU上，VCPU只在绑定的物理CPU上调度，达到隔离VCPU并提升虚拟机性能的目的。如果没有作VCPU绑定，则虚拟机的VCPU可以在所有物理CPU上调度。</span></p> 
+<p style="margin:10px auto; padding-top:0px; padding-bottom:0px; font-family:Verdana,Arial,Helvetica,sans-serif; line-height:21.6000003814697px"> </p> 
+<p style="text-align:justify; margin:10px auto; padding-top:0px; padding-bottom:0px; font-family:Verdana,Arial,Helvetica,sans-serif; font-size:14px; line-height:21.6000003814697px; white-space:pre"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif">绑定vcpu到指定的cpu上，的确会提高性能，因为在vcpu的线程在物理cpu做负载均衡的时候，会有一些必要的数据结构初始化（vmlaunch）相对于VM-Entry来说是比较奢侈的，加上cache的命中，性能必然会有所提高，但破坏了负载均衡。当绑定在同一cpu上的两个vcpu同时高负载的时候，性能就会大打折扣，而其他的cpu也没有得到充分的利用。</span></p> 
+<p style="text-align:justify; margin:10px auto; padding-top:0px; padding-bottom:0px; font-family:Verdana,Arial,Helvetica,sans-serif; font-size:14px; line-height:21.6000003814697px; white-space:pre"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif">　　在KVM环境中，一般并不推荐手动设置qemu进程的处理器亲和性来绑定vCPU，但是，在非常了解系统硬件架构的基础上，根据实际应用的需求，可以将其绑定到特定的CPU上，从而提高客户机中的CPU执行效率或实现CPU资源独享的隔离性。</span></p> 
+<p style="text-align:justify"></p> 
+<p style="margin:10px auto; padding-top:0px; padding-bottom:0px; font-family:Verdana,Arial,Helvetica,sans-serif; line-height:21.6000003814697px"> </p> 
+<p style="text-align:justify; white-space:pre; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif">为了实现这个功能，你首先得会 taskset命令，直观上来说，taskset就是设置任务，也就是制定任务运行的情况，是一个很好用的工具。</span></p> 
+<p style="text-align:justify; white-space:pre; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="background-color:rgb(255,255,102)"><span style="line-height:21.6000003814697px">　</span><span style="line-height:21.6000003814697px; margin:0px; padding:0px"><u>taskset -p [mask] pid</u></span></span></span></p> 
+<p style="white-space:pre; font-family:Arial; line-height:26px"></p> 
+<div style="text-align:justify"> 
+ <span style="color:rgb(51,51,51); font-family:Verdana,Arial,Helvetica,sans-serif">taskset绑定进程到某个CPU是很方便的：</span> 
+</div> 
+<span style="font-family:Verdana,Arial,Helvetica,sans-serif"></span> 
+<div style="text-align:justify"> 
+ <span style="color:rgb(51,51,51)">#taskset -pc 0,1 1249</span> 
+</div> 
+<span style="color:rgb(51,51,51)"></span> 
+<div style="text-align:justify">
+  这会绑定1249进程到0号跟1号cpu上。 
+</div> 
+<span style="color:#333333"></span> 
+<div style="text-align:justify">
+  #cat /proc/1249/status 
+</div> 
+<span style="color:#333333"></span> 
+<div style="text-align:justify">
+  Cpus_allowed: 3 
+</div> 
+<span style="color:#333333"></span> 
+<div style="text-align:justify">
+  Cpus_allowed_list: 0-1 
+</div> 
+<span style="color:#333333"></span> 
+<div style="text-align:justify">
+  重新绑定下： 
+</div> 
+<span style="color:#333333"></span> 
+<div style="text-align:justify">
+  #taskset -pc 1 1249 
+</div> 
+<span style="color:#333333"></span> 
+<div style="text-align:justify">
+  #cat /proc/1249/status 
+</div> 
+<span style="color:#333333"></span> 
+<div style="text-align:justify">
+  Cpus_allowed: 2 
+</div> 
+<span style="color:#333333"></span> 
+<div style="text-align:justify">
+  Cpus_allowed_list: 1 
+</div> 
+<span style="color:#333333"></span> 
+<div style="text-align:justify">
+  注意这里的Cpu_allowed用的是 
+ <span style="color:rgb(255,0,0)">二进制掩码</span>，3的二进制是11，2的二进制是10。前一个表示可在两个CPU上运行，第二个表示仅在第二个CPU上运行。 
+</div> 
+<p></p> 
+<p style="text-align:justify; white-space:pre; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif">那么我们这里就可以使用taskset了，只需把这九个线程都绑定在同一个cpu上即可。假设我们把这个虚拟机绑定到1号cpu上：</span></p> 
+<p style="text-align:justify; white-space:pre; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif">taskset -p 2 20736</span></p> 
+<p style="text-align:justify; white-space:pre; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif">taskset -p 20740</span></p> 
+<p style="text-align:justify; white-space:pre; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif">taskset -p 20741</span></p> 
+<p style="text-align:justify; white-space:pre; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif">......</span></p> 
+<p style="text-align:justify; white-space:pre; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif">taskset -p 20747</span></p> 
+<p style="text-align:justify; white-space:pre; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif">ok,这时你再运行ps -eLo ruser,pid,ppid,lwp,psr| awk ‘{if($5==1) print $0}’，会看到形如下面的结果：</span></p> 
+<p style="text-align:justify; white-space:pre; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><img src="https://images2.imgbox.com/59/6e/90UckoSX_o.jpg" alt="" style="max-width:100%; border:none"></span></p> 
+<p style="text-align:justify; white-space:pre; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif">那么也就是完成了我们的虚拟机绑定任务，为了验证一下是否真正实现了绑定，我们在core8虚拟机里运行一个死循环，然后看host里的 top指令的结果：</span></p> 
+<p style="text-align:justify; white-space:pre; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><img src="https://images2.imgbox.com/c0/3a/MoVF0x3e_o.jpg" alt="" style="max-width:100%; border:none"><br> </span></p> 
+<p style="text-align:justify; white-space:pre; color:rgb(51,51,51); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif">我们可以清楚的看到1号cpu的利用率100%，而其它的cpu基本上没用到，这说明我们的绑定是成功的，完成了客户提出的需求。</span></p> 
+<div style="text-align:justify"> 
+ <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><br> </span> 
+</div> 
+<p style="text-align:justify"></p> 
+<p style="text-align:justify"></p> 
+<div> 
+ <p align="left" style="text-align:justify; color:rgb(54,46,43); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><strong><span style="font-size:18px">Taskset命令设置某虚拟机在某个固定cpu上运行</span></strong></span></p> 
+ <p align="left" style="text-align:justify; font-size:14px; color:rgb(54,46,43); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="white-space:pre"></span>设置某个进程pid在某个cpu上运行：</span></p> 
+ <p align="left" style="text-align:justify; font-size:14px; color:rgb(54,46,43); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="white-space:pre"></span>[root@test~]#<span style="background-color:rgb(255,255,102)"> taskset -p 100 95090</span></span></p> 
+ <p align="left" style="text-align:justify; font-size:14px; color:rgb(54,46,43); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="white-space:pre"></span>pid 95090's current affinity mask: 1</span></p> 
+ <p align="left" style="text-align:justify; font-size:14px; color:rgb(54,46,43); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="white-space:pre"></span>pid 95090's new affinity mask: 100</span></p> 
+ <p align="left" style="text-align:justify; font-size:14px; color:rgb(54,46,43); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="white-space:pre"></span>解释：设置95090这个进程，在cpu8上运行</span></p> 
+ <p align="left" style="text-align:justify; font-size:14px; font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="color:red; white-space:pre"></span>95090是我提前用ps –aux|grep “<span style="color:#362e2b">虚拟机名” 找到的虚拟机进程id。</span></span></p> 
+ <p align="left" style="text-align:justify; font-size:14px; font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="color:#362e2b"><br> </span></span></p> 
+ <p align="left" style="text-align:justify; font-family:Arial; line-height:26px"><span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="color:#362e2b"><span style="font-family:Arial; white-space:pre"><strong><span style="font-size:18px">vcpupin命令设置虚拟机某个vcpu在某个固定cpu上运行</span></strong></span><span style="font-size:14px"><br> </span></span></span></p> 
+ <p align="left" style="text-align:justify; font-size:14px; color:rgb(54,46,43); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="white-space:pre"></span>vcpupin的命令如下：</span></p> 
+ <p align="left" style="text-align:justify; font-size:14px; color:rgb(54,46,43); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="white-space:pre"></span><span style="background-color:rgb(255,255,102)">virsh vcpupin 4 0 8</span>：绑定domain 4的vcpu 0 到物理CPU8</span></p> 
+ <p align="left" style="text-align:justify; font-size:14px; color:rgb(54,46,43); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><br> </span></p> 
+ <p align="left" style="text-align:justify; font-size:14px; color:rgb(54,46,43); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="font-size:12px"><span style="font-size:18px">taskset和vcpupin区别</span></span></span></p> 
+ <p style="text-align:justify; font-size:14px; color:rgb(54,46,43); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="white-space:pre"></span>Taskset是以task（也就是虚拟机）为单位，也就是以虚拟机上的所有cpu为一个单位，与物理机上的cpu进行绑定，它不能指定虚拟机上的某个vcpu与物理机上某个物理cpu进行绑定，其粒度较大。</span></p> 
+ <p style="text-align:justify; font-size:14px; color:rgb(54,46,43); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="white-space:pre"></span>vcpupin命令就可以单独把虚拟机上的vcpu与物理机上的物理cpu进行绑定。</span></p> 
+ <p style="text-align:justify; font-size:14px; color:rgb(54,46,43); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><img src="https://images2.imgbox.com/27/93/OxECECMP_o.png" alt=""><br> </span></p> 
+ <p style="text-align:justify; font-size:14px; color:rgb(54,46,43); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="white-space:pre"></span>比如vm1和vm2都有3个vcpu（core），物理机有8个cpu（8个core，假如每个core一个线程），taskset能做到把vm2的3个vcpu同时绑定到一个或者多个cpu上，但vcpupin能把vm1的每个vcpu与每个cpu进行绑定。</span></p> 
+ <p style="text-align:justify; font-size:14px; color:rgb(54,46,43); font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><br> </span></p> 
+ <p style="margin:10px auto; padding-top:0px; padding-bottom:0px; font-size:14px; color:rgb(255,0,0); font-family:Verdana,Arial,Helvetica,sans-serif; line-height:21.6000003814697px; white-space:pre"> </p> 
+ <p style="text-align:justify; margin:10px auto; padding-top:0px; padding-bottom:0px; font-family:Verdana,Arial,Helvetica,sans-serif; line-height:21.6000003814697px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><strong><span style="font-size:24px">libvirt实现方式 </span></strong></span></p> 
+</div> 
+<div> 
+ <h4 style="white-space:pre; margin:0px; padding:0px; font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><a target="_blank" name="t7" class="     " style="font-size:14px"></a></span> 
+  <div style="text-align:justify"></div> <span style="font-size:14px"><a target="_blank" name="cputune" class="anchor" href="https://github.com/bohai/note/blob/master/QF_numa.md#cputune" style="text-decoration:none" rel="noopener noreferrer"></a></span><span style="font-size:18px">cpuset</span></h4> 
+</div> 
+<div class="highlight highlight-xml" style="font-size:14px; font-family:Arial; line-height:26px"> 
+ <pre style="text-align:justify; white-space:pre-wrap; word-wrap:break-word"><span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span class="nt">&lt;vcpu</span> <span class="na">cpuset=</span><span class="s">'1-2'</span><span class="nt">&gt;</span>4<span class="nt">&lt;/vcpu&gt;</span>
+</span></pre> 
+</div> 
+<p style="text-align:justify; margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="font-size:14px"><span style="white-space:pre"></span>查看CPU绑定情况（其中28863为qemu的进程IP）：</span></span></p> 
+<pre lang="shell" style="font-size:14px; white-space:pre-wrap; word-wrap:break-word; line-height:26px; background-color:rgb(255,255,255)"> 
+ <div style="text-align:justify">
+  
+  <span style="font-family:Verdana,Arial,Helvetica,sans-serif; white-space:pre">	</span>
+  
+  <span style="font-family:Verdana,Arial,Helvetica,sans-serif">#grep Cpus_allowed_list /proc/28863/task/*/status </span>
+ 
+ </div><span style="font-family:Verdana,Arial,Helvetica,sans-serif"></span>
+ 
+ <div style="text-align:justify">
+  
+  <span style="white-space:pre">	</span>/proc/28863/task/28863/status:Cpus_allowed_list:    1-2
+ 
+ </div><code></code>
+ 
+ <div style="text-align:justify">
+  
+  <span style="font-family:Verdana,Arial,Helvetica,sans-serif; white-space:pre">	</span>
+  
+  <span style="font-family:Verdana,Arial,Helvetica,sans-serif">/proc/28863/task/28864/status:Cpus_allowed_list:    1-2</span>
+ 
+ </div><span style="white-space:pre"></span>
+ 
+ <div style="text-align:justify">
+  
+  <span style="font-family:Verdana,Arial,Helvetica,sans-serif">	</span>
+  
+  <span style="font-family:Verdana,Arial,Helvetica,sans-serif; white-space:pre-wrap">/proc/28863/task/28865/status:Cpus_allowed_list:    1-2</span>
+ 
+ </div><span style="white-space:pre"></span>
+ 
+ <div style="text-align:justify">
+  
+  <span style="font-family:Verdana,Arial,Helvetica,sans-serif">	</span>
+  
+  <span style="font-family:Verdana,Arial,Helvetica,sans-serif; white-space:pre-wrap">/proc/28863/task/28866/status:Cpus_allowed_list:    1-2</span>
+ 
+ </div><span style="white-space:pre"></span>
+ 
+ <div style="text-align:justify">
+  
+  <span style="font-family:Verdana,Arial,Helvetica,sans-serif">	</span>
+  
+  <span style="font-family:Verdana,Arial,Helvetica,sans-serif; white-space:pre-wrap">/proc/28863/task/28867/status:Cpus_allowed_list:    1-2</span>
+ 
+ </div></pre> 
+<h4 style="margin:0px; padding:0px; font-family:Arial; line-height:26px"><span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="font-size:18px"><a target="_blank" name="t7" class="    "></a></span></span> 
+ <div style="text-align:justify"></div> <a target="_blank" name="cputune" class="anchor" href="https://github.com/bohai/note/blob/master/QF_numa.md#cputune" style="text-decoration:none" rel="noopener noreferrer"></a>cputune</h4> 
+<p style="text-align:justify; margin-top:0px; margin-bottom:0px; padding-top:0px; padding-bottom:0px; font-family:Arial; line-height:26px"> <span style="font-family:Verdana,Arial,Helvetica,sans-serif"><span style="font-size:14px"><span style="white-space:pre"></span>cputune提供了精细的vcpu绑定设定，可以具体到每个vcpu设置。而且提供vcpu能力的标准化，如quota,period,shares，可以用于实现cpu的Qos。</span></span></p> 
+<div class="highlight highlight-xml" style="font-size:14px; font-family:Arial; line-height:26px"> 
+ <pre style="white-space:pre-wrap; word-wrap:break-word">  
+  <div style="text-align:justify">
+   
+   <span style="font-family:Verdana,Arial,Helvetica,sans-serif"> </span>
+   
+   <span class="nt" style="font-family:Verdana,Arial,Helvetica,sans-serif">&lt;vcpu</span>
+   
+   <span style="font-family:Verdana,Arial,Helvetica,sans-serif"> </span>
+   
+   <span class="na" style="font-family:Verdana,Arial,Helvetica,sans-serif">placement=</span>
+   
+   <span class="s" style="font-family:Verdana,Arial,Helvetica,sans-serif">'static'</span>
+   
+   <span class="nt" style="font-family:Verdana,Arial,Helvetica,sans-serif">&gt;</span>
+   
+   <span style="font-family:Verdana,Arial,Helvetica,sans-serif">4</span>
+   
+   <span class="nt" style="font-family:Verdana,Arial,Helvetica,sans-serif">&lt;/vcpu&gt;</span>
+  
+  </div><span style="font-family:Verdana,Arial,Helvetica,sans-serif"></span>
+  
+  <div style="text-align:justify">  
+   
+   <span class="nt">&lt;cputune&gt;</span>
+  
+  </div>
+  
+  <div style="text-align:justify">    
+   
+   <span class="nt">&lt;shares&gt;</span>2048
+   
+   <span class="nt">&lt;/shares&gt;</span>
+  
+  </div>
+  
+  <div style="text-align:justify">    
+   
+   <span class="nt">&lt;period&gt;</span>1000000
+   
+   <span class="nt">&lt;/period&gt;</span>
+  
+  </div>
+  
+  <div style="text-align:justify">    
+   
+   <span class="nt">&lt;quota&gt;</span>-1
+   
+   <span class="nt">&lt;/quota&gt;</span>
+  
+  </div>
+  
+  <div style="text-align:justify">    
+   
+   <span class="nt">&lt;vcpupin</span> 
+   
+   <span class="na">vcpu=</span>
+   
+   <span class="s">'0'</span> 
+   
+   <span class="na">cpuset=</span>
+   
+   <span class="s">'8'</span>
+   
+   <span class="nt">/&gt;</span>
+  
+  </div>
+  
+  <div style="text-align:justify">    
+   
+   <span class="nt">&lt;vcpupin</span> 
+   
+   <span class="na">vcpu=</span>
+   
+   <span class="s">'1'</span> 
+   
+   <span class="na">cpuset=</span>
+   
+   <span class="s">'16'</span>
+   
+   <span class="nt">/&gt;</span>
+  
+  </div>
+  
+  <div style="text-align:justify">    
+   
+   <span class="nt">&lt;emulatorpin</span> 
+   
+   <span class="na">cpuset=</span>
+   
+   <span class="s">'16'</span>
+   
+   <span class="nt">/&gt;</span>
+  
+  </div>
+  
+  <div style="text-align:justify">  
+   
+   <span class="nt">&lt;/cputune&gt;</span>
+  
+  </div></pre> 
+</div> 
+<div style="text-align:justify"> 
+ <span style="font-family:Verdana,Arial,Helvetica,sans-serif; color:#ff0000"><span style="font-size:14px"><br> </span></span> 
+</div> 
+<div style="text-align:justify"> 
+ <span style="font-size:14px; white-space:pre"><br> </span> 
+</div> 
+<p style="text-align:justify"></p> 
+<p style="text-align:justify"><span style="font-size:14px">参考自：</span></p> 
+<p style="text-align:justify"><span style="font-size:14px">http://www.cnblogs.com/fengrenzw/p/3378344.html<br> </span></p> 
+<p style="text-align:justify"><span style="font-size:14px">http://www.linuxidc.com/Linux/2015-01/112328.htm<br> </span></p> 
+<p style="text-align:justify"><span style="font-size:14px">http://www.ckernel.org/media/ppt/2014_NFV%E5%9C%BA%E6%99%AF%E4%B8%8B%E8%99%9A%E6%8B%9F%E6%9C%BA%E9%9A%94%E7%A6%BB%E9%83%A8%E7%BD%B2.pdf<br> </span></p> 
+<p style="text-align:justify"><span style="font-size:14px">http://blog.csdn.net/u010818955/article/details/9901103</span></p> 
+<p style="text-align:justify"><span style="font-size:14px">https://access.redhat.com/documentation/en-US/Red_Hat_Enterprise_Linux/5/html/Virtualization/ch33s08.html<br> </span></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/1c5e2708f6aee4f14de52bbd78bd91c1/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Could not resolve hostname 。。。。。。: Name or service not known</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/3bef063a16f61a868c1cb4addd098cb0/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Dubbo和Spring集成Demo</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>GSM模块_STM32实现GPRS与服务器数据传输经验总结 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="GSM模块_STM32实现GPRS与服务器数据传输经验总结" />
+<meta property="og:description" content="硬件环境
+MCU：STM32F103RET6 （调试器：J-Link）
+GSM模块：Ai-Thinker_A6 （安信可）（还需要配一个串口打印工具，当初选这个模块纯粹是因为价格是最便宜的）
+------------------------------------------------------------------------- 软件环境
+Keil4
+------------------------------------------------------------------------- 开篇废话
+经过两周时间的编码、调试，终于实现了GSM模块通过GPRS连接服务器的功能，并成功移植到了公司自己的项目里面。趁着有点空，我就把整个开发调试的过程记录下来，给自己做个备忘，也给大家做个参考。
+------------------------------------------------------------------------- 时间列表
+2天时间完成底层驱动部分函数的编写。
+4天时间完成模块与服务器的连接，测试实例：获取服务器的RTC信息。
+1天时间移植到公司的项目，纯代码搬运工作。
+3天时间测试修复BUG并优化代码，找BUG的这几天，有1天只修改了1条代码，我也是醉了。
+------------------------------------------------------------------------- 函数清单和注意事项
+（底层驱动部分）
+1. IO口初始化：控制 IO 和通讯 IO，控制包括电源控制，复位和低功耗模式，通讯就是串口啦，相信大家应该都很熟悉了。
+当然在这个基础上还可以组合出复位的功能，复位在GPRS连接出错的时候会用到。
+2. 串口初始化：模块的波特率为115200，8位数据位，1位停止位，没有校验位和流控。
+串口还需要两个发送函数，发送一个字节和发送一串字符串的。串口中断处理函数放到后面说。
+3. AT指令操作：发送AT指令
+设置GPRS数据长度
+发送GPRS数据内容
+接收GPRS数据内容
+AT指令/GPRS数据解析
+4. 串口中断函数：包含AT指令/GPRS数据解析 和 接收GPRS数据内容，判断AT指令是否发送成功。
+AT指令返回的结束符除了设置GPRS数据长度的是&#39;&gt;&#39;，其他都是&#34;\r\n&#34;。但是在判断接收结束的时候不能只考虑这两种情况，还有一个情况需要特殊处理，那就是当接收到GPRS数据的时候，完全有可能会出现&#39;\r&#39;,&#39;\n&#39;对应的十六进制数。解决的办法就是在接收到&#34;&#43;CIPRCV:xxx,&#34;的时候，附带判断接收到的数据长度，&#34;xxx&#34;代表的是GPRS数据长度信息，字符型格式，在这里还需要做一个格式转换。数据长度的位数根据字符 &#39;,&#39;来进行判断，&#39;,&#39; 将AT命令和GPRS数据进行分割。&#34;xxx&#34;换算过来的数值决定了 &#39;,&#39; 后面接收到的数据长度。
+由于目前采用的SIM卡模块内部没有自带缓冲区，在GPRS数据接收的时候，需要另外开辟一个存储空间用于数据的临时存储，建议采用环形缓冲区Buffer， 将串口接收到的数据按顺序存储，这个部分在串口中断函数里面实现。在大循环里面将数据取出处理，并设置相关标志位。我一开始设计的时候只开辟了一个非环形的缓冲区，每次接收到完整的数据，会从缓冲区的0地址重新开始存储，那么就会导致未及时处理的数据被新的数据冲掉。 不知道有没有别家的SIM卡模块是自带缓冲区的。 （主循环部分）
+1. TCP/IP连接流程控制：
+step1、&#34;AT\r\n&#34;//检测模块串口工作
+step2、&#34;AT&#43;CCID\r\n&#34;//检查是否插卡
+step3、&#34;AT&#43;CREG?\r\n&#34;//检查网络注册情况
+step4、&#34;AT&#43;CGATT=1\r\n&#34;//附着网络
+step5、&#34;AT&#43;CGDCONT=1,\&#34;IP\&#34;,\&#34;CMNET\&#34;\r\n&#34;//设置PDP参数
+step6、&#34;AT&#43;CGACT=1,1\r\n&#34;//激活网络 step7、 &#34;AT&#43;CIPSTART=\&#34;TCP\&#34;,\&#34;121.41.xxx.xxx\&#34;,port\r\n&#34;//连接TCPIP服务器
+我用的这个模块硬件初始化差不多就要10秒了，在硬件初始化完成后，按照以上七步进行服务器连接，测试下来，连接的成功率还是蛮高的。前面两步是硬件检测用的，如果这两步都测不过，那就需要检查下硬件是否完整。三到六步如果返回ERROR，可重复发送，直至返回OK，每一步之间可间隔数秒。最后一步如果失败，需先关闭连接，再重新发起连接。如果第七步一直连接不成功，那么可以通过控制 IO 复位模块，当然也可以先确认下你的服务器的端口是否打开。
+我的经验是连接和通讯的过程中，如果出现错误的情况，复位模块是最有效和快捷的方式。在确认硬件连接正常的情况下，如果多次发送命令失败，返回ERROR的话，那你还是乖乖的复位它吧。
+另外两个AT命令也很好用
+&#34;AT&#43;CIPCLOSE\r\n&#34;//关闭TCPIP连接 &#34;ATE0\r\n&#34;//关闭回显，关闭自己发给模块的串口数据，调试的时候可以不开启这个功能，方便观察
+2. 数据链路层数据处理：实现GPRS数据接收/发送控制，存储串口中断接收到的数据，发送GPRS数据长度和GPRS数据内容。
+这个函数里面需要注意的是发送GPRS长度和数据的操作，需要在一次操作流程里面完成。我一开始脑残的将GPRS数据长度和数据发送分开处理，导致设置完数据长度后，发送状态处于准备好的状态，此时只要检测到有数据是需要发送的，便会通过GPRS发送出去，而无法保证是当前数据长度对应的数据帧（我在这里一共开辟了8个数据缓存，但是没有对发送状态进行分开判断）。在设置完数据长度后，需要判断是否接收到字符&#39;&gt;&#39;，大概需要50毫秒的时间。一开始分开发送也是和这个&#39;&gt;&#39;字符的操作有关的，我已经帮大家试过了，连在一起发就好了。
+发送完GPRS长度帧后，返回字符&#39;&gt;&#39;，接着发送数据帧，在模块返回&#34;OK&#34;之前，发送的数据都会被发送到服务器，导致通讯出错。所以在数据发送后，需要等待判断模块是否已经发送成功。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/5de08d6b905881184a9c6d7c0880ea7c/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2016-11-17T20:18:28+08:00" />
+<meta property="article:modified_time" content="2016-11-17T20:18:28+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">GSM模块_STM32实现GPRS与服务器数据传输经验总结</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p><span style="font-weight:bold; font-size:1rem; font-family:微软雅黑">硬件环境</span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:1.067rem"><span style="font-family:微软雅黑"><span style="font-size:1rem">MCU：STM32F103RET6 （调试器：J-Link）</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:1.067rem"><span style="font-family:微软雅黑"><span style="font-size:1rem">GSM模块：Ai-Thinker_A6 （安信可）（还需要配一个串口打印工具，当初选这个模块纯粹是因为价格是最便宜的）</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:1.067rem"><span style="font-family:微软雅黑"><span style="font-size:15px"><span style="font-size:1rem">-------------------------------------------------------------------------</span></span><span style="font-size:1rem"><strong><br style="font-size:1rem"> </strong></span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:1.067rem"><span style="font-family:微软雅黑"><span style="font-size:1rem"><strong>软件环境</strong></span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:1.067rem"><span style="font-family:微软雅黑"><span style="font-size:1rem">Keil4</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-family:微软雅黑"><span style="font-size:15px"><span style="font-size:1rem">-------------------------------------------------------------------------</span></span><br style="font-size:1rem"> </span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:15px"><strong><span style="font-family:微软雅黑"><span style="font-size:1rem">开篇废话</span></span></strong></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-family:微软雅黑"><span style="font-size:1rem">    经过两周时间的编码、调试，终于实现了GSM模块通过GPRS连接服务器的功能，并成功移植到了公司自己的项目里面。趁着有点空，我就把整个开发调试的过程记录下来，给自己做个备忘，也给大家做个参考。</span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-family:微软雅黑"><span style="font-size:15px"><span style="font-size:1rem">-------------------------------------------------------------------------</span></span><br style="font-size:1rem"> </span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif; font-size:15px"> <span style="font-family:微软雅黑"><strong><span style="font-size:1rem">时间列表</span></strong></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-family:微软雅黑"><span style="font-size:1rem">2天时间完成底层驱动部分函数的编写。</span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-family:微软雅黑"><span style="font-size:1rem">4天时间完成模块与服务器的连接，测试实例：获取服务器的RTC信息。</span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-family:微软雅黑"><span style="font-size:1rem">1天时间移植到公司的项目，</span><span style="font-size:15px"><span style="font-size:1rem">纯代码搬运工作</span></span><span style="font-size:1rem"><span style="font-size:1rem">。</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-family:微软雅黑"><span style="font-size:1rem">3天时间测试修复BUG并优化代码，找BUG的这几天，有1天只修改了1条代码，我也是醉了。</span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-family:微软雅黑"><span style="font-size:15px"><span style="font-size:1rem">-------------------------------------------------------------------------</span></span><span style="font-size:1rem"><br style="font-size:1rem"> </span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:15px"><strong><span style="font-family:微软雅黑"><span style="font-size:1rem">函数清单和注意事项</span></span></strong></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:1rem; font-family:微软雅黑">（底层驱动部分）</span><br> </p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:1.067rem"><span style="font-family:微软雅黑"><span style="font-size:1rem">1. IO口初始化：控制 IO 和通讯 IO，控制包括电源控制，复位和低功耗模式，通讯就是串口啦，相信大家应该都很熟悉了。</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:1.067rem"><span style="font-family:微软雅黑"><span style="font-size:1rem">                      当然在这个基础上还可以组合出复位的功能，复位在GPRS连接出错的时候会用到。</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-family:微软雅黑"><span style="font-size:1.067rem"><span style="font-size:1rem">2. 串口初始化：模块的波特率为115200，8位数据位，1位停止位，没有校验位和流控。</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-family:微软雅黑"><span style="font-size:1.067rem"><span style="font-size:1rem">                      串口还需要两个发送函数，发送一个字节和发送一串字符串的。串口中断处理函数放到后面说。</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:1.067rem"><span style="font-family:微软雅黑"><span style="font-size:1rem">3. AT指令操作：发送AT指令</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:1.067rem"><span style="font-family:微软雅黑"><span style="font-size:1rem">                        设置GPRS数据长度</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:1.067rem"><span style="font-family:微软雅黑"><span style="font-size:1rem">                        发送GPRS数据内容</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:1.067rem"><span style="font-family:微软雅黑"><span style="font-size:1rem">                        接收GPRS数据内容</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:1.067rem"><span style="font-family:微软雅黑"><span style="font-size:1rem">                        AT指令/GPRS数据解析</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-family:微软雅黑"><span style="font-size:1rem">4. 串口中断函数：包含</span><span style="font-size:15px"><span style="font-size:1rem">AT指令/GPRS数据解析 和 </span></span><span style="font-size:15px"><span style="font-size:1rem">接收GPRS数据内容，判断AT指令是否发送成功。</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-family:微软雅黑"><span style="font-size:15px"><span style="font-size:1rem">    AT指令返回的结束符除了设置GPRS数据长度的是'&gt;'，其他都是"\r\n"。但是在判断接收结束的时候不能只考虑这两种情况，还有一个情况需要特殊处理，那就是当接收到GPRS数据的时候，完全有可能会出现'\r','\n'对应的十六进制数。解决的办法就是在接收到"</span></span><span style="font-size:15px; line-height:1.6"><span style="font-size:1rem">+CIPRCV:xxx,</span></span><span style="font-size:15px"><span style="font-size:1rem">"的时候，附带判断接收到的数据长度，"xxx"代表的是GPRS数据长度信息，字符型格式，在这里还需要做一个格式转换。数据长度的位数</span></span><span style="font-size:15px"><span style="font-size:1rem">根据字符 </span></span><span style="font-size:15px"><span style="font-size:1rem">','来进行判断，',' 将AT命令和GPRS数据进行分割。"xxx"换算过来的数值决定了 ',' 后面接收到的数据长度。</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:15px"><span style="font-family:微软雅黑"><span style="font-size:1rem">    由于</span></span></span><span style="font-family:微软雅黑; font-size:15px"><span style="font-size:1rem">目前采用的SIM卡模块内部没有自带缓冲区，在</span></span><span style="font-size:1rem; font-family:微软雅黑">GPRS数据接收的时候，需要另外开辟一个存储空间用于数据的临时存储，建议采用环形缓冲区Buffer， 将串口接收到的数据按顺序存储，这个部分在串口中断函数里面实现。在大循环里面将数据取出处理，并设置相关标志位。我一开始设计的时候只开辟了一个非环形的缓冲区，每次接收到完整的数据，会从缓冲区的0地址重新开始存储，那么就会导致未及时处理的数据被新的数据冲掉。 不知道有没有别家的SIM卡模块是自带缓冲区的。 </span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-family:微软雅黑"><br style="font-size:1rem"> </span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-family:微软雅黑"><span style="font-size:1rem">（主循环部分）</span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif; font-size:15px; line-height:24px"> <span style="font-size:1.067rem; line-height:normal"><span style="font-family:微软雅黑"><span style="font-size:1rem">1. TCP/IP连接流程控制：</span></span></span></p> 
+<p style='widows:2; font-family:Helvetica,"Hiragino Sans GB",微软雅黑,"Microsoft YaHei UI",SimSun,SimHei,arial,sans-serif; font-size:15px; line-height:24px'> <span style="font-size:1rem; line-height:normal; font-family:微软雅黑; widows:1">    step1、"AT\r\n"//检测模块串口工作</span><span style="font-size:1rem; line-height:normal; font-family:微软雅黑"></span></p> 
+<p style='font-family:Helvetica,"Hiragino Sans GB",微软雅黑,"Microsoft YaHei UI",SimSun,SimHei,arial,sans-serif; font-size:15px; line-height:24px; widows:1'> <span style="font-family:微软雅黑"><span style="line-height:normal"><span style="font-size:1rem">    step2、"AT+CCID\r\n"//检查是否插卡</span></span></span></p> 
+<p style='font-family:Helvetica,"Hiragino Sans GB",微软雅黑,"Microsoft YaHei UI",SimSun,SimHei,arial,sans-serif; font-size:15px; line-height:24px; widows:1'> <span style="font-family:微软雅黑"><span style="line-height:normal"><span style="font-size:1rem">    step3、"AT+CREG?\r\n"//检查网络注册情况</span></span></span></p> 
+<p style='font-family:Helvetica,"Hiragino Sans GB",微软雅黑,"Microsoft YaHei UI",SimSun,SimHei,arial,sans-serif; font-size:15px; line-height:24px; widows:1'> <span style="font-size:1.067rem; line-height:normal"><span style="font-family:微软雅黑"></span></span><span style="font-family:微软雅黑; line-height:normal"><span style="font-size:1rem">    step4、</span></span><span style="font-family:微软雅黑"><span style="line-height:normal"><span style="font-size:1rem">"AT+CGATT=1\r\n"//附着网络</span></span></span></p> 
+<p style='font-family:Helvetica,"Hiragino Sans GB",微软雅黑,"Microsoft YaHei UI",SimSun,SimHei,arial,sans-serif; font-size:15px; line-height:24px; widows:1'> <span style="font-family:微软雅黑"><span style="line-height:normal"><span style="font-size:1rem">    step5、"AT+CGDCONT=1,\"IP\",\"CMNET\"\r\n"//设置PDP参数</span></span></span></p> 
+<p style='font-family:Helvetica,"Hiragino Sans GB",微软雅黑,"Microsoft YaHei UI",SimSun,SimHei,arial,sans-serif; font-size:15px; line-height:24px; widows:1'> <span style="font-family:微软雅黑; font-size:1.067rem; line-height:normal"><span style="font-size:15px"></span></span><span style="font-family:微软雅黑; line-height:normal"><span style="font-size:1rem">    step6、</span></span><span style="font-family:微软雅黑"><span style="line-height:normal"><span style="font-size:1rem">"AT+CGACT=1,1\r\n"//激活网络</span></span></span><span style="font-family:微软雅黑; font-size:1.067rem; line-height:normal"><span style="font-size:1rem"><br style="font-size:1rem"> </span></span></p> 
+<p style='font-family:Helvetica,"Hiragino Sans GB",微软雅黑,"Microsoft YaHei UI",SimSun,SimHei,arial,sans-serif; font-size:15px; line-height:24px; widows:1'> <span style="font-family:微软雅黑; line-height:normal"><span style="font-size:1rem">    step7、</span></span><span style="font-family:微软雅黑; font-size:1.067rem; line-height:normal"><span style="font-size:15px"><span style="font-size:1rem"> </span></span></span><span style="font-family:微软雅黑"><span style="line-height:normal"><span style="font-size:1rem">"AT+CIPSTART=</span></span></span><span style="line-height:normal; font-family:微软雅黑"><span style="font-size:1rem">\"TCP\",\"121.41.xxx.xxx\",port\r\n"//</span></span><span style="font-family:微软雅黑"><span style="line-height:normal"><span style="font-size:1rem">连接TCPIP服务器</span></span></span></p> 
+<p style='font-family:Helvetica,"Hiragino Sans GB",微软雅黑,"Microsoft YaHei UI",SimSun,SimHei,arial,sans-serif; font-size:15px; line-height:24px; widows:1'> <span style="font-family:微软雅黑"><span style="line-height:normal"><span style="font-size:1rem">    我用的这个模块硬件初始化差不多就要10秒了，在硬件初始化完成后，按照以上七步进行服务器连接，测试下来，连接的成功率还是蛮高的。前面两步是硬件检测用的，如果这两步都测不过，那就需要检查下硬件是否完整。三到六步如果返回ERROR，可重复发送，直至返回OK，每一步之间可间隔数秒。最后一步如果失败，需先关闭连接，再重新发起连接。如果第七步一直连接不成功，那么可以通过控制 IO 复位模块，当然也可以先确认下你的服务器的端口是否打开。</span></span></span></p> 
+<p style='font-family:Helvetica,"Hiragino Sans GB",微软雅黑,"Microsoft YaHei UI",SimSun,SimHei,arial,sans-serif; font-size:15px; line-height:24px; widows:1'> <span style="font-family:微软雅黑"><span style="line-height:normal"><span style="font-size:1rem">    我的经验是连接和通讯的过程中，如果出现错误的情况，复位模块是最有效和快捷的方式。在确认硬件连接正常的情况下，如果多次发送命令失败，返回ERROR的话，那你还是乖乖的复位它吧。</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif; font-size:15px; line-height:24px"> <span style="font-family:微软雅黑"><span style="line-height:normal"><span style="font-size:1rem"></span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif; font-size:15px; line-height:24px"> <span style="font-family:微软雅黑"><span style="line-height:normal"><span style="font-size:1rem">    另外两个AT命令也很好用</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif; font-size:15px; line-height:24px"> <span style="font-family:微软雅黑"><span style="line-height:normal"><span style="font-size:1rem">"AT+CIPCLOSE\r\n"//关闭TCPIP连接</span></span><br style="font-size:1rem"> </span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif; font-size:15px; line-height:24px"> <span style="font-family:微软雅黑"><span style="line-height:normal"><span style="font-size:1rem">"ATE0\r\n"//关闭回显，关闭自己发给模块的串口数据，调试的时候可以不开启这个功能，方便观察</span></span><br> </span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:1.067rem"><span style="font-size:15px"><span style="font-family:微软雅黑"><br style="font-size:1rem"> </span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-family:微软雅黑"><span style="font-size:1rem">2. 数据链路层数据处理：实现GPRS数据接收/发送控制，存储串口中断接收到的数据，发送GPRS数据长度和GPRS数据内容。</span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-family:微软雅黑"><span style="font-size:1rem">    这个函数里面需要注意的是发送GPRS长度和数据的操作，需要在一次操作流程里面完成。我一开始脑残的</span><span style="font-size:15px; line-height:1.6"><span style="font-size:1rem">将GPRS数据长度和数据发送分开处理，导致设置完数据长度后，发送状态处于准备好的状态，此时只要检测到有数据是需要发送的，便会通过GPRS发送出去，而无法保证是当前数据长度对应的数据帧（我在这里一共开辟了8个数据缓存，但是没有对发送状态进行分开判断）。在设置完数据长度后，需要判断是否接收到字符'&gt;'，大概需要50毫秒的时间。一开始分开发送也是和这个'&gt;'字符的操作有关的，我已经帮大家试过了，连在一起发就好了。</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-family:微软雅黑; font-size:16.005px"><span style="font-size:1rem">    发送完GPRS</span></span><span style="font-family:微软雅黑; font-size:16.005px"><span style="font-size:1rem">长度帧</span></span><span style="font-family:微软雅黑; font-size:16.005px"><span style="font-size:1rem">后，返回</span></span><span style="font-family:微软雅黑; font-size:16.005px"><span style="font-size:1rem">字符</span></span><span style="font-family:微软雅黑; font-size:16.005px"><span style="font-size:1rem">'&gt;'，接着发送数据帧，在模块返回"OK"之前，发送的数据都会被发送到服务器，导致通讯出错。所以在数据发送后，需要等待判断模块是否已经发送成功。</span></span><span style="font-family:微软雅黑"><span style="font-size:15px; line-height:1.6"><span style="font-size:1rem"><br> </span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:1.067rem"><span style="font-family:微软雅黑"><span style="font-size:1rem"><br style="font-size:1rem"> </span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:15px"><span style="font-family:微软雅黑"><span style="font-size:1rem">3. 超时判断：检测GPRS数据是否发送失败，失败后可关闭TCP/IP连接，进行重连，如果还是失败，可复位模块，重新进行TCP/IP连接流程。</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-family:微软雅黑; font-size:15px"><span style="font-size:1rem">-------------------------------------------------------------------------</span></span><span style="font-family:微软雅黑"><br style="font-size:1rem"> </span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:1.067rem"><span style="font-family:微软雅黑"><span style="font-size:1rem"><strong>小技巧</strong></span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif; font-size:15px"> <span style="font-size:16.005px"><span style="font-family:微软雅黑"><span style="font-size:1rem">1、官方的例程里面，在GPRS数据发送完之后，需要发送结束符0x1A，其实是不需要的。</span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:1.067rem"><span style="font-family:微软雅黑"><span style="font-size:1rem"><br> </span></span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:18px; color:#ff0000"><span style="font-family:微软雅黑"></span><span style="line-height:20px">最近一直有朋友问我要代码，我整理了一下，代码和资料已经放到资源里面了，有需要的朋友请自行下载。</span></span></p> 
+<p style="font-family:Helvetica,'Hiragino Sans GB',微软雅黑,'Microsoft YaHei UI',SimSun,SimHei,arial,sans-serif"> <span style="font-size:18px; color:#ff0000"><span style="line-height:20px">链接：<a target="_blank" href="http://download.csdn.net/detail/cc214042/9758859" rel="noopener noreferrer">STM32实现GPRS与服务器数据传输</a></span></span></p> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/eb5318ba411192723dc893aeeb4fbedb/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Android 使用Face&#43;&#43;进行人脸识别</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/b1bd7e32f10f3b4bc604e244ad352af2/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Bootstrap 之Table样式</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

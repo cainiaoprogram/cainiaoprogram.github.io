@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Kong与Serverless无服务器计算 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Kong与Serverless无服务器计算" />
+<meta property="og:description" content="首先我们要来科普一下什么是无服务器计算，无服务器计算是在无需最终用户管理的基础设施上托管应用程序的新方式，是IaaS(基础设施即服务)演进的下一个阶段。它将底层基础架构从开发人员中分离出来，基本上虚拟化了运行时(虚拟机的一种，一般指进程级别的虚拟机)和运营管理。这通常被称为 FaaS(功能即服务)。
+无服务器计算的优势表现在：敏捷、可伸缩性、计费模式、安全。其他相关知识可以百度，这里我们举个例子来说明一下：比如一款手机游戏，允许用户在不同的平台上查询全球顶级玩家分数表。当请求此信息时，请求从应用程序到API接口。API接口或许会触发某个无服务器函数，这些函数再从数据库表中获取到数据流，返回包含前五名分数的一定格式的数据。一旦构建完成，应用程序的功能就可以在基于移动和基于 web 的游戏版本中重用。这跟设置服务器不同，不是必须要有虚拟机资源或服务器资源，然后等待请求。环境由事件触发，而响应事件所需的逻辑只在响应时执行。这意味着，运行函数的资源只有在函数运行时被创建，产生一种非常高效的方法来构建应用程序。
+再举个例子，比如前端调用某个API，实际是去调用后端不同语言的代码来实现相关功能，通过的做法是我们需要部署服务器，安装中间件并将程序部署到中间件中暴露接口以供调用，而无服务器的概念则是在服务器之上再抽象一层，运行时语言、中间件等环境统统封装好，你只需将调用的代码注入到对应的管道，通过触发事件来进行调用，整个程序包含非常多的代码片段及托管(可能是多种语言的)，复杂的调用链事件组合，而不再需要诸如服务器部署、环境配置及维护等工作，非常之敏捷。
+那么kong网关的无服务器插件究竟有哪些呢，他们运行的机制和原理是什么呢？
+1、鼎鼎大名的Aws Lambda，AWS Lambda 是一项计算服务，可使您无需预配置或管理服务器即可运行代码。借助 AWS Lambda，您几乎可以为任何类型的应用程序或后端服务运行代码，并且不必进行任何管理。AWS Lambda 在可用性高的计算基础设施上运行您的代码，执行计算资源的所有管理工作，其中包括服务器和操作系统维护、容量预置和自动扩展、代码监控和记录。您只需要以 AWS Lambda 支持的一种语言提供您的代码。看一下同步调用Lambda的例子：
+实际上对于kong来说，提供的插件可以替换掉上图中的Amazon API Gateway。Kong的管理平台上关于AWS Lambda的配置界面如下：
+由于我没有注册AWS账户，所以没有实际测试，上面的主要参数大致讲解下：
+ aws key和secret:这个主要是用来鉴权和认证。
+ aws region：亚马逊目前在运营的几个区域，如US区，CN区，这个决定了你的function实际是放在那里。
+ aws function name：函数名称，你托管的代码片段函数名，kong在后端服务调用前会去调用aws上预先设置的函数。
+ invocation type：调用类型，包含RequestResponse（请求响应）、Event(事件)、Dryrun(空运行、预检) 。
+2、微软的无服务器插件 Azure Functions，功能也亚马逊的类似，这里就不再解释。Kong网关的以上两类无服务器插件不仅可以用在全局上、还可以单独作用到服务/路由、以及单个消费方之上，而kong提供的另外两个无服务器插件Pre-function和Post-function则只能作用在全局、服务、路由上，无法作用到单个消费方上。
+3、Post-function: kong提供的无服务器函数之一，提供lua的运行环境(因为kong的源码就是lua编写的)。post-function 配置好之后，服务/路由在访问时在配置的其他插件运行之后再运行post-function中配置的函数。
+4、Pre-function: kong提供的无服务器函数之一，提供lua的运行环境。pre-function 配置好之后，服务/路由在访问时在配置的其他插件运行之前运行pre-function中配置的函数。这里对他进行重点验证。
+网上有个例子：https://www.jianshu.com/p/3496448db28f，是使用curl以文件的方式进行配置，我没尝试成功，自己研读了kong的源码，使用kong的管理平台验证成功，以下为主要过程：
+1、 kong源码中有lua的loadstring函数，对提交的function进行验证，如验证不通过，则插件配不上，loadstring函数对于分行代码需要用;来分割。
+2、 假设我们要配置的源码如下：
+这个源码是检查调用请求header中的x-custom-auth的值，如果为空则返回401及消息。那么按照1中的要求，写法应该是这样：
+local custom_auth = kong.request.get_header(‘x-custom-auth’);if not custom_auth then;return kong.response.exit(401, “Invalid Credentials”);end;kong.service.request.clear_header(‘x-custom-auth’)
+3、 通过kong管理平台配置到kong网关中：
+4、 调用该API的路由，出现我们定义的消息，也就是说pre-function会在所有其他配置的插件之前运行：
+5、 如果我们在请求的消息头中加上x-custom-auth，关闭base-auth和acl插件再次调用，则成功返回消息：
+最后我们要提一下，为什么网关要来支持这些无服务器运营商和函数呢，第一肯定是为了网关能更加灵活的处理个性化的需求，比如在请求前和请求后做一些常用的诸如数据转换、外部调用、记录、业务计算等功能，另一方面随着serverless的大力发展，未来的趋势也是如此，当大家都在这么做的时候，设计的网关不支持serverless的调用，将会失去优势，这也是kong有先见之明之处。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/be31d481a0d06e212cdbdccda982ede2/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-12-21T09:39:15+08:00" />
+<meta property="article:modified_time" content="2021-12-21T09:39:15+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Kong与Serverless无服务器计算</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>首先我们要来科普一下什么是无服务器计算，无服务器计算是在无需最终用户管理的基础设施上托管应用程序的新方式，是IaaS(基础设施即服务)演进的下一个阶段。它将底层基础架构从开发人员中分离出来，基本上虚拟化了运行时(虚拟机的一种，一般指进程级别的虚拟机)和运营管理。这通常被称为 FaaS(功能即服务)。<br> 无服务器计算的优势表现在：敏捷、可伸缩性、计费模式、安全。其他相关知识可以百度，这里我们举个例子来说明一下：比如一款手机游戏，允许用户在不同的平台上查询全球顶级玩家分数表。当请求此信息时，请求从应用程序到API接口。API接口或许会触发某个无服务器函数，这些函数再从数据库表中获取到数据流，返回包含前五名分数的一定格式的数据。一旦构建完成，应用程序的功能就可以在基于移动和基于 web 的游戏版本中重用。这跟设置服务器不同，不是必须要有虚拟机资源或服务器资源，然后等待请求。环境由事件触发，而响应事件所需的逻辑只在响应时执行。这意味着，运行函数的资源只有在函数运行时被创建，产生一种非常高效的方法来构建应用程序。<br> 再举个例子，比如前端调用某个API，实际是去调用后端不同语言的代码来实现相关功能，通过的做法是我们需要部署服务器，安装中间件并将程序部署到中间件中暴露接口以供调用，而无服务器的概念则是在服务器之上再抽象一层，运行时语言、中间件等环境统统封装好，你只需将调用的代码注入到对应的管道，通过触发事件来进行调用，整个程序包含非常多的代码片段及托管(可能是多种语言的)，复杂的调用链事件组合，而不再需要诸如服务器部署、环境配置及维护等工作，非常之敏捷。<br> 那么kong网关的无服务器插件究竟有哪些呢，他们运行的机制和原理是什么呢？<br> 1、鼎鼎大名的Aws Lambda，AWS Lambda 是一项计算服务，可使您无需预配置或管理服务器即可运行代码。借助 AWS Lambda，您几乎可以为任何类型的应用程序或后端服务运行代码，并且不必进行任何管理。AWS Lambda 在可用性高的计算基础设施上运行您的代码，执行计算资源的所有管理工作，其中包括服务器和操作系统维护、容量预置和自动扩展、代码监控和记录。您只需要以 AWS Lambda 支持的一种语言提供您的代码。看一下同步调用Lambda的例子：<br> <img src="https://images2.imgbox.com/b9/69/tJc5S1Y1_o.png" alt="在这里插入图片描述"></p> 
+<p>实际上对于kong来说，提供的插件可以替换掉上图中的Amazon API Gateway。Kong的管理平台上关于AWS Lambda的配置界面如下：<br> <img src="https://images2.imgbox.com/f6/0a/4vLyue6E_o.png" alt="在这里插入图片描述"></p> 
+<p>由于我没有注册AWS账户，所以没有实际测试，上面的主要参数大致讲解下：<br>  aws key和secret:这个主要是用来鉴权和认证。<br>  aws region：亚马逊目前在运营的几个区域，如US区，CN区，这个决定了你的function实际是放在那里。<br>  aws function name：函数名称，你托管的代码片段函数名，kong在后端服务调用前会去调用aws上预先设置的函数。<br>  invocation type：调用类型，包含RequestResponse（请求响应）、Event(事件)、Dryrun(空运行、预检) 。<br> 2、微软的无服务器插件 Azure Functions，功能也亚马逊的类似，这里就不再解释。Kong网关的以上两类无服务器插件不仅可以用在全局上、还可以单独作用到服务/路由、以及单个消费方之上，而kong提供的另外两个无服务器插件Pre-function和Post-function则只能作用在全局、服务、路由上，无法作用到单个消费方上。<br> 3、Post-function: kong提供的无服务器函数之一，提供lua的运行环境(因为kong的源码就是lua编写的)。post-function 配置好之后，服务/路由在访问时在配置的其他插件运行之后再运行post-function中配置的函数。<br> 4、Pre-function: kong提供的无服务器函数之一，提供lua的运行环境。pre-function 配置好之后，服务/路由在访问时在配置的其他插件运行之前运行pre-function中配置的函数。这里对他进行重点验证。<br> 网上有个例子：https://www.jianshu.com/p/3496448db28f，是使用curl以文件的方式进行配置，我没尝试成功，自己研读了kong的源码，使用kong的管理平台验证成功，以下为主要过程：<br> 1、 kong源码中有lua的loadstring函数，对提交的function进行验证，如验证不通过，则插件配不上，loadstring函数对于分行代码需要用;来分割。<br> 2、 假设我们要配置的源码如下：<br> <img src="https://images2.imgbox.com/c5/a9/srClrsgK_o.png" alt="在这里插入图片描述"></p> 
+<p>这个源码是检查调用请求header中的x-custom-auth的值，如果为空则返回401及消息。那么按照1中的要求，写法应该是这样：<br> local custom_auth = kong.request.get_header(‘x-custom-auth’);if not custom_auth then;return kong.response.exit(401, “Invalid Credentials”);end;kong.service.request.clear_header(‘x-custom-auth’)<br> 3、 通过kong管理平台配置到kong网关中：<br> <img src="https://images2.imgbox.com/d0/b8/iSFYkLTD_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/03/7b/McyDra9q_o.png" alt="在这里插入图片描述"></p> 
+<p>4、 调用该API的路由，出现我们定义的消息，也就是说pre-function会在所有其他配置的插件之前运行：<br> <img src="https://images2.imgbox.com/3b/2e/BMzT3CON_o.png" alt="在这里插入图片描述"></p> 
+<p>5、 如果我们在请求的消息头中加上x-custom-auth，关闭base-auth和acl插件再次调用，则成功返回消息：<br> <img src="https://images2.imgbox.com/95/bc/Cda51huW_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/5b/ef/QW8ET16g_o.png" alt="在这里插入图片描述"></p> 
+<p>最后我们要提一下，为什么网关要来支持这些无服务器运营商和函数呢，第一肯定是为了网关能更加灵活的处理个性化的需求，比如在请求前和请求后做一些常用的诸如数据转换、外部调用、记录、业务计算等功能，另一方面随着serverless的大力发展，未来的趋势也是如此，当大家都在这么做的时候，设计的网关不支持serverless的调用，将会失去优势，这也是kong有先见之明之处。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/ef9a73095593d121a7b7d38ed52118d0/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">微服务03——protobuf</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/5eb10dd82bbc61217f8fba3bb5435656/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">深入理解：顶点缓存对象（VBO）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

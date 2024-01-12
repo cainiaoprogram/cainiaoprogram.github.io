@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>四轮两驱小车（三）：STM32驱动MPU6050进行转弯 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="四轮两驱小车（三）：STM32驱动MPU6050进行转弯" />
+<meta property="og:description" content="前言： 寒假已经过了一半了，前段时间跟学弟一起从零开始搞了一下深度学习，现在才想起来这个系列还没有更完。本篇博客主要介绍一下这个小车转直角弯的神器----MPU6050
+MPU6050介绍： 我所采用的MPU6050是某宝上十几块钱的这种，这种MPU6050有个缺点是带有零点漂移，这个接下来我会在博客里给大家提供我的解决方案，优点显而易见是便宜，如果坏了也不心疼，这可比正点原子的便宜多了。 MPU6050内部整合了三轴MEMS陀螺仪、三轴MEMS加速度计以及一个可扩展的数字运动处理器DMP(Digital Motion Processor)，而且还可以连接一个第三方数字传感器(如磁力计)，这样的话，就可以通过IIC接口输出一个9轴信号(链接第三方数字传感器才可以输出九轴信号，否则只有六轴信号)。当然，上面给大家展示的就是一个6轴的陀螺仪。更加方便的是，有了DMP，可以结合InvenSense公司提供的运动处理资料库，实现姿态解算。通过自带的DMP，可以通过IIC接口输出9轴融合演算的数据，大大降低了运动处理运算对操作系统的负荷，同时也降低了开发难度。其实，简单一句话说，陀螺仪就是测角速度的，加速度传感器就是测角加速度的，二者数据通过算法就可以得到PITCH、YAW、ROLL角了。
+MPU6050对陀螺仪和加速度计分别用了三个16位ADC，将其测量的模拟量转化为可输出的数字量。为了精确跟踪快速和慢速的运动，传感器的测量范围都是用户可控的。陀螺仪的可测范围为±250，±500，±1000，±2000°/秒（dps），加速度计可测范围为±2，±4，±8，±16g。
+下面是一张关于MPU6050的三个姿态角。而刚才提到的零飘问题其实就是Z轴角度出了问题。
+管脚的使用： MPU6050一共有8个引脚，网上不少博主选择使用其中的5个引脚，而我选择了其中的四个引脚，没有使用INT这个引脚。这个引脚是MPU6050的中断引脚，MPU6050会50ms中断一次，我的板子上IO口不是很丰富，就没有用这个引脚。而AD0作为一个地址引脚决定了MPU6050的地址，它接地或者悬空的时候，MPU的地址为0x68，接高电平的时候，MPU的地址为0x69（博主直接悬空了）。而XCL和XDA是用来外接传感器的，这里我没有外接，所以也悬空了。此外，MPU6050的SCL和SDA，我用的是PB8、PB9来软件模拟的IIC，而不是STM32自带的硬件IIC。
+MPU6050管脚对应的STM32F103RCT6 IO口SCLPB8SDAPB9VCCVCC（3.3v或5v）GNDGND 代码修改部分： 这里我给大家展示一下对应的.c和.h文件。这里的文件涉及到的比较多，博主在自学的时候学习了很多博主的代码，发现其中缺的东西很多，要不是少sysclock.h要不就是少sys.h，干脆这里我一并给大家放上一个链接，STM32F103C8T6驱动MPU6050并且在OLED屏幕上显示。提取码：2471
+这里我要给大家强调一下，如果delay函数不对的话，很可能会导致MPU6050的IIC时序不对而发生错误，所以大家最好是参照一下我的文件。此外要给大家强调的一点是如果大家用的管脚不是PB8 PB9而要修改其他的IO口的话，那么除了这里要修改。
+对应的IO操作方向也要注意，这里给大家提个醒，当初我就是没有仔细修改这里，而导致多次初始化失败，具体修改方法可以参考数据手册
+移植完成后，我们就可以通过Read_DMP(&amp;Pitch,&amp;Roll,&amp;Yaw);这个函数来读取对应的角度，这个角度是由DMP结算过的，所以可以拿过来就直接用。
+是否需要扶正，是否需要开机校准 关于这个问题，我并没有出现过网上说的不扶正就不能开机，博主的小车只是用了MPU6050来准确的转一下90°角，所以也就没有过多关注这一块。是否需要开机校准，我觉得还是需要的，当你转过一个90°弯之后，我们可以通过重新让MPU6050初始化，来把转完弯后的方向设置为0°方向，这样方便下一次转弯，在代码逻辑上会减轻不少工作量。
+如果选择开机校准的话，那么我们就要让run_self_test()函数正常运行
+static void run_self_test(void) { int result; long gyro[3], accel[3]; result = mpu_run_self_test(gyro, accel); if (result == 0x3) { /* Test passed. We can trust the gyro data here, so let&#39;s push it down * to the DMP. */ float sens; unsigned short accel_sens; mpu_get_gyro_sens(&amp;sens); gyro[0] = (long)(gyro[0] * sens); gyro[1] = (long)(gyro[1] * sens); gyro[2] = (long)(gyro[2] * sens); dmp_set_gyro_bias(gyro); mpu_get_accel_sens(&amp;accel_sens); accel[0] *= accel_sens; accel[1] *= accel_sens; accel[2] *= accel_sens; dmp_set_accel_bias(accel); printf(&#34;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/2543a6deb1eb349e6f467d65b6714163/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-01-26T13:52:33+08:00" />
+<meta property="article:modified_time" content="2023-01-26T13:52:33+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">四轮两驱小车（三）：STM32驱动MPU6050进行转弯</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h2>前言：</h2> 
+<p>        寒假已经过了一半了，前段时间跟学弟一起从零开始搞了一下深度学习，现在才想起来这个系列还没有更完。本篇博客主要介绍一下这个小车转直角弯的神器----MPU6050</p> 
+<h2>MPU6050介绍：</h2> 
+<p>      我所采用的MPU6050是某宝上十几块钱的这种，这种MPU6050有个缺点是带有零点漂移，这个接下来我会在博客里给大家提供我的解决方案，优点显而易见是便宜，如果坏了也不心疼，这可比正点原子的便宜多了。<img alt="" height="800" src="https://images2.imgbox.com/60/66/trxRocjK_o.jpg" width="800">          MPU6050内部整合了<span style="color:#fe2c24;">三轴MEMS陀螺仪、三轴MEMS加速度计以及一个可扩展的数字运动处理器DMP(Digital Motion Processor)，</span>而且还可以连接一个第三方数字传感器(如磁力计)，这样的话，就可以通过IIC接口输出一个9轴信号(链接第三方数字传感器才可以输出九轴信号，否则只有六轴信号)。当然，上面给大家展示的就是一个6轴的陀螺仪。更加方便的是，有了DMP，可以结合InvenSense公司提供的运动处理资料库，实现姿态解算。通过自带的DMP，可以通过IIC接口输出9轴融合演算的数据，大大降低了运动处理运算对操作系统的负荷，同时也降低了开发难度。其实，简单一句话说，陀螺仪就是测角速度的，加速度传感器就是测角加速度的，二者数据通过算法就可以得到PITCH、YAW、ROLL角了。</p> 
+<p>        MPU6050对陀螺仪和加速度计分别用了三个16位ADC，将其测量的模拟量转化为可输出的数字量。为了精确跟踪快速和慢速的运动，传感器的测量范围都是用户可控的。陀螺仪的可测范围为±250，±500，±1000，±2000°/秒（dps），加速度计可测范围为±2，±4，±8，±16g。</p> 
+<p>        下面是一张关于MPU6050的三个姿态角。而刚才提到的零飘问题其实就是Z轴角度出了问题。<br>         <img alt="" height="466" src="https://images2.imgbox.com/a2/2d/zn0u5qL2_o.png" width="578"></p> 
+<h3>管脚的使用：</h3> 
+<p>        MPU6050一共有8个引脚，网上不少博主选择使用其中的5个引脚，而我选择了其中的四个引脚，没有使用INT这个引脚。这个引脚是MPU6050的中断引脚，MPU6050会50ms中断一次，我的板子上IO口不是很丰富，就没有用这个引脚。而AD0作为一个地址引脚决定了MPU6050的地址，它接地或者悬空的时候，MPU的地址为0x68，接高电平的时候，MPU的地址为0x69（博主直接悬空了）。而XCL和XDA是用来外接传感器的，这里我没有外接，所以也悬空了。此外，MPU6050的SCL和SDA，我用的是PB8、PB9来软件模拟的IIC，而不是STM32自带的硬件IIC。</p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td style="text-align:center;">MPU6050管脚</td><td style="text-align:center;">对应的STM32F103RCT6 IO口</td></tr><tr><td style="text-align:center;">SCL</td><td style="text-align:center;">PB8</td></tr><tr><td style="text-align:center;">SDA</td><td style="text-align:center;">PB9</td></tr><tr><td style="text-align:center;">VCC</td><td style="text-align:center;">VCC（3.3v或5v）</td></tr><tr><td style="text-align:center;">GND</td><td style="text-align:center;">GND</td></tr></tbody></table> 
+<h3>代码修改部分：</h3> 
+<p>        这里我给大家展示一下对应的.c和.h文件。这里的文件涉及到的比较多，博主在自学的时候学习了很多博主的代码，发现其中缺的东西很多，要不是少sysclock.h要不就是少sys.h，干脆这里我一并给大家放上一个链接，<a class="link-info" href="https://pan.baidu.com/s/1Yuz2bD_80AMAqibsXN0b8Q%C2%A0" rel="nofollow" title="STM32F103C8T6驱动MPU6050并且在OLED屏幕上显示">STM32F103C8T6驱动MPU6050并且在OLED屏幕上显示</a>。提取码：2471</p> 
+<p>         这里我要给大家强调一下，如果delay函数不对的话，很可能会导致MPU6050的IIC时序不对而发生错误，所以大家最好是参照一下我的文件。此外要给大家强调的一点是如果大家用的管脚不是PB8 PB9而要修改其他的IO口的话，那么除了这里要修改。</p> 
+<p><img alt="" height="140" src="https://images2.imgbox.com/7c/04/O9zjVgmW_o.png" width="657"></p> 
+<p>         对应的IO操作方向也要注意，这里给大家提个醒，当初我就是没有仔细修改这里，而导致多次初始化失败，具体修改方法可以参考数据手册</p> 
+<p><img alt="" height="97" src="https://images2.imgbox.com/2f/03/a85ePOZz_o.png" width="656"></p> 
+<p>        移植完成后，我们就可以通过Read_DMP(&amp;Pitch,&amp;Roll,&amp;Yaw);这个函数来读取对应的角度，这个角度是由DMP结算过的，所以可以拿过来就直接用。</p> 
+<h2>是否需要扶正，是否需要开机校准</h2> 
+<p>        关于这个问题，我并没有出现过网上说的不扶正就不能开机，博主的小车只是用了MPU6050来准确的转一下90°角，所以也就没有过多关注这一块。是否需要开机校准，我觉得还是需要的，<span style="color:#fe2c24;">当你转过一个90°弯之后，我们可以通过重新让MPU6050初始化，来把转完弯后的方向设置为0°方向，这样方便下一次转弯，</span>在代码逻辑上会减轻不少工作量。</p> 
+<p>        如果选择开机校准的话，那么我们就要让run_self_test()函数正常运行</p> 
+<pre><code class="language-cs">static void run_self_test(void)
+{
+    int result;
+    long gyro[3], accel[3];
+
+    result = mpu_run_self_test(gyro, accel);
+    if (result == 0x3) {
+        /* Test passed. We can trust the gyro data here, so let's push it down
+         * to the DMP.
+         */
+        float sens;
+        unsigned short accel_sens;
+        mpu_get_gyro_sens(&amp;sens);
+        gyro[0] = (long)(gyro[0] * sens);
+        gyro[1] = (long)(gyro[1] * sens);
+        gyro[2] = (long)(gyro[2] * sens);
+        dmp_set_gyro_bias(gyro);
+        mpu_get_accel_sens(&amp;accel_sens);
+        accel[0] *= accel_sens;
+        accel[1] *= accel_sens;
+        accel[2] *= accel_sens;
+        dmp_set_accel_bias(accel);
+		printf("setting bias succesfully ......\r\n");
+    }
+}</code></pre> 
+<p>        博主在让小车完成指令的过程中，采用了状态机的思路（FSM），当小车转弯一个90°之后，即将进入下一个状态的时候，我让MPU6050重新初始化，方便下一次转弯。</p> 
+<pre><code class="language-cs">IIC_Init();
+MPU6050_initialize();     //=====MPU6050初始化	
+DMP_Init();
+Yaw1 = 0;                //yaw1角度是缓解零飘问题的产物，这里也需要清零。</code></pre> 
+<h2>缓解yaw角零飘问题：</h2> 
+<p>        这个问题其实困扰我很久，当时将MPU6050加到小车上的时候，我使用JLINK给板子烧录程序时，在OLED显示屏上看到的零飘很小，我猜测可能是有JLINK和电池一起供电的原因。我将JLINK断开后，使用电池给板子供电，零飘一秒能有2到3°，这就很离谱了，我从知乎一篇文章那里找到了一个软件的解决方案，那就是按照它的漂移规律，<span style="color:#fe2c24;">写一个可以随时间变换角度的函数来减缓这个趋势。</span>我一并把代码粘出来，我将这个代码放到了TIM7定时器里，每10ms中断一次，把处理过的角度用OLED显示一下，大概是1分重才漂移1°，这就符合我们的要求了，而这个yaw1就是我们处理过后的角度。</p> 
+<pre><code class="language-cs">if(++mpu_count == 6000)mpu_count = 0;
+Read_DMP(&amp;Pitch,&amp;Roll,&amp;Yaw);
+yaw1 = Yaw - 0.001*mpu_count-0.49;
+</code></pre> 
+<h2>转弯函数：</h2> 
+<p>        这个转弯函数是一个比较简单的写法，我通过两轮的差速来让小车进行转弯，同时利用MPU6050来时刻测算角度，满足指定角度之后，就停止差速转弯。</p> 
+<blockquote> 
+ <p>        这里要注意的一点是，MPU6050在旋转的过程中，如果到了180°左右，会突然变成0，这就说明这时候小车转弯转过了，就要给MPU6050加上一个角度大于0的限制，否则一旦跃变成0，那肯定会不停地旋转。</p> 
+</blockquote> 
+<pre><code class="language-cs">#include "stm32f10x.h"
+#include "move.h"
+#include "MPU6050.h"
+#include "motor.h"
+#include "FSM.h"
+
+
+extern float Yaw1;
+//float Target_Left = 85.000;
+float bias_r;					//左转函数用到的偏差
+float bias_last_r;		//左转函数用到的上一次偏差
+float bais_error;
+float bias_l;
+float bias_last_l;
+float media_r;
+unsigned char stop_flag;
+void turn_right_90(float Yaw1,float Target_right)
+{
+	if(Yaw1 &lt; Target_right)
+	{	
+			Motor3_forward(1499);
+			Motor4_reverse(8499);
+	}
+	else
+	{
+		Move_stop();
+	}
+}
+void turn_back(float Yaw1,float Target_right)
+{
+	if((Yaw1 &lt; Target_right)&amp;&amp;(Yaw1 &gt; 0))
+	{	
+			Motor3_forward(1499);
+			Motor4_reverse(8499);
+	}
+	else if((Yaw1 &gt; Target_right)||(Yaw1 &lt; 0))
+	{
+		Move_stop();
+	}
+}
+</code></pre> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/23cc4ff520d7c9ac5672e592d6e23793/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">解决VMware虚拟机页面无法自适应缩放</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/ab71808d30b7556a7b2b1e503cd6eb17/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Latex中给图表添加中英文标题及生成相关目录</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

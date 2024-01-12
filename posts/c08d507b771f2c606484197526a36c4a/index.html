@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>yolov5训练加速--一个可能忽视的细节（mmdetection也一样），为什么显卡使用率老是为0？ - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="yolov5训练加速--一个可能忽视的细节（mmdetection也一样），为什么显卡使用率老是为0？" />
+<meta property="og:description" content="本文仅讨论节省图片加载时间问题，这里面可能有一些容易忽视的细节。yolov5的训练参数里面有一个--cache，默认是ram，就是把解码后的图片保存在内存中。也可以是disk，就会把解码后的图片保存在硬盘上。
+parser.add_argument(&#39;--cache&#39;, type=str, nargs=&#39;?&#39;, const=&#39;ram&#39;, help=&#39;--cache images in &#34;ram&#34; (default) or &#34;disk&#34;&#39;) 解码后的图片就是numpy数组啦，保存为.npy文件
+这里可能有一个问题，保存在硬盘上有啥用？能加速吗？
+接下来就稍微展开讨论一下。
+一。现象 在训练的时候，有可能会发现显卡使用率不高，甚至有的时候显卡使率用老是为0（用nvidia-smi查看），然后刷地一下升高了，然后又较长时间为0，这时候可能会觉得奇怪，它到底在干啥呢？这个时候如果查看cpu使用率，往往发现cpu占用率一直很高，有几个逻辑cpu始终满负责（用top命令查看）
+二。分析 训练的时候无非是几个步骤：
+1.加载图片
+2.图片预处理，数据增强，比如缩放，旋转，错切等等，还有yolov5常用的mosaic、mixup
+3.正向反向，更新梯度等等要用显卡的地方
+而1、2两步里面的加载图片其实是一个容易忽略的耗时步骤，加载图片的耗时即磁盘IO耗时和解码图片耗时，这两个耗时都跟图片大小有关系，图片越大，耗时就越长。而磁盘IO又跟你的磁盘性能有关系，磁盘性能相差可能天差地别，比如pcie4.0的SSD和机械硬盘就可能是10倍以上的速度差别，而解码图片这个只跟CPU有关系了，差别不会太大。
+所以这里先回前面的问题保存在硬盘上有啥用？能加速吗？-----能，就算解码后图片文件比原图片文件更大，都能加速，只要你用的是高性能的SSD就行，因为它把CPU解码时间完全给省掉了。
+另外，其实yolov5每训练一张图片，它不是只读了一张图，它起码会读4张图，因为mosaic数据增强是默认开启的，概率为1，它会把4张图拼成一张（随机中心点），这个暂不详述。然后如果开启了mixup，mixup又会再读4张图，跟之前的4张图做混合，那就是一次读8张图了。（当然如果mixup开的概率不大的话，那就不是每次都读8级图）。总之就是一次最多能读到8张图，那么读图时间成本就翻了8倍了。虽然你可能会说我CPU多核的，我SSD很快，但是你本来开一个较大的batch-size的时候，就已经充分用到了多核性能，现在再乘个8，就不够用啦。
+这里要提一下mmdetection里的yolox，它默认是会用到mosaic加mixup的，并且没有概率设置，每次都读8张图，所以给人的感觉就是，这玩意儿训练怎么这么慢？我的显卡为什么一直是0，它在干啥？
+注：原生的yolox是可以用缓存的，但mmdetection好像不行，如果你知道怎么用，请告诉我
+三。先上结论 1.如果训练图片总量不大，或者服务器内存超高，即完全可以把解码后的图片放内存里，那就充分利用，直接加上--cache参数完事
+2.如果读图片的时间不长，它的耗时只占总时间的很少一部分，没什么优化意义那就不用管它。比如：
+(1)训练图片都很小，比如大多在200K以下
+(2)模型比较大，导致显卡耗时占了大部分，比如用yolov5x的规模训练
+(3)只开mosaic，没开mixup，甚至mosaic的概率还调小了
+3.如果想节省读图时间，但是内存又装不下。但是你有一个高性能的SSD，那你就可以考虑把解码后的图片缓存在硬盘上。即用--cache disk参数
+4.如果想节省读图时间，但是内存装不下，又没有SSD，那怎么办呢？凉拌！买一个SSD不就行了，买不起显卡，还买不起SSD吗，管够！不过还有一点
+如果你的训练图片都很大，比如分辨率高，或者压缩率低，你都可以根据训练用到的分辨率直接把原图resize一下，保存为jpg格式，直接保存到npy文件中（具体见续篇），比如你训练的分辨率用的是640（yolov5默认就是640），那你就把图片resize到640（保持宽高比例）就行了，这样你的图片就变小了，那读图时间自然就少了。并且有可能变小之后你的内存装的下了，那速度就起飞了！
+此处修正:
+1.保存为640jpg是有可能影响训练效果的，可以保存为640分辨率的npy
+2.关于读图时间、显卡耗时与总时间的关系，其实不是简单地相加，两者是木桶效应。
+具体可以见续篇：
+yolov5训练加速--一个可能忽视的细节（mmdetection也一样），为什么显卡使用率老是为0？（续）_kv1830的博客-CSDN博客
+四。实验 我其实是用mmdetection的yolox在训练cityscape数据集的时候，发现了这么个问题，cityscape的图片都是2M左右，分辨率是2048乘1024的，然后你再用一个小规模的模型来训练，比如yolox_s，那就会发现训练时间明显长于yolov5s（那是因为yolox开了mixup），而且貌似还没有把图片加内存里的功能。
+但是我家里的电脑上没有准备好cityscape的标注文件，我就不用它演示了。我正好有一个之前做一个实验用的超小数据集，训练集一共只有45张图，验证集只有5张图，但是里面的图片都蛮大的，都是2M多，正好用它来试试。之前的实验在如下文章中：
+https://blog.csdn.net/ogebgvictor/article/details/128179019
+我的显卡是笔记本上的3080，为了增强对比效果，先把mixup打开，概率设为1（复制了一份超参数文件data/hyps/hyp.scratch-low-my.yaml）
+注意，我笔记本上只有一个PCIE4.0的SSD，所以我的耗时主要不在磁盘IO上，而是在图片解码上
+1.啥也不缓存 python train.py --data earplug_data/dataset.yaml --cfg models/yolov5s.yaml --weights weights/yolov5s.pt --batch-size 8 --epochs 200 --name exp_earplug --hyp data/hyps/hyp.scratch-low-my.yaml 耗时如下，45张图按理来说岂不是飞地一下就没了，这边却耗时在7、8秒左右一轮，而且明显会感觉进度条卡顿(时快，时卡那种，那个0秒的可能不太准）
+2.直接装内存里 python train.py --data earplug_data/dataset." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/c08d507b771f2c606484197526a36c4a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-09-04T23:56:33+08:00" />
+<meta property="article:modified_time" content="2023-09-04T23:56:33+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">yolov5训练加速--一个可能忽视的细节（mmdetection也一样），为什么显卡使用率老是为0？</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>本文仅讨论节省图片加载时间问题，这里面可能有一些容易忽视的细节。yolov5的训练参数里面有一个--cache，默认是ram，就是把解码后的图片保存在内存中。也可以是disk，就会把解码后的图片保存在硬盘上。</p> 
+<pre>parser.add_argument('--cache', type=str, nargs='?', const='ram', help='--cache images in "ram" (default) or "disk"')
+</pre> 
+<p> 解码后的图片就是numpy数组啦，保存为.npy文件</p> 
+<p><img alt="" height="384" src="https://images2.imgbox.com/ea/ef/K3LrPjyS_o.png" width="1089"></p> 
+<p> 这里可能有一个问题，保存在硬盘上有啥用？能加速吗？</p> 
+<p>接下来就稍微展开讨论一下。</p> 
+<h2>一。现象</h2> 
+<p>在训练的时候，有可能会发现显卡使用率不高，甚至有的时候显卡使率用老是为0（用nvidia-smi查看），然后刷地一下升高了，然后又较长时间为0，这时候可能会觉得奇怪，它到底在干啥呢？这个时候如果查看cpu使用率，往往发现cpu占用率一直很高，有几个逻辑cpu始终满负责（用top命令查看）</p> 
+<h2>二。分析</h2> 
+<p>训练的时候无非是几个步骤：</p> 
+<p>1.加载图片</p> 
+<p>2.图片预处理，数据增强，比如缩放，旋转，错切等等，还有yolov5常用的mosaic、mixup</p> 
+<p>3.正向反向，更新梯度等等要用显卡的地方</p> 
+<p>而1、2两步里面的加载图片其实是一个容易忽略的耗时步骤，加载图片的耗时即磁盘IO耗时和解码图片耗时，这两个耗时都跟图片大小有关系，图片越大，耗时就越长。而磁盘IO又跟你的磁盘性能有关系，磁盘性能相差可能天差地别，比如pcie4.0的SSD和机械硬盘就可能是10倍以上的速度差别，而解码图片这个只跟CPU有关系了，差别不会太大。</p> 
+<p><strong>所以这里先回前面的问题保存在硬盘上有啥用？能加速吗？-----能，就算解码后图片文件比原图片文件更大，都能加速，只要你用的是高性能的SSD就行，因为它把CPU解码时间完全给省掉了。</strong></p> 
+<p>另外，其实yolov5每训练一张图片，它不是只读了一张图，它起码会读4张图，因为mosaic数据增强是默认开启的，概率为1，它会把4张图拼成一张（随机中心点），这个暂不详述。然后如果开启了mixup，mixup又会再读4张图，跟之前的4张图做混合，那就是一次读8张图了。（当然如果mixup开的概率不大的话，那就不是每次都读8级图）。总之就是一次最多能读到8张图，那么读图时间成本就翻了8倍了。虽然你可能会说我CPU多核的，我SSD很快，但是你本来开一个较大的batch-size的时候，就已经充分用到了多核性能，现在再乘个8，就不够用啦。</p> 
+<p>这里要提一下mmdetection里的yolox，它默认是会用到mosaic加mixup的，并且没有概率设置，每次都读8张图，所以给人的感觉就是，这玩意儿训练怎么这么慢？我的显卡为什么一直是0，它在干啥？</p> 
+<p>注：原生的yolox是可以用缓存的，但mmdetection好像不行，如果你知道怎么用，请告诉我</p> 
+<h2>三。先上结论</h2> 
+<p>1.如果训练图片总量不大，或者服务器内存超高，即完全可以把解码后的图片放内存里，那就充分利用，直接加上--cache参数完事</p> 
+<p>2.如果读图片的时间不长，它的耗时只占总时间的很少一部分，没什么优化意义那就不用管它。比如：</p> 
+<p>(1)训练图片都很小，比如大多在200K以下</p> 
+<p>(2)模型比较大，导致显卡耗时占了大部分，比如用yolov5x的规模训练</p> 
+<p>(3)只开mosaic，没开mixup，甚至mosaic的概率还调小了</p> 
+<p>3.如果想节省读图时间，但是内存又装不下。但是你有一个高性能的SSD，那你就可以考虑把解码后的图片缓存在硬盘上。即用--cache disk参数</p> 
+<p>4.如果想节省读图时间，但是内存装不下，又没有SSD，那怎么办呢？凉拌！买一个SSD不就行了，买不起显卡，还买不起SSD吗，管够！不过还有一点</p> 
+<p>如果你的训练图片都很大，比如分辨率高，或者压缩率低，你都可以根据训练用到的分辨率直接把原图resize一下，<span style="color:#fe2c24;"><s>保存为jpg格式</s></span>，直接保存到npy文件中（具体见续篇），比如你训练的分辨率用的是640（yolov5默认就是640），那你就把图片resize到640（保持宽高比例）就行了，这样你的图片就变小了，那读图时间自然就少了。并且有可能变小之后你的内存装的下了，那速度就起飞了！</p> 
+<p><span style="color:#fe2c24;"><strong>此处修正:</strong></span></p> 
+<p><span style="color:#fe2c24;"><strong>1.保存为640jpg是有可能影响训练效果的，可以保存为640分辨率的npy</strong></span></p> 
+<p><span style="color:#fe2c24;"><strong>2.关于读图时间、显卡耗时与总时间的关系，其实不是简单地相加，两者是木桶效应。</strong></span></p> 
+<p><span style="color:#fe2c24;"><strong>具体可以见续篇：</strong></span></p> 
+<p><a href="https://blog.csdn.net/ogebgvictor/article/details/132529353" title="yolov5训练加速--一个可能忽视的细节（mmdetection也一样），为什么显卡使用率老是为0？（续）_kv1830的博客-CSDN博客">yolov5训练加速--一个可能忽视的细节（mmdetection也一样），为什么显卡使用率老是为0？（续）_kv1830的博客-CSDN博客</a></p> 
+<h2>四。实验</h2> 
+<p>我其实是用mmdetection的yolox在训练cityscape数据集的时候，发现了这么个问题，cityscape的图片都是2M左右，分辨率是2048乘1024的，然后你再用一个小规模的模型来训练，比如yolox_s，那就会发现训练时间明显长于yolov5s（那是因为yolox开了mixup），而且貌似还没有把图片加内存里的功能。</p> 
+<p>但是我家里的电脑上没有准备好cityscape的标注文件，我就不用它演示了。我正好有一个之前做一个实验用的超小数据集，训练集一共只有45张图，验证集只有5张图，但是里面的图片都蛮大的，都是2M多，正好用它来试试。之前的实验在如下文章中：</p> 
+<p><a href="https://blog.csdn.net/ogebgvictor/article/details/128179019" title="https://blog.csdn.net/ogebgvictor/article/details/128179019">https://blog.csdn.net/ogebgvictor/article/details/128179019</a></p> 
+<p><img alt="" height="294" src="https://images2.imgbox.com/e3/1c/UH5M77Qk_o.png" width="1064"></p> 
+<p> 我的显卡是笔记本上的3080，为了增强对比效果，先把mixup打开，概率设为1（复制了一份超参数文件data/hyps/hyp.scratch-low-my.yaml）</p> 
+<p><img alt="" height="330" src="https://images2.imgbox.com/14/eb/I25PxHi9_o.png" width="1030"></p> 
+<p><span style="color:#fe2c24;"><strong>注意，我笔记本上只有一个PCIE4.0的SSD，所以我的耗时主要不在磁盘IO上，而是在图片解码上</strong></span></p> 
+<h3> 1.啥也不缓存</h3> 
+<p>python train.py --data earplug_data/dataset.yaml --cfg models/yolov5s.yaml --weights weights/yolov5s.pt --batch-size 8 --epochs 200  --name exp_earplug --hyp data/hyps/hyp.scratch-low-my.yaml </p> 
+<p>耗时如下，45张图按理来说岂不是飞地一下就没了，这边却耗时在7、8秒左右一轮，而且明显会感觉进度条卡顿(时快，时卡那种，那个0秒的可能不太准）</p> 
+<p><img alt="" height="1012" src="https://images2.imgbox.com/12/6f/C2zdLxC1_o.png" width="1200"></p> 
+<h3> 2.直接装内存里</h3> 
+<p>python train.py --data earplug_data/dataset.yaml --cfg models/yolov5s.yaml --weights weights/yolov5s.pt --batch-size 8 --epochs 200  --name exp_earplug --hyp data/hyps/hyp.scratch-low-my.yaml <span style="color:#fe2c24;"> --cache </span></p> 
+<p>速度起飞没的说，非常流畅</p> 
+<p><img alt="" height="1141" src="https://images2.imgbox.com/f6/a1/jKKbJ1Jh_o.png" width="1200"></p> 
+<h3> 3.缓存到硬盘里</h3> 
+<p>python train.py --data earplug_data/dataset.yaml --cfg models/yolov5s.yaml --weights weights/yolov5s.pt --batch-size 8 --epochs 200  --name exp_earplug --hyp data/hyps/hyp.scratch-low-my.yaml  <span style="color:#fe2c24;">--cache disk </span></p> 
+<p><span style="color:#0d0016;">速度也是很快，但是稍有卡顿，没有内存那么流畅，而且这边的0秒是个整数，我感觉它其实并不是0秒，可能0.5也算0秒了，跟2那个0秒是有差距的。</span></p> 
+<p><span style="color:#0d0016;">这里也证 明了之前关于</span><strong>保存在硬盘上有啥用？能加速吗？</strong>的回答，是正确的</p> 
+<p><img alt="" height="1104" src="https://images2.imgbox.com/33/3c/wLiwSPXs_o.png" width="1200"></p> 
+<p> 我PCIE4.0的SSD，读几个图片咋就会稍有卡顿？仔细看一下训练图片发现，图片2M多，解码后36M！</p> 
+<p><img alt="" height="581" src="https://images2.imgbox.com/f4/1c/0TaqDiZU_o.png" width="1200"></p> 
+<p> 其实解码图片的大小是固定的，就是宽*高*3，单位字节，看一下我这个图片的分辨率</p> 
+<p><img alt="" height="929" src="https://images2.imgbox.com/5e/7d/eFdYtB8U_o.png" width="680"></p> 
+<p> <img alt="" height="565" src="https://images2.imgbox.com/a1/48/1UKaGB70_o.jpg" width="1200"></p> 
+<p> 是36M吧，上面已经说到了解决办法，直接resize成640分辨率</p> 
+<h3>4.resize后再用缓存</h3> 
+<p>就像下面这样把图片都resize一下</p> 
+<pre><code class="language-python">import cv2 as cv
+from pathlib import Path
+
+
+def batch_resize(img_dir, dest_img_dir, size=640):
+    img_dir = Path(img_dir)
+    dest_img_dir = Path(dest_img_dir)
+    dest_img_dir.mkdir(parents=True, exist_ok=True)
+
+    for img_path in img_dir.glob('*.jpg'):
+        img = cv.imread(str(img_path))
+        h, w = img.shape[:2]
+        ratio = size / max(h, w)
+        img = cv.resize(img, None, fx=ratio, fy=ratio, interpolation=cv.INTER_LINEAR)
+        cv.imwrite(str(dest_img_dir/img_path.name), img)
+batch_resize(r'D:\workPython\yolov5-6.2\data\earplug_data\images\train',
+             r'D:\workPython\yolov5-6.2\data\earplug_data\images_mini\train')
+batch_resize(r'D:\workPython\yolov5-6.2\data\earplug_data\images\val',
+             r'D:\workPython\yolov5-6.2\data\earplug_data\images_mini\val')</code></pre> 
+<p>不过要注意的是，训练的时候你不能把图片目录指定为images_mini，你还是用得images，因为在yolov5代码里写死了，它由图片目录去找labels目录的时候只会把图片目录当成images来用。所以你自己改一下目录名，我就不帮你改了</p> 
+<p>改完了之后先啥都不缓存，直接试一下，命令同1.</p> 
+<p>python train.py --data earplug_data/dataset.yaml --cfg models/yolov5s.yaml --weights weights/yolov5s.pt --batch-size 8 --epochs 200  --name exp_earplug --hyp data/hyps/hyp.scratch-low-my.yaml </p> 
+<p>发现速度居然跟 3.缓存到硬盘里比较相近！此处就不贴图了，耗时显示的都是0。其实相对于3，我这是节省了磁盘IO时间，因为我的图片resize之后都在100K以下，增加了一点点解码时间。</p> 
+<p>如果resize之后再用缓存，那速度更是快的飞起，跟2.直接装内存里差不多了。缓存文件只有900K。</p> 
+<p><img alt="" height="481" src="https://images2.imgbox.com/01/7a/zHSKvOZu_o.png" width="1200"></p> 
+<h2> 五。mmdetetion怎么办？</h2> 
+<p>mmdetection好像不支持缓存（如果能的话请告诉我怎么用，我暂时没发现），所以办法即：</p> 
+<p>1.你给它加个缓存功能，可以参考yolov5，原生yolox的代码来看看怎么改，我暂时还没仔细研究</p> 
+<p>2.缓存到内存稍微麻烦一点，因为它涉及多进程的问题，但缓存到硬盘上那不是很简单吗，如果你不想涉及到多进程的问题，你直接找到它读图片的代码，好像在一个loading.py里面，把里面的逻辑改一下即可，改为如果存在npy，则加载它。然后呢你事先给先把图片缓存到硬盘上，然后再启动训练流程，就完全不会有多进程的问题啦。</p> 
+<p>3.如果你真的没有SSD，比如我用的服务器上就没有，那你可以先考虑把图片resize到训练分辨率，还是会节省一些时间的。</p> 
+<h2>下一篇：</h2> 
+<p><a href="https://blog.csdn.net/ogebgvictor/article/details/132529353" title="yolov5训练加速--一个可能忽视的细节（mmdetection也一样），为什么显卡使用率老是为0？（续）_kv1830的博客-CSDN博客">yolov5训练加速--一个可能忽视的细节（mmdetection也一样），为什么显卡使用率老是为0？（续）_kv1830的博客-CSDN博客</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e2826c2de4f4db5778d76dd453c36c7f/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">clickhouse三分片一副本集群部署</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/a813230b13c255c43496f47f29564208/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">7. read_excel()函数读取Excel文件</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

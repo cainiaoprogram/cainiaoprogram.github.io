@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>用nginx实现分布式限流(防DDOS攻击) - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="用nginx实现分布式限流(防DDOS攻击)" />
+<meta property="og:description" content="1.前言
+一般对外暴露的系统,在促销或者黑客攻击时会涌来大量的请求,为了保护系统不被瞬间到来的高并发流量给打垮, 就需要限流 . 本文主要阐述如何用nginx 来实现限流. 听说 Hystrix 也可以, 各位有兴趣可以去研究哈 .
+2. 首先部署一个对外暴露接口的程序
+我这里部署的是一个spring boot 项目 里面暴露了如下接口, 很简单
+package com.anuo.app.controller; import org.slf4j.Logger; import org.slf4j.LoggerFactory; import org.springframework.web.bind.annotation.RequestMapping; import org.springframework.web.bind.annotation.RequestMethod; import org.springframework.web.bind.annotation.RestController; @RestController @RequestMapping(&#34;/test&#34;) public class TestController { Logger logger = LoggerFactory.getLogger(TestController.class); @RequestMapping(value = &#34;/show/message&#34;, method = RequestMethod.GET) public String test() { return &#34;hello world &#34;; } } 暴露了一个 get 请求返回 hello world 的restful 接口.
+将此程序部署到 linux 服务器上. 部署步奏不再赘述, 自行百度 spring boot 部署 即可." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/de4e89d90235f9357900e94927b276db/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-07-01T10:00:52+08:00" />
+<meta property="article:modified_time" content="2020-07-01T10:00:52+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">用nginx实现分布式限流(防DDOS攻击)</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>1.前言</p> 
+<p>一般对外暴露的系统,在促销或者黑客攻击时会涌来大量的请求,为了保护系统不被瞬间到来的高并发流量给打垮, 就需要限流 . </p> 
+<p>本文主要阐述如何用nginx 来实现限流. 听说 Hystrix 也可以, 各位有兴趣可以去研究哈 .</p> 
+<p>2. 首先部署一个对外暴露接口的程序</p> 
+<p> 我这里部署的是一个spring boot 项目 里面暴露了如下接口, 很简单</p> 
+<pre>package com.anuo.app.controller;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/test")
+public class TestController {
+
+    Logger logger = LoggerFactory.getLogger(TestController.class);
+
+
+
+    @RequestMapping(value = "/show/message", method = RequestMethod.GET)
+    public String test() {
+        return  "hello world ";
+    }
+
+
+}</pre> 
+<p>暴露了一个 get 请求返回 hello world 的restful 接口.</p> 
+<p>将此程序部署到 linux 服务器上. 部署步奏不再赘述, 自行百度 spring boot 部署 即可. </p> 
+<p> </p> 
+<p>3.创建一个名称为 nginx.conf 的 nginx 配置文件</p> 
+<p>创建一个 名叫 nginx.conf 的配置文件, 完整内容如下</p> 
+<pre>user  nginx;
+worker_processes  1;
+
+error_log  /var/log/nginx/error.log warn;
+pid        /var/run/nginx.pid;
+
+
+events {
+    worker_connections  1024;
+}
+
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    log_format  main  ‘$remote_addr - $remote_user [$time_local] "$request" ‘
+                      ‘$status $body_bytes_sent "$http_referer" ‘
+                      ‘"$http_user_agent" "$http_x_forwarded_for"‘;
+
+    access_log  /var/log/nginx/access.log  main;
+
+    sendfile        on;
+    #tcp_nopush     on;
+
+    keepalive_timeout  65;
+
+    #gzip  on;
+
+   
+	#限流配置
+	limit_req_zone $binary_remote_addr zone=perip:10m rate=1r/s;
+	 
+	
+	#负载均衡配置
+	upstream myserver {
+		server 192.168.10.253:8090;
+		
+	}
+	server {
+		listen 80;
+		 
+		location / {
+			limit_req zone=perip;
+			proxy_pass http://myserver;
+			
+		}
+	}
+}
+</pre> 
+<p> </p> 
+<p>配置文件中限流部分解释:</p> 
+<p>如上, nginx 的限流配置 , 只有两行代码.</p> 
+<p> 第一行: </p> 
+<pre> </pre> 
+<pre>#限流配置
+limit_req_zone $binary_remote_addr zone=perip:10m rate=1r/s;</pre> 
+<p>limit_req_zone : 是限流声明.</p> 
+<p>$binary_remote_addr: 表示根据客户端 ip 来 限流, 比如 上面的限流配置 限制每个客户端ip的请求频率为一秒一次, 你如果耍流氓一秒两次, 就会被限流 会返回一个http 503 错误给你. </p> 
+<p>zone=perip: 表示 用 perip 这个 名称 来标识 这行限流配置, 待会 会通过 perip 这个名称来引用这行限流配置(也就是说限流配置是可以定义为多个的)</p> 
+<p>10m: 表示存储客户端ip的空间为10MB, 1MB 大概存储1万多ip , 10 MB 大概 10多万Ip , 参考解释:  http://www.ttlsa.com/nginx/nginx-limiting-the-number-of-requests-ngx_http_limit_req_module-module/  在这篇文章中搜索 binary_remote_addr 即可定位相关解释. </p> 
+<p> rate=1r/s: 表示频率是 一秒一个请求. </p> 
+<p> </p> 
+<p> 第二行:</p> 
+<p> </p> 
+<pre>location / {
+			limit_req zone=perip;
+			proxy_pass http://myserver;
+			
+		}</pre> 
+<p>即这行: </p> 
+<pre>limit_req zone=perip;</pre> 
+<p>表示在 myserver 这个集群上, 使用 名称为 perip 的限流配置</p> 
+<p> </p> 
+<p>4.用docker 部署 nginx </p> 
+<p>将上一步创建的 nginx.conf 配置文件, 拷贝到linux 目录 , /root/nginx/ 下 (目录可以任意), 然后 一个docker 命令部署好 nginx 环境</p> 
+<pre>docker run --name nginx -v /root/nginx/nginx.conf:/etc/nginx/nginx.conf:ro -p 8080:80 -d nginx</pre> 
+<p>这里暴露的是 8080 端口, 通过 8080 端口可以访问到 nginx 配置中的负载均衡节点, 即 192.168.10.253:8090  ip端口, 这个 ip端口对应的就是 , 第一步创建部署的 hello world 程序. </p> 
+<p> </p> 
+<p>5. 用代码访问 第一步定义的 helloworld 接口</p> 
+<p> </p> 
+<pre>package com.anuo.study.studydistributed;
+
+import com.anuo.app.common.util.HttpUtil;
+
+public class StudyNginx {
+    public static void main(String[] args) throws InterruptedException {
+        while (true) {
+            Thread.sleep(100);
+            String s= HttpUtil.sendGet("http://192.168.10.253:8080/test/show/message");
+            System.out.println(s);
+        }
+    }
+}
+</pre> 
+<p>我这里是 一秒 执行 10次 get 请求, 已经大于了 nginx中配置的 rate=1r/s  一秒一次的请求, 所以会看到 503 报错, 如下. </p> 
+<p><img alt="技术分享图片" src="https://images2.imgbox.com/54/92/a7ln5n1J_o.png"></p> 
+<p><br> 如果改哈代码, 改为一秒执行一次get 请求, 就不会报错, 各位可以去试一下</p> 
+<p> </p> 
+<p>至此 nginx 的限流 已实现. </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/b06fa446608736c036dc5f69399db848/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【Java学习-进阶】-swagger配置与优化</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/bf05e2da4750256e2d299853a0d17b05/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">系统学习NLP（三十二）--BERT、XLNet、RoBERTa、ALBERT及知识蒸馏</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

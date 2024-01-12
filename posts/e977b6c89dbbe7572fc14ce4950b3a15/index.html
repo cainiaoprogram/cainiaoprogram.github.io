@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【redis源码分析】内存分配---zmalloc - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【redis源码分析】内存分配---zmalloc" />
+<meta property="og:description" content="/* zmalloc - total amount of allocated memory aware version of malloc() * * Copyright (c) 2009-2010, Salvatore Sanfilippo &lt;antirez at gmail dot com&gt; * All rights reserved. * * Redistribution and use in source and binary forms, with or without * modification, are permitted provided that the following conditions are met: * * * Redistributions of source code must retain the above copyright notice, * this list of conditions and the following disclaimer." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/e977b6c89dbbe7572fc14ce4950b3a15/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2014-05-17T21:34:53+08:00" />
+<meta property="article:modified_time" content="2014-05-17T21:34:53+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【redis源码分析】内存分配---zmalloc</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <pre><code class="language-cpp">/* zmalloc - total amount of allocated memory aware version of malloc()
+ *
+ * Copyright (c) 2009-2010, Salvatore Sanfilippo &lt;antirez at gmail dot com&gt;
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ *   * Redistributions of source code must retain the above copyright notice,
+ *     this list of conditions and the following disclaimer.
+ *   * Redistributions in binary form must reproduce the above copyright
+ *     notice, this list of conditions and the following disclaimer in the
+ *     documentation and/or other materials provided with the distribution.
+ *   * Neither the name of Redis nor the names of its contributors may be used
+ *     to endorse or promote products derived from this software without
+ *     specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#ifndef __ZMALLOC_H
+#define __ZMALLOC_H
+
+/* Double expansion needed for stringification of macro values. */
+//宏的双重定义，实现宏的字符串化
+//参考http://my.oschina.net/moooofly/blog/126187
+//此处使用#将宏(这里是#紧跟的那个s)“字符串化”；使用##能将左右两边的标签组合在一起，而且两个标签之间不存在空格
+
+#define __xstr(s) __str(s)
+#define __str(s) #s
+/*
+	#define __xstr(s)  __str(s)  
+	#define __str(s) #s
+
+	#define str "hello" __xstr(raiet)
+
+	int main(){
+		printf("str : %s\n",str);
+		exit(0);	
+	}
+	output  helloraiet
+*/
+
+#if defined(USE_TCMALLOC)
+#define ZMALLOC_LIB ("tcmalloc-" __xstr(TC_VERSION_MAJOR) "." __xstr(TC_VERSION_MINOR))
+#include &lt;google/tcmalloc.h&gt;
+//版本高于1.6
+#if (TC_VERSION_MAJOR == 1 &amp;&amp; TC_VERSION_MINOR &gt;= 6) || (TC_VERSION_MAJOR &gt; 1)
+#define HAVE_MALLOC_SIZE 1
+//分别定义出内存占有量的计算方法
+#define zmalloc_size(p) tc_malloc_size(p)
+#else
+#error "Newer version of tcmalloc required"
+#endif
+
+#elif defined(USE_JEMALLOC)
+#define ZMALLOC_LIB ("jemalloc-" __xstr(JEMALLOC_VERSION_MAJOR) "." __xstr(JEMALLOC_VERSION_MINOR) "." __xstr(JEMALLOC_VERSION_BUGFIX))
+#include &lt;jemalloc/jemalloc.h&gt;
+//版本高于2.1
+#if (JEMALLOC_VERSION_MAJOR == 2 &amp;&amp; JEMALLOC_VERSION_MINOR &gt;= 1) || (JEMALLOC_VERSION_MAJOR &gt; 2)
+#define HAVE_MALLOC_SIZE 1
+//分别定义出内存占有量的计算方法
+#define zmalloc_size(p) je_malloc_usable_size(p)
+#else
+#error "Newer version of jemalloc required"
+#endif
+
+#elif defined(__APPLE__)
+#include &lt;malloc/malloc.h&gt;
+#define HAVE_MALLOC_SIZE 1
+//分别定义出内存占有量的计算方法
+#define zmalloc_size(p) malloc_size(p)
+#endif
+//如果没有使用tcmalloc或是jemalloc库，则使用glibc库
+#ifndef ZMALLOC_LIB
+#define ZMALLOC_LIB "libc"
+#endif
+
+//申明一些函数原型
+void *zmalloc(size_t size);
+void *zcalloc(size_t size);
+void *zrealloc(void *ptr, size_t size);
+void zfree(void *ptr);
+char *zstrdup(const char *s);
+size_t zmalloc_used_memory(void);
+void zmalloc_enable_thread_safeness(void);
+void zmalloc_set_oom_handler(void (*oom_handler)(size_t));
+float zmalloc_get_fragmentation_ratio(void);
+size_t zmalloc_get_rss(void);
+size_t zmalloc_get_private_dirty(void);
+void zlibc_free(void *ptr);
+
+#ifndef HAVE_MALLOC_SIZE
+size_t zmalloc_size(void *ptr);
+#endif
+
+#endif /* __ZMALLOC_H */</code></pre> 
+<p><br> </p> 
+<p></p> 
+<pre><code class="language-cpp">/* zmalloc - total amount of allocated memory aware version of malloc()
+ *
+ * Copyright (c) 2009-2010, Salvatore Sanfilippo &lt;antirez at gmail dot com&gt;
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ *   * Redistributions of source code must retain the above copyright notice,
+ *     this list of conditions and the following disclaimer.
+ *   * Redistributions in binary form must reproduce the above copyright
+ *     notice, this list of conditions and the following disclaimer in the
+ *     documentation and/or other materials provided with the distribution.
+ *   * Neither the name of Redis nor the names of its contributors may be used
+ *     to endorse or promote products derived from this software without
+ *     specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+
+/* This function provide us access to the original libc free(). This is useful
+ * for instance to free results obtained by backtrace_symbols(). We need
+ * to define this function before including zmalloc.h that may shadow the
+ * free implementation if we use jemalloc or another non standard allocator. */
+ //将这个函数定义在"zmalloc.h"之前就是为了避免调用jemallor或者是其他库的标准操作器，而是调用原始C语言函数库"libc"中的free()函数
+void zlibc_free(void *ptr) {
+    free(ptr);
+}
+
+#include &lt;string.h&gt;
+#include &lt;pthread.h&gt;
+#include "config.h"
+#include "zmalloc.h"
+//PREFIX_SIZE用来记录malloc分配到的内存大小  
+//tc_malloc/je_malloc/Mac平台分别采用tc_malloc_size/malloc_size/je_malloc_usable_size（不需要单独开空间计算得到的内存大小，PREFIX_SIZE值置为0）  
+//linux和sun平台分别采用sizeof(size_t)字节和sizeof(long long)定长字段记录，所以要记录分配空间的大小
+
+#ifdef HAVE_MALLOC_SIZE
+#define PREFIX_SIZE (0)
+#else
+#if defined(__sun) || defined(__sparc) || defined(__sparc__)
+#define PREFIX_SIZE (sizeof(long long))
+#else
+#define PREFIX_SIZE (sizeof(size_t))
+#endif
+#endif
+
+/* Explicitly override malloc/free etc when using tcmalloc. */
+#if defined(USE_TCMALLOC)
+#define malloc(size) tc_malloc(size)
+#define calloc(count,size) tc_calloc(count,size)
+#define realloc(ptr,size) tc_realloc(ptr,size)
+#define free(ptr) tc_free(ptr)
+#elif defined(USE_JEMALLOC)
+#define malloc(size) je_malloc(size)
+#define calloc(count,size) je_calloc(count,size)
+#define realloc(ptr,size) je_realloc(ptr,size)
+#define free(ptr) je_free(ptr)
+#endif
+
+//使用原子操作更新内存使用量(如果定义了原子操作，则使用原子操作，否则使用互斥量保护)
+#ifdef HAVE_ATOMIC
+#define update_zmalloc_stat_add(__n) __sync_add_and_fetch(&amp;used_memory, (__n))
+#define update_zmalloc_stat_sub(__n) __sync_sub_and_fetch(&amp;used_memory, (__n))
+#else
+#define update_zmalloc_stat_add(__n) do { \
+    pthread_mutex_lock(&amp;used_memory_mutex); \
+    used_memory += (__n); \
+    pthread_mutex_unlock(&amp;used_memory_mutex); \
+} while(0)
+
+#define update_zmalloc_stat_sub(__n) do { \
+    pthread_mutex_lock(&amp;used_memory_mutex); \
+    used_memory -= (__n); \
+    pthread_mutex_unlock(&amp;used_memory_mutex); \
+} while(0)
+
+#endif
+//定义在分配和释放内存的时候更新used_memory的值（用到上面内存分配的原子操作add和sub函数）  
+//if结构判断语句中返回的是对_n末两位进行截断的结果：sizeof(long)在32位系统下的二进制表现形式为：100  
+//if结构成立证明当前分配的内存大小有碎片（即_n值不是内存分配单元的整数倍），所以后面有个+=sizeof(long)-(_n&amp;(sizeof(long)-1)的过程就是为了补齐
+//这个函数是最上面几个函数的封(在分配内存时使用)
+#define update_zmalloc_stat_alloc(__n) do { \
+    size_t _n = (__n); \
+    if (_n&amp;(sizeof(long)-1)) _n += sizeof(long)-(_n&amp;(sizeof(long)-1)); \
+    if (zmalloc_thread_safe) { \
+        update_zmalloc_stat_add(_n); \
+    } else { \
+        used_memory += _n; \
+    } \
+} while(0)
+
+//同上面(在释放内存时使用)
+#define update_zmalloc_stat_free(__n) do { \
+    size_t _n = (__n); \
+    if (_n&amp;(sizeof(long)-1)) _n += sizeof(long)-(_n&amp;(sizeof(long)-1)); \
+    if (zmalloc_thread_safe) { \
+        update_zmalloc_stat_sub(_n); \
+    } else { \
+        used_memory -= _n; \
+    } \
+} while(0)
+
+
+static size_t used_memory = 0;
+static int zmalloc_thread_safe = 0;
+pthread_mutex_t used_memory_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+//异常处理(Out of memory)的默认操作，直接退出
+static void zmalloc_default_oom(size_t size) {
+    fprintf(stderr, "zmalloc: Out of memory trying to allocate %zu bytes\n",
+        size);
+    fflush(stderr);
+    abort();
+}
+
+static void (*zmalloc_oom_handler)(size_t) = zmalloc_default_oom;
+
+void *zmalloc(size_t size) {
+	//PREFIX_SIZE代表是否需要存储额外的变量prefix所占的内存字节数
+    void *ptr = malloc(size+PREFIX_SIZE);
+
+    if (!ptr) zmalloc_oom_handler(size);
+#ifdef HAVE_MALLOC_SIZE
+	//如果有size函数可以直接获得内存使用量，则直接调用zmalloc_size函数获得内存使用量
+    update_zmalloc_stat_alloc(zmalloc_size(ptr));
+    return ptr;
+#else
+	//否则一般是使用了glibc，需要自己封装内存使用量
+    *((size_t*)ptr) = size;
+    update_zmalloc_stat_alloc(size+PREFIX_SIZE);
+	//指针向后移动，返回真正可用的地址
+    return (char*)ptr+PREFIX_SIZE;
+#endif
+}
+
+//同上
+void *zcalloc(size_t size) {
+	//分配1个长度为size+PREFIX_SIZE大小的连续空间
+    void *ptr = calloc(1, size+PREFIX_SIZE);
+
+    if (!ptr) zmalloc_oom_handler(size);
+#ifdef HAVE_MALLOC_SIZE
+    update_zmalloc_stat_alloc(zmalloc_size(ptr));
+    return ptr;
+#else
+    *((size_t*)ptr) = size;
+    update_zmalloc_stat_alloc(size+PREFIX_SIZE);
+    return (char*)ptr+PREFIX_SIZE;
+#endif
+}
+
+void *zrealloc(void *ptr, size_t size) {
+#ifndef HAVE_MALLOC_SIZE
+    void *realptr;
+#endif
+    size_t oldsize;
+    void *newptr;
+
+    if (ptr == NULL) return zmalloc(size);
+#ifdef HAVE_MALLOC_SIZE
+	//先取得之前内存的大小，用于统计内存使用量(需要先减去这个大小)
+    oldsize = zmalloc_size(ptr);
+	//重新分配
+    newptr = realloc(ptr,size);
+    if (!newptr) zmalloc_oom_handler(size);
+	//更新内存使用量
+    update_zmalloc_stat_free(oldsize);
+    update_zmalloc_stat_alloc(zmalloc_size(newptr));
+    return newptr;
+#else
+	//指针先前移动找到真正的地址起始地址，这样才能正确释放
+    realptr = (char*)ptr-PREFIX_SIZE;
+    oldsize = *((size_t*)realptr);
+	//再次分配size+PREFIX_SIZE大小的内存
+    newptr = realloc(realptr,size+PREFIX_SIZE);
+    if (!newptr) zmalloc_oom_handler(size);
+
+    *((size_t*)newptr) = size;
+    update_zmalloc_stat_free(oldsize);
+	//这里应该要加上PREFIX_SIZE，原本的代码没有，应该是疏忽了
+	//update_zmalloc_stat_alloc(size + PREFIX_SIZE);
+    update_zmalloc_stat_alloc(size);
+    return (char*)newptr+PREFIX_SIZE;
+#endif
+}
+
+/* Provide zmalloc_size() for systems where this function is not provided by
+ * malloc itself, given that in that case we store an header with this
+ * information as the first bytes of every allocation. */
+ //如果使用的库(glibc)没有定义取得内存的size方法，则需要自己定义，这样就可以对外提供统一的调用接口了
+#ifndef HAVE_MALLOC_SIZE
+size_t zmalloc_size(void *ptr) {
+    void *realptr = (char*)ptr-PREFIX_SIZE;
+    size_t size = *((size_t*)realptr);
+    /* Assume at least that all the allocations are padded at sizeof(long) by
+     * the underlying allocator. */
+    if (size&amp;(sizeof(long)-1)) size += sizeof(long)-(size&amp;(sizeof(long)-1));
+    return size+PREFIX_SIZE;
+}
+#endif
+
+void zfree(void *ptr) {
+#ifndef HAVE_MALLOC_SIZE
+    void *realptr;
+    size_t oldsize;
+#endif
+
+    if (ptr == NULL) return;
+#ifdef HAVE_MALLOC_SIZE
+    update_zmalloc_stat_free(zmalloc_size(ptr));
+    free(ptr);
+#else
+	//指针偏移
+    realptr = (char*)ptr-PREFIX_SIZE;
+    oldsize = *((size_t*)realptr);
+    update_zmalloc_stat_free(oldsize+PREFIX_SIZE);
+    free(realptr);
+#endif
+}
+
+//字符串复制
+char *zstrdup(const char *s) {
+    size_t l = strlen(s)+1;
+    char *p = zmalloc(l);
+
+    memcpy(p,s,l);
+    return p;
+}
+//返回当前已经使用的内存大小
+size_t zmalloc_used_memory(void) {
+    size_t um;
+	//区分线程安全与否
+    if (zmalloc_thread_safe) {
+#ifdef HAVE_ATOMIC
+        um = __sync_add_and_fetch(&amp;used_memory, 0);
+#else
+        pthread_mutex_lock(&amp;used_memory_mutex);
+        um = used_memory;
+        pthread_mutex_unlock(&amp;used_memory_mutex);
+#endif
+    }
+    else {
+        um = used_memory;
+    }
+
+    return um;
+}
+
+//设置线程安全
+void zmalloc_enable_thread_safeness(void) {
+    zmalloc_thread_safe = 1;
+}
+//设置自定义的异常处理函数
+void zmalloc_set_oom_handler(void (*oom_handler)(size_t)) {
+    zmalloc_oom_handler = oom_handler;
+}
+
+/* Get the RSS information in an OS-specific way.
+ *
+ * WARNING: the function zmalloc_get_rss() is not designed to be fast
+ * and may not be called in the busy loops where Redis tries to release
+ * memory expiring or swapping out objects.
+ *
+ * For this kind of "fast RSS reporting" usages use instead the
+ * function RedisEstimateRSS() that is a much faster (and less precise)
+ * version of the funciton. */
+
+
+//以下的函数都是和系统相关的
+#if defined(HAVE_PROC_STAT)
+#include &lt;unistd.h&gt;
+#include &lt;sys/types.h&gt;
+#include &lt;sys/stat.h&gt;
+#include &lt;fcntl.h&gt;
+/*
+RES：resident memory usage 常驻内存
+1、进程当前使用的内存大小，但不包括swap out
+2、包含其他进程的共享
+3、如果申请100m的内存，实际使用10m，它只增长10m，与VIRT相反
+4、关于库占用内存的情况，它只统计加载的库文件所占内存大小
+
+res的值是 /proc/&lt;pid&gt;/stat文件的第24个字段
+*/
+size_t zmalloc_get_rss(void) {
+    int page = sysconf(_SC_PAGESIZE);
+    size_t rss;
+    char buf[4096];
+    char filename[256];
+    int fd, count;
+    char *p, *x;
+
+    snprintf(filename,256,"/proc/%d/stat",getpid());
+    if ((fd = open(filename,O_RDONLY)) == -1) return 0;
+    if (read(fd,buf,4096) &lt;= 0) {
+        close(fd);
+        return 0;
+    }
+    close(fd);
+
+    p = buf;
+    count = 23; /* RSS is the 24th field in /proc/&lt;pid&gt;/stat */
+    while(p &amp;&amp; count--) {
+        p = strchr(p,' ');
+        if (p) p++;
+    }
+    if (!p) return 0;
+    x = strchr(p,' ');
+    if (!x) return 0;
+    *x = '\0';
+
+    rss = strtoll(p,NULL,10);
+    rss *= page;
+    return rss;
+}
+#elif defined(HAVE_TASKINFO)
+#include &lt;unistd.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;sys/types.h&gt;
+#include &lt;sys/sysctl.h&gt;
+#include &lt;mach/task.h&gt;
+#include &lt;mach/mach_init.h&gt;
+
+size_t zmalloc_get_rss(void) {
+    task_t task = MACH_PORT_NULL;
+    struct task_basic_info t_info;
+    mach_msg_type_number_t t_info_count = TASK_BASIC_INFO_COUNT;
+
+    if (task_for_pid(current_task(), getpid(), &amp;task) != KERN_SUCCESS)
+        return 0;
+    task_info(task, TASK_BASIC_INFO, (task_info_t)&amp;t_info, &amp;t_info_count);
+
+    return t_info.resident_size;
+}
+#else
+//否则直接返回实际的内存使用量
+size_t zmalloc_get_rss(void) {
+    /* If we can't get the RSS in an OS-specific way for this system just
+     * return the memory usage we estimated in zmalloc()..
+     *
+     * Fragmentation will appear to be always 1 (no fragmentation)
+     * of course... */
+    return zmalloc_used_memory();
+}
+#endif
+//计算碎片率
+/* Fragmentation = RSS / allocated-bytes */
+float zmalloc_get_fragmentation_ratio(void) {
+    return (float)zmalloc_get_rss()/zmalloc_used_memory();
+}
+
+#if defined(HAVE_PROC_SMAPS)
+size_t zmalloc_get_private_dirty(void) {
+    char line[1024];
+    size_t pd = 0;
+    FILE *fp = fopen("/proc/self/smaps","r");
+
+    if (!fp) return 0;
+    while(fgets(line,sizeof(line),fp) != NULL) {
+        if (strncmp(line,"Private_Dirty:",14) == 0) {
+            char *p = strchr(line,'k');
+            if (p) {
+                *p = '\0';
+                pd += strtol(line+14,NULL,10) * 1024;
+            }
+        }
+    }
+    fclose(fp);
+    return pd;
+}
+#else
+size_t zmalloc_get_private_dirty(void) {
+    return 0;
+}
+#endif
+</code></pre> 
+<br> 
+<p>总结：</p> 
+<p><span style="white-space:pre"></span>redis的内存分配实际上使用了facebook的jemmalloc内存分配库，只不过为了提高系统的扩张性，将整个内存分配进行了一次封装，对外提供统一的接口，而内部使用了不同的实现。上面的代码也可以看出，他主要封装了现在流行的两个个内存分配库：google的tcmalloc和facebook的jemalloc库。</p> 
+<p><span style="white-space:pre"></span>这一套对内存的封装的代码，很值得在以后的系统中使用，一来对内存管理会有更高的可控性，比如，可以利用内部的实现监控内存，检测内存泄露等等，二来利用更加优秀的内存分配库也可以在一定程度上提高整个系统的性能。</p> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/a472c6c716d2b8080cafb9fe26f58f69/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">To &#34;windows mobile 5.0 pocket pc device&#34; connection failed 这个产品的配置数据已损坏,请与技术支持人员联系</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/dfdc3221c81531ab0ebcb3bf20704dc2/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">修改开源项目源码方法</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

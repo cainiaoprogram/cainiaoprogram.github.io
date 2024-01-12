@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>epoll的LT模式（水平触发）和ET模式（边沿触发） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="epoll的LT模式（水平触发）和ET模式（边沿触发）" />
+<meta property="og:description" content="文章目录 前言名称的记忆状态变化LT模式ET模式数据的读取和发送代码实践基础代码测试分类怎么解决ET触发了一次就不再触发了 总结 前言 epoll的触发模式是个引发讨论非常多的话题，网络上这方面总结的文章也很多，首先从名字上就不是很统一，LT模式常被称为水平触发、电平触发、条件触发，而ET模式常被称为边缘触发、边沿触发等，这些都是从英文翻译过来的，只不过翻译的时候有些差异，LT全称 level-triggered，ET全称 edge-triggered。
+虽然这个知识点热度很高，但很多人对于它的理解总是差那么一点，特别是在面试的时候，很多面试者总是处于一种回忆和背诵的状态，其实这两种模式真的不需要去死记硬背，下面说说我个人对这两种模式的理解和记忆方法。
+名称的记忆 每次提到ET（边沿触发）首先映入我脑海的是大学里《数字逻辑电路》这门课程，里面会提到低电平、高电平，当电平从低到高时会有一个上升沿，而电平从高到低时会有一个下降沿，这个“沿”就是边沿触发时提到的“边沿”，跟马路边的马路牙子是同一种概念，也就是指状态变化的时候。提起上升沿和下降沿我还是印象很深的，当时我可是占用了好几节课的时间用Verilog语言写了一个显示“HELLO WORLD”的仿真波形，依靠的就是电平变化中的“沿”。
+状态变化 LT模式和ET模式可以类比电平变化来学习，但是在实际应用中概念却不是完全一样的，在epoll的应用中涉及到关于IO的读写，而读写的状态变化有哪些呢？可读、不可读、可写、不可写，其实就是这四种状态而已，以socket为例。
+可读：socket上有数据
+不可读：socket上没有数据了
+可写：socket上有空间可写
+不可写：socket上无空间可写
+对于水平触发模式，一个事件只要有，就会一直触发。
+对于边缘触发模式，只有一个事件从无到有才会触发。
+LT模式 对于读事件 EPOLLIN，只要socket上有未读完的数据，EPOLLIN 就会一直触发；对于写事件 EPOLLOUT，只要socket可写（一说指的是 TCP 窗口一直不饱和，我觉得是TCP缓冲区未满时，这一点还需验证），EPOLLOUT 就会一直触发。
+在这种模式下，大家会认为读数据会简单一些，因为即使数据没有读完，那么下次调用epoll_wait()时，它还会通知你在上没读完的文件描述符上继续读，也就是人们常说的这种模式不用担心会丢失数据。
+而写数据时，因为使用 LT 模式会一直触发 EPOLLOUT 事件，那么如果代码实现依赖于可写事件触发去发送数据，一定要在数据发送完之后移除检测可写事件，避免没有数据发送时无意义的触发。
+ET模式 对于读事件 EPOLLIN，只有socket上的数据从无到有，EPOLLIN 才会触发；对于写事件 EPOLLOUT，只有在socket写缓冲区从不可写变为可写，EPOLLOUT 才会触发（刚刚添加事件完成调用epoll_wait时或者缓冲区从满到不满）
+这种模式听起来清爽了很多，只有状态变化时才会通知，通知的次数少了自然也会引发一些问题，比如触发读事件后必须把数据收取干净，因为你不一定有下一次机会再收取数据了，即使不采用一次读取干净的方式，也要把这个激活状态记下来，后续接着处理，否则如果数据残留到下一次消息来到时就会造成延迟现象。
+这种模式下写事件触发后，后续就不会再触发了，如果还需要下一次的写事件触发来驱动发送数据，就需要再次注册一次检测可写事件。
+数据的读取和发送 关于数据的读比较好理解，无论是LT模式还是ET模式，监听到读事件从socket开始读数据就好了，只不过读的逻辑有些差异，LT模式下，读事件触发后，可以按需收取想要的字节数，不用把本次接收到的数据收取干净，ET模式下，读事件触发后通常需要数据一次性收取干净。
+而数据的写不太容易理解，因为数据的读是对端发来数据导致的，而数据的写其实是自己的逻辑层触发的，所以在通过网络发数据时通常都不会去注册监可写事件，一般都是调用 send 或者 write 函数直接发送，如果发送过程中， 函数返回 -1，并且错误码是 EWOULDBLOCK 表明发送失败，此时才会注册监听可写事件，并将剩余的服务存入自定义的发送缓冲区中，等可写事件触发后再接着将发送缓冲区中剩余的数据发送出去。
+代码实践 基础代码 以下为一个epoll触发模式测试的基础代码，也不算太长，直接拿来就可以测试：
+#include &lt;sys/socket.h&gt; //for socket #include &lt;arpa/inet.h&gt; //for htonl htons #include &lt;sys/epoll.h&gt; //for epoll_ctl #include &lt;unistd." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/22a53ae36d2f9c2586414cf285faa8ff/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-04-04T18:42:32+08:00" />
+<meta property="article:modified_time" content="2022-04-04T18:42:32+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">epoll的LT模式（水平触发）和ET模式（边沿触发）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><a href="#_2" rel="nofollow">前言</a></li><li><a href="#_8" rel="nofollow">名称的记忆</a></li><li><a href="#_12" rel="nofollow">状态变化</a></li><li><a href="#LT_24" rel="nofollow">LT模式</a></li><li><a href="#ET_32" rel="nofollow">ET模式</a></li><li><a href="#_41" rel="nofollow">数据的读取和发送</a></li><li><a href="#_49" rel="nofollow">代码实践</a></li><li><ul><li><a href="#_51" rel="nofollow">基础代码</a></li><li><a href="#_218" rel="nofollow">测试分类</a></li><li><a href="#ET_303" rel="nofollow">怎么解决ET触发了一次就不再触发了</a></li></ul> 
+  </li><li><a href="#_373" rel="nofollow">总结</a></li></ul> 
+</div> 
+<p></p> 
+<h2><a id="_2"></a>前言</h2> 
+<p>epoll的触发模式是个引发讨论非常多的话题，网络上这方面总结的文章也很多，首先从名字上就不是很统一，LT模式常被称为水平触发、电平触发、条件触发，而ET模式常被称为边缘触发、边沿触发等，这些都是从英文翻译过来的，只不过翻译的时候有些差异，LT全称 level-triggered，ET全称 edge-triggered。</p> 
+<p>虽然这个知识点热度很高，但很多人对于它的理解总是差那么一点，特别是在面试的时候，很多面试者总是处于一种回忆和背诵的状态，其实这两种模式真的不需要去死记硬背，下面说说我个人对这两种模式的理解和记忆方法。</p> 
+<h2><a id="_8"></a>名称的记忆</h2> 
+<p>每次提到ET（边沿触发）首先映入我脑海的是大学里《数字逻辑电路》这门课程，里面会提到低电平、高电平，当电平从低到高时会有一个上升沿，而电平从高到低时会有一个下降沿，这个“沿”就是边沿触发时提到的“边沿”，跟马路边的马路牙子是同一种概念，也就是指状态变化的时候。提起上升沿和下降沿我还是印象很深的，当时我可是占用了好几节课的时间用Verilog语言写了一个显示“HELLO WORLD”的仿真波形，依靠的就是电平变化中的“沿”。</p> 
+<h2><a id="_12"></a>状态变化</h2> 
+<p>LT模式和ET模式可以类比电平变化来学习，但是在实际应用中概念却不是完全一样的，在epoll的应用中涉及到关于IO的读写，而读写的状态变化有哪些呢？可读、不可读、可写、不可写，其实就是这四种状态而已，以socket为例。</p> 
+<p>可读：socket上有数据<br> 不可读：socket上没有数据了<br> 可写：socket上有空间可写<br> 不可写：socket上无空间可写</p> 
+<blockquote> 
+ <p>对于水平触发模式，一个事件只要有，就会一直触发。<br> 对于边缘触发模式，只有一个事件从无到有才会触发。</p> 
+</blockquote> 
+<h2><a id="LT_24"></a>LT模式</h2> 
+<p>对于读事件 <code>EPOLLIN</code>，只要socket上有未读完的数据，<code>EPOLLIN</code> 就会一直触发；对于写事件 <code>EPOLLOUT</code>，只要socket可写（一说指的是 TCP 窗口一直不饱和，我觉得是TCP缓冲区未满时，这一点还需验证），<code>EPOLLOUT</code> 就会一直触发。</p> 
+<p>在这种模式下，大家会认为读数据会简单一些，因为即使数据没有读完，那么下次调用epoll_wait()时，它还会通知你在上没读完的文件描述符上继续读，也就是人们常说的这种模式不用担心会丢失数据。</p> 
+<p>而写数据时，因为使用 LT 模式会一直触发 <code>EPOLLOUT</code> 事件，那么如果代码实现依赖于可写事件触发去发送数据，一定要在数据发送完之后移除检测可写事件，避免没有数据发送时无意义的触发。</p> 
+<h2><a id="ET_32"></a>ET模式</h2> 
+<p>对于读事件 <code>EPOLLIN</code>，只有socket上的数据从无到有，<code>EPOLLIN</code> 才会触发；对于写事件 <code>EPOLLOUT</code>，只有在socket写缓冲区从不可写变为可写，<code>EPOLLOUT</code> 才会触发（刚刚添加事件完成调用epoll_wait时或者缓冲区从满到不满）</p> 
+<p>这种模式听起来清爽了很多，只有状态变化时才会通知，通知的次数少了自然也会引发一些问题，比如触发读事件后必须把数据收取干净，因为你不一定有下一次机会再收取数据了，即使不采用一次读取干净的方式，也要把这个激活状态记下来，后续接着处理，否则如果数据残留到下一次消息来到时就会造成延迟现象。</p> 
+<p>这种模式下写事件触发后，后续就不会再触发了，如果还需要下一次的写事件触发来驱动发送数据，就需要再次注册一次检测可写事件。</p> 
+<h2><a id="_41"></a>数据的读取和发送</h2> 
+<p>关于数据的读比较好理解，无论是LT模式还是ET模式，监听到读事件从socket开始读数据就好了，只不过读的逻辑有些差异，LT模式下，读事件触发后，可以按需收取想要的字节数，不用把本次接收到的数据收取干净，ET模式下，读事件触发后通常需要数据一次性收取干净。</p> 
+<p>而数据的写不太容易理解，因为数据的读是对端发来数据导致的，而数据的写其实是自己的逻辑层触发的，所以在通过网络发数据时通常都不会去注册监可写事件，一般都是调用 <code>send</code> 或者 <code>write</code> 函数直接发送，如果发送过程中， 函数返回 <code>-1</code>，并且错误码是 EWOULDBLOCK 表明发送失败，此时才会注册监听可写事件，并将剩余的服务存入自定义的发送缓冲区中，等可写事件触发后再接着将发送缓冲区中剩余的数据发送出去。</p> 
+<h2><a id="_49"></a>代码实践</h2> 
+<h3><a id="_51"></a>基础代码</h3> 
+<p>以下为一个epoll触发模式测试的基础代码，也不算太长，直接拿来就可以测试：</p> 
+<pre><code class="prism language-cpp"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/socket.h&gt;</span> <span class="token comment">//for socket</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;arpa/inet.h&gt;</span>  <span class="token comment">//for htonl htons</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/epoll.h&gt;</span>  <span class="token comment">//for epoll_ctl</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;unistd.h&gt;</span>     <span class="token comment">//for close</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;fcntl.h&gt;</span>      <span class="token comment">//for fcntl</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;errno.h&gt;</span>      <span class="token comment">//for errno</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;iostream&gt;</span>     <span class="token comment">//for cout</span></span>
+
+<span class="token keyword">class</span> <span class="token class-name">fd_object</span>
+<span class="token punctuation">{<!-- --></span>
+<span class="token keyword">public</span><span class="token operator">:</span>
+    <span class="token function">fd_object</span><span class="token punctuation">(</span><span class="token keyword">int</span> fd<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> listen_fd <span class="token operator">=</span> fd<span class="token punctuation">;</span> <span class="token punctuation">}</span>
+    <span class="token operator">~</span><span class="token function">fd_object</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token function">close</span><span class="token punctuation">(</span>listen_fd<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token punctuation">}</span>
+<span class="token keyword">private</span><span class="token operator">:</span>
+    <span class="token keyword">int</span> listen_fd<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token comment">/*
+./epoll for lt mode
+and
+./epoll 1 for et mode
+*/</span>
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token keyword">int</span> argc<span class="token punctuation">,</span> <span class="token keyword">char</span><span class="token operator">*</span> argv<span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//create a socket fd</span>
+    <span class="token keyword">int</span> listen_fd <span class="token operator">=</span> <span class="token function">socket</span><span class="token punctuation">(</span>AF_INET<span class="token punctuation">,</span> SOCK_STREAM<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>listen_fd <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"create listen socket fd error."</span> <span class="token operator">&lt;&lt;</span> std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    fd_object <span class="token function">obj</span><span class="token punctuation">(</span>listen_fd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">//set socket to non-block</span>
+    <span class="token keyword">int</span> socket_flag <span class="token operator">=</span> <span class="token function">fcntl</span><span class="token punctuation">(</span>listen_fd<span class="token punctuation">,</span> F_GETFL<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    socket_flag <span class="token operator">|=</span> O_NONBLOCK<span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">fcntl</span><span class="token punctuation">(</span>listen_fd<span class="token punctuation">,</span> F_SETFL<span class="token punctuation">,</span> socket_flag<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"set listen fd to nonblock error."</span> <span class="token operator">&lt;&lt;</span> std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">//init server bind info</span>
+    <span class="token keyword">int</span> port <span class="token operator">=</span> <span class="token number">51741</span><span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span> bind_addr<span class="token punctuation">;</span>
+    bind_addr<span class="token punctuation">.</span>sin_family <span class="token operator">=</span> AF_INET<span class="token punctuation">;</span>
+    bind_addr<span class="token punctuation">.</span>sin_addr<span class="token punctuation">.</span>s_addr <span class="token operator">=</span> <span class="token function">htonl</span><span class="token punctuation">(</span>INADDR_ANY<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    bind_addr<span class="token punctuation">.</span>sin_port <span class="token operator">=</span> <span class="token function">htons</span><span class="token punctuation">(</span>port<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">bind</span><span class="token punctuation">(</span>listen_fd<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>bind_addr<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>bind_addr<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"bind listen socket fd error."</span> <span class="token operator">&lt;&lt;</span> std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">//start listen</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">listen</span><span class="token punctuation">(</span>listen_fd<span class="token punctuation">,</span> SOMAXCONN<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"listen error."</span> <span class="token operator">&lt;&lt;</span> std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">else</span>
+        std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"start server at port ["</span> <span class="token operator">&lt;&lt;</span> port <span class="token operator">&lt;&lt;</span> <span class="token string">"] with ["</span> <span class="token operator">&lt;&lt;</span> <span class="token punctuation">(</span>argc <span class="token operator">&lt;=</span> <span class="token number">1</span> <span class="token operator">?</span> <span class="token string">"LT"</span> <span class="token operator">:</span> <span class="token string">"ET"</span><span class="token punctuation">)</span> <span class="token operator">&lt;&lt;</span> <span class="token string">"] mode."</span> <span class="token operator">&lt;&lt;</span> std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+
+    <span class="token comment">//create a epoll fd</span>
+    <span class="token keyword">int</span> epoll_fd <span class="token operator">=</span> <span class="token function">epoll_create</span><span class="token punctuation">(</span><span class="token number">88</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>epoll_fd <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"create a epoll fd error."</span> <span class="token operator">&lt;&lt;</span> std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    epoll_event listen_fd_event<span class="token punctuation">;</span>
+    listen_fd_event<span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd <span class="token operator">=</span> listen_fd<span class="token punctuation">;</span>
+    listen_fd_event<span class="token punctuation">.</span>events <span class="token operator">=</span> EPOLLIN<span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>argc <span class="token operator">&gt;</span> <span class="token number">1</span><span class="token punctuation">)</span> listen_fd_event<span class="token punctuation">.</span>events <span class="token operator">|=</span> EPOLLET<span class="token punctuation">;</span>
+
+    <span class="token comment">//add epoll event for listen fd</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">epoll_ctl</span><span class="token punctuation">(</span>epoll_fd<span class="token punctuation">,</span> EPOLL_CTL_ADD<span class="token punctuation">,</span> listen_fd<span class="token punctuation">,</span> <span class="token operator">&amp;</span>listen_fd_event<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"epoll ctl error."</span> <span class="token operator">&lt;&lt;</span> std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        epoll_event epoll_events<span class="token punctuation">[</span><span class="token number">1024</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+        <span class="token keyword">int</span> n <span class="token operator">=</span> <span class="token function">epoll_wait</span><span class="token punctuation">(</span>epoll_fd<span class="token punctuation">,</span> epoll_events<span class="token punctuation">,</span> <span class="token number">1024</span><span class="token punctuation">,</span> <span class="token number">1000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>n <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+            <span class="token keyword">break</span><span class="token punctuation">;</span>
+        <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>n <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token comment">//timeout</span>
+            <span class="token keyword">continue</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> n<span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>events <span class="token operator">&amp;</span> EPOLLIN<span class="token punctuation">)</span><span class="token comment">//trigger read event</span>
+            <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd <span class="token operator">==</span> listen_fd<span class="token punctuation">)</span>
+                <span class="token punctuation">{<!-- --></span>
+                    <span class="token comment">//accept a new connection</span>
+                    <span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span> client_addr<span class="token punctuation">;</span>
+                    socklen_t client_addr_len <span class="token operator">=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>client_addr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">int</span> client_fd <span class="token operator">=</span> <span class="token function">accept</span><span class="token punctuation">(</span>listen_fd<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span><span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>client_addr<span class="token punctuation">,</span> <span class="token operator">&amp;</span>client_addr_len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span>client_fd <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+                        <span class="token keyword">continue</span><span class="token punctuation">;</span>
+
+                    socket_flag <span class="token operator">=</span> <span class="token function">fcntl</span><span class="token punctuation">(</span>client_fd<span class="token punctuation">,</span> F_GETFL<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    socket_flag <span class="token operator">|=</span> O_NONBLOCK<span class="token punctuation">;</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">fcntl</span><span class="token punctuation">(</span>client_fd<span class="token punctuation">,</span> F_SETFL<span class="token punctuation">,</span> socket_flag<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+                    <span class="token punctuation">{<!-- --></span>
+                        <span class="token function">close</span><span class="token punctuation">(</span>client_fd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"set client fd to non-block error."</span> <span class="token operator">&lt;&lt;</span> std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+                        <span class="token keyword">continue</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+
+                    epoll_event client_fd_event<span class="token punctuation">;</span>
+                    client_fd_event<span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd <span class="token operator">=</span> client_fd<span class="token punctuation">;</span>
+                    client_fd_event<span class="token punctuation">.</span>events <span class="token operator">=</span> EPOLLIN <span class="token operator">|</span> EPOLLOUT<span class="token punctuation">;</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span>argc <span class="token operator">&gt;</span> <span class="token number">1</span><span class="token punctuation">)</span> client_fd_event<span class="token punctuation">.</span>events <span class="token operator">|=</span> EPOLLET<span class="token punctuation">;</span>
+
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">epoll_ctl</span><span class="token punctuation">(</span>epoll_fd<span class="token punctuation">,</span> EPOLL_CTL_ADD<span class="token punctuation">,</span> client_fd<span class="token punctuation">,</span> <span class="token operator">&amp;</span>client_fd_event<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+                    <span class="token punctuation">{<!-- --></span>
+                        std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"add client fd to epoll fd error."</span> <span class="token operator">&lt;&lt;</span> std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+                        <span class="token function">close</span><span class="token punctuation">(</span>client_fd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        <span class="token keyword">continue</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+
+                    std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"accept a new client fd ["</span> <span class="token operator">&lt;&lt;</span> client_fd <span class="token operator">&lt;&lt;</span> <span class="token string">"]."</span> <span class="token operator">&lt;&lt;</span> std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                <span class="token keyword">else</span>
+                <span class="token punctuation">{<!-- --></span>
+                    std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"EPOLLIN event triggered for client fd ["</span> <span class="token operator">&lt;&lt;</span> epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd <span class="token operator">&lt;&lt;</span> <span class="token string">"]."</span> <span class="token operator">&lt;&lt;</span> std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+
+                    <span class="token keyword">char</span> recvbuf<span class="token punctuation">[</span><span class="token number">1024</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span> <span class="token number">0</span> <span class="token punctuation">}</span><span class="token punctuation">;</span>
+                    <span class="token keyword">int</span> m <span class="token operator">=</span> <span class="token function">recv</span><span class="token punctuation">(</span>epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd<span class="token punctuation">,</span> recvbuf<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// only read 1 bytes when read event triggered</span>
+
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span>m <span class="token operator">==</span> <span class="token number">0</span> <span class="token operator">||</span> <span class="token punctuation">(</span>m <span class="token operator">&lt;</span> <span class="token number">0</span> <span class="token operator">&amp;&amp;</span> errno <span class="token operator">!=</span> EWOULDBLOCK <span class="token operator">&amp;&amp;</span> errno <span class="token operator">!=</span> EINTR<span class="token punctuation">)</span><span class="token punctuation">)</span>
+                    <span class="token punctuation">{<!-- --></span>
+                        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">epoll_ctl</span><span class="token punctuation">(</span>epoll_fd<span class="token punctuation">,</span> EPOLL_CTL_DEL<span class="token punctuation">,</span> epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+                            std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"the client fd ["</span> <span class="token operator">&lt;&lt;</span> epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd <span class="token operator">&lt;&lt;</span> <span class="token string">"] disconnected."</span> <span class="token operator">&lt;&lt;</span>  std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+                        <span class="token function">close</span><span class="token punctuation">(</span>epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+
+                    std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"recv data from client fd ["</span> <span class="token operator">&lt;&lt;</span> epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd <span class="token operator">&lt;&lt;</span> <span class="token string">"] and data is ["</span> <span class="token operator">&lt;&lt;</span> recvbuf <span class="token operator">&lt;&lt;</span> <span class="token string">"]."</span> <span class="token operator">&lt;&lt;</span> std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+            <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>events <span class="token operator">&amp;</span> EPOLLOUT<span class="token punctuation">)</span>
+            <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd <span class="token operator">==</span> listen_fd<span class="token punctuation">)</span> <span class="token comment">//trigger write event</span>
+                    <span class="token keyword">continue</span><span class="token punctuation">;</span>
+
+                std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"EPOLLOUT event triggered for client fd ["</span> <span class="token operator">&lt;&lt;</span> epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd <span class="token operator">&lt;&lt;</span> <span class="token string">"]."</span> <span class="token operator">&lt;&lt;</span> std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>简单说下这段代码的测试方法，可以使用 <code>g++ testepoll.cpp -o epoll</code> 进行编译，编译后通过 <code>./epoll</code> 运行为LT模式，通过 <code>./epoll et</code>模式运行为ET模式，我们用编译好的epoll程序作为服务器，使用nc命令来模拟一个客户端。</p> 
+<h3><a id="_218"></a>测试分类</h3> 
+<ol><li>编译后直接<code>./epoll</code>，然后在另一个命令行窗口用 <code>nc -v 127.0.0.1 51741</code> 命令模拟一次连接，此时 <code>./epoll</code> 会产生大量的 <code>EPOLLOUT event triggered for client fd ...</code>，那是因为在LT模式下，<code>EPOLLOUT</code>会被一直触发。</li></ol> 
+<pre><code class="prism language-c++">albert@home-pc:/mnt/d/data/cpp/testepoll$ ./epoll
+start server at port [51741] with [LT] mode.
+accept a new client fd [5].
+EPOLLOUT event triggered for client fd [5].
+EPOLLOUT event triggered for client fd [5].
+EPOLLOUT event triggered for client fd [5].
+EPOLLOUT event triggered for client fd [5].
+EPOLLOUT event triggered for client fd [5].
+EPOLLOUT event triggered for client fd [5].
+EPOLLOUT event triggered for client fd [5].
+EPOLLOUT event triggered for client fd [5].
+...
+</code></pre> 
+<ol start="2"><li>注释包含 <code>EPOLLOUT event triggered for client fd</code> 输出内容的第152行代码，编译后 <code>./epoll</code>运行，然后在另一个命令行窗口用 <code>nc -v 127.0.0.1 51741</code> 模拟一次连接后，输入abcd回车，可以看到服务器<code>./epoll</code>输出内容，<code>EPOLLIN</code>被触发多次，每次读取一个字节。</li></ol> 
+<pre><code class="prism language-c++">albert@home-pc:/mnt/d/data/cpp/testepoll$ ./epoll
+start server at port [51741] with [LT] mode.
+accept a new client fd [5].
+EPOLLIN event triggered for client fd [5].
+recv data from client fd [5] and data is [a].
+EPOLLIN event triggered for client fd [5].
+recv data from client fd [5] and data is [b].
+EPOLLIN event triggered for client fd [5].
+recv data from client fd [5] and data is [c].
+EPOLLIN event triggered for client fd [5].
+recv data from client fd [5] and data is [d].
+EPOLLIN event triggered for client fd [5].
+recv data from client fd [5] and data is [
+].
+</code></pre> 
+<ol start="3"><li>还原刚才注释的那行代码，编译后执行 <code>./epoll et</code> 启动服务器，然后在另一个命令行窗口用 <code>nc -v 127.0.0.1 51741</code> 模拟一次连接后，然后在另一个命令行窗口用 <code>nc -v 127.0.0.1 51741</code> 模拟一次连接，服务器窗口显示触发了<code>EPOLLOUT</code>事件</li></ol> 
+<pre><code class="prism language-c++">albert@home-pc:/mnt/d/data/cpp/testepoll$ ./epoll et
+start server at port [51741] with [ET] mode.
+accept a new client fd [5].
+EPOLLOUT event triggered for client fd [5].
+</code></pre> 
+<p>在此基础上，从刚刚运行 <code>nc</code>命令的窗口中输入回车、输入回车、输出回车，那么epoll服务器窗口看到的是触发了三次<code>EPOLLIN</code>事件，每次收到一个回车:</p> 
+<pre><code class="prism language-c++">albert@home-pc:/mnt/d/data/cpp/testepoll$ ./epoll et
+start server at port [51741] with [ET] mode.
+accept a new client fd [5].
+EPOLLOUT event triggered for client fd [5].
+EPOLLIN event triggered for client fd [5].
+recv data from client fd [5] and data is [
+].
+EPOLLIN event triggered for client fd [5].
+recv data from client fd [5] and data is [
+].
+EPOLLIN event triggered for client fd [5].
+recv data from client fd [5] and data is [
+].
+</code></pre> 
+<p>但是如果在nc模拟的客户端里输出abcd回车，那么在epoll服务器窗口触发一次<code>EPOLLIN</code>事件接收到一个a之后便再也不会触发<code>EPOLLIN</code>了，即使你在nc客户端在此输入也没有用，那是因为在接受的缓冲区中一直还有数据，新数据来时没有出现缓冲区从空到有数据的情况，所以在ET模式下也注意这种情况。</p> 
+<pre><code class="prism language-c++">albert@home-pc:/mnt/d/data/cpp/testepoll$ ./epoll et
+start server at port [51741] with [ET] mode.
+accept a new client fd [5].
+EPOLLOUT event triggered for client fd [5].
+EPOLLIN event triggered for client fd [5].
+recv data from client fd [5] and data is [
+].
+EPOLLIN event triggered for client fd [5].
+recv data from client fd [5] and data is [
+].
+EPOLLIN event triggered for client fd [5].
+recv data from client fd [5] and data is [
+].
+EPOLLIN event triggered for client fd [5].
+recv data from client fd [5] and data is [a].
+</code></pre> 
+<h3><a id="ET_303"></a>怎么解决ET触发了一次就不再触发了</h3> 
+<p>改代码呗，ET模式在连接后触发一次<code>EPOLLOUT</code>，接收到数据时触发一次<code>EPOLLIN</code>，如果数据没收完，以后这两个事件就再也不会被触发了，要想改变这种情况可以再次注册一下这两个事件，时机可以选择接收到数据的时候，所以可以修改这部分代码：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">else</span>
+<span class="token punctuation">{<!-- --></span>
+    std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"EPOLLIN event triggered for client fd ["</span> <span class="token operator">&lt;&lt;</span> epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd <span class="token operator">&lt;&lt;</span> <span class="token string">"]."</span> <span class="token operator">&lt;&lt;</span> std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+
+    <span class="token keyword">char</span> recvbuf<span class="token punctuation">[</span><span class="token number">1024</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span> <span class="token number">0</span> <span class="token punctuation">}</span><span class="token punctuation">;</span>
+    <span class="token keyword">int</span> m <span class="token operator">=</span> <span class="token function">recv</span><span class="token punctuation">(</span>epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd<span class="token punctuation">,</span> recvbuf<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// only read 1 bytes when read event triggered</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>m <span class="token operator">==</span> <span class="token number">0</span> <span class="token operator">||</span> <span class="token punctuation">(</span>m <span class="token operator">&lt;</span> <span class="token number">0</span> <span class="token operator">&amp;&amp;</span> errno <span class="token operator">!=</span> EWOULDBLOCK <span class="token operator">&amp;&amp;</span> errno <span class="token operator">!=</span> EINTR<span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">epoll_ctl</span><span class="token punctuation">(</span>epoll_fd<span class="token punctuation">,</span> EPOLL_CTL_DEL<span class="token punctuation">,</span> epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+            std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"the client fd ["</span> <span class="token operator">&lt;&lt;</span> epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd <span class="token operator">&lt;&lt;</span> <span class="token string">"] disconnected."</span> <span class="token operator">&lt;&lt;</span>  std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+        <span class="token function">close</span><span class="token punctuation">(</span>epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"recv data from client fd ["</span> <span class="token operator">&lt;&lt;</span> epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd <span class="token operator">&lt;&lt;</span> <span class="token string">"] and data is ["</span> <span class="token operator">&lt;&lt;</span> recvbuf <span class="token operator">&lt;&lt;</span> <span class="token string">"]."</span> <span class="token operator">&lt;&lt;</span> std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>添加再次注册的逻辑：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">else</span>
+<span class="token punctuation">{<!-- --></span>
+    std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"EPOLLIN event triggered for client fd ["</span> <span class="token operator">&lt;&lt;</span> epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd <span class="token operator">&lt;&lt;</span> <span class="token string">"]."</span> <span class="token operator">&lt;&lt;</span> std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+
+    <span class="token keyword">char</span> recvbuf<span class="token punctuation">[</span><span class="token number">1024</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span> <span class="token number">0</span> <span class="token punctuation">}</span><span class="token punctuation">;</span>
+    <span class="token keyword">int</span> m <span class="token operator">=</span> <span class="token function">recv</span><span class="token punctuation">(</span>epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd<span class="token punctuation">,</span> recvbuf<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// only read 1 bytes when read event triggered</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>m <span class="token operator">==</span> <span class="token number">0</span> <span class="token operator">||</span> <span class="token punctuation">(</span>m <span class="token operator">&lt;</span> <span class="token number">0</span> <span class="token operator">&amp;&amp;</span> errno <span class="token operator">!=</span> EWOULDBLOCK <span class="token operator">&amp;&amp;</span> errno <span class="token operator">!=</span> EINTR<span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">epoll_ctl</span><span class="token punctuation">(</span>epoll_fd<span class="token punctuation">,</span> EPOLL_CTL_DEL<span class="token punctuation">,</span> epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+            std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"the client fd ["</span> <span class="token operator">&lt;&lt;</span> epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd <span class="token operator">&lt;&lt;</span> <span class="token string">"] disconnected."</span> <span class="token operator">&lt;&lt;</span>  std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+        <span class="token function">close</span><span class="token punctuation">(</span>epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    epoll_event client_fd_event<span class="token punctuation">;</span>
+    client_fd_event<span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd <span class="token operator">=</span> epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd<span class="token punctuation">;</span>
+    client_fd_event<span class="token punctuation">.</span>events <span class="token operator">=</span> EPOLLIN <span class="token operator">|</span> EPOLLOUT<span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>argc <span class="token operator">&gt;</span> <span class="token number">1</span><span class="token punctuation">)</span> client_fd_event<span class="token punctuation">.</span>events <span class="token operator">|=</span> EPOLLET<span class="token punctuation">;</span>
+
+    <span class="token function">epoll_ctl</span><span class="token punctuation">(</span>epoll_fd<span class="token punctuation">,</span> EPOLL_CTL_MOD<span class="token punctuation">,</span> epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd<span class="token punctuation">,</span> <span class="token operator">&amp;</span>client_fd_event<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    std<span class="token double-colon punctuation">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"recv data from client fd ["</span> <span class="token operator">&lt;&lt;</span> epoll_events<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>data<span class="token punctuation">.</span>fd <span class="token operator">&lt;&lt;</span> <span class="token string">"] and data is ["</span> <span class="token operator">&lt;&lt;</span> recvbuf <span class="token operator">&lt;&lt;</span> <span class="token string">"]."</span> <span class="token operator">&lt;&lt;</span> std<span class="token double-colon punctuation">::</span>endl<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>这次以 <code>./epoll et</code> 方式启动服务器，使用 <code>nc -v 127.0.0.1 51741</code> 模拟客户端，输入abc回车发现，epoll服务器输出显示触发的事件变了：</p> 
+<pre><code class="prism language-c++">albert@home-pc:/mnt/d/data/cpp/testepoll$ ./epoll et
+start server at port [51741] with [ET] mode.
+accept a new client fd [5].
+EPOLLOUT event triggered for client fd [5].
+EPOLLIN event triggered for client fd [5].
+recv data from client fd [5] and data is [a].
+EPOLLIN event triggered for client fd [5].
+recv data from client fd [5] and data is [b].
+EPOLLIN event triggered for client fd [5].
+recv data from client fd [5] and data is [c].
+EPOLLIN event triggered for client fd [5].
+recv data from client fd [5] and data is [
+].
+EPOLLOUT event triggered for client fd [5].
+</code></pre> 
+<h2><a id="_373"></a>总结</h2> 
+<ul><li>LT模式会一直触发<code>EPOLLOUT</code>，当缓冲区有数据时会一直触发<code>EPOLLIN</code></li><li>ET模式会在连接建立后触发一次<code>EPOLLOUT</code>，当收到数据时会触发一次<code>EPOLLIN</code></li><li>LT模式触发<code>EPOLLIN</code>时可以按需读取数据，残留了数据还会再次通知读取</li><li>ET模式触发<code>EPOLLIN</code>时必须把数据读取完，否则即使来了新的数据也不会再次通知了</li><li>LT模式的<code>EPOLLOUT</code>会一直触发，所以发送完数据记得删除，否则会产生大量不必要的通知</li><li>ET模式的<code>EPOLLOUT</code>事件若数据未发送完需再次注册，否则不会再有发送的机会</li><li>通常发送网络数据时不会依赖<code>EPOLLOUT</code>事件，只有在缓冲区满发送失败时会注册这个事件，期待被通知后再次发送</li></ul> 
+<hr> 
+<center> 
+ <a href="https://blog.csdn.net/albertsh/article/details/123468650"> ==&gt;&gt; 反爬链接，请勿点击，原地爆炸，概不负责！&lt;&lt;== </a> 
+</center> 
+<hr> 
+<blockquote> 
+ <p>即使是在灿烂的阳光下也会有黑暗的角落，不能因为角落的阴暗就忽略阳光下的美好，我们要做的不是把黑暗面放大，而是要做阳光的传递者，哪怕是一面面镜子，通过反射来照亮那星星点点的黑暗，认清自己，不与黑暗为伍，那绝不是你自甘堕落的借口。</p> 
+</blockquote> 
+<blockquote> 
+ <p>两千光束已然出发~</p> 
+</blockquote>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/a993b87ce1b28f57b0f23cbc8a31c65e/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Spring IoC(控制反转)和DI(依赖注入)的理解，非常通俗易懂</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/f8dced054dbeb5190d28f757753341b7/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">进一步的认识服务注册中心--Nacos</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

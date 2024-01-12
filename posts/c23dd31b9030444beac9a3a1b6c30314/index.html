@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【Flink】Flink 中的时间和窗口之水位线(Watermark) - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【Flink】Flink 中的时间和窗口之水位线(Watermark)" />
+<meta property="og:description" content="1. 时间语义 这里先介绍一下什么是时间语义，时间语义在Flink中是一种很重要的概念，下面介绍的水位线就是基于时间语义来讲的。
+在Flink中我们提到的时间语义一般指的是事件时间和处理时间：
+处理时间(Processing Time)，一般指执行处理操作的系统时间，也就是Flink的窗口算子对该数据的操作时间。事件时间(Event Time)， 一般指每个事件在对应设备上发生的时间，也就是数据的生成的时间。 Flink中之所以会出现这两种时间语义，是因为Flink的分布式系统会有网络传输延迟以及时钟飘逸，处理时间相对于事件时间会有所滞后，并且数据在网络以及Flink中的传输是是乱序的。Flink的1.12版本之前默认使用的是处理时间，之后已经将事件时间作为默认的时间语义。
+对于 先产生的数据先被处理，这就要求需要保证数据的到达顺序，但是因为网络传输延迟不确定性，是无法保证数据的到达顺序，在这种情况下就不能简单使用数据自带的时间戳当做时钟，而是需要另外的标志来表达事件时间的进展，在Flink中这就是事件时间的水位线。
+2. 水位线 Flink中的水位线（Watermark）是一种用来表示事件时间进展的机制，它可以帮助Flink系统及时处理延迟数据，并保证处理结果的正确性。具体来说，水位线是一个时间戳，表示对于所有时间戳小于该水位线的事件已经全部到达，可以进行相应的计算处理。
+2.1 事件时间和窗口 在实际应用中，一般都会采用事件时间语义，而水位线就是基于事件时间提出的概念。和水位线相关的还有一个窗口概念，事件时间和窗口也是有很大的关系。
+这里举一个例子，我们有一个班车系统，班车上装的都是带有生产时间的商品，如果有一辆车的开车时间是8点，我们需要这辆车到九点就开始发车。商品一个个到达车上，车上的商品时间从8点开始依次增长。当到达车上的商品生产时间是九点的时候，这时候车门关闭开始发车。
+在这个过程中，我们说的班车就相当于窗口，定义了一个8点到九点的窗口。并且我们会定义一个逻辑时钟，这个逻辑时钟是基于事件时间来的，不会自动流逝。时钟的进展就是靠着新的数据上的事件时间时间戳来推动的。这样就不需要依赖系统的时间，无论什么时候进行统计处理，得到的结果都是正确的。
+2.2 什么是水位线 在事件时间语义下，我们可以不依赖系统时间，而是基于数据自带的时间戳去定义了一个时钟，用来表示当前时间的进展。这样每个并行子任务都会有一个自己的逻辑时钟，它的前进是靠数据的时间戳来驱动的。
+但是在分布式系统中，会存在一些问题，因为数据本身在处理转换过程中会发生变化，如果遇到窗口聚合的操作，呢么下游的数据就会变少，时间进度的控制就不精细了。另外，数据向下游任务传递时，一般只能传输给一个子任务（除广播外），这样其他的并行子任务的时钟就无法推进了。
+所以时钟也需要以数据的形式传递出去，告诉下游任务当前时间的进展；而且时钟传递过程也不会因为运算而停滞。解决这个问题的想法就是在数据流种加入一个时间标记，记录当前的事件时间并且广播到下游，当下游收到这个标记就可以更新自己的时钟了。这种用来衡量事件时间进展的标记在Flink中就被称作水位线。
+如图 6-5 所示，每个事件产生的数据，都包含了一个时间戳，我们直接用一个整数表示。这里没有指定单位，可以理解为秒或者毫秒（方便起见，下面讲述统一认为是秒）。当产生于2 秒的数据到来之后，当前的事件时间就是 2 秒；在后面插入一个时间戳也为 2 秒的水位线，随着数据一起向下游流动。而当 5 秒产生的数据到来之后，同样在后面插入一个水位线，时间戳也为 5，当前的时钟就推进到了 5 秒。这样，如果出现下游有多个并行子任务的情形，我们只要将水位线广播出去，就可以通知到所有下游任务当前的时间进度了。
+水位线就像它的名字一样，是数据流中的一部分，随着数据一起流动，在不同任务之间传输。不过水位线也存在有序和乱序区分：
+2.2.1 有序流中的水位线 在理想状态下，数据按照顺序排好队进入数据流，并且处理的过程遵循先来后到的原则，这样每个数据中提取的时间戳就会保持从小到大的增长，而水位线也会不断增长、事件时钟也不断向前推进。
+但是在实际应用中，数据量非常大，还有可能好多数据的事件时间戳都是相同的，每一个都插入水位线是做了很多无用功的。所以为了提高效率一般每隔一段时间生成一个水位线，这个水位线的时间戳就是当前最新数据的时间戳，就如下图所示： 这里注意水位线插入的周期本身也是时间概念，并且这个周期时间是指处理时间也就是系统时间，而不是事件时间，如果使用事件时间就陷入了死循环了。
+2.2.2 乱序流中的水位线 有序流的处理非常简单，但是在分布式系统中，会因为数据在节点的传输以及网络传输的延迟不确定性导致顺序发生改变，这就是乱序数据。 这里所说的乱序是指数据的先后顺序不一致，主要就是基于数据的产生时间而言的。如图 6-7 所示，一个 7 秒时产生的数据，生成时间自然要比 9 秒的数据早；但是经过数据缓存和传输之后，处理任务可能先收到了 9 秒的数据，之后 7 秒的数据才姗姗来迟。这时如果我们希望插入水位线，来指示当前的事件时间进展，又该怎么做呢？ 解决思路也很简单：我们插入新的水位线时，要先判断一下时间戳是否比之前的大，否则就不再生成新的水位线，如图 6-8 所示。也就是说，只有数据的时间戳比当前时钟大，才能推动时钟前进，这时才插入水位线。
+考虑到大量数据同时到来的处理效率，我们同样可以周期性的生成水位线。这时只需要保存一下之前所有数据中的最大时间戳，需要插入水位线时，就直接以它作为时间戳生成新的水位线，如图 6-9 所示。
+但是又如何处理迟到的数据？其实也很简单，那就是等待几秒，比如上图当收到9秒的数据，等待2秒也就是7秒，这时候7秒的数据到来，数据就到齐了。
+下图是我们使用周期性的方式生成等待2秒的水位线
+另外需要注意的是，这里一个窗口所收集的数据，并不是之前所有已经到达的数据。因为数据属于哪个窗口，是由数据本身的时间戳决定的，一个窗口只会收集真正属于它的那些数据。也就是说，上图中尽管水位线 W(20)之前有时间戳为 22 的数据到来，10~20 秒的窗口中也不会收集这个数据，进行计算依然可以得到正确的结果。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/c23dd31b9030444beac9a3a1b6c30314/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-06-26T23:50:03+08:00" />
+<meta property="article:modified_time" content="2023-06-26T23:50:03+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【Flink】Flink 中的时间和窗口之水位线(Watermark)</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="1__0"></a>1. 时间语义</h2> 
+<p>这里先介绍一下什么是<code>时间语义</code>，<code>时间语义</code>在Flink中是一种很重要的概念，下面介绍的<code>水位线</code>就是基于<code>时间语义</code>来讲的。<br> <img src="https://images2.imgbox.com/56/33/rp5ZQEMU_o.png" alt="在这里插入图片描述"></p> 
+<p>在Flink中我们提到的时间语义一般指的是<code>事件时间</code>和<code>处理时间</code>：</p> 
+<ul><li><code>处理时间(Processing Time)</code>，一般指执行处理操作的系统时间，也就是Flink的窗口算子对该数据的操作时间。</li><li><code>事件时间(Event Time)</code>， 一般指每个事件在对应设备上发生的时间，也就是数据的生成的时间。</li></ul> 
+<p>Flink中之所以会出现这两种时间语义，是因为Flink的分布式系统会有网络传输延迟以及时钟飘逸，<code>处理时间</code>相对于<code>事件时间</code>会有所滞后，并且数据在网络以及<code>Flink</code>中的传输是是乱序的。Flink的1.12版本之前默认使用的是<code>处理时间</code>，之后已经将<code>事件时间</code>作为<code>默认</code>的时间语义。</p> 
+<p>对于 <code>先产生的数据先被处理</code>，这就要求需要保证数据的到达顺序，但是因为网络传输延迟不确定性，是无法保证数据的到达顺序，在这种情况下就不能简单使用数据自带的时间戳当做时钟，而是需要另外的标志来表达<code>事件时间</code>的进展，在Flink中这就是<code>事件时间</code>的<code>水位线</code>。</p> 
+<h2><a id="2__12"></a>2. 水位线</h2> 
+<p>Flink中的水位线（Watermark）是一种用来表示事件时间进展的机制，它可以帮助Flink系统及时处理延迟数据，并保证处理结果的正确性。具体来说，水位线是一个时间戳，表示对于所有时间戳小于该水位线的事件已经全部到达，可以进行相应的计算处理。</p> 
+<h3><a id="21__14"></a>2.1 事件时间和窗口</h3> 
+<p>在实际应用中，一般都会采用事件时间语义，而水位线就是基于事件时间提出的概念。和水位线相关的还有一个窗口概念，事件时间和窗口也是有很大的关系。</p> 
+<p>这里举一个例子，我们有一个班车系统，班车上装的都是带有生产时间的商品，如果有一辆车的开车时间是8点，我们需要这辆车到九点就开始发车。商品一个个到达车上，车上的商品时间从8点开始依次增长。当到达车上的商品生产时间是九点的时候，这时候车门关闭开始发车。<br> <img src="https://images2.imgbox.com/be/f8/pOOZeKlu_o.png" alt="在这里插入图片描述"><br> 在这个过程中，我们说的班车就相当于窗口，定义了一个8点到九点的窗口。并且我们会定义一个逻辑时钟，这个逻辑时钟是基于事件时间来的，不会自动流逝。时钟的进展就是靠着新的数据上的事件时间时间戳来推动的。这样就不需要依赖系统的时间，无论什么时候进行统计处理，得到的结果都是正确的。</p> 
+<h3><a id="22__20"></a>2.2 什么是水位线</h3> 
+<p>在事件时间语义下，我们可以不依赖系统时间，而是基于数据自带的时间戳去定义了一个时钟，用来表示当前时间的进展。这样每个并行子任务都会有一个自己的逻辑时钟，它的前进是靠数据的时间戳来驱动的。</p> 
+<p>但是在分布式系统中，会存在一些问题，因为数据本身在处理转换过程中会发生变化，如果遇到窗口聚合的操作，呢么下游的数据就会变少，时间进度的控制就不精细了。另外，数据向下游任务传递时，一般只能传输给一个子任务（除广播外），这样其他的并行子任务的时钟就无法推进了。</p> 
+<p>所以时钟也需要以数据的形式传递出去，告诉下游任务当前时间的进展；而且时钟传递过程也不会因为运算而停滞。解决这个问题的想法就是在数据流种加入一个时间标记，记录当前的事件时间并且广播到下游，当下游收到这个标记就可以更新自己的时钟了。这种用来衡量事件时间进展的标记在Flink中就被称作水位线。<br> <img src="https://images2.imgbox.com/ef/59/u6sRHOGF_o.png" alt="在这里插入图片描述"><br> 如图 6-5 所示，每个事件产生的数据，都包含了一个时间戳，我们直接用一个整数表示。这里没有指定单位，可以理解为秒或者毫秒（方便起见，下面讲述统一认为是秒）。当产生于2 秒的数据到来之后，当前的事件时间就是 2 秒；在后面插入一个时间戳也为 2 秒的水位线，随着数据一起向下游流动。而当 5 秒产生的数据到来之后，同样在后面插入一个水位线，时间戳也为 5，当前的时钟就推进到了 5 秒。这样，如果出现下游有多个并行子任务的情形，我们只要将水位线广播出去，就可以通知到所有下游任务当前的时间进度了。</p> 
+<p>水位线就像它的名字一样，是数据流中的一部分，随着数据一起流动，在不同任务之间传输。不过水位线也存在有序和乱序区分：</p> 
+<h4><a id="221__30"></a>2.2.1 有序流中的水位线</h4> 
+<p>在理想状态下，数据按照顺序排好队进入数据流，并且处理的过程遵循先来后到的原则，这样每个数据中提取的时间戳就会保持从小到大的增长，而水位线也会不断增长、事件时钟也不断向前推进。</p> 
+<pre><code>但是在实际应用中，数据量非常大，还有可能好多数据的事件时间戳都是相同的，每一个都插入水位线是做了很多无用功的。所以为了提高效率一般每隔一段时间生成一个水位线，这个水位线的时间戳就是当前最新数据的时间戳，就如下图所示：
+</code></pre> 
+<p><img src="https://images2.imgbox.com/21/51/s0lHLjnX_o.png" alt="在这里插入图片描述"><br> 这里注意水位线插入的周期本身也是时间概念，并且这个周期时间是指处理时间也就是系统时间，而不是事件时间，如果使用事件时间就陷入了死循环了。</p> 
+<h4><a id="222__36"></a>2.2.2 乱序流中的水位线</h4> 
+<pre><code>有序流的处理非常简单，但是在分布式系统中，会因为数据在节点的传输以及网络传输的延迟不确定性导致顺序发生改变，这就是乱序数据。
+
+这里所说的乱序是指数据的先后顺序不一致，主要就是基于数据的产生时间而言的。如图 6-7 所示，一个 7 秒时产生的数据，生成时间自然要比 9 秒的数据早；但是经过数据缓存和传输之后，处理任务可能先收到了 9 秒的数据，之后 7 秒的数据才姗姗来迟。这时如果我们希望插入水位线，来指示当前的事件时间进展，又该怎么做呢？
+</code></pre> 
+<p><img src="https://images2.imgbox.com/03/76/j5OACXax_o.png" alt="在这里插入图片描述">解决思路也很简单：我们插入新的水位线时，要先判断一下时间戳是否比之前的大，否则就不再生成新的水位线，如图 6-8 所示。也就是说，只有数据的时间戳比当前时钟大，才能推动时钟前进，这时才插入水位线。<br> <img src="https://images2.imgbox.com/bd/29/W0Q8z1Lf_o.png" alt="在这里插入图片描述"><br> 考虑到大量数据同时到来的处理效率，我们同样可以周期性的生成水位线。这时只需要保存一下之前所有数据中的最大时间戳，需要插入水位线时，就直接以它作为时间戳生成新的水位线，如图 6-9 所示。<br> <img src="https://images2.imgbox.com/03/69/Q6HLlbDD_o.png" alt="在这里插入图片描述">但是又如何处理迟到的数据？其实也很简单，那就是等待几秒，比如上图当收到9秒的数据，等待2秒也就是7秒，这时候7秒的数据到来，数据就到齐了。<br> <img src="https://images2.imgbox.com/b3/d7/wsYnI1zw_o.png" alt="在这里插入图片描述"><br> 下图是我们使用周期性的方式生成等待2秒的水位线<br> <img src="https://images2.imgbox.com/ea/a2/AFor9z3E_o.png" alt="在这里插入图片描述"><br> 另外需要注意的是，这里一个窗口所收集的数据，并不是之前所有已经到达的数据。因为数据属于哪个窗口，是由数据本身的时间戳决定的，一个窗口只会收集真正属于它的那些数据。也就是说，上图中尽管水位线 W(20)之前有时间戳为 22 的数据到来，10~20 秒的窗口中也不会收集这个数据，进行计算依然可以得到正确的结果。</p> 
+<h4><a id="223__48"></a>2.2.3 水位线的特性</h4> 
+<ul><li>水位线是插入到数据流中的一种标记，可以认为是一种特殊的数据</li><li>水位线主要内容是一个时间戳，用来表示当前事件时间的进展</li><li>水位线是基于数据的时间戳生成的</li><li>水位线的时间戳必须单调递增，以确保任务的事件时间时钟一直向前推进</li><li>水位线可以通过设置延迟，来保证正确处理乱序数据</li><li>一个水位线Watermark(t) 表示在当前流中事件时间已经达到了时间戳t，这代表t之前的所有数据都到齐了，之后流中不会出现时间戳t’&lt;= t的数据</li></ul> 
+<p>水位线是Flink流处理中保证结果正确性的核心机制，它往往会跟窗口一起配合，完成对乱序数据的正确处理。</p> 
+<h3><a id="23__57"></a>2.3 如何生成水位线</h3> 
+<p>水位线是保证窗口处理结果的正确性的，如果不能正确处理所有乱序数据，可以尝试调大延迟时间，但是在实际应用中不是随便调整的。</p> 
+<h4><a id="231__59"></a>2.3.1 生成水位线的总体原则</h4> 
+<p>只能尽量保证水位线的正确，如果想对结果正确性要求很高，那就需要设置等待时间长一点，但是等待的时间越长，漏掉数据的概率越低。但是这样做的代价就是处理的实时性降低了，所以我们希望能处理的更快，更实时，就必须将水位线设置的低一些。而对于漏掉的数据，Flink提供了窗口处理迟到数据。</p> 
+<p>Flink中的水位线其实就是流处理中对延迟和结果正确性的一个权衡机制，而且把控制权交给了程序员，我们可以在代码中定义水位线的生成策略。</p> 
+<h4><a id="232_Watermark_Strategies_63"></a>2.3.2 水位线的生成策略（Watermark Strategies）</h4> 
+<p><code>Flink</code>的<code>DataStream API</code>中，提供了用于生成水位线的方法<code>.assignTimestampsAndWatermarks()</code>，主要是用来为流中的数据分配时间戳，并生成水位线来指示事件时间，</p> 
+<pre><code class="prism language-java"><span class="token comment">// 为数据流中的元素分配时间戳并生成水位线以表示事件时间进度。给定的 WatermarkStrategy 用于创建 TimestampAssigner 和 WatermarkGenerator。</span>
+<span class="token keyword">public</span> <span class="token class-name">SingleOutputStreamOperator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token function">assignTimestampsAndWatermarks</span><span class="token punctuation">(</span><span class="token class-name">WatermarkStrategy</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> watermarkStrategy<span class="token punctuation">)</span>
+</code></pre> 
+<p>具体使用时直接用<code>DataSream</code>调用该方法即可，与普通<code>transform</code>方法完全一样</p> 
+<pre><code class="prism language-java"><span class="token class-name">DataStream</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> stringDataStreamSource <span class="token operator">=</span> env<span class="token punctuation">.</span><span class="token function">fromCollection</span><span class="token punctuation">(</span>list<span class="token punctuation">,</span> <span class="token class-name">BasicTypeInfo</span><span class="token punctuation">.</span>STRING_TYPE_INFO<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">DataStream</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> withTimestampsAndWatermarks <span class="token operator">=</span> stringDataStreamSource<span class="token punctuation">.</span><span class="token function">assignTimestampsAndWatermarks</span><span class="token punctuation">(</span><span class="token generics"><span class="token punctuation">&lt;</span>watermark strategy<span class="token punctuation">&gt;</span></span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><code>.assignTimestampsAndWatermarks()</code>方法需要传入一个<code>WatermarkStrategy</code>作为参数，这个参数就是<code>水位线生成策略</code>。<code>WatermarkStrategy</code>中包含了一个<code>时间戳分配器(TimestampAssigner)</code>和一个<code>水位线生成器(WatermarkGenerator)</code>。</p> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Public</span>
+<span class="token keyword">public</span> <span class="token keyword">interface</span> <span class="token class-name">WatermarkStrategy</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span>
+        <span class="token keyword">extends</span> <span class="token class-name">TimestampAssignerSupplier</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">,</span> <span class="token class-name">WatermarkGeneratorSupplier</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+<span class="token annotation punctuation">@Override</span>
+    <span class="token class-name">WatermarkGenerator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token function">createWatermarkGenerator</span><span class="token punctuation">(</span><span class="token class-name">WatermarkGeneratorSupplier<span class="token punctuation">.</span>Context</span> context<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">default</span> <span class="token class-name">TimestampAssigner</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token function">createTimestampAssigner</span><span class="token punctuation">(</span>
+            <span class="token class-name">TimestampAssignerSupplier<span class="token punctuation">.</span>Context</span> context<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">RecordTimestampAssigner</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li><code>TimestampAssigner</code>：主要负责从流中数据元素的某个字段中提取时间戳，并分配给元素。时间戳的分配是生成水位线的基础。</li><li><code>WatermarkGenerator</code>：主要负责按照既定的方式，基于时间戳生成水位线。在<code>WatermarkGenerator</code>接口中，主要又有两个方法：<code>onEvent()</code>和 <code>onPeriodicEmit()</code>。</li><li><code>onEvent</code>：每个事件（数据）到来都会调用的方法，它的参数有当前事件，时间戳以及允许发出水位线的一个WatermarkOutput，可以基于事件做各种操作。</li><li><code>onPeriodicEmit</code>：周期性调用的方法，可以由<code>WatermarkOutput</code>发出水位线。周期时间为处理时间，可以调用环境配置的<code>.setAutoWatermarkInterval()</code>方法来设置，默认为<code>200ms</code>。</li></ul> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Public</span>
+<span class="token keyword">public</span> <span class="token keyword">interface</span> <span class="token class-name">WatermarkGenerator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">void</span> <span class="token function">onEvent</span><span class="token punctuation">(</span><span class="token class-name">T</span> event<span class="token punctuation">,</span> <span class="token keyword">long</span> eventTimestamp<span class="token punctuation">,</span> <span class="token class-name">WatermarkOutput</span> output<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">void</span> <span class="token function">onPeriodicEmit</span><span class="token punctuation">(</span><span class="token class-name">WatermarkOutput</span> output<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>也可以通过设置周期时间<br> <code>env.getConfig().setAutoWatermarkInterval(60 * 1000L);</code></p> 
+<h4><a id="233_Flink_101"></a>2.3.3 Flink内置水位线生成器</h4> 
+<p>Flink提供了两种内置的水位线生成器（WatermarkGenerator)，分别对应着有序流和乱序流的场景。</p> 
+<h5><a id="2331__104"></a>2.3.3.1 有序流</h5> 
+<p>对于有序流主要特点就是时间戳单调增长，所以永远不会出现迟到的数据问题。这是周期性生成水位线的最简单的场景，直接调用<code>WatermarkStategy.forMonotonousTimestamps()</code>方法就可以实现，简单说就是拿当前最大时间戳作为水位线就可以了。</p> 
+<pre><code class="prism language-java"><span class="token keyword">static</span> <span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token class-name">WatermarkStrategy</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token function">forMonotonousTimestamps</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> <span class="token punctuation">(</span>ctx<span class="token punctuation">)</span> <span class="token operator">-&gt;</span> <span class="token keyword">new</span> <span class="token class-name">AscendingTimestampsWatermarks</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>源码可以看到有序流返回的水位线生成器策略是<code>AscendingTimestampsWatermarks</code>对象：<br> <code>示例代码</code>：</p> 
+<pre><code class="prism language-java"><span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span> list <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        list<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Event</span><span class="token punctuation">(</span><span class="token string">"ming"</span><span class="token punctuation">,</span><span class="token string">"www.baidu1.com"</span><span class="token punctuation">,</span><span class="token number">1200L</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        list<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Event</span><span class="token punctuation">(</span><span class="token string">"xiaohu"</span><span class="token punctuation">,</span><span class="token string">"www.baidu5.com"</span><span class="token punctuation">,</span><span class="token number">1267L</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        list<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Event</span><span class="token punctuation">(</span><span class="token string">"ming"</span><span class="token punctuation">,</span><span class="token string">"www.baidu7.com"</span><span class="token punctuation">,</span><span class="token number">4200L</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        list<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Event</span><span class="token punctuation">(</span><span class="token string">"xiaohu"</span><span class="token punctuation">,</span><span class="token string">"www.baidu8.com"</span><span class="token punctuation">,</span><span class="token number">5500L</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token class-name">DataStream</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span> stringDataStreamSource <span class="token operator">=</span> env<span class="token punctuation">.</span><span class="token function">fromCollection</span><span class="token punctuation">(</span>list<span class="token punctuation">,</span> <span class="token class-name">BasicTypeInfo</span><span class="token punctuation">.</span><span class="token function">of</span><span class="token punctuation">(</span><span class="token class-name">Event</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 使用forMonotonousTimestamps</span>
+        <span class="token class-name">DataStream</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span> watermarks <span class="token operator">=</span> stringDataStreamSource<span class="token punctuation">.</span><span class="token function">assignTimestampsAndWatermarks</span><span class="token punctuation">(</span><span class="token class-name">WatermarkStrategy</span><span class="token punctuation">.</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span><span class="token function">forMonotonousTimestamps</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+                <span class="token punctuation">.</span><span class="token function">withTimestampAssigner</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">SerializableTimestampAssigner</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token annotation punctuation">@Override</span>
+                    <span class="token keyword">public</span> <span class="token keyword">long</span> <span class="token function">extractTimestamp</span><span class="token punctuation">(</span><span class="token class-name">Event</span> element<span class="token punctuation">,</span> <span class="token keyword">long</span> recordTimestamp<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token keyword">return</span> element<span class="token punctuation">.</span><span class="token function">getTimestamp</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span><span class="token punctuation">)</span>
+        <span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>上面的代码中我们调用的<code>.withTimestampAssigner()</code>方法，将数据中的<code>timestamp</code>字段提取出来作为<code>时间戳</code>分配给数据元素；然后使用<code>内置</code>的<code>有序流水位线生成器</code>构造出了生成策略，这样提取出来的<code>数据时间戳</code>就是我们处理计算时间的<code>事件时间</code>。</p> 
+<p><code>要注意的是这里的时间戳和水位线的单位必须都是毫秒。</code></p> 
+<h5><a id="2332__136"></a>2.3.3.2 乱序流</h5> 
+<p>由于乱序流中需要等待迟到的数据到齐，所以必须设置一个固定量的延迟时间（Fixed Amount of Lateness）。这时生成的水位线的时间戳就是当前数据流中最大的时间戳减去延迟的结果，相当于把表调慢，当前时钟会滞后于数据的最大时间戳。调用<code>WatermarkStrategy. forBoundedOutOfOrderness()</code>方法就可以实现。</p> 
+<pre><code class="prism language-java"><span class="token keyword">static</span> <span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token class-name">WatermarkStrategy</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token function">forBoundedOutOfOrderness</span><span class="token punctuation">(</span><span class="token class-name">Duration</span> maxOutOfOrderness<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> <span class="token punctuation">(</span>ctx<span class="token punctuation">)</span> <span class="token operator">-&gt;</span> <span class="token keyword">new</span> <span class="token class-name">BoundedOutOfOrdernessWatermarks</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>maxOutOfOrderness<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>不过这个方法需要传一个<code>maxOutOfOrderness</code>参数，表示<code>最大乱序程度</code>， 它表示数据流中乱序数据时间戳的最大差值；如果我们能确定乱序程度，呢么设置对应时间长度的延迟就可以等到所有的乱序数据了。<br> <code>示例代码</code>：</p> 
+<pre><code class="prism language-java"><span class="token class-name">DataStream</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span> stringDataStreamSource <span class="token operator">=</span> env<span class="token punctuation">.</span><span class="token function">fromCollection</span><span class="token punctuation">(</span>list<span class="token punctuation">,</span> <span class="token class-name">BasicTypeInfo</span><span class="token punctuation">.</span><span class="token function">of</span><span class="token punctuation">(</span><span class="token class-name">Event</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token class-name">DataStream</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span> watermarks <span class="token operator">=</span> stringDataStreamSource<span class="token punctuation">.</span><span class="token function">assignTimestampsAndWatermarks</span><span class="token punctuation">(</span><span class="token class-name">WatermarkStrategy</span><span class="token punctuation">.</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span><span class="token function">forBoundedOutOfOrderness</span><span class="token punctuation">(</span><span class="token class-name">Duration</span><span class="token punctuation">.</span><span class="token function">ofMillis</span><span class="token punctuation">(</span><span class="token number">5</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                <span class="token punctuation">.</span><span class="token function">withTimestampAssigner</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">SerializableTimestampAssigner</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token annotation punctuation">@Override</span>
+                    <span class="token keyword">public</span> <span class="token keyword">long</span> <span class="token function">extractTimestamp</span><span class="token punctuation">(</span><span class="token class-name">Event</span> element<span class="token punctuation">,</span> <span class="token keyword">long</span> recordTimestamp<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token keyword">return</span> element<span class="token punctuation">.</span><span class="token function">getTimestamp</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span><span class="token punctuation">)</span>
+        <span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>上面的代码提取了timestamp字段作为时间戳，并且以5毫秒的延迟时间创建了处理乱序流的水位线生成器。</p> 
+<p>查看有序流的水位线生成器和乱序流的水位线生成器的源码可以发现，其实有序流的水位线生成器本质上和乱序流是一样的，相当于延迟为0秒的乱序流水位线生成器。</p> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Public</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">AscendingTimestampsWatermarks</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token keyword">extends</span> <span class="token class-name">BoundedOutOfOrdernessWatermarks</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">public</span> <span class="token class-name">AscendingTimestampsWatermarks</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">super</span><span class="token punctuation">(</span><span class="token class-name">Duration</span><span class="token punctuation">.</span><span class="token function">ofMillis</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+<span class="token annotation punctuation">@Public</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">BoundedOutOfOrdernessWatermarks</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token keyword">implements</span> <span class="token class-name">WatermarkGenerator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">private</span> <span class="token keyword">long</span> maxTimestamp<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token keyword">long</span> outOfOrdernessMillis<span class="token punctuation">;</span>
+    <span class="token keyword">public</span> <span class="token class-name">BoundedOutOfOrdernessWatermarks</span><span class="token punctuation">(</span><span class="token class-name">Duration</span> maxOutOfOrderness<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">checkNotNull</span><span class="token punctuation">(</span>maxOutOfOrderness<span class="token punctuation">,</span> <span class="token string">"maxOutOfOrderness"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">checkArgument</span><span class="token punctuation">(</span><span class="token operator">!</span>maxOutOfOrderness<span class="token punctuation">.</span><span class="token function">isNegative</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token string">"maxOutOfOrderness cannot be negative"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>outOfOrdernessMillis <span class="token operator">=</span> maxOutOfOrderness<span class="token punctuation">.</span><span class="token function">toMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>maxTimestamp <span class="token operator">=</span> <span class="token class-name">Long</span><span class="token punctuation">.</span>MIN_VALUE <span class="token operator">+</span> outOfOrdernessMillis <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onEvent</span><span class="token punctuation">(</span><span class="token class-name">T</span> event<span class="token punctuation">,</span> <span class="token keyword">long</span> eventTimestamp<span class="token punctuation">,</span> <span class="token class-name">WatermarkOutput</span> output<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        maxTimestamp <span class="token operator">=</span> <span class="token class-name">Math</span><span class="token punctuation">.</span><span class="token function">max</span><span class="token punctuation">(</span>maxTimestamp<span class="token punctuation">,</span> eventTimestamp<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onPeriodicEmit</span><span class="token punctuation">(</span><span class="token class-name">WatermarkOutput</span> output<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        output<span class="token punctuation">.</span><span class="token function">emitWatermark</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Watermark</span><span class="token punctuation">(</span>maxTimestamp <span class="token operator">-</span> outOfOrdernessMillis <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>这里还要注意一下，乱序流中生成的水位线真正的时间戳，其实是当前<code>最大时间戳 - 延迟时间 - 1</code>，这里的单位是毫秒。为什么要减去1毫秒是以为Flink中的窗口都是左开右闭的<code>(8,7]</code> 表示7点到8点的数据。</p> 
+<h4><a id="234__189"></a>2.3.4 自定义水位线策略</h4> 
+<p>在<code>WatermarkStrategy</code>中，时间戳分配器<code>TimestampAssigner</code>都是大同小异的，指定字段提取时间戳就可以了；不同的点在于<code>WatermarkGenerator</code>的实现，整体来说，有两种生成水位线的方式：一种是<code>周期性的（Periodic）</code>，另一种是<code>断点式的（Punctuated）</code>。</p> 
+<p>创建自定义水位线离不开<code>WatermarkGenerator</code>的<code>onEvent()</code>和<code> onPeriodicEmit()</code>，前者是每个事件到来时调用，后者由框架周期性的调用。周期性调用的方法中<code>onPeriodicEmit()</code>发出水位线就是周期性生成水位线，由事件触发的 方法中<code>onEvent()</code>发出的水位线就是断点式生成的水位线。两种方式的不同就集中体现在这两个方法上。</p> 
+<h5><a id="2341_Periodic_Generator_194"></a>2.3.4.1 周期性水位线生成器（Periodic Generator）</h5> 
+<p>周期性生成器一般是通过<code>onEvent()</code>观察判断输入的事件，而在<code>onPeriodicEmit()</code>里发出水位线。<br> 示例代码：</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token class-name">String</span><span class="token punctuation">[</span><span class="token punctuation">]</span> args<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">StreamExecutionEnvironment</span> env <span class="token operator">=</span> <span class="token class-name">StreamExecutionEnvironment</span><span class="token punctuation">.</span><span class="token function">getExecutionEnvironment</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        env<span class="token punctuation">.</span><span class="token function">setParallelism</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// 2. 从集合中读取数据</span>
+        <span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span> list <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        list<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Event</span><span class="token punctuation">(</span><span class="token string">"ming"</span><span class="token punctuation">,</span><span class="token string">"www.baidu1.com"</span><span class="token punctuation">,</span><span class="token number">1200L</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        list<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Event</span><span class="token punctuation">(</span><span class="token string">"xiaohu"</span><span class="token punctuation">,</span><span class="token string">"www.baidu5.com"</span><span class="token punctuation">,</span><span class="token number">1267L</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        list<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Event</span><span class="token punctuation">(</span><span class="token string">"ming"</span><span class="token punctuation">,</span><span class="token string">"www.baidu7.com"</span><span class="token punctuation">,</span><span class="token number">4200L</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        list<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Event</span><span class="token punctuation">(</span><span class="token string">"xiaohu"</span><span class="token punctuation">,</span><span class="token string">"www.baidu8.com"</span><span class="token punctuation">,</span><span class="token number">5500L</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token class-name">DataStream</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span> stringDataStreamSource <span class="token operator">=</span> env<span class="token punctuation">.</span><span class="token function">fromCollection</span><span class="token punctuation">(</span>list<span class="token punctuation">,</span> <span class="token class-name">BasicTypeInfo</span><span class="token punctuation">.</span><span class="token function">of</span><span class="token punctuation">(</span><span class="token class-name">Event</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">DataStream</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span> watermarks <span class="token operator">=</span> stringDataStreamSource<span class="token punctuation">.</span><span class="token function">assignTimestampsAndWatermarks</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">WatermarkStrategy</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token annotation punctuation">@Override</span>
+            <span class="token keyword">public</span> <span class="token class-name">TimestampAssigner</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span> <span class="token function">createTimestampAssigner</span><span class="token punctuation">(</span><span class="token class-name">TimestampAssignerSupplier<span class="token punctuation">.</span>Context</span> context<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">SerializableTimestampAssigner</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token annotation punctuation">@Override</span>
+                    <span class="token keyword">public</span> <span class="token keyword">long</span> <span class="token function">extractTimestamp</span><span class="token punctuation">(</span><span class="token class-name">Event</span> element<span class="token punctuation">,</span> <span class="token keyword">long</span> recordTimestamp<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token keyword">return</span> element<span class="token punctuation">.</span><span class="token function">getTimestamp</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token annotation punctuation">@Override</span>
+            <span class="token keyword">public</span> <span class="token class-name">WatermarkGenerator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span> <span class="token function">createWatermarkGenerator</span><span class="token punctuation">(</span><span class="token class-name">WatermarkGeneratorSupplier<span class="token punctuation">.</span>Context</span> context<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">WatermarkGenerator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token keyword">private</span> <span class="token class-name">Long</span> delayTime <span class="token operator">=</span> <span class="token number">5000L</span><span class="token punctuation">;</span> <span class="token comment">// 延迟时间</span>
+
+                    <span class="token keyword">private</span> <span class="token class-name">Long</span> maxTs <span class="token operator">=</span> <span class="token class-name">Long</span><span class="token punctuation">.</span>MIN_VALUE <span class="token operator">+</span> delayTime <span class="token operator">+</span> <span class="token number">1L</span><span class="token punctuation">;</span> <span class="token comment">// 观察到的最大时间戳</span>
+                    <span class="token annotation punctuation">@Override</span>
+                    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onEvent</span><span class="token punctuation">(</span><span class="token class-name">Event</span> event<span class="token punctuation">,</span> <span class="token keyword">long</span> eventTimestamp<span class="token punctuation">,</span> <span class="token class-name">WatermarkOutput</span> output<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token comment">// 每来一条数据就调用一次</span>
+                        maxTs <span class="token operator">=</span> <span class="token class-name">Math</span><span class="token punctuation">.</span><span class="token function">max</span><span class="token punctuation">(</span>event<span class="token punctuation">.</span>timestamp<span class="token punctuation">,</span> maxTs<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 更新最大时间戳</span>
+                    <span class="token punctuation">}</span>
+
+                    <span class="token annotation punctuation">@Override</span>
+                    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onPeriodicEmit</span><span class="token punctuation">(</span><span class="token class-name">WatermarkOutput</span> output<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token comment">// 发射水位线，默认 200ms 调用一次 可以使用 env.getConfig().setAutoWatermarkInterval(60 * 1000L); 调整周期时间</span>
+                        output<span class="token punctuation">.</span><span class="token function">emitWatermark</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Watermark</span><span class="token punctuation">(</span>maxTs <span class="token operator">-</span> delayTime <span class="token operator">-</span> <span class="token number">1L</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h5><a id="2342_Punctuated_Generator_243"></a>2.3.4.2 断点式水位线生成器（Punctuated Generator）</h5> 
+<p>断点式生成器会不停的检测<code>onEvent()</code>事件，当发现带有水位线信息的特殊事件时，就立即发出水位线。一般来说，断点式生成器不会通过<code>onPeriodicEmit()</code>发出水位线。<br> <code>示例代码</code>：</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token class-name">String</span><span class="token punctuation">[</span><span class="token punctuation">]</span> args<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">StreamExecutionEnvironment</span> env <span class="token operator">=</span> <span class="token class-name">StreamExecutionEnvironment</span><span class="token punctuation">.</span><span class="token function">getExecutionEnvironment</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        env<span class="token punctuation">.</span><span class="token function">setParallelism</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// 2. 从集合中读取数据</span>
+        <span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span> list <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        list<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Event</span><span class="token punctuation">(</span><span class="token string">"ming"</span><span class="token punctuation">,</span><span class="token string">"www.baidu1.com"</span><span class="token punctuation">,</span><span class="token number">1200L</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        list<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Event</span><span class="token punctuation">(</span><span class="token string">"xiaohu"</span><span class="token punctuation">,</span><span class="token string">"www.baidu5.com"</span><span class="token punctuation">,</span><span class="token number">1267L</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        list<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Event</span><span class="token punctuation">(</span><span class="token string">"ming"</span><span class="token punctuation">,</span><span class="token string">"www.baidu7.com"</span><span class="token punctuation">,</span><span class="token number">4200L</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        list<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Event</span><span class="token punctuation">(</span><span class="token string">"xiaohu"</span><span class="token punctuation">,</span><span class="token string">"www.baidu8.com"</span><span class="token punctuation">,</span><span class="token number">5500L</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token class-name">DataStream</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span> stringDataStreamSource <span class="token operator">=</span> env<span class="token punctuation">.</span><span class="token function">fromCollection</span><span class="token punctuation">(</span>list<span class="token punctuation">,</span> <span class="token class-name">BasicTypeInfo</span><span class="token punctuation">.</span><span class="token function">of</span><span class="token punctuation">(</span><span class="token class-name">Event</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">DataStream</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span> watermarks <span class="token operator">=</span> stringDataStreamSource<span class="token punctuation">.</span><span class="token function">assignTimestampsAndWatermarks</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">WatermarkStrategy</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token annotation punctuation">@Override</span>
+            <span class="token keyword">public</span> <span class="token class-name">TimestampAssigner</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span> <span class="token function">createTimestampAssigner</span><span class="token punctuation">(</span><span class="token class-name">TimestampAssignerSupplier<span class="token punctuation">.</span>Context</span> context<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">SerializableTimestampAssigner</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token annotation punctuation">@Override</span>
+                    <span class="token keyword">public</span> <span class="token keyword">long</span> <span class="token function">extractTimestamp</span><span class="token punctuation">(</span><span class="token class-name">Event</span> element<span class="token punctuation">,</span> <span class="token keyword">long</span> recordTimestamp<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token keyword">return</span> element<span class="token punctuation">.</span><span class="token function">getTimestamp</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token annotation punctuation">@Override</span>
+            <span class="token keyword">public</span> <span class="token class-name">WatermarkGenerator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span> <span class="token function">createWatermarkGenerator</span><span class="token punctuation">(</span><span class="token class-name">WatermarkGeneratorSupplier<span class="token punctuation">.</span>Context</span> context<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">WatermarkGenerator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token annotation punctuation">@Override</span>
+                    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onEvent</span><span class="token punctuation">(</span><span class="token class-name">Event</span> event<span class="token punctuation">,</span> <span class="token keyword">long</span> eventTimestamp<span class="token punctuation">,</span> <span class="token class-name">WatermarkOutput</span> output<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token comment">// 只有在遇到特定的 itemId 时，才发出水位线</span>
+                        <span class="token keyword">if</span> <span class="token punctuation">(</span>event<span class="token punctuation">.</span><span class="token function">getUser</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">equals</span><span class="token punctuation">(</span><span class="token string">"Mary"</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                            output<span class="token punctuation">.</span><span class="token function">emitWatermark</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Watermark</span><span class="token punctuation">(</span>event<span class="token punctuation">.</span><span class="token function">getTimestamp</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        <span class="token punctuation">}</span>
+                    <span class="token punctuation">}</span>
+
+                    <span class="token annotation punctuation">@Override</span>
+                    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onPeriodicEmit</span><span class="token punctuation">(</span><span class="token class-name">WatermarkOutput</span> output<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token comment">// 不需要做任何事情，因为我们在 onEvent 方法中发射了水位线</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+</code></pre> 
+<p>我们在 <code>onEvent()</code>中判断当前事件的 user 字段，只有遇到“Mary”这个特殊的值时，才调用<code>output.emitWatermark()</code>发出水位线。这个过程是完全依靠事件来触发的，所以水位线的生成一定在某个数据到来之后。</p> 
+<h4><a id="235__294"></a>2.3.5 在自定义数据源中发送水位线</h4> 
+<p>在自定义的数据源中抽取事件时间，然后发送水位线。这里要注意的是，在自定义数据源中发送了水位线以后，就不能再在程序中使用<code>assignTimestampsAndWatermarks</code>方法来生成水位线了。在自定义数据源中生成水位线和在程序中使用<code>assignTimestampsAndWatermarks</code>方法生成水位线二者只能取其一。<br> <code>示例代码</code>：</p> 
+<pre><code class="prism language-java">env<span class="token punctuation">.</span><span class="token function">addSource</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">SourceFunction</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">private</span> <span class="token keyword">boolean</span> running <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+            <span class="token annotation punctuation">@Override</span>
+            <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">run</span><span class="token punctuation">(</span><span class="token class-name">SourceContext</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Event</span><span class="token punctuation">&gt;</span></span> ctx<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token class-name">Random</span> random <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Random</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token class-name">String</span><span class="token punctuation">[</span><span class="token punctuation">]</span> userArr <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">"Mary"</span><span class="token punctuation">,</span> <span class="token string">"Bob"</span><span class="token punctuation">,</span> <span class="token string">"Alice"</span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+                <span class="token class-name">String</span><span class="token punctuation">[</span><span class="token punctuation">]</span> urlArr <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">"./home"</span><span class="token punctuation">,</span> <span class="token string">"./cart"</span><span class="token punctuation">,</span> <span class="token string">"./prod?id=1"</span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+                <span class="token keyword">while</span> <span class="token punctuation">(</span>running<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token keyword">long</span> currTs <span class="token operator">=</span> <span class="token class-name">Calendar</span><span class="token punctuation">.</span><span class="token function">getInstance</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getTimeInMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 毫秒时间戳</span>
+                    <span class="token class-name">String</span> username <span class="token operator">=</span> userArr<span class="token punctuation">[</span>random<span class="token punctuation">.</span><span class="token function">nextInt</span><span class="token punctuation">(</span>userArr<span class="token punctuation">.</span>length<span class="token punctuation">)</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+                    <span class="token class-name">String</span> url <span class="token operator">=</span> urlArr<span class="token punctuation">[</span>random<span class="token punctuation">.</span><span class="token function">nextInt</span><span class="token punctuation">(</span>urlArr<span class="token punctuation">.</span>length<span class="token punctuation">)</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+                    <span class="token class-name">Event</span> event <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Event</span><span class="token punctuation">(</span>username<span class="token punctuation">,</span> url<span class="token punctuation">,</span> currTs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token comment">// 使用 collectWithTimestamp 方法将数据发送出去，并指明数据中的时间戳的字段</span>
+                    ctx<span class="token punctuation">.</span><span class="token function">collectWithTimestamp</span><span class="token punctuation">(</span>event<span class="token punctuation">,</span> event<span class="token punctuation">.</span>timestamp<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token comment">// 发送水位线</span>
+                    ctx<span class="token punctuation">.</span><span class="token function">emitWatermark</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Watermark</span><span class="token punctuation">(</span>event<span class="token punctuation">.</span>timestamp <span class="token operator">-</span> <span class="token number">1L</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token class-name">Thread</span><span class="token punctuation">.</span><span class="token function">sleep</span><span class="token punctuation">(</span><span class="token number">1000L</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+            <span class="token annotation punctuation">@Override</span>
+            <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">cancel</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">this</span><span class="token punctuation">.</span>running <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><code> ctx.collectWithTimestamp(event, event.timestamp);</code> 这里发出的时间戳，其实就是我们经常使用的内置水位线生成器的方法中的<code>recordTimestamp</code></p> 
+<pre><code>return new SerializableTimestampAssigner&lt;Event&gt;() {
+                    @Override
+                    public long extractTimestamp(Event element, long recordTimestamp) {
+                        return element.getTimestamp();
+                    }
+                };
+</code></pre> 
+<p>在自定义水位线中生成水位线相比 assignTimestampsAndWatermarks 方法更加灵活，可以任意的产生周期性的、非周期性的水位线，以及水位线的大小也完全由我们自定义。所以非常适合用来编写 Flink 的测试程序，测试 Flink 的各种各样的特性。</p> 
+<h3><a id="24__333"></a>2.4 水位线的传递</h3> 
+<p>在每一个分区中都有一个分区水位线。<br> <img src="https://images2.imgbox.com/d3/7e/IXgiDeWj_o.png" alt="在这里插入图片描述"><br> 如图 6-12 所示，当前任务的上游，有四个并行子任务，所以会接收到来自四个分区的水位线；而下游有三个并行子任务，所以会向三个分区发出水位线。具体过程如下：</p> 
+<ol><li>上游并行子任务发来不同的水位线，当前任务会为每一个分区设置一个“分区水位线”（Partition Watermark），这是一个分区时钟；而当前任务自己的时钟，就是所有分区时钟里最小的那个。</li><li>当有一个新的水位线（第一分区的 4）从上游传来时，当前任务会首先更新对应的分区时钟；然后再次判断所有分区时钟中的最小值，如果比之前大，说明事件时间有了进展，当前任务的时钟也就可以更新了。这里要注意，更新后的任务时钟，并不一定是新来的那个分区水位线，比如这里改变的是第一分区的时钟，但最小的分区时钟是第三分区的 3，于是当前任务时钟就推进到了 3。当时钟有进展时，当前任务就会将自己的时钟以水位线的形式，广播给下游所有子任务。</li><li>再次收到新的水位线（第二分区的 7）后，执行同样的处理流程。首先将第二个分区时钟更新为 7，然后比较所有分区时钟；发现最小值没有变化，那么当前任务的时钟也不变，也不会向下游任务发出水位线。</li><li>同样道理，当又一次收到新的水位线（第三分区的 6）之后，第三个分区时钟更新为6，同时所有分区时钟最小值变成了第一分区的 4，所以当前任务的时钟推进到 4，并发出时间戳为 4 的水位线，广播到下游各个分区任务。</li></ol> 
+<p>水位线在上下游任务之间的传递，非常巧妙地避免了分布式系统中没有统一时钟的问题，每个任务都以“处理完之前所有数据”为标准来确定自己的时钟，就可以保证窗口处理的结果总是正确的。</p> 
+<h3><a id="25__344"></a>2.5 水位线的总结</h3> 
+<p>水位线在事件时间的世界里面，承担了时钟的角色。也就是说在事件时间的流中，水位线是唯一的时间尺度。如果想要知道现在几点，就要看水位线的大小。后面讲到的窗口的闭合，以及定时器的触发都要通过判断水位线的大小来决定是否触发。</p> 
+<p>水位线是一种特殊的事件，由程序员通过编程插入的数据流里面，然后跟随数据流向下游流动。水位线的默认计算公式：水位线 = 观察到的最大事件时间 – 最大延迟时间 – 1 毫秒。<br> 所以这里涉及到一个问题，就是不同的算子看到的水位线的大小可能是不一样的。因为下游的算子可能并未接收到来自上游算子的水位线，导致下游算子的时钟要落后于上游算子的时钟。比如 map-&gt;reduce 这样的操作，如果在 map 中编写了非常耗时间的代码，将会阻塞水位线的向下传播，因为水位线也是数据流中的一个事件，位于水位线前面的数据如果没有处理完毕，那么水位线不可能弯道超车绕过前面的数据向下游传播，也就是说会被前面的数据阻塞。这样就会影响到下游算子的聚合计算，因为下游算子中无论由窗口聚合还是定时器的操作，都需要水位线才能触发执行。这也就告诉了我们，在编写 Flink 程序时，一定要谨慎的编写每一个算子的计算逻辑，尽量避免大量计算或者是大量的 IO 操作，这样才不会阻塞水位线的向下传递。</p> 
+<p>在数据流开始之前，Flink 会插入一个大小是负无穷大（在 Java 中是-Long.MAX_VALUE）的水位线，而在数据流结束时，Flink 会插入一个正无穷大(Long.MAX_VALUE)的水位线，保证所有的窗口闭合以及所有的定时器都被触发。</p> 
+<p>对于离线数据集，Flink 也会将其作为流读入，也就是一条数据一条数据的读取。在这种情况下，Flink 对于离线数据集，只会插入两次水位线，也就是在最开始处插入负无穷大的水位线，在结束位置插入一个正无穷大的水位线。因为只需要插入两次水位线，就可以保证计算的正确，无需在数据流的中间插入水位线了。</p> 
+<p>水位线的重要性在于它的逻辑时钟特性，而逻辑时钟这个概念可以说是分布式系统里面最为重要的概念之一了，理解透彻了对理解各种分布式系统非常有帮助。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/31083d1ad262d277549ce6f4daef71d5/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">pointNet训练预测自己的数据集Charles版本(二）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/2060fcb0f69bbda126ab63f6133a5517/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">【Flink】DataStream API使用之转换算子（Transformation）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

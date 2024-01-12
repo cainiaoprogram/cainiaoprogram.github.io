@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>关于 FullNat 模式的 Toa 实现原理【转】 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="关于 FullNat 模式的 Toa 实现原理【转】" />
+<meta property="og:description" content="目录 背景获取client ip的几种方法toa/uoa 获取client ip原理tcp option 字段lvs中的toa格式与插入格式插入 后端获取client ipss/netstat 和 toa的关系其他实现方式 参考 背景 FullNat 模式的特点，比如跨机房、可运维性强等优势。不过会存在一个问题，在后端服务器上，应用程序能够获取到的请求源 IP 是 lvs 的 LocalIP，并不是真实客户端的 ClientIP。而现在大多数业务都需要对用户信息进行分析画像，也有一些敏感业务需要对用户进行溯源，所以获取用户的真实客户端 IP 地址是非常重要和必要的。
+获取client ip的几种方法 有一定流量的业务基本上都要经过负载均衡设备，所以后端服务器要获取客户端真实IP地址，也是常见的问题和需求，这里先罗列几种常见的获取源 IP 的方式：
+通过 L3 转发时，源 IP 不变。
+比如 lvs 的 dr、nat、tunnel 模式，后端服务器可以直接获取到真实客户端 IP 地址。通过 proxy protocol 协议实现源 IP 传递。
+原理是在三次握手后，发送请求数据前，在四层头之后插入一个 proxy protocol 数据包，数据包中可以携带 src ip、src port 等信息，该协议是由 haproxy 提出的，目前常见的 web 服务器都已经支持。通过 toa 模块获取源 IP。
+在三次握手最后一个 ack 数据包的 tcp option 中插入源 IP 和源 Port 等信息；后端服务器在调用 getpeername 获取源 IP 时读取 tcp option 数据即可获取真实客户端的 IP 地址。通过七层的 XFF 字段。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/18c00c35f56b295eefdca7f909ebbad5/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-02-24T17:29:43+08:00" />
+<meta property="article:modified_time" content="2022-02-24T17:29:43+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">关于 FullNat 模式的 Toa 实现原理【转】</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>目录</h4> 
+ <ul><li><a href="#_1" rel="nofollow">背景</a></li><li><a href="#client_ip_4" rel="nofollow">获取client ip的几种方法</a></li><li><a href="#toauoa_client_ip_17" rel="nofollow">toa/uoa 获取client ip</a></li><li><ul><li><a href="#_18" rel="nofollow">原理</a></li><li><a href="#tcp_option__25" rel="nofollow">tcp option 字段</a></li><li><a href="#lvstoa_29" rel="nofollow">lvs中的toa格式与插入</a></li><li><ul><li><a href="#_30" rel="nofollow">格式</a></li><li><a href="#_64" rel="nofollow">插入</a></li></ul> 
+   </li><li><a href="#client_ip_70" rel="nofollow">后端获取client ip</a></li><li><a href="#ssnetstat__toa_117" rel="nofollow">ss/netstat 和 toa的关系</a></li><li><a href="#_137" rel="nofollow">其他实现方式</a></li></ul> 
+  </li><li><a href="#_149" rel="nofollow">参考</a></li></ul> 
+</div> 
+<p></p> 
+<h2><a id="_1"></a>背景</h2> 
+<p>FullNat 模式的特点，比如跨机房、可运维性强等优势。不过会存在一个问题，在后端服务器上，应用程序能够获取到的请求源 IP 是 lvs 的 LocalIP，并不是真实客户端的 ClientIP。而现在大多数业务都需要对用户信息进行分析画像，也有一些敏感业务需要对用户进行溯源，所以获取用户的真实客户端 IP 地址是非常重要和必要的。</p> 
+<h2><a id="client_ip_4"></a>获取client ip的几种方法</h2> 
+<p>有一定流量的业务基本上都要经过负载均衡设备，所以后端服务器要获取客户端真实IP地址，也是常见的问题和需求，这里先罗列几种常见的获取源 IP 的方式：</p> 
+<ul><li>通过 L3 转发时，源 IP 不变。<br> 比如 lvs 的 dr、nat、tunnel 模式，后端服务器可以直接获取到真实客户端 IP 地址。</li><li>通过 proxy protocol 协议实现源 IP 传递。<br> 原理是在三次握手后，发送请求数据前，在四层头之后插入一个 proxy protocol 数据包，数据包中可以携带 src ip、src port 等信息，该协议是由 haproxy 提出的，目前常见的 web 服务器都已经支持。</li><li>通过 toa 模块获取源 IP。<br> 在三次握手最后一个 ack 数据包的 tcp option 中插入源 IP 和源 Port 等信息；后端服务器在调用 getpeername 获取源 IP 时读取 tcp option 数据即可获取真实客户端的 IP 地址。</li><li>通过七层的 XFF 字段。<br> HTTP 协议实现的字段，没什么可说的。业务层自己实现。</li></ul> 
+<p>几种方案各有优缺点，以及自己适用的应用场景。本文重点要说的是 TOA ，TOA 工作在 L4 层，适用性更通用一些。</p> 
+<h2><a id="toauoa_client_ip_17"></a>toa/uoa 获取client ip</h2> 
+<h3><a id="_18"></a>原理</h3> 
+<p>TOA 名字全称是 tcp option address，是 FullNat 模式下能够让后端服务器获取 ClientIP 的一种实现方式，它的基本原理比较简单。</p> 
+<ul><li>客户端用户请求数据包到达 LVS 时，LVS 在数据包的 tcp option 中插入 src ip 和 src port 信息。</li><li>数据包到达后端服务器（装有 toa 模块）后，应用程序正常调用 getpeername 系统函数来获取连接的源端 IP 地址。</li><li>由于在 toa 代码中 hook（修改）了 inet_getname 函数（getpeername 系统调用对应的内核处理函数），该函数会从 tcp option 中获取 lvs 填充的 src 信息。</li><li>这样后端服务器应用程序就获取到了真实客户端的 ClientIP，而且对应用程序来说是透明的。</li></ul> 
+<h3><a id="tcp_option__25"></a>tcp option 字段</h3> 
+<p><img src="https://images2.imgbox.com/49/0c/52mk1MEu_o.png" alt="在这里插入图片描述"><br> client ip 就是放在 tcp option 字段中。option 字段最长 40 字节，每个选项由三部分组成：op-kind、op-length、op-data，我们最常见的 MSS 字段就是在 option 里。<br> 目前 option 使用的 op-kind 并不多，我们只需要构建一个不冲突的 op-kind 就可以把 clientIP 填充进去。IPv4 地址占用 4 个字节，IPv6 占用 16 字节，填充到 option 中是没有问题的。</p> 
+<h3><a id="lvstoa_29"></a>lvs中的toa格式与插入</h3> 
+<h4><a id="_30"></a>格式</h4> 
+<p>首先要确定 toa 的具体数据格式：<br> <strong>（一）IPv4 toa 格式</strong></p> 
+<pre><code class="prism language-c"><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span>
+<span class="token operator">|</span>  opcode  <span class="token operator">|</span>  opsize  <span class="token operator">|</span>         port       <span class="token operator">|</span>
+<span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span>
+<span class="token operator">|</span>                clientIP                  <span class="token operator">|</span>
+<span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span>
+</code></pre> 
+<p>各字段含义：</p> 
+<blockquote> 
+ <p>opcode: opcode = 254<br> opsize: toa 大小 8 字节<br> port: 客户端端口<br> clientIP: 客户端 IP（4 字节）<br> 注：opsize 大小包含了自身opsize(2B) + port(2B) + ip(4B)</p> 
+</blockquote> 
+<p><strong>(二）IPv6 toa 格式</strong></p> 
+<pre><code class="prism language-c"><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span>
+<span class="token operator">|</span>  opcode  <span class="token operator">|</span>  opsize  <span class="token operator">|</span>         port       <span class="token operator">|</span>
+<span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span>
+<span class="token operator">|</span>                                          <span class="token operator">|</span>
+<span class="token operator">|</span>               clientIPv6                 <span class="token operator">|</span>
+<span class="token operator">|</span>               clientIPv6                 <span class="token operator">|</span>
+<span class="token operator">|</span>                                          <span class="token operator">|</span>
+<span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span>
+</code></pre> 
+<p>各字段含义：</p> 
+<blockquote> 
+ <p>opcode: opcode = 254<br> opsize: toa 大小 20 字节<br> port: 客户端端口<br> clientIP: 客户端 IP（16 字节）</p> 
+</blockquote> 
+<h4><a id="_64"></a>插入</h4> 
+<p>lvs 需要对每个 tcp 数据包都要插入 toa 信息么？如果这样会影响到 lvs 整体性能的，而且后端服务器也没必要对每个 tcp 数据包进行解析，当然也很影响服务器性能。<br> 其实只需要在第 3 次握手 ack 数据包中插入 toa 选项即可，后端服务器从 ack 数据包中解析并获取即可。</p> 
+<blockquote> 
+ <p>注：<br> 其实syn包中插入 tcp option也是没有什么意义的。因为后端时收到三次握手的ack，才会从ack中获取tcp option的。</p> 
+</blockquote> 
+<h3><a id="client_ip_70"></a>后端获取client ip</h3> 
+<p>TCP 协议栈中处理三次握手的 ack 数据包的函数是 tcp_v4_syn_recv_sock，完成连接的建立，并创建 newsock。</p> 
+<ol><li>toa 模块会将此函数通过 tcp_v4_syn_recv_sock_toa 函数进行劫持，也就是说第三次握手的 ack 到达协议栈后调用的是 tcp_v4_syn_recv_sock_toa 函数，而不是tcp_v4_syn_recv_sock 。</li><li>在 tcp_xx_toa 函数中首先会调用内核原有的处理函数 tcp_v4_syn_recv_sock 函数，这样兼容了那些不是通过 toa 的连接。然后解析 ack 数据包中 tcp option 内容，获取到 lvs 插入到 toa 的 src ip 和 src port 信息，将此信息挂在 newsock 结构变量中。</li></ol> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">struct</span> <span class="token class-name">sock</span> <span class="token operator">*</span>
+<span class="token function">tcp_v4_syn_recv_sock_toa</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sock</span> <span class="token operator">*</span>sk<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">sk_buff</span> <span class="token operator">*</span>skb<span class="token punctuation">,</span>
+            <span class="token keyword">struct</span> <span class="token class-name">request_sock</span> <span class="token operator">*</span>req<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">dst_entry</span> <span class="token operator">*</span>dst<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    newsock <span class="token operator">=</span> <span class="token function">tcp_v4_syn_recv_sock</span><span class="token punctuation">(</span>sk<span class="token punctuation">,</span> skb<span class="token punctuation">,</span> req<span class="token punctuation">,</span> dst<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    newsock<span class="token operator">-&gt;</span>sk_user_data <span class="token operator">=</span> <span class="token function">get_toa_data_compatible</span><span class="token punctuation">(</span>AF_INET<span class="token punctuation">,</span> skb<span class="token punctuation">,</span> <span class="token operator">&amp;</span>nat64<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> newsock<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>当应用程序，如 nginx 或 MySQL 调用 getpeername 系统函数时，正常情况会调用 inet_getname 函数来获取连接远端的 ClientIP。</p> 
+<ol start="3"><li>toa 模块对 inet_getname 函数也用 inet_getname_toa 函数进行了劫持，也就是说应用程序调用 getpeername 时，内核对应的处理函数是 inet_getname_toa。</li></ol> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">int</span>
+<span class="token function">inet_getname_toa</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">socket</span> <span class="token operator">*</span>sock<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span>uaddr<span class="token punctuation">,</span>
+        <span class="token keyword">int</span> <span class="token operator">*</span>uaddr_len<span class="token punctuation">,</span> <span class="token keyword">int</span> peer<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> retval <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> <span class="token class-name">sock</span> <span class="token operator">*</span>sk <span class="token operator">=</span> sock<span class="token operator">-&gt;</span>sk<span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span> <span class="token operator">*</span>sin <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span> <span class="token operator">*</span><span class="token punctuation">)</span> uaddr<span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> <span class="token class-name">toa_ip4_data</span> tdata<span class="token punctuation">;</span>
+
+    <span class="token comment">// 调用内核原来的函数，兼容那些不是toa的情况</span>
+    retval <span class="token operator">=</span> <span class="token function">inet_getname</span><span class="token punctuation">(</span>sock<span class="token punctuation">,</span> uaddr<span class="token punctuation">,</span> uaddr_len<span class="token punctuation">,</span> peer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 如果是toa，则直接从sk-&gt;sk_user_data获取数据</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>retval <span class="token operator">==</span> <span class="token number">0</span> <span class="token operator">&amp;&amp;</span> <span class="token constant">NULL</span> <span class="token operator">!=</span> sk<span class="token operator">-&gt;</span>sk_user_data <span class="token operator">&amp;&amp;</span> peer<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">memcpy</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>tdata<span class="token punctuation">,</span> <span class="token operator">&amp;</span>sk<span class="token operator">-&gt;</span>sk_user_data<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>tdata<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            sin<span class="token operator">-&gt;</span>sin_port <span class="token operator">=</span> tdata<span class="token punctuation">.</span>port<span class="token punctuation">;</span>
+            sin<span class="token operator">-&gt;</span>sin_addr<span class="token punctuation">.</span>s_addr <span class="token operator">=</span> tdata<span class="token punctuation">.</span>ip<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">return</span> retval<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>总结：</strong></p> 
+<blockquote> 
+ <ul><li>hook 三次握手中收到ack后建立连接的函数：tcp_v4_syn_recv_sock：<br> 将三次握手的ack中携带的 client-ip, client-port 保存到 新建sock 的 sk_user_data 中。</li><li>hook 后端server的 getpeer 的函数：<br> sock 的 sk_user_data 非空时，则getpeer 返回调度时 sock 的 sk_user_data 的数据。</li></ul> 
+</blockquote> 
+<h3><a id="ssnetstat__toa_117"></a>ss/netstat 和 toa的关系</h3> 
+<ul><li><strong>ss/netstat -apn 看到的连接的 ip 是否为真实的 client-ip？</strong><br> 经过测试发现：<br> <mark>netstat -apn 中看到的 ip 不是client-ip ,而是lvs的 local-ip</mark>。<br> 因为netstat 并不是一个真实的server，监听某个端口，然后新建连接，进行getpeer 获取对端的ip，其是通过读取/proc/net下的内核文件来获取所有的连接信息。</li></ul> 
+<pre><code class="prism language-c"><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>安装
+<span class="token operator">&gt;</span> yum install <span class="token operator">-</span>y nginx
+<span class="token operator">&gt;</span> #which nginx
+<span class="token operator">&gt;</span> #rpm <span class="token operator">-</span>qf <span class="token operator">/</span>sbin<span class="token operator">/</span><span class="token function">nginx</span>
+<span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span> 安装 <span class="token function">toa</span>
+<span class="token punctuation">(</span><span class="token number">3</span><span class="token punctuation">)</span> nginx 日志查看client ip
+如下所示：此时看到的 ip 的确是 client<span class="token operator">-</span>ip，但是netstat 看到的依然是 local<span class="token operator">-</span>ip；
+</code></pre> 
+<p><img src="https://images2.imgbox.com/10/89/0t0ljHSG_o.png" alt="在这里插入图片描述"></p> 
+<blockquote> 
+ <p>注：查看netstat /ss 的原理：<br> strace -e open netstat -apn ； 发现 netstat 其实是 打开/proc/net/tcp, /proc/net/tcp6，/proc/net/udp, /proc/net/udp6， /proc/net/raw, /proc/net/unix 等文件</p> 
+</blockquote> 
+<h3><a id="_137"></a>其他实现方式</h3> 
+<p><mark>以上 toa 的方式的 两个 hook 函数是 内核中原始存在这样的函数，只不过将原有函数给劫持了, 所以不需要重新执行 nf_register_hook 进行注册 hook函数。<br> 如果需要在netfilter 中添加新的函数，则需要考虑将 新的函数 添加到netfilter 的哪个链中（比如：PREROUTING链），以及对应的优先级的设置（相比较于该链中其他表/函数的优先级，比如：raw/mangle/nat/filter）。<br> 【具体实现可参考 uoa 的实现以及百度 bcettm 的实现】</mark></p> 
+<p><strong>其他实现方法</strong>：<br> 比如：直接注册两个 hook 函数，执行 source nat操作，而不是劫持原有的函数。</p> 
+<blockquote> 
+ <p>具体行为是：将sip/sport 替换为 tcp option中的client-ip, client-port， 并且建立 session，后续的包中没有携带 clinet-ip、port，直接查找session，也可以进行snat 替换。</p> 
+</blockquote> 
+<blockquote> 
+ <p>注：此时需要保证 lvs发给后端的 syn 包中携带有 client-ip, client-port 信息，而不仅仅是 三次握手的第三个包中携带有 client-ip, client-port。<br> 这也是为什么 lvs会在 syn 以及三次握手的 ack中都携带有 client-ip、port信息了。因为后端可以通过nat方式，也可通过hook原有的函数的方式来获取 client-ip、port。</p> 
+</blockquote> 
+<h2><a id="_149"></a>参考</h2> 
+<pre><code class="prism language-c">https<span class="token operator">:</span><span class="token comment">//blog.csdn.net/liwei0526vip/article/details/106108844</span>
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/833d7f724c10220660297a62f56fcfd3/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">cdh组件之间的端口</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/1f0c23141e32c033f691cd277dffce03/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">05. 基础篇 - 多表查询</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

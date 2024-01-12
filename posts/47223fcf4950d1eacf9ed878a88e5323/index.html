@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Redis集群模式（主从模式、哨兵模式和分片模式） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Redis集群模式（主从模式、哨兵模式和分片模式）" />
+<meta property="og:description" content="单机版的redis，如果这台redis挂了，所有的redis读写操作都会受影响，而且单台redis容量上限比较低，
+Redis有三种集群模式：主从集群模式、哨兵集群模式和分片集群模式
+（1）主从模式
+所有对数据库的修改操作请求都发送到主数据库上，再由主数据库将数据同步到从数据库上，从数据库只用来读
+也就是说这个过程中，主数据库承担写操作和数据同步的任务，而从数据库则可以承当读操作的任务，这样可以缓解整个系统的读压力
+也就是说：将数据写（修改）到主数据库上，读数据的话是从从数据库中读
+一个主数据库可以拥有多个从数据库，从数据库还可以作为其他数据库的主库
+比如在上面这张图张你可以看到：
+主数据库Master的从数据库是Slave-0和Slave-1
+同时Slave-1作为主数据库，Slave-1-0和Slave-1-1是它的从数据库
+主redis将数据同步到从redis的过程：
+（1）一个从数据库在启动后，会向主数据库发送SYNC命令，表示从数据库想要同步主数据库的数据
+（2）主数据库在接收到SYNC命令后会开始在后台保存快照（即RDB持久化的过程），并将保存快照期间接收到的命令缓存起来。在该持久化过程中会生成一个rdb快照文件
+（3）主数据库发送RDB快照文件给从数据库
+（4）从数据库收到主数据库的rdb快照文件后，载入该快照文件到本地，加载RDB文件，以上过程被称为复制初始化
+（5）在复制初始化结束后，主数据库在每次收到写命令时都会将命令同步给从数据库，从而保证主从数据库的数据一致
+也就是说复制初始化是通过rdb文件，后续你的同步就是直接发送主redis执行的写命令
+可以认为复制初始化就是全量同步，后续同步就是增量同步
+配置主从复制：
+配置一台redis服务器作为从机slave（主数据库无须进行任何配置，只需要在从数据库上进行配置）
+指定这台redis服务器是谁的从机，找谁当自己的主机
+127.0.0.1:6380&gt; slaveof 168.19.20.13 6379
+#如果master有密码，则需设置masterauth 主数据库的密码
+masterauth=123
+这里表示127.0.0.1这台redis服务器的主机是168.19.20.13 （2）哨兵模式
+高可用方案：故障发生时，可以自动进行主从切换，运维人员可以继续睡大觉
+哨兵结点通过心跳机制持续监控主从节点的健康
+客户端先连接哨兵，然后哨兵告诉它去哪台redis服务器中获取数据
+在主从模式上添加了一个哨兵的角色来监控集群的运行状态，如果master故障，会将一个slave提升为master
+哨兵是如何得知redis集群中每个redis结点的状态的？通过心跳机制，每隔一秒就向集群中每一个redis发送ping命令，如果未在规定时间响应就认为该redis下线了（主观下线），如果超过一定数量(比如超过一半)的sentinel都认为该实例主观下线，那该redis就是客观下线
+主redis宕机了如何从从redis中选一个成为新的主redis
+应用程序问哨兵我现在应该连哪一台redis服务器
+redis2作为redis1的slave，再引入一台redis sentinal 哨兵，这台哨兵和两台redis服务器都进行长连接，而且采用redis2作为redis1的slave，再引入一台redis sentinal 哨兵，这台哨兵和两台redis服务器都进行长连接，而且是心跳机制，此时后端服务器不再去redis1或者redis2中查询，而是直接问redis sentinal，应该连哪一台redis,于是后端服务器就会去连接主redis(master redis)
+当redis1作为master产生了异常 ，心跳就会被破坏掉，redis sentinal就会马上将redis2 切换成master，将redis1切换成slave，这个时候sentinal会告诉后端服务器产生了change，你重新来ask一下
+如果哨兵监测到Master主数据库宕机时会自动将Slave从数据库切换成Master主数据库，然后通过发布与订阅模式通知其他从服务器修改配置文件，完成主数据库和从数据库的切换
+一个哨兵进程对redis服务器进行监控可能会出现问题，为此，可以设置多个哨兵进行监控，各个哨兵之间还会进行监控，形成多哨兵模式
+（3）分片集群模式
+主从和哨兵两种集群模式有两个问题没有解决：海量数据存储和高并发写
+1.分片集群有多个master，每个master保存不同数据（这些redis都是主数据库，一个redis保存20G的数据，那三个redis就可以保存60G的数据）
+2.而且每个master redis有多个slave redis
+3.master之间通过互相ping来监测彼此的健康状态
+客户端可以请求集群内任意的结点，最终都会被转发到正确的结点
+显然分片集群模式虽然没有哨兵，但是却实现了哨兵的功能
+在集群中超过半数的节点检测到某个节点Fail后将该节点设置为Fail状态
+将0~16383共16384个插槽值分配给master redis，每个master redis会获得一些插槽值：（N个结点每个结点可以分配到的插槽值是16384/N）
+第一台master redis分配了0-5460号插槽值
+第二台master redis分配了5461-10922号插槽值
+第三台master redis分配了10923-16383号插槽值" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/47223fcf4950d1eacf9ed878a88e5323/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-06-21T11:25:36+08:00" />
+<meta property="article:modified_time" content="2023-06-21T11:25:36+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Redis集群模式（主从模式、哨兵模式和分片模式）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>单机版的redis，如果这台redis挂了，所有的redis读写操作都会受影响，而且单台redis容量上限比较低，</p> 
+<p></p> 
+<p>Redis有三种集群模式：主从集群模式、哨兵集群模式和分片集群模式</p> 
+<p>（1）主从模式</p> 
+<p>所有对数据库的修改操作请求都发送到主数据库上，再由主数据库将数据同步到从数据库上，从数据库只用来读</p> 
+<p>也就是说这个过程中，主数据库承担写操作和数据同步的任务，而从数据库则可以承当读操作的任务，这样可以缓解整个系统的读压力</p> 
+<p>也就是说：将数据写（修改）到主数据库上，读数据的话是从从数据库中读</p> 
+<p class="img-center"><img alt="" height="399" src="https://images2.imgbox.com/c0/b4/BEq5wbv6_o.png" width="540"></p> 
+<p> 一个主数据库可以拥有多个从数据库，从数据库还可以作为其他数据库的主库</p> 
+<p>比如在上面这张图张你可以看到：</p> 
+<p>主数据库Master的从数据库是Slave-0和Slave-1</p> 
+<p>同时Slave-1作为主数据库，Slave-1-0和Slave-1-1是它的从数据库</p> 
+<p></p> 
+<p>主redis将数据同步到从redis的过程：</p> 
+<p> （1）一个从数据库在启动后，会向主数据库发送SYNC命令，表示从数据库想要同步主数据库的数据</p> 
+<p>（2）主数据库在接收到SYNC命令后会开始在后台保存快照（即RDB持久化的过程），并将保存快照期间接收到的命令缓存起来。在该持久化过程中会生成一个rdb快照文件</p> 
+<p>（3）主数据库发送RDB快照文件给从数据库</p> 
+<p>（4）从数据库收到主数据库的rdb快照文件后，载入该快照文件到本地，加载RDB文件，以上过程被称为复制初始化</p> 
+<p>（5）在复制初始化结束后，主数据库在每次收到写命令时都会将命令同步给从数据库，从而保证主从数据库的数据一致</p> 
+<p><span style="color:#fe2c24;"><strong>也就是说复制初始化是通过rdb文件，后续你的同步就是直接发送主redis执行的写命令</strong></span></p> 
+<p><span style="color:#fe2c24;"><strong>可以认为复制初始化就是全量同步，后续同步就是增量同步</strong></span></p> 
+<p><img alt="" src="https://images2.imgbox.com/cb/de/B8Nb3iNa_o.png"></p> 
+<p><br>  </p> 
+<p></p> 
+<p>配置主从复制：</p> 
+<p>配置一台redis服务器作为从机slave（<span style="color:#fe2c24;"><strong>主数据库无须进行任何配置，只需要在从数据库上进行配置</strong></span>）</p> 
+<p>指定这台redis服务器是谁的从机，找谁当自己的主机</p> 
+<blockquote> 
+ <p>127.0.0.1:6380&gt; slaveof 168.19.20.13   6379<br>  <br>  #如果master有密码，则需设置masterauth  主数据库的密码<br> masterauth=123<br>  </p> 
+</blockquote> 
+<p>这里表示127.0.0.1这台redis服务器的主机是168.19.20.13  </p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p>（2）哨兵模式</p> 
+<p><img alt="" height="1200" src="https://images2.imgbox.com/8f/1a/yhOzzjiF_o.jpg" width="1200"></p> 
+<p> 高可用方案：故障发生时，可以自动进行主从切换，运维人员可以继续睡大觉</p> 
+<p>哨兵结点通过心跳机制持续监控主从节点的健康</p> 
+<p>客户端先连接哨兵，然后哨兵告诉它去哪台redis服务器中获取数据</p> 
+<p>在主从模式上添加了一个哨兵的角色来监控集群的运行状态，如果master故障，会将一个slave提升为master</p> 
+<p>哨兵是如何得知redis集群中每个redis结点的状态的？通过心跳机制，每隔一秒就向集群中每一个redis发送ping命令，如果未在规定时间响应就认为该redis下线了（主观下线），如果超过一定数量(比如超过一半)的sentinel都认为该实例主观下线，那该redis就是客观下线</p> 
+<p>主redis宕机了如何从从redis中选一个成为新的主redis</p> 
+<p><img alt="" height="850" src="https://images2.imgbox.com/a8/c0/rOE9jVab_o.png" width="1073"></p> 
+<p></p> 
+<p> 应用程序问哨兵我现在应该连哪一台redis服务器</p> 
+<p><img alt="" height="608" src="https://images2.imgbox.com/28/46/IDRx4upV_o.png" width="1111"></p> 
+<p> redis2作为redis1的slave，再引入一台redis sentinal 哨兵，这台哨兵和两台redis服务器都进行长连接，而且采用redis2作为redis1的slave，再引入一台redis sentinal 哨兵，这台哨兵和两台redis服务器都进行长连接，而且是心跳机制，此时后端服务器不再去redis1或者redis2中查询，而是直接问redis sentinal，应该连哪一台redis,于是后端服务器就会去连接主redis(master redis)</p> 
+<p>当redis1作为master产生了异常 ，心跳就会被破坏掉，redis sentinal就会马上将redis2 切换成master，将redis1切换成slave，这个时候sentinal会告诉后端服务器产生了change，你重新来ask一下</p> 
+<p><img alt="" height="677" src="https://images2.imgbox.com/4f/f9/x9zsF2kG_o.png" width="1111"></p> 
+<p> 如果哨兵监测到Master主数据库宕机时会自动将Slave从数据库切换成Master主数据库，然后通过发布与订阅模式通知其他从服务器修改配置文件，完成主数据库和从数据库的切换</p> 
+<p></p> 
+<p>一个哨兵进程对redis服务器进行监控可能会出现问题，为此，可以设置多个哨兵进行监控，各个哨兵之间还会进行监控，形成多哨兵模式</p> 
+<p class="img-center"><img alt="" height="276" src="https://images2.imgbox.com/68/91/eZxx9CVC_o.png" width="495"></p> 
+<p>（3）分片集群模式</p> 
+<p>主从和哨兵两种集群模式有两个问题没有解决：海量数据存储和高并发写</p> 
+<p>1.分片集群有多个master，每个master保存不同数据（这些redis都是主数据库，一个redis保存20G的数据，那三个redis就可以保存60G的数据）</p> 
+<p>2.而且每个master redis有多个slave redis</p> 
+<p>3.master之间通过互相ping来监测彼此的健康状态</p> 
+<p><img alt="" height="840" src="https://images2.imgbox.com/c5/ab/CMwhXsty_o.png" width="882"></p> 
+<p>客户端可以请求集群内任意的结点，最终都会被转发到正确的结点</p> 
+<p>显然分片集群模式虽然没有哨兵，但是却实现了哨兵的功能</p> 
+<p>在集群中超过半数的节点检测到某个节点Fail后将该节点设置为Fail状态</p> 
+<p>将0~16383共16384个插槽值分配给master redis，每个master redis会获得一些插槽值：（N个结点每个结点可以分配到的插槽值是16384/N）</p> 
+<p><img alt="" height="221" src="https://images2.imgbox.com/25/8f/kFwdNvYB_o.png" width="1074"></p> 
+<p>第一台master redis分配了0-5460号插槽值</p> 
+<p>第二台master redis分配了5461-10922号插槽值</p> 
+<p>第三台master redis分配了10923-16383号插槽值</p> 
+<p>现在我要存储一个数据，比如num=123，应该存在哪一个master redis里面呢？</p> 
+<p>根据key计算插槽值，也就是使用CRC16算法得到一个hash值，然后将这个求出来的值对16384进行取余，得到的值就是插槽值，根据这个插槽值判断这个数据存储到哪个master redis上</p> 
+<p>当分片集群要增加一个新节点master redis的时候，要重新分配插槽值，使得每个master redis分配到的插槽值为16384/N，所以还需要进行数据迁移</p> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/36eb7ed0341286847d3e0610d5df3b22/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">maven本地仓库批量上传私服</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/2ada266f5ba7eee1e902cd41e09b86be/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">从零开始，教你如何安装、配置Python开发环境，Python入门安装教程，超级详细！！！</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

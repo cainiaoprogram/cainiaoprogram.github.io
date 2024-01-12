@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【MySQL基本功系列】第二篇 InnoDB事务提交过程深度解析 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【MySQL基本功系列】第二篇 InnoDB事务提交过程深度解析" />
+<meta property="og:description" content="通过上一篇博文，我们简要了解了MySQL的运行逻辑，从用户请求到最终将数据写入磁盘的整个过程。
+当数据写入磁盘时，存储引擎扮演着关键的角色，它负责实际的数据存储和检索。
+在MySQL中，有多个存储引擎可供选择，每个存储引擎都具有不同的特性和适用场景，但目前最常用的存储引擎之一是InnoDB。
+今天，我们将学习InnoDB存储引擎的架构设计和核心特点，以及InnoDB事务提交过程深度解析。
+UPDATE users set name=&#39;张老三&#39; WHERE id = 1 如果我们执行上述update语句，它在整个执行过程中会发生什么？
+接下来，我们将围绕这个update语句，熟悉整个的执行过程。
+一、InnoDB存储引擎的特性： 1. 缓冲池（Buffer Pool） 缓冲池是InnoDB内部的一个重要内存结构，用于高效管理数据库表的数据和索引的缓存。
+它在内存中存储了常用的数据页，以加速数据的读取和写入。
+我们要更新上述sql
+这个时候，它会先找 id = 1 这行数据是否在缓冲池中，如果不在，就将这条数据从磁盘加载到缓存池中。
+当我们此时update的时候，也是先将新的数据更新到缓冲池，再写入到磁盘。
+2. undo log（回滚日志） 我们知道，事务的所有操作要么全部成功（提交），要么全部失败（回滚）。
+那么事务如何回滚呢？我们就要介绍到undo log
+unod log文件顾名思义，就是回滚日志。
+Undo Log 记录了事务对数据所做的修改，以便在需要回滚时能够撤销或者反向执行这些修改。
+就是说我们写入新的数据到内存(缓冲池之前)，会把更新之前的数据，也就是说原来的数据写入undo log文件，方便回滚的时候将数据恢复到事务开始之前的状态。
+当我们把要更新的那行记录从磁盘文件加载到缓冲池，同时把更新前的旧值写入undo日志文件之后，就可以正式开始更新这行记录了。
+根据上图我们看到，InnoDB收到更新请求后，查看缓冲池中是否有要更新这条数据的缓存页，如果没有则从磁盘文件中加载到缓冲池，再将更新前的数据写入undo log，最后进行数据的更新（更新到内存）
+3. Redo Log（重做日志） 现在我们已经把内存里(缓冲池)的数据进行了修改，但是磁盘上的数据还没修改。
+如果这时候MySQL机器宕机了，导致内存里修改过的数据丢失，应该怎么办呢？
+为了防止这种情况发生，InnoDB 存储引擎在处理事务时采用了一种称为&#34;write-ahead logging&#34; (WAL) 的机制。
+这种机制在更内存（缓冲池）时，会同时更新 Redo Log（重做日志）。
+Redo Log是用于记录数据库引擎在执行事务期间对数据所做的所有修改操作，它记录了对数据页的物理修改操作，例如在磁盘上某个位置上的某个字节被修改成什么值。
+当我们提交事务时，会把操作记录到 Redo Log 中，然后再更新到磁盘。这样做的目的是在系统崩溃时，可以通过重新执行 Redo Log 中的操作来还原已提交的事务，确保数据的一致性和完整性。
+通过上图第5步，我们看到，当事务提交时，会将Redo Log写入到磁盘中，这是InnoDB的默认策略，也有其他方式可以自己配置
+它由innodb_flush_log_at_trx_commit 参数进行控制：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/d693d77080c51fe8ae632de8ebc1bea7/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-11-11T17:48:00+08:00" />
+<meta property="article:modified_time" content="2023-11-11T17:48:00+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【MySQL基本功系列】第二篇 InnoDB事务提交过程深度解析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>通过上一篇博文，我们简要了解了<a href="https://javajingbo.blog.csdn.net/article/details/134246403?spm=1001.2014.3001.5502" rel="nofollow">MySQL的运行逻辑</a>，从用户请求到最终将数据写入磁盘的整个过程。</p> 
+<p>当数据写入磁盘时，存储引擎扮演着关键的角色，它负责实际的数据存储和检索。</p> 
+<p>在MySQL中，有多个存储引擎可供选择，每个存储引擎都具有不同的特性和适用场景，但目前最常用的存储引擎之一是InnoDB。</p> 
+<p>今天，我们将学习InnoDB存储引擎的架构设计和核心特点，以及InnoDB事务提交过程深度解析。</p> 
+<pre><code class="prism language-java"><span class="token constant">UPDATE</span> users set name<span class="token operator">=</span><span class="token char">'张老三'</span> <span class="token class-name">WHERE</span> id <span class="token operator">=</span> <span class="token number">1</span>
+</code></pre> 
+<p>如果我们执行上述update语句，它在整个执行过程中会发生什么？</p> 
+<p>接下来，我们将围绕这个update语句，熟悉整个的执行过程。</p> 
+<h3><a id="InnoDB_15"></a>一、InnoDB存储引擎的特性：</h3> 
+<h4><a id="1_Buffer_Pool_16"></a>1. 缓冲池（Buffer Pool）</h4> 
+<p>缓冲池是InnoDB内部的一个重要内存结构，用于高效管理数据库表的数据和索引的缓存。</p> 
+<p>它在内存中存储了常用的数据页，以加速数据的读取和写入。</p> 
+<p>我们要更新上述sql</p> 
+<p>这个时候，它会先找 id = 1 这行数据是否在缓冲池中，如果不在，就将这条数据从磁盘加载到缓存池中。<br> <img src="https://images2.imgbox.com/5c/2b/C4O46KDf_o.png" alt="缓冲池"><br> 当我们此时update的时候，也是先将新的数据更新到缓冲池，再写入到磁盘。</p> 
+<h4><a id="2_undo_log_27"></a>2. undo log（回滚日志）</h4> 
+<p>我们知道，事务的所有操作要么全部成功（提交），要么全部失败（回滚）。</p> 
+<p>那么事务如何回滚呢？我们就要介绍到undo log</p> 
+<p>unod log文件顾名思义，就是回滚日志。</p> 
+<p>Undo Log 记录了事务对数据所做的修改，以便在需要回滚时能够撤销或者反向执行这些修改。</p> 
+<p>就是说我们写入新的数据到内存(缓冲池之前)，会把更新之前的数据，也就是说原来的数据写入undo log文件，方便回滚的时候将数据恢复到事务开始之前的状态。</p> 
+<p>当我们把要更新的那行记录从磁盘文件加载到缓冲池，同时把更新前的旧值写入undo日志文件之后，就可以正式开始更新这行记录了。<br> <img src="https://images2.imgbox.com/66/99/XDzQ8TuQ_o.png" alt="在这里插入图片描述"><br> 根据上图我们看到，InnoDB收到更新请求后，查看缓冲池中是否有要更新这条数据的缓存页，如果没有则从磁盘文件中加载到缓冲池，再将更新前的数据写入undo log，最后进行数据的更新（更新到内存）</p> 
+<h4><a id="3_Redo_Log_42"></a>3. Redo Log（重做日志）</h4> 
+<p>现在我们已经把内存里(缓冲池)的数据进行了修改，但是磁盘上的数据还没修改。</p> 
+<p>如果这时候MySQL机器宕机了，导致内存里修改过的数据丢失，应该怎么办呢？</p> 
+<p>为了防止这种情况发生，InnoDB 存储引擎在处理事务时采用了一种称为"write-ahead logging" (WAL) 的机制。</p> 
+<p>这种机制在更内存（缓冲池）时，会同时更新 Redo Log（重做日志）。</p> 
+<p>Redo Log是用于记录数据库引擎在执行事务期间对数据所做的所有修改操作，它记录了对数据页的物理修改操作，例如在磁盘上某个位置上的某个字节被修改成什么值。</p> 
+<p>当我们提交事务时，会把操作记录到 Redo Log 中，然后再更新到磁盘。这样做的目的是在系统崩溃时，可以通过重新执行 Redo Log 中的操作来还原已提交的事务，确保数据的一致性和完整性。<br> <img src="https://images2.imgbox.com/46/75/VT5Fzwr4_o.png" alt="在这里插入图片描述"></p> 
+<p>通过上图第5步，我们看到，当事务提交时，会将Redo Log写入到磁盘中，这是InnoDB的默认策略，也有其他方式可以自己配置</p> 
+<p>它由innodb_flush_log_at_trx_commit 参数进行控制：</p> 
+<h5><a id="31_innodb_flush_log_at_trx_commit__0_60"></a>3.1 innodb_flush_log_at_trx_commit = 0：</h5> 
+<p>事务提交时，并不会立即将事务日志刷新到磁盘，而是每秒执行一次日志刷新操作。</p> 
+<p>也就是说，提交事务之后，mysql宕机，那么此时redo日志没有刷盘，导致内存（MySQL内存）里的redo日志丢失，我们提交的事务更新的数据就丢失了。</p> 
+<p>可能会丢失最多一秒钟的事务。</p> 
+<h5><a id="32_innodb_flush_log_at_trx_commit__1_68"></a>3.2 innodb_flush_log_at_trx_commit = 1（默认值）：</h5> 
+<p>每次事务提交时，都会将事务日志立即刷新到磁盘。</p> 
+<p>这种配置提供了 <strong>最高的事务持久性</strong> ，因为在事务提交后，日志已经被写入磁盘，即使系统崩溃，也能够最小程度地丢失数据。</p> 
+<h5><a id="33_innodb_flush_log_at_trx_commit__2_74"></a>3.3 innodb_flush_log_at_trx_commit = 2：</h5> 
+<p>每次事务提交时，事务日志会被写入到<strong>操作系统的缓存</strong>，而不是直接刷新到磁盘。<br> 然后，日志会被每秒钟刷新到磁盘。这样可以提高性能，同时在机器崩溃时可能会丢失最多一秒钟的事务。</p> 
+<p>所以对于数据库这样严格的系统而言，一般建议redo日志刷盘策略设置为1，保证事务提交之后，数据绝对不能丢失。</p> 
+<p>当然，我们应该根据业务需要适当调整配置。</p> 
+<p>在整个事务提交的过程中，还有一点不得不提，那就是Binlog</p> 
+<p>根据我的经历，其实在实际工作中，我们更频繁地听到的是 Binlog（归档日志）。</p> 
+<p>例如，在数据库备份、数据恢复以及通过 CDC 同步数据等方面，Binlog 扮演着至关重要的角色。</p> 
+<h3><a id="_Binlog_88"></a>二、 Binlog（）</h3> 
+<p>MySQL Binlog（二进制日志）是一种记录数据库中修改操作的日志。</p> 
+<p>与上面介绍的Redo Log偏向于物理性质的重做日志不同，Binlog更倾向于逻辑性的日志。</p> 
+<p>它记录了诸如“<strong>对users表中id = 1的一行数据进行更新，更新后的值是什么</strong>”之类的逻辑操作。</p> 
+<p>Binlog不是InnoDB存储引擎特有的日志文件，而是<strong>属于MySQL服务器自身的日志文件</strong>。</p> 
+<p>在事务提交时，MySQL会将修改操作先写入Redo log，以确保这些修改操作在系统崩溃或故障时不会丢失。</p> 
+<p>然后，再将事务写入binlog，以记录详细的修改操作信息，并用于数据复制和恢复。</p> 
+<p>这种顺序的执行方式是为了确保数据的一致性和可恢复性。</p> 
+<p>通过先写redo log，可以确保事务的持久性，避免数据丢失。</p> 
+<p>然后，通过写binlog可以记录详细的修改操作信息，并用于数据复制和恢复。<br> <img src="https://images2.imgbox.com/38/bc/yfn232zb_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="1_binlog__107"></a>1. binlog 刷盘策略</h4> 
+<p>当然，与Redo Log一样，对于Binlog日志，也有不同的同步策略。</p> 
+<p>它是通过sync_binlog参数可以控制Binlog的刷盘策略</p> 
+<h5><a id="11_sync_binlog0_113"></a>1.1 sync_binlog=0：</h5> 
+<p>sync_binlog=0是MySQL的默认值。</p> 
+<p>在提交事务时，将Binlog写入磁盘时先进入操作系统（OS）的Cache内存缓存。</p> 
+<p>这意味着Binlog首先被写入内存，而不是直接持久化到磁盘。</p> 
+<p>这样的方式在性能上更高，但在机器宕机时可能导致数据丢失。</p> 
+<h5><a id="12_sync_binlog1_124"></a>1.2 sync_binlog=1</h5> 
+<p>sync_binlog=1，在提交事务时，强制将Binlog直接写入磁盘文件，而不经过操作系统的Cache内存缓存。</p> 
+<p>这样做可以提高数据持久性，即使机器宕机，也不会丢失Binlog日志。</p> 
+<p>但是，这可能会对性能产生一定影响。</p> 
+<p>通过设置sync_binlog的不同取值，可以在数据安全性和性能之间进行权衡。</p> 
+<p>如果对数据的持久性要求较高，可以将其设置为1，确保在提交事务时Binlog立即写入磁盘。</p> 
+<p>如果更注重性能，可以使用默认值0，利用操作系统的Cache提高写入速度。</p> 
+<p>在提交了事务之后，MySQL有一个后台的IO线程，会不定期随机的把内存buffer pool中的修改后的脏数据写到磁盘中。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/2736401eac2dcaf687a0807f98adadaf/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【Python办公】win32com打开Office、WPS文档的启动方式</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/895186bfb6d4fbc1587080c2f970b2e9/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">交通流量数据PEMs数据集说明</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

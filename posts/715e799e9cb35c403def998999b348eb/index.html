@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>读源码学MYSQL系列（一）decimal类型用法及存储实现 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="读源码学MYSQL系列（一）decimal类型用法及存储实现" />
+<meta property="og:description" content="问题来源 最近在项目中用到了许多浮点数，精度要求较高，小数点后有4位甚至8位的，思考了一下，类似需求在工程计算、数值计算、股票金融、数字货币等场景都会出现。
+计算机提供了float/double两种浮点类型的数据来进行科学计算，但计算机中的浮点数据表示是有误差的，它们并不能准确的表示十进制的小数，在进行高精度计算时会产生误差，再经过复杂的传播，误差就变得很不可控了。
+为了保证结果的准确性，必须使用高精度计算。高精度计算的基本原理是模拟人工计算过程，保留计算过程中的所有数位，从而达到结果的精确性。各类语言及数据库都提供了对基本浮点类型的支持，扩展库都会提供相应的高精度数据的支持，在MYSQL中，decimal就是高精度浮点数据类型。后文主要介绍decimal的使用和实现原理。
+MYSQL中浮点数据介绍 float/double MYSQL当中的float/double和我们常见的编程语言当中的float/double是一样的，分别表示32位单精度和64位双精度浮点数，在存储上分别需要4字节和8字节。从浮点的特性考虑，float和double都只能近似表示，无法精确。如下图所示，a列为float(10, 4)，b列为double，参考第2行，同一个数131072.32保存在a和b的结果是不同的。在超出了浮点数的表示精度后，会有一定的截断，从而引起计算结果的误差。
+numeric/decimal 基本用法 decimal(M,D)表示高精度的小数，其中M表示整数加小数的数位，D表示小数部分位数，并且有如下约束：
+字段约束M总精度，整数加小数部分，1 &lt;= M &lt;= 65, 默认M = 10D小数部分精度，0 &lt;= D &lt;= 30且D &lt;= M, 默认D = 0 SQL标准中，numeric(M,D)表示准确为M位的小数，而decimal(M,D)表示精度至少为M，可以比M位多。但在MYSQL中，两者是一样的，都只能表示精度为M位。
+存储实现 MYSQL对decimal的存储进行了优化。为了节省空间，MYSQL采用4字节来存储9位数位。我们知道，9位数字最大为999999999，但4字节整数最大可以表示21亿多，可以达到10位，所以4字节是充足的。整数部分和小数部分是分开存储的，每9位存储为4字节，多余部分采用额外的字节存储。对应的额外字节如下：
+数位字节001-213-425-637-94 举个例子，decimal(18,9)的整数部分和小数部分各有9位，所以两边各需要4字节来存储。decimal(20,6)有14位整数，6位小数，整数部分先用4字节表示9位，余下5位仍然需要3字节，所以整数部分共7个字节，小数部分则需要3字节。
+浮点位或者前缀0不会被保存。那么MYSQL是怎么保存负数的呢？负数的存储是将正数的每个字节取反。参考下面的示例：
+我们将1234567890.1234存储到MYSQL中，设定M=14，D=4.
+首先，将整数和小数进行分组：
+1 234567890 1234 整数部分低9位可以存储为4个字节，即
+...... 0D-FB-38-D2 ...... 剩下的一位可以存储成1个字节，
+01 0D-FB-38-D2 ...... 小数部分，可以用2字节存储，得如下
+01 0D-FB-38-D2 04-D2 对最高位求反，得到
+81 0D-FB-38-D2 04-D2 于是，我们得到了这个14位精度数据在MYSQL中的二进制存储
+81 0D FB 38 D2 04 D2 对上述各个字节求反，可以得到-1234567890.1234的存储表示
+7E F2 04 C7 2D FB 2D 由此可见，MYSQL中的decimal是可以实现对小数部分的高精度的，而且在性能上比起一般采用varchar存储的做法要好，毕竟MYSQL内部采取的是整数分组计算的策略。这也启发我们，如果要自己实现高精度计算，应该采取类似的思路。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/715e799e9cb35c403def998999b348eb/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2019-12-30T20:51:57+08:00" />
+<meta property="article:modified_time" content="2019-12-30T20:51:57+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">读源码学MYSQL系列（一）decimal类型用法及存储实现</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="_0"></a>问题来源</h2> 
+<p>  最近在项目中用到了许多浮点数，精度要求较高，小数点后有4位甚至8位的，思考了一下，类似需求在工程计算、数值计算、股票金融、数字货币等场景都会出现。<br>   计算机提供了float/double两种浮点类型的数据来进行科学计算，但计算机中的浮点数据表示是有误差的，它们并不能准确的表示十进制的小数，在进行高精度计算时会产生误差，再经过复杂的传播，误差就变得很不可控了。<br>   为了保证结果的准确性，必须使用高精度计算。高精度计算的基本原理是模拟人工计算过程，保留计算过程中的所有数位，从而达到结果的精确性。各类语言及数据库都提供了对基本浮点类型的支持，扩展库都会提供相应的高精度数据的支持，在MYSQL中，decimal就是高精度浮点数据类型。后文主要介绍decimal的使用和实现原理。</p> 
+<h2><a id="MYSQL_4"></a>MYSQL中浮点数据介绍</h2> 
+<h3><a id="floatdouble_5"></a>float/double</h3> 
+<p>  MYSQL当中的float/double和我们常见的编程语言当中的float/double是一样的，分别表示32位单精度和64位双精度浮点数，在存储上分别需要4字节和8字节。从浮点的特性考虑，float和double都只能近似表示，无法精确。如下图所示，a列为float(10, 4)，b列为double，参考第2行，同一个数131072.32保存在a和b的结果是不同的。在超出了浮点数的表示精度后，会有一定的截断，从而引起计算结果的误差。<br> <img src="https://images2.imgbox.com/5f/59/eTyvheud_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="numericdecimal_8"></a>numeric/decimal</h3> 
+<h4><a id="_9"></a>基本用法</h4> 
+<p>  decimal(M,D)表示高精度的小数，其中M表示整数加小数的数位，D表示小数部分位数，并且有如下约束：</p> 
+<table><thead><tr><th>字段</th><th>约束</th></tr></thead><tbody><tr><td>M</td><td>总精度，整数加小数部分，1 &lt;= M &lt;= 65, 默认M = 10</td></tr><tr><td>D</td><td>小数部分精度，0 &lt;= D &lt;= 30且D &lt;= M, 默认D = 0</td></tr></tbody></table> 
+<p>  SQL标准中，numeric(M,D)表示准确为M位的小数，而decimal(M,D)表示精度至少为M，可以比M位多。但在MYSQL中，两者是一样的，都只能表示精度为M位。</p> 
+<h4><a id="_16"></a>存储实现</h4> 
+<p>  MYSQL对decimal的存储进行了优化。为了节省空间，MYSQL采用4字节来存储9位数位。我们知道，9位数字最大为999999999，但4字节整数最大可以表示21亿多，可以达到10位，所以4字节是充足的。整数部分和小数部分是分开存储的，每9位存储为4字节，多余部分采用额外的字节存储。对应的额外字节如下：</p> 
+<table><thead><tr><th>数位</th><th>字节</th></tr></thead><tbody><tr><td>0</td><td>0</td></tr><tr><td>1-2</td><td>1</td></tr><tr><td>3-4</td><td>2</td></tr><tr><td>5-6</td><td>3</td></tr><tr><td>7-9</td><td>4</td></tr></tbody></table> 
+<p>  举个例子，decimal(18,9)的整数部分和小数部分各有9位，所以两边各需要4字节来存储。decimal(20,6)有14位整数，6位小数，整数部分先用4字节表示9位，余下5位仍然需要3字节，所以整数部分共7个字节，小数部分则需要3字节。<br>   浮点位或者前缀0不会被保存。那么MYSQL是怎么保存负数的呢？负数的存储是将正数的每个字节取反。参考下面的示例：<br> 我们将1234567890.1234存储到MYSQL中，设定M=14，D=4.<br> 首先，将整数和小数进行分组：</p> 
+<pre><code>1 234567890 1234
+</code></pre> 
+<p>整数部分低9位可以存储为4个字节，即</p> 
+<pre><code>...... 0D-FB-38-D2 ......
+</code></pre> 
+<p>剩下的一位可以存储成1个字节，</p> 
+<pre><code>01 0D-FB-38-D2 ......
+</code></pre> 
+<p>小数部分，可以用2字节存储，得如下</p> 
+<pre><code>01 0D-FB-38-D2 04-D2
+</code></pre> 
+<p>对最高位求反，得到</p> 
+<pre><code>81 0D-FB-38-D2 04-D2
+</code></pre> 
+<p>于是，我们得到了这个14位精度数据在MYSQL中的二进制存储</p> 
+<pre><code>81 0D FB 38 D2 04 D2
+</code></pre> 
+<p>对上述各个字节求反，可以得到-1234567890.1234的存储表示</p> 
+<pre><code>7E F2 04 C7 2D FB 2D
+</code></pre> 
+<p>  由此可见，MYSQL中的decimal是可以实现对小数部分的高精度的，而且在性能上比起一般采用varchar存储的做法要好，毕竟MYSQL内部采取的是整数分组计算的策略。这也启发我们，如果要自己实现高精度计算，应该采取类似的思路。</p> 
+<p>  本文至此结束。本系列后续文章会结合源代码分析MYSQL加减乘除的具体实现细节。</p> 
+<h2><a id="_59"></a>参考</h2> 
+<p><a href="https://dev.mysql.com/doc/refman/5.7/en/precision-math-decimal-characteristics.html" rel="nofollow">DECIMAL Data Type Characteristics</a><br> <a href="https://www.docs4dev.com/docs/zh/mysql/5.7/reference/precision-math-decimal-characteristics.html#decimal%E6%95%B0%E6%8D%AE%E7%B1%BB%E5%9E%8B%E7%89%B9%E5%BE%81" rel="nofollow">DECIMAL数据类型特征</a><br> <a href="https://github.com/twitter-forks/mysql/blob/master/strings/decimal.c">github 源代码</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/95a028530ab7336f8dca3ab31519c99b/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">网站页面底部的著作权（版权）声明应该怎么写？</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/ac34403a533e5b612222617ccbfb710a/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Kali之airodump-ng</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

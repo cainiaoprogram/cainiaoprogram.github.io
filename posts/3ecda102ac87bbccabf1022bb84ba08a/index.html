@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>相互依赖的so库，在编译时如何解耦 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="相互依赖的so库，在编译时如何解耦" />
+<meta property="og:description" content="有时候，我们写的程序，会涉及到相互引用的问题。比如frameworks\av\media\libstagefright下的这个libstagefright，被frameworks\av\media\libstagefright\codecs\avienc我们这个新增的avienc引用到了，而反过来，libstagefright在录制avi视频时，又用到了我们的avienc.so这个库。看Android.mk:
+libstagefright.so的Android.mk里 ...... LOCAL_SHARED_LIBRARIES := \ avienc ...... avienc.so的Android.mk里 ...... LOCAL_SHARED_LIBRARIES := \ libstagefright ...... 像这种情况，在编译时，肯定是通过不了的。因为在编译libstagefright的时候，要用到avienc，而去编译avienc时又需要到libstagefright，这样就造成了一个相互依赖的死结。
+处理这种情况，最常用的办法是将avienc里要用到的libstagefright里的文件，全部拷贝到avienc里来，这样就达到了单方向的解耦。但是这样无疑会增加avienc的代码量。有没有一种，在不影响libstagefright和avienc的代码结构、不增加它们代码量的情况下，解决这个问题的方法呢？答应是有的。
+动态库dlopen、dlsym、dlclose这三个函数就可以实现这个功能。其实在android里,我们framework层去调用hal层的库时，用的hw_get_module这个函数，只要大家跟时去看，就会发现，实际上它用的也就是动态库的这三板斧。先来介绍下这三个函数：
+dlopen 基本定义 功能：打开一个动态链接库 包含头文件： #include &lt;dlfcn.h&gt; 函数定义： void * dlopen( const char * pathname, int mode ); 函数描述： 在dlopen的（）函数以指定模式打开指定的动态连接库文件，并返回一个句柄给调用进程。使用dlclose（）来卸载打开的库。 mode：分为这两种 RTLD_LAZY 暂缓决定，等有需要时再解出符号 RTLD_NOW 立即决定，返回前解除所有未决定的符号。 RTLD_LOCAL RTLD_GLOBAL 允许导出符号 RTLD_GROUP RTLD_WORLD 返回值: 打开错误返回NULL 成功，返回库引用 编译时候要加入 -ldl (指定dl库) dlsym() 功能： 根据动态链接库操作句柄与符号，返回符号对应的地址。 包含头文件： #include &lt;dlfcn.h&gt; 函数定义： void*dlsym(void* handle,const char* symbol) 函数描述： dlsym根据动态链接库操作句柄(handle)与符号(symbol)，返回符号对应的地址。使用这个函数不但可以获取函数地址，也可以获取变量地址。 handle是由dlopen打开动态链接库后返回的指针，symbol就是要求获取的函数或全局变量的名称。 dlclose() dlclose用于关闭指定句柄的动态链接库，只有当此动态链接库的使用计数为0时,才会真正被系统卸载。 介绍完这三个函数后，再来看我们是如何来解耦的。我们在avienc文件夹里增加一个头文件avidef." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/3ecda102ac87bbccabf1022bb84ba08a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2019-08-15T10:14:06+08:00" />
+<meta property="article:modified_time" content="2019-08-15T10:14:06+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">相互依赖的so库，在编译时如何解耦</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>        有时候，我们写的程序，会涉及到相互引用的问题。比如frameworks\av\media\libstagefright下的这个libstagefright，被frameworks\av\media\libstagefright\codecs\avienc我们这个新增的avienc引用到了，而反过来，libstagefright在录制avi视频时，又用到了我们的avienc.so这个库。看Android.mk:</p> 
+<pre class="has"><code>libstagefright.so的Android.mk里
+
+......
+LOCAL_SHARED_LIBRARIES := \
+    avienc
+......</code></pre> 
+<pre class="has"><code>avienc.so的Android.mk里
+
+......
+LOCAL_SHARED_LIBRARIES := \
+    libstagefright
+......</code></pre> 
+<p>        像这种情况，在编译时，肯定是通过不了的。因为在编译libstagefright的时候，要用到avienc，而去编译avienc时又需要到libstagefright，这样就造成了一个相互依赖的死结。</p> 
+<p>        处理这种情况，最常用的办法是将avienc里要用到的libstagefright里的文件，全部拷贝到avienc里来，这样就达到了单方向的解耦。但是这样无疑会增加avienc的代码量。有没有一种，在不影响libstagefright和avienc的代码结构、不增加它们代码量的情况下，解决这个问题的方法呢？答应是有的。</p> 
+<p>        动态库dlopen、dlsym、dlclose这三个函数就可以实现这个功能。其实在android里,我们framework层去调用hal层的库时，用的hw_get_module这个函数，只要大家跟时去看，就会发现，实际上它用的也就是动态库的这三板斧。先来介绍下这三个函数：</p> 
+<pre class="has"><code>
+
+dlopen
+
+基本定义
+
+功能：打开一个动态链接库 
+　　包含头文件： 
+　　#include &lt;dlfcn.h&gt; 
+　　函数定义： 
+　　void * dlopen( const char * pathname, int mode ); 
+　　函数描述： 
+　　在dlopen的（）函数以指定模式打开指定的动态连接库文件，并返回一个句柄给调用进程。使用dlclose（）来卸载打开的库。 
+　　mode：分为这两种 
+　　RTLD_LAZY 暂缓决定，等有需要时再解出符号 
+　　RTLD_NOW 立即决定，返回前解除所有未决定的符号。 
+　　RTLD_LOCAL 
+　　RTLD_GLOBAL 允许导出符号 
+　　RTLD_GROUP 
+　　RTLD_WORLD 
+
+
+　　返回值: 
+　　打开错误返回NULL 
+　　成功，返回库引用 
+　　编译时候要加入 -ldl (指定dl库) </code></pre> 
+<pre class="has"><code>dlsym()
+
+ 
+　功能：
+
+根据动态链接库操作句柄与符号，返回符号对应的地址。
+包含头文件：
+#include &lt;dlfcn.h&gt;
+函数定义：
+void*dlsym(void* handle,const char* symbol)
+函数描述：
+dlsym根据动态链接库操作句柄(handle)与符号(symbol)，返回符号对应的地址。使用这个函数不但可以获取函数地址，也可以获取变量地址。
+handle是由dlopen打开动态链接库后返回的指针，symbol就是要求获取的函数或全局变量的名称。</code></pre> 
+<pre class="has"><code>dlclose()
+
+ 
+
+dlclose用于关闭指定句柄的动态链接库，只有当此动态链接库的使用计数为0时,才会真正被系统卸载。</code></pre> 
+<p>        介绍完这三个函数后，再来看我们是如何来解耦的。我们在avienc文件夹里增加一个头文件avidef.h</p> 
+<pre class="has"><code>#ifndef AVI_DEF_H_
+#define AVI_DEF_H_
+
+#include &lt;sys/types.h&gt;
+#include "AVIWriter.h"
+#include &lt;media/stagefright/MediaWriter.h&gt;
+
+namespace android {
+
+#ifdef __cplusplus
+extern "C" {
+MediaWriter *getaviwriter(int fd);
+}
+#endif
+
+}
+#endif
+
+</code></pre> 
+<p>        然后再增加一个.cpp文件avidef.cpp</p> 
+<pre class="has"><code>#include "AVIDef.h"
+
+namespace android {
+
+#ifdef __cplusplus
+extern "C" {
+    MediaWriter *getaviwriter(int fd)
+    {
+        return new AVIWriter(fd);
+    }
+}
+#endif
+
+}
+</code></pre> 
+<p>avienc对应的android.mk</p> 
+<pre class="has"><code>avienc.so的Android.mk里
+
+......
+LOCAL_SHARED_LIBRARIES := \
+    libstagefright
+......</code></pre> 
+<p>同时删除libstagefright里Android.mk里的avienc动态库的引用。然后在在libstagefright里要用到avienc里的地方如下处理:</p> 
+<pre class="has"><code>    status_t err = OK;
+    sp&lt;MediaWriter&gt; writer;
+    void *handle;
+    handle = dlopen("/system/lib/libstagefright_soft_avi_enc.so", RTLD_LAZY);
+    if (!handle)
+    {
+        ALOGD("setupAVIRecording dlopen avi enc so is error, %s", dlerror());
+    }
+    else
+    {
+        ALOGV("setupAVIRecording dlopen avi enc so is succ");
+        dlerror();
+        typedef MediaWriter* (*GETAVIWRITER)(int fd);
+        GETAVIWRITER yunovo_aviWriter = (GETAVIWRITER)dlsym(handle, "getaviwriter");
+        const char *dlsym_error = dlerror();
+        if(dlsym_error != NULL) 
+        {
+            ALOGD("setupAVIRecording dlsym is dlsym_error, %s", dlsym_error);
+        }
+        else
+        {
+            ALOGV("setupAVIRecording dlsym is succ");
+            writer = aviWriter(mOutputFd);
+        }
+        dlclose(handle);
+    }</code></pre> 
+<p>        如此一来,libstagefright的Android.mk里没有引用到avienc的库,但是在代码里又通过动态库引用到了它的函数.这样就达到了完美的解耦的目的.</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e272bd22fbc773c3a22e4e3eda02f251/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">4、H3C交换机AAA本地用户</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/a0916586231f3c7c448612554974de25/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">深度学习计算机视觉学习流程</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

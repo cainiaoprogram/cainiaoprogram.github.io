@@ -1,0 +1,857 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Unix系统编程学习笔记 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Unix系统编程学习笔记" />
+<meta property="og:description" content="第11章：名字与地址转换 1、概述 这一章主要探讨实现主机名到ip地址、服务名到端口号之间转换的方法；
+在IPv4的版本下，我们对应的有四个函数：
+1. 主机名到ip地址，gethostbyname
+2. ip地址反查主机名, gethostbyaddr
+3.服务名到端口号, getservbyname
+4.端口号反查服务名, getservbyport
+上述的四个函数虽然好用，但是问题在于不兼容IPv6，于是我们引入了getaddrinfo函数，它会返回一个协议无关的地址信息的链表。围绕getaddrinfo函数，介绍了可以读取getaddrinfo函数返回值来返回错误信息的函数gai_strerror。同时由于getaddrinfo采用了动态内存的方式，我们引入freeaddrinfo来避免内存泄漏。
+getaddrinfo虽然很强大，但是使用起来比较繁琐，有很多固定的处理逻辑。于是我们从不同的应用场景引入了五个对应的接口，我们用host_serv可以快速的基于主机名和服务名获取相对应的addrinfo而不用考虑内存释放、错误处理等。我们可以用tcp_connect,udp_client,udp_connect三个函数，来实现基于给定主机名（ip）和服务名（端口）来分别完成tcp客户连接，udp未连接套接字和udp已连接套接字，我们也可以用tcp_listen和udp_server来完成基于服务名字完成协议无关的服务器绑定。
+我们然后提到了和getaddrinfo相对应的getnameinfo，它可以基于给定的套接字地址（包含了ip地址和端口号），反查出主机名字和服务名字。
+最后我们提到了可重入函数的概念，不可重入的函数意味着如果信号处理函数和主控制流都调用了同一函数，那么存在着被覆盖重写的危险。我们指出ipv4的四个函数式不可重入的,而inet_ntoa(网络地址转换为ip地址字符串)也是不可重入的，inet_ntop(从网络地址转换为ip地址字符串)和inet_pton(将ip地址字符串转换为二进制数值)是可重入的，getaddrinfo和getnameinfo则是可重入的。我们指出errno虽然不是什么函数，但是由于其是进程独有（而不是线程独有），所以也有同样的风险。对于不可重入函数，我们建议在信号处理函数中避免调用，对于errno覆盖问题，我们建议采用事先保存，事后恢复值的办法。
+2、域名系统(域名解析系统)：实现了主机名与ip地址的映射；
+主机名既可以是简单名字，例如host1，也可以是Fqdn全限定域名：主机名&#43;域名：host1.baidu.com
+资源记录：
+DNS中的条目被称之为资源记录(RR),我们感兴趣的主要就几种
+名称 示例 作用
+A freebsd in A 12.106.32.254 将主机名字映射成IPv4地址；
+AAAA freebsd in AAAA 3ffe:b80:1f8d:1:a00:20ff:fea7:686b 将主机名字映射成IPv6地址；
+PTR 指针记录，将ip地址映射成主机名，是A、4A记录的反向记录；构建记录的结果字符串：
+ipv4：32位ip地址的每个字节反转，然后在末尾加上in-addr.arpa；
+ipv6：128位的32个四位组反转顺序，末尾加上ip6.arpa，兼容早期标准的Ip6.int；
+使用nslookup命令来查询PRT记录，如：
+nslookup -qt=prt 202.108.3.184
+这个IP是 sina 的邮件主机，查询结果是：
+184.3.108.202.in-addr.arpa name = mail3-184.sinamail.sina.com.cn.
+如果IP没有反向解析，一般返回：
+** server can&#39;t find 65.20.211.58.in-addr.arpa: NXDOMAIN
+反向解析就是通过查询ip地址对应的ptr记录来得到该地址指向的域名；
+和A记录相反，存储的是 ip 地址对应的主机名，该记录只存在于反向解析的区域数据文件中(并非一定)。PTR记录可以用来做垃圾邮件核验，比如以baidu域名发送邮件到163邮箱，163邮箱会对你的域名和你的IP地址校验看是否是baidu对应的地址，如果不是会被退信；
+举例：
+上例中的两个PTR记录分别为：
+254.32.106.12.in-addr.arpa
+b.6.8.6.7.a.e.f.f.f.0.2.0.0.a.0.0.a.0.1.0.0.0.d.8.f.1.0.8.b.0.e.f.f.3.ip6.arpa
+MX 邮件交换记录，它指向一个邮件服务器，用于电子邮件系统发邮件时根据收信人的地址后缀来定位查找域名的mx记录然后定位到指定的邮件服务器。
+CNAME ftp in cname linux." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/fef67cd528498aca954a39ab32a88b2e/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-04-06T08:31:00+08:00" />
+<meta property="article:modified_time" content="2023-04-06T08:31:00+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Unix系统编程学习笔记</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h3><strong>第11章：名字与地址转换 </strong></h3> 
+<h4><strong>1、概述</strong></h4> 
+<p style="margin-left:0;text-align:justify;">        这一章主要探讨实现主机名到ip地址、服务名到端口号之间转换的方法；</p> 
+<p style="margin-left:0;text-align:justify;">在IPv4的版本下，我们对应的有四个函数：</p> 
+<p style="margin-left:0;text-align:justify;">1. 主机名到ip地址，gethostbyname</p> 
+<p style="margin-left:0;text-align:justify;">2. ip地址反查主机名, gethostbyaddr</p> 
+<p style="margin-left:0;text-align:justify;">3.服务名到端口号, getservbyname</p> 
+<p style="margin-left:0;text-align:justify;">4.端口号反查服务名, getservbyport</p> 
+<p style="margin-left:0;text-align:justify;">        上述的四个函数虽然好用，但是问题在于不兼容IPv6，于是我们引入了getaddrinfo函数，它会返回一个协议无关的地址信息的链表。围绕getaddrinfo函数，介绍了可以读取getaddrinfo函数返回值来返回错误信息的函数gai_strerror。同时由于getaddrinfo采用了动态内存的方式，我们引入freeaddrinfo来避免内存泄漏。</p> 
+<p style="margin-left:0;text-align:justify;">        getaddrinfo虽然很强大，但是使用起来比较繁琐，有很多固定的处理逻辑。于是我们从不同的应用场景引入了五个对应的接口，我们用host_serv可以快速的基于主机名和服务名获取相对应的addrinfo而不用考虑内存释放、错误处理等。我们可以用tcp_connect,udp_client,udp_connect三个函数，来实现基于给定主机名（ip）和服务名（端口）来分别完成tcp客户连接，udp未连接套接字和udp已连接套接字，我们也可以用tcp_listen和udp_server来完成基于服务名字完成协议无关的服务器绑定。</p> 
+<p style="margin-left:0;text-align:justify;">        我们然后提到了和getaddrinfo相对应的getnameinfo，它可以基于给定的套接字地址（包含了ip地址和端口号），反查出主机名字和服务名字。</p> 
+<p style="margin-left:0;text-align:justify;">        最后我们提到了可重入函数的概念，不可重入的函数意味着如果信号处理函数和主控制流都调用了同一函数，那么存在着被覆盖重写的危险。我们指出ipv4的四个函数式不可重入的,而inet_ntoa(网络地址转换为ip地址字符串)也是不可重入的，inet_ntop(从网络地址转换为ip地址字符串)和inet_pton(将ip地址字符串转换为二进制数值)是可重入的，getaddrinfo和getnameinfo则是可重入的。我们指出errno虽然不是什么函数，但是由于其是进程独有（而不是线程独有），所以也有同样的风险。对于不可重入函数，我们建议在信号处理函数中避免调用，对于errno覆盖问题，我们建议采用事先保存，事后恢复值的办法。</p> 
+<p style="text-align:justify;"><strong>2、域名系统(域名解析系统)：实现了主机名与ip地址的映射；</strong></p> 
+<p style="margin-left:0;text-align:justify;">主机名既可以是简单名字，例如host1，也可以是Fqdn全限定域名：主机名+域名：host1.baidu.com</p> 
+<p style="margin-left:0;text-align:justify;"><strong>资源记录</strong>：</p> 
+<p style="margin-left:0;text-align:justify;">DNS中的条目被称之为资源记录(RR),我们感兴趣的主要就几种</p> 
+<p style="margin-left:0;text-align:justify;">名称       示例       作用</p> 
+<p style="margin-left:0;text-align:justify;">A       freebsd in  A 12.106.32.254     将主机名字映射成IPv4地址；</p> 
+<p style="margin-left:0;text-align:justify;">AAAA     freebsd in AAAA 3ffe:b80:1f8d:1:a00:20ff:fea7:686b 将主机名字映射成IPv6地址；</p> 
+<p style="margin-left:0;text-align:justify;">PTR 指针记录，将ip地址映射成主机名，是A、4A记录的反向记录；构建记录的结果字符串：</p> 
+<p style="margin-left:0;text-align:justify;">ipv4：32位ip地址的每个字节反转，然后在末尾加上in-addr.arpa；</p> 
+<p style="margin-left:0;text-align:justify;">ipv6：128位的32个四位组反转顺序，末尾加上ip6.arpa，兼容早期标准的Ip6.int；</p> 
+<p style="margin-left:0;text-align:justify;">使用nslookup命令来查询PRT记录，如：</p> 
+<p style="margin-left:0;text-align:justify;">  nslookup -qt=prt 202.108.3.184</p> 
+<p style="margin-left:0;text-align:justify;">这个IP是 sina 的邮件主机，查询结果是：</p> 
+<p style="margin-left:0;text-align:justify;">    184.3.108.202.in-addr.arpa name = mail3-184.sinamail.sina.com.cn.</p> 
+<p style="margin-left:0;text-align:justify;">如果IP没有反向解析，一般返回：</p> 
+<p style="margin-left:0;text-align:justify;">    ** server can't find 65.20.211.58.in-addr.arpa: NXDOMAIN</p> 
+<p style="margin-left:0;text-align:justify;">反向解析就是通过查询ip地址对应的ptr记录来得到该地址指向的域名；</p> 
+<p style="margin-left:0;text-align:justify;">和A记录相反，存储的是 ip 地址对应的主机名，该记录只存在于反向解析的区域数据文件中(并非一定)。PTR记录可以用来做垃圾邮件核验，比如以baidu域名发送邮件到163邮箱，163邮箱会对你的域名和你的IP地址校验看是否是baidu对应的地址，如果不是会被退信；</p> 
+<p style="margin-left:0;text-align:justify;">举例：</p> 
+<p style="margin-left:0;text-align:justify;">上例中的两个PTR记录分别为：</p> 
+<p style="margin-left:0;text-align:justify;">254.32.106.12.in-addr.arpa</p> 
+<p style="margin-left:0;text-align:justify;">b.6.8.6.7.a.e.f.f.f.0.2.0.0.a.0.0.a.0.1.0.0.0.d.8.f.1.0.8.b.0.e.f.f.3.ip6.arpa</p> 
+<p style="margin-left:0;text-align:justify;">MX  邮件交换记录，它指向一个邮件服务器，用于电子邮件系统发邮件时根据收信人的地址后缀来定位查找域名的mx记录然后定位到指定的邮件服务器。</p> 
+<p style="margin-left:0;text-align:justify;">CNAME  ftp in cname linux.unpbook.com 规范名字，为常见的服务（如ftp或者www）指定cname记录，这样即便该服务被挪动了主机，仍然能够找到；</p> 
+<p style="margin-left:0;text-align:justify;">例如，有一台计算机名为“r0WSPFSx58.”（A记录）。 它同时提供WWW和MAIL服务，为了便于用户访问服务。可以为该计算机设置两个别名（CNAME）：WWW和MAIL。</p> 
+<p style="margin-left:0;text-align:justify;">同样的方法可以用于当您拥有多个域名需要指向同一服务器IP，此时您就可以将一个域名做A记录指向服务器IP，然后将其他的域名做别名(即CNAME)到A记录的域名上；那么当您的服务器IP地址变更时，您就可以不必对一个一个域名做更改指向了，只需要更改A记录的那个域名到服务器新IP上，其他做别名（即CNAME）的那些域名的指向将自动更改到新的IP地址上（以上操作均需要在DNS处执行）</p> 
+<p style="margin-left:0;text-align:justify;"><strong>解析器和名字服务器</strong></p> 
+<p style="margin-left:0;text-align:justify;">我们是通过调用解析器的函数库中的函数来接触DNS服务器的，常见的解析器函数包括gethostbyname和gethostbyaddr</p> 
+<p style="margin-left:0;text-align:justify;"></p> 
+<p style="margin-left:0;text-align:justify;">解析器代码会读取系统配置文件来确定本组织结构的名字服务器的所在位置（ip地址），/etc/resolv.conf中通常存储了本地名字服务器主机的IP地址。然后用UDP向本地名字服务器发送查询，如果本地不知道，那么本地会去查询其他名字服务器，如果消息太长，那么就会转成TCP；</p> 
+<p style="margin-left:0;text-align:justify;"><img alt="" height="436" src="https://images2.imgbox.com/2d/07/OXiXcDsN_o.png" width="805"></p> 
+<p></p> 
+<p style="margin-left:0;text-align:justify;"><strong>DNS替代方法：不适用dns获取名字与地址信息；</strong></p> 
+<p style="margin-left:0;text-align:justify;">静态主机文件，就是/etc/hosts/文件</p> 
+<p style="margin-left:0;text-align:justify;">网络消息系统NIS；</p> 
+<p style="margin-left:0;text-align:justify;">轻量级目录访问协议LDAP；</p> 
+<p style="margin-left:0;text-align:justify;">对于开发者来说，这些是透明的，我们只需要调用解析器函数如gethostname,gethostbyaddr；</p> 
+<p style="margin-left:0;text-align:justify;"></p> 
+<p style="margin-left:0;text-align:justify;"></p> 
+<h4 style="text-align:justify;"><strong>3、gethostbyname函数：根据主机名获取主机信息；执行的是对A记录的查询，只能返回IPv4地址</strong></h4> 
+<p style="margin-left:0;text-align:justify;">函数定义：</p> 
+<pre><code class="language-cpp">#include &lt;netdb.h&gt;
+
+struct hostent *gethostbyname(const char *hostname);
+//返回：若成功则为空指针，若出错，返回NULL且设置h_errno
+
+struct hostent {
+
+       char *h_name;       /* 规范名字FQDN类型，ftp.unpbook.com的规范名字就是linux.unpbook.com */
+       char **h_aliases;    /* 主机的别名 www.baidu.com baidu就是别名 */
+       int   h_addrtype;   /* ip地址的类型：AF_INET */
+       int   h_length; /* 主机Ip地址的长度 */
+       char **h_addr_list; /* 主机的 ip 地址，是网络字节序，需要通过 inet_ntop 函数转换 */
+};
+</code></pre> 
+<p style="margin-left:0;text-align:justify;"><img alt="" height="467" src="https://images2.imgbox.com/46/15/OHkggXoS_o.png" width="789"></p> 
+<p></p> 
+<p style="margin-left:0;text-align:justify;"></p> 
+<p style="margin-left:0;text-align:justify;"></p> 
+<p style="margin-left:0;text-align:justify;"></p> 
+<p style="margin-left:0;text-align:justify;">与之前的函数不太一样的是，如果发生了错误，不会设置errno变量，而是设置h_errno变量为以下之一:</p> 
+<p style="margin-left:0;text-align:justify;">HOST_NOT_FOUND</p> 
+<p style="margin-left:0;text-align:justify;">TRY_AGAIN</p> 
+<p style="margin-left:0;text-align:justify;">NO_RECOVERY</p> 
+<p style="margin-left:0;text-align:justify;">NO_DATA(相当于NO_ADDRESS)。</p> 
+<p style="margin-left:0;text-align:justify;">其中，NO_DATA表示名字有效，但是没有A记录（比方说有MX记录）</p> 
+<p style="margin-left:0;text-align:justify;">代码示例：</p> 
+<pre><code class="language-cpp">#include    "unp.h"
+
+
+int
+main(int argc, char **argv)
+{
+
+    char            *ptr, **pptr;
+    char            str[INET_ADDRSTRLEN]; //表示点分十进制ipv4地址所使用的内存最大长度
+    struct hostent  *hptr;
+
+    while (--argc &gt; 0) {
+        ptr = *++argv;
+        if ( (hptr = gethostbyname(ptr)) == NULL) { // while循环中给每个命令行参数调用gethostbyname
+            err_msg("gethostbyname error for host: %s: %s",
+                    ptr, hstrerror(h_errno)); // hstrerror查出h_errno对应socket错误的描述
+            continue;
+        }
+        printf("official hostname: %s\n", hptr-&gt;h_name); // 输出规范的主机名
+
+        for (pptr = hptr-&gt;h_aliases; *pptr != NULL; pptr++) // 输出别名列表
+            printf("\talias: %s\n", *pptr);
+
+        switch (hptr-&gt;h_addrtype) {
+        case AF_INET:
+            pptr = hptr-&gt;h_addr_list;
+            for ( ; *pptr != NULL; pptr++)
+                printf("\taddress: %s\n",
+                    Inet_ntop(hptr-&gt;h_addrtype, *pptr, str, sizeof(str))); // 输出转换为点分十进制后的主机号
+            break;
+
+        default:
+            err_ret("unknown address type");
+            break;
+        }
+    }
+
+    exit(0);
+
+}</code></pre> 
+<p style="margin-left:0;text-align:justify;">错误信息：</p> 
+<p style="margin-left:0;text-align:justify;"><img alt="" height="98" src="https://images2.imgbox.com/98/78/E3IaL5Kn_o.png" width="811"></p> 
+<p style="text-align:justify;">1.执行一个不存在的主机名</p> 
+<p style="text-align:justify;">2.指定一个仅有MX记录的名字</p> 
+<h4 style="text-align:justify;"><strong>4、gethostbyaddr函数</strong></h4> 
+<p style="margin-left:0;text-align:justify;"></p> 
+<p style="margin-left:0;text-align:justify;">gethostbyaddr通过二进制的IP地址找到相应的主机名字</p> 
+<p style="margin-left:0;text-align:justify;">函数定义：</p> 
+<pre><code class="language-cpp">#include &lt;netdb.h&gt;
+
+struct hostent *gethostbyaddr(const void *addr, socklen_t len, int family);
+//返回：若成功则为空指针，若出错，返回NULL且设置h_errno</code></pre> 
+<p style="margin-left:0;text-align:justify;">解释：addr参数是一个指向in_addr结构的指针，带了Ip地址号，len是该结构的大小（IPv4是4），family参数是AF_INET，通常来说，我们感兴趣的是主机名字，所以可以看返回值的h_name；</p> 
+<h4 style="margin-left:0px;text-align:justify;">5、getservbyname、getservbyport函数</h4> 
+<p style="margin-left:0;text-align:justify;">简述：</p> 
+<p style="margin-left:0;text-align:justify;">一般来说，服务也是依赖于名称识别，这么做的优势在于，一旦主机发生了改变，我们只需要修改特定文件(一般是/etc/services)，而不需要重新编译应用程序；</p> 
+<p style="margin-left:0;text-align:justify;">getserverbyname：根据给定名字查找对应服务；</p> 
+<pre><code class="language-cpp">struct servent *getservbyname(const char *servname, const char *protoname);
+//返回：若成功则为非空指针，若出错则为NULL；</code></pre> 
+<pre><code class="language-cpp">struct servent *getservbyport(int port, const char *protoname);
+
+struct servent {
+
+       char *s_name; /* official service name */
+       char **s_aliases;     /* alias list */
+       int   s_port;           /* port # */
+       char *s_proto; /* protocol to use */
+};</code></pre> 
+<p style="margin-left:0;text-align:justify;">解释：对于getservbyname来说，servname是必须的，protoname可以不指定，如果指定的话，那么就要求该服务必须有匹配的协议，如果不指定协议而服务支持多个协议，那么返回的端口就取决于实现（一般没所谓，因为tcp和udp端口号一般一致，但是没有保证）；servent中我们主要关注的是端口号(s_port)，注意返回的是网络字节序，所以不要在其上调用htons等(htons 是把实际主机内存中的整数存放方式调整成网络字节顺序，低位字节放在高位地址)</p> 
+<p style="margin-left:0;text-align:justify;">常用调用类似下面：</p> 
+<pre><code class="language-cpp">struct servent *sptr;
+
+sptr = getservbyname("domain","udp"); //dns使用udp；
+sptr = getservbyname("ftp","tcp"); //ftp使用tcp；
+sptr = getservbyname("ftp","NULL"); //ftp使用tcp；
+sptr = getservbyname("domain","udp"); //调用失败；</code></pre> 
+<p style="margin-left:0;text-align:justify;">getservbyport：根据给定端口号和可选协议查找相应服务；</p> 
+<pre><code class="language-cpp">#include &lt;netdb.h&gt;
+struct servent *getservbyport(int port, const char *protoname);
+// port传入的时候必须要是网络字节序；
+// 返回：若成功则为非空指针，否则返回NULL；
+</code></pre> 
+<p style="margin-left:0;text-align:justify;"></p> 
+<p style="margin-left:0;text-align:justify;">常规调用类似下面:</p> 
+<pre><code class="language-cpp">struct servent *sptr;
+
+sptr = getservbyport(htons(53),"udp"); //dns使用udp
+sptr = getservbyport(htons(21),"tcp"); //ftp使用tcp
+sptr = getservbyport(htons(21),"null"); //ftp使用tcp
+sptr = getservbyport(htons(21),"udp"); //调用失败</code></pre> 
+<p style="margin-left:0;text-align:justify;"></p> 
+<p style="margin-left:0;text-align:justify;"></p> 
+<p style="margin-left:0;text-align:justify;">使用gethostbyname和getservbyname改写的TCP时间获取客户程序代码示例：</p> 
+<pre><code class="language-cpp">#include   "unp.h"
+
+int main(int argc, char **argv)
+{
+
+    int sockfd, n;
+    char recvline[MAXLINE+1];
+    struct sockaddr_in servaddr;
+    struct in_addr **pptr;
+    struct in_addr *inetaddrp[2];
+    struct in_addr inetaddr;
+    struct hostent *hp;
+    struct servent *sp;
+
+    if (argc!=3)
+        err_quit("usage:daytimetcpcli1 &lt;hostname&gt; &lt;service&gt;");
+
+    if ( (hp=gethostbyname(argv[1])) == NULL){ // 获取主机名对应地址号
+        if (inet_aton(argv[1],&amp;inetaddr)==0){  // 转点分十进制ip地址为二进制网络序列
+            err_quit("hostname error for %s: %s",argv[1],hstrerror(h_errno));
+        }else{
+            inetaddrp[0]=&amp;inetaddr;
+            inetaddrp[1]=NULL;
+            pptr=inetaddrp;
+        }
+
+    }else{
+
+        pptr=(struct in_addr **)hp-&gt;h_addr_list; // 将得到的二进制ip网络序列用in_addr做包裹
+    }
+
+    if ( (sp=getservbyname(argv[2],"tcp"))==NULL){//获取服务名对应的端口号
+        err_quit("getservbyname error for %s",argv[2]);
+    }
+
+    for (; *pptr!=NULL; pptr++){
+
+        sockfd=Socket(AF_INET,SOCK_STREAM,0);  //创建socket套接字
+        bzero(&amp;servaddr,sizeof(servaddr)); // 清空sockaddr_in结构
+        servaddr.sin_family=AF_INET;
+        servaddr.sin_port=sp-&gt;s_port;
+        memcpy(&amp;servaddr.sin_addr,*pptr,sizeof(struct in_addr)); //将获取到的二进制网络序地址复制到servaddr的in_addr结构
+        printf("trying %s\n",Sock_ntop((SA*)&amp;servaddr,sizeof(servaddr)));
+        if (connect(sockfd,(SA *)&amp;servaddr,sizeof(servaddr))==0) // 按指向的服务器建立tcp连接
+            break;
+        err_ret("connect error");
+        close(sockfd);
+    }
+
+    if (*pptr==NULL)
+        err_quit("unable to connect");
+    while ( (n=Read(sockfd,recvline,MAXLINE))&gt;0){
+        recvline[n]=0;
+        Fputs(recvline,stdout); //标准I/o函数Fputs读取服务器应答
+    }
+    exit(0);
+
+}</code></pre> 
+<h4 style="margin-left:0px;text-align:justify;">6、getaddrinfo函数</h4> 
+<p style="margin-left:0;text-align:justify;">简述：gethostbyname和gethostbyaddr只支持IPv4，而getaddrinfo可以同时实现基于名字找地址和找端口，并且对外返回sockaddr结构而隐藏了协议相关性；</p> 
+<pre><code class="language-cpp">#include &lt;netdb.h&gt;
+int getaddrinfo(const char *hostname, const char *service, const struct addrinfo *hints, struct addrinfo **result);
+//返回：若成功则为0，若出错则为非0；</code></pre> 
+<p style="margin-left:0;text-align:justify;">hostname是主机名字或者地址串，</p> 
+<p style="margin-left:0;text-align:justify;">service参数是服务名字或者十进制端口号数串，</p> 
+<p style="margin-left:0;text-align:justify;">hints可以是空指针，用于填入期望返回的信息类型的暗示。比方说如果及支持TCP又支持UDP，那么通过设置ai_socktype为SOCK_DGRAM，我们可以只返回适用于UDP的信息；</p> 
+<p style="margin-left:0;text-align:justify;">函数通过result指针参数返回一个指向addrinfo结构的链表：</p> 
+<pre><code class="language-cpp">struct addrinfo {
+
+       int   ai_flags;  /* AI_PASSIVE, AI_CANONNAME, AI_NUMERICHOST */
+       int   ai_family; /* PF_xxx */
+       int   ai_socktype;   /* SOCK_xxx */  该参数不可缺失，否则返回一个错误；
+       int   ai_protocol;   /* 0 or IPPROTO_xxx for IPv4 and IPv6 */
+       socklen_t ai_addrlen;    /* length of ai_addr */
+       char *ai_canonname;    /* canonical name for hostname */
+       struct     sockaddr *ai_addr; /*对于地址族的binary address */
+       struct     addrinfo *ai_next; /* next structure in linked list */
+};</code></pre> 
+<p style="margin-left:0;text-align:justify;">一般来说我们可以在hints中配置的主要是四项:ai_flags,ai_family,ai_socktype和ai_protocol；</p> 
+<p style="margin-left:0;text-align:justify;">对于ai_flags我们可用的标志值和含义如下：</p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td>ai_flags标志值</td><td>含义</td></tr><tr><td>AI_PASSIVE   </td><td>套接字用于被动打开，保证套接字地址可被服务器用作监听套接字</td></tr><tr><td>AI_CANONNAME</td><td>告知getaddrinfo函数返回规范主机名</td></tr><tr><td>AI_NUMERICHOST</td><td>防止任何类型的名字到地址的映射，hostname必须是一个地址串</td></tr><tr><td>AI_NUMERICSERV</td><td>防止任何类型的名字到服务的映射，service必须是一个十进制端口号数串</td></tr><tr><td>AI_V4MAPPED     </td><td>如果同时指定了ai_family成员为AF_INET6，那么如果没有可用的AAAA记录，返回与A记录对应的IPv4映射的IPv6地址</td></tr><tr><td>AI_ALL   </td><td>如果同时指定了AI_V4MAPPED，那么除了返回与AAAA记录对应的IPv6地址外，还返回与IPv4映射的IPv6地址</td></tr><tr><td>AI_ADDRCONFIG </td><td>按照所在主机的配置选择返回地址类型，就是只查找与所在主机回馈接口以外的网络接口配置的IP地址版本一致的地址</td></tr></tbody></table> 
+<p style="margin-left:0;text-align:justify;">如果hints为空指针，那么就会假设ai_flags,ai_socktype和ai_protocol的值为0，ai_family的值为AF_UNSPEC；</p> 
+<p style="margin-left:0;text-align:justify;">返回值：</p> 
+<p style="margin-left:0;text-align:justify;">        如果该函数返回成功（返回0），那么result指向的变量已经被填充，指向的是由ai_next串起来的addrinfo链表；</p> 
+<p>导致返回多个addrinfo结构的情形有以下两个：</p> 
+<p>1.如果与hostname参数关联的地址有多个，则每个地址都返回一个对应的结构</p> 
+<p>2.如果service参数指定的服务支持多个套接字类型，那么每个套接字类型都可能返回一个对应的结构(一个端口号对应tcp和udp服务)；</p> 
+<p>        在addrinfo结构中返回的信息可现成用于socket调用，随后现成用于客户的connect或sendto调用，或者是和服务器的bind调用。如：socket函数的参数就是addrinfo结构中的ai_family、ai_socktype和ad_addr成员。</p> 
+<p style="margin-left:0;text-align:justify;">        如果我们设置了AI_CANONNAME,那么函数返回的第一个addrinfo结构的ai_cononname成员指向了规范名字；</p> 
+<p style="margin-left:0;text-align:justify;">例子：主机freebsd4的规范主机名freebsd4.unpbook.com,并且在dns中有两个IPV4地址；</p> 
+<pre><code class="language-cpp">struct addrinfo    hints, *res;
+
+bzero(&amp;hints, sizeof(hints));
+hints.ai_flags = AI_CANONNAME;
+hints.ai_family = AF_INET;
+
+getaddrinfo(*freebsd4, "domain", &amp;hints, &amp;res);</code></pre> 
+<p style="margin-left:0;text-align:justify;"><img alt="" height="681" src="https://images2.imgbox.com/6a/e7/h6zGajoZ_o.png" width="561"></p> 
+<p> 下面查看这个函数的一些常见的输入：</p> 
+<p>1.指定hostname和service。这是TCP或UDP客户进程调用getaddrinfo的常规输入。该调用返回后，TCP客户在一个循环中针对每个返回的IP地址，逐一调用socket和connect，直到有一个连接成功，或者所有地址尝试完毕为止。UDP客户根据填入的套接字地址信息调用sendto或connect；如果只需要处理一种类型的套接字，就用hints结构该类型对应的ai_socktype指明；</p> 
+<p>2.典型的服务器进程指定service而不指定hostname，同时在hints结构中指定AI_PASSIVE标志。返回的套接字地址结构中应含有一个值为INADDR_ANY（对于IPv4）或IN6ADDR_ANY_INIT(对于ipv6)的IP地址，Tcp服务器随后调用socket、bind和linsten，UDP服务器将调用socket、bind和recvform；</p> 
+<p>3.服务器可以使用select或poll函数让服务器进程处理多个套接字：服务器将遍历getaddrinfo返回的整个addrinfo结构链表，并为每个结构创建一个套接字，再使用select或poll。</p> 
+<p>getaddrinfo函数及行为和结果汇总：</p> 
+<p><img alt="" height="787" src="https://images2.imgbox.com/f4/14/AYDen3s7_o.png" width="820"></p> 
+<p></p> 
+<h4><strong>7、gai_strerror函数</strong></h4> 
+<p style="margin-left:0;text-align:justify;">简述：</p> 
+<p style="margin-left:0;text-align:justify;">该函数主要用于解读getaddrinfo返回的非0错误值的解读</p> 
+<p style="margin-left:0;text-align:justify;">函数定义：</p> 
+<pre><code class="language-cpp">#include &lt;netdb.h&gt;
+const char     *gai_strerror(int error);</code></pre> 
+<p style="margin-left:0;text-align:justify;">错误描述消息：</p> 
+<p style="margin-left:0;text-align:justify;"><img alt="" height="326" src="https://images2.imgbox.com/4b/2e/czZdsApW_o.png" width="538"></p> 
+<h4 style="text-align:justify;">8、freeaddrinfo</h4> 
+<p style="margin-left:0;text-align:justify;">简述：</p> 
+<p style="margin-left:0;text-align:justify;">由于getaddrinfo返回的存储空间都是动态获取的，在调用结束后我们需要调用freeaddrinfo来释放该部分内存；</p> 
+<p style="margin-left:0;text-align:justify;">函数定义：</p> 
+<pre><code class="language-cpp">#include &lt;netdb.h&gt;
+
+void  freeaddrinfo(struct addrinfo *ai);</code></pre> 
+<p style="margin-left:0;text-align:justify;">该函数传入的ai应该是链表的第一个结构，链表所有的结构以及指向的动态空间都会被释放（复制的时候需要注意）</p> 
+<h4 style="text-align:justify;">9、host_serv函数</h4> 
+<p style="margin-left:0;text-align:justify;">简述：该函数是我们自行定义的接口函数，应用于当我们没有兴趣自行书写hints</p> 
+<p style="margin-left:0;text-align:justify;">函数定义和源代码：</p> 
+<pre><code class="language-cpp">#include "unp.h"
+
+struct addrinfo *host_serv(const char *hostname, const char *service, int family, int socktype);
+
+// 返回：成功则返回指向addrinfo的指针，出错则返回NULL</code></pre> 
+<pre><code class="language-cpp">#include "unp.h"
+
+struct addrinfo *host_serv(const char *host, const char *serv, int family, int socktype)
+
+{
+
+    int n;
+
+    struct addrinfo hints,*res;
+
+    bzero(&amp;hints,sizeof(struct addrinfo));
+    hints.ai_flags=AI_CANONNAME;
+    hints.ai_family=family;
+    hints.ai_socktype=socktype;
+
+    if ( (n=getaddrinfo(host,serv,&amp;hints,&amp;res))!=0)
+
+        return NULL;
+
+    return(res);
+
+}</code></pre> 
+<p style="margin-left:0;text-align:justify;">10.tcp_connect函数</p> 
+<p style="margin-left:0;text-align:justify;">简述：该函数也是我们自行定义的接口函数，我们可以用于创建一个TCP套接字并连接到一个服务器；</p> 
+<p style="margin-left:0;text-align:justify;">函数定义：</p> 
+<pre><code class="language-cpp">#include "unp.h"
+
+int tcp_connect(const char *hostname, const char *service);
+//返回：成功则为已连接套接字描述符(int,即为accept函数的返回值)，出错则不返回；</code></pre> 
+<pre><code class="language-cpp">int tcp_connect(const char *host, const char *serv)
+
+{
+
+    int sockfd, n;
+    struct addrinfo hints, *res, *ressave;
+
+    bzero(&amp;hints, sizeof(struct addrinfo));
+    hints.ai_family = AF_UNSPEC;//表示IPv4和IPv6都可以
+    hints.ai_socktype = SOCK_STREAM;
+
+    if ( (n=getaddrinfo(host,serv,&amp;hints,&amp;res))!=0)//如果无法解析，那就退出
+        err_quit("tcp_connect error for %s, %s: %s",host,serv,gai_strerror(n));
+
+    ressave=res;//用于保存链表头部（方便free）
+
+    do{
+        sockfd=socket(res-&gt;ai_family,res-&gt;ai_socktype,res-&gt;ai_protocol);//注意对于addrinfo信息的利用
+
+        if (sockfd&lt;0)
+            continue;//因为可能还有其他地址可以尝试
+        if (connect(sockfd,res-&gt;ai_addr,res-&gt;ai_addrlen)==0)
+            break;//成功的话不需要再尝试
+        Close(sockfd);
+    }while( (res=res-&gt;ai_next)!=NULL);//尝试所有
+
+    if (res==NULL)//表示所有都试过且失败了
+        err_sys("tcp_connect error for %s,%s",host,serv);
+
+    freeaddrinfo(ressave);
+    return(sockfd);
+}</code></pre> 
+<p style="margin-left:0;text-align:justify;">时间获取客户程序改造：</p> 
+<pre><code class="language-cpp">#include "unp.h"
+
+int main(int argc, char **argv)
+
+{
+
+    intsockfd, n;
+    charrecvline[MAXLINE + 1];
+    socklen_tlen;
+    struct sockaddr_storage ss;
+
+
+    if (argc !=3)
+        err_quit("usage: daytimetcpcli &lt;hostname/IPaddress&gt; &lt;service/port#&gt;");
+    sockfd = Tcp_connect(argv[1], argv[2]);
+    len =sizeof(ss);
+    Getpeername(sockfd, (SA *)&amp;ss, &amp;len); // 获取连接到socket的对方主机地址
+    printf("connected to %s\n", Sock_ntop_host((SA *)&amp;ss, len)); // 取得的服务器地址信息转成二进制网络字节序打印出来
+    while ( (n = Read(sockfd, recvline, MAXLINE)) &gt;0) {
+    recvline[n] = 0;/* null terminate */
+    Fputs(recvline, stdout);
+    }
+    exit(0);
+
+}</code></pre> 
+<p style="margin-left:0;text-align:justify;">只支持IPV4的主机名处理：</p> 
+<p style="margin-left:0;text-align:justify;"><img alt="" height="75" src="https://images2.imgbox.com/5a/c0/Ux80b7rW_o.png" width="363"></p> 
+<p style="margin-left:0;text-align:justify;">同时支持IPV4和IPV6的主机名处理：</p> 
+<p style="margin-left:0;text-align:justify;"><img alt="" height="80" src="https://images2.imgbox.com/d0/c9/kqmIA0hO_o.png" width="457"></p> 
+<p>实际使用了IPv6地址， 因为tcp_connect把地址族设为AF_UNSPEC，首先搜索AAAA记录，然后搜索A记录，connect顺序靠前的IPv6地址一旦成功，就不再尝试连接顺序靠后的IPv4地址；</p> 
+<p> 11、tcp_listen函数</p> 
+<p style="margin-left:0;text-align:justify;">简述：</p> 
+<p style="margin-left:0;text-align:justify;">该函数可以执行tcp服务器的通常步骤，创建TCP套接字捆绑端口并接受外来连接请求；</p> 
+<pre><code class="language-cpp">#include "unp.h"
+
+int tcp_listen(const char *host, const char *serv, socklen_t *addrlenp);
+// 返回：若成功则为已连接套接字描述符，若出错则不返回；
+</code></pre> 
+<p style="margin-left:0;text-align:justify;">比起直接连接，其优势在于协议无关（可以同时处理IPv6）</p> 
+<p style="margin-left:0;text-align:justify;">源代码</p> 
+<pre><code class="language-cpp">#include "unp.h"
+
+int tcp_listen(const char *host, const char *serv, socklen_t *addrlenp)
+
+{
+
+    int listenfd,n;
+    const int on=1;
+    struct addrinfo hints,*res,*ressave;
+
+    bzero(&amp;hints,sizeof(hints));
+    hints.ai_flags=AI_PASSIVE;//下文将在bind函数中调用该函数返回的地址信息，同时表示是通配的
+    hints.ai_family=AF_UNSPEC;
+    hints.ai_socktype=SOCK_STREAM;
+
+    if ( (n=getaddrinfo(host,serv,&amp;hints,&amp;res))!=0)
+        err_quit("tcp_listen error for %s, %s:%s",host,serv,gai_strerror(n));
+    ressave=res;
+
+    do{
+        listenfd=socket(res-&gt;ai_family,res-&gt;ai_socktype,res-&gt;ai_protocol);
+        if (listenfd&lt;0)
+            continue;
+
+        Setsockopt(listenfd,SOL_SOCKET,SO_REUSEADDR,&amp;on,sizeof(on));
+        if (bind(listenfd,res-&gt;ai_addr,res-&gt;ai_addrlen)==0)
+            break;
+
+        Close(listenfd);
+    }while( (res=res-&gt;ai_next)!= NULL);
+
+    if (res==NULL)
+        err_sys("tcp_listen error for %s,%s",host,serv);
+
+    Listen(listenfd,LISTENQ); //调用listen使当前套接字变成一个监听套接字
+
+    if (addrlenp)
+        *addrlenp=res-&gt;ai_addrlen; // 如果addrlenp非空，就返回协议地址的大小，它允许调用者通过accept获取客户协议地址时分配一个套接字地址结构的内存空间
+
+    freeaddrinfo(ressave);
+
+    return listenfd;
+}</code></pre> 
+<p style="margin-left:0;text-align:justify;">解释:</p> 
+<p style="margin-left:0;text-align:justify;">在调用的时候，我们一般可以设置第一个参数（指定主机）和第三个参数（长度）为NULL;</p> 
+<p style="margin-left:0;text-align:justify;">时间获取服务器程序：</p> 
+<pre><code class="language-cpp">#include "unp.h"
+#include &lt;time.h&gt;
+
+int main(int argc, char **argv)
+{
+
+    int  listenfd, connfd;
+    socklen_t  len;
+    char  buff[MAXLINE];
+    time_t  ticks;
+    struct sockaddr_storage  cliaddr;  //128字节  确保ipv4、ipv6的sockadd都能被放下
+
+    if (argc !=2)
+    err_quit("usage: daytimetcpsrv1 &lt;service or port#&gt;");
+
+    listenfd = Tcp_listen(NULL, argv[1],NULL); // 创建监听套接字，由于tcp_listen使用了sockaddr_storage，所以不用传递地址长度
+
+    for ( ; ; ) {
+
+        len =sizeof(cliaddr);
+        connfd = Accept(listenfd, (SA *)&amp;cliaddr, &amp;len);
+        printf("connection from %s\n", Sock_ntop((SA *)&amp;cliaddr, len)); // 输出客户的地址信息
+
+        ticks = time(NULL);
+        snprintf(buff,sizeof(buff), "%.24s\r\n", ctime(&amp;ticks));
+        Write(connfd, buff, strlen(buff));
+
+        Close(connfd);
+}
+}
+
+</code></pre> 
+<h4 style="margin-left:0px;text-align:justify;">12、udp_client函数</h4> 
+<p style="margin-left:0;text-align:justify;">简述：udp_client将会用于创建未连接udp套接字；</p> 
+<pre><code class="language-cpp">#include "unp.h"
+
+int udp_client(const char *host, const char *serv, struct sockaddr **saptr, socklen_t *lenp);
+// 返回：若成功则为未连接套接字描述符，若出错则不返回</code></pre> 
+<pre><code class="language-cpp">int udp_client(const char *host, const char *serv, struct sockaddr **saptr, socklen_t *lenp)
+
+{
+
+    int sockfd,n;
+    struct addrinfo hints,*res,*ressave;
+
+    bzero(&amp;hints,sizeof(hints));
+    hints.ai_family=AF_UNSPEC;
+    hints.ai_socktype=SOCK_DGRAM;
+
+
+
+    if ( (n=getaddrinfo(host,serv,&amp;hints,&amp;res))!=0)
+
+        err_quit("udp_client error for %s, %s:%s",host,serv,gai_strerror(n));
+
+    
+
+    ressave=res;
+
+    do{
+        sockfd=socket(res-&gt;ai_family,res-&gt;ai_socktype,res-&gt;ai_protocol);
+        if (sockfd&gt;=0)
+            break;
+    }while( (res=res-&gt;ai_next)!= NULL);
+
+
+
+    if (res==NULL)
+
+        err_sys("udp_client error for %s, %s",host,serv);
+
+    *saptr=Malloc(res-&gt;ai_addrlen);
+    memcpy(*saptr,res-&gt;ai_addr,res-&gt;ai_addrlen);
+    *lenp=res-&gt;ai_addrlen;
+
+    freeaddrinfo(ressave);
+
+    return(sockfd);
+
+}</code></pre> 
+<p style="margin-left:0;text-align:justify;">时间获取客户程序：</p> 
+<pre><code class="language-cpp">#include    "unp.h"
+
+int
+main(int argc, char **argv)
+{
+    int                sockfd, n;
+    char            recvline[MAXLINE + 1];
+    socklen_t        salen;
+    struct sockaddr    *sa;
+
+    if (argc != 3)
+        err_quit("usage: daytimeudpcli1 &lt;hostname/IPaddress&gt; &lt;service/port#&gt;");
+
+    sockfd = Udp_client(argv[1], argv[2], (void **) &amp;sa, &amp;salen);
+
+    printf("sending to %s\n", Sock_ntop_host(sa, salen));
+
+    Sendto(sockfd, "", 1, 0, sa, salen);    /* send 1-byte datagram */
+
+    n = Recvfrom(sockfd, recvline, MAXLINE, 0, NULL, NULL);
+    recvline[n] = '\0';    /* null terminate */
+    Fputs(recvline, stdout);
+
+    exit(0);
+}</code></pre> 
+<h4 style="margin-left:0px;text-align:justify;">13、udp_connect函数</h4> 
+<p style="margin-left:0;text-align:justify;">简述：该函数也是用于udp，但是是用来构建已连接udp套接字的</p> 
+<pre><code class="language-cpp">#include    "unp.h"
+int udp_connect(const char *host, const char *serv);
+          //若成功则为已连接套接字描述符，若出错则不返回</code></pre> 
+<p style="margin-left:0;text-align:justify;">源代码：</p> 
+<pre><code class="language-cpp">#include    "unp.h"
+
+int
+udp_connect(const char *host, const char *serv)
+{
+    int                sockfd, n;
+    struct addrinfo    hints, *res, *ressave;
+
+    bzero(&amp;hints, sizeof(struct addrinfo));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+
+    if ( (n = getaddrinfo(host, serv, &amp;hints, &amp;res)) != 0)
+        err_quit("udp_connect error for %s, %s: %s",
+                 host, serv, gai_strerror(n));
+    ressave = res;
+
+    do {
+        sockfd = socket(res-&gt;ai_family, res-&gt;ai_socktype, res-&gt;ai_protocol);
+        if (sockfd &lt; 0)
+            continue;    /* ignore this one */
+
+        if (connect(sockfd, res-&gt;ai_addr, res-&gt;ai_addrlen) == 0)
+            break;        /* success */
+
+        Close(sockfd);    /* ignore this one */
+    } while ( (res = res-&gt;ai_next) != NULL);
+
+    if (res == NULL)    /* errno set from final connect() */
+        err_sys("udp_connect error for %s, %s", host, serv);
+
+    freeaddrinfo(ressave);
+
+    return(sockfd);
+}</code></pre> 
+<p style="margin-left:0;text-align:justify;">        该函数与tcp_connect几乎等同，但UDP套接字上的connect调用不会发送任何东西到对端；如果存在错误，调用者就得等向对端发送一个数据报之后才能被发现；</p> 
+<h4 style="margin-left:0px;text-align:justify;">14、udp_server函数</h4> 
+<p style="margin-left:0;text-align:justify;">简述：该接口函数式为了建立一个udp服务器，与tcp_listen相同，hostname是可选的；</p> 
+<pre><code class="language-cpp">#include    "unp.h"
+int udp_server(const char *host, const char *serv, socklen_t *addrlenp);
+                          //返回：若成功则为未连接套接字描述符，若出错则不返回</code></pre> 
+<p style="margin-left:0;text-align:justify;">定义和源代码：</p> 
+<pre><code class="language-cpp">#include    "unp.h"
+
+int
+udp_server(const char *host, const char *serv, socklen_t *addrlenp)
+{
+    int                sockfd, n;
+    struct addrinfo    hints, *res, *ressave;
+
+    bzero(&amp;hints, sizeof(struct addrinfo));
+    hints.ai_flags = AI_PASSIVE;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+
+    if ( (n = getaddrinfo(host, serv, &amp;hints, &amp;res)) != 0)
+        err_quit("udp_server error for %s, %s: %s",
+                 host, serv, gai_strerror(n));
+    ressave = res;
+
+    do {
+        sockfd = socket(res-&gt;ai_family, res-&gt;ai_socktype, res-&gt;ai_protocol);
+        if (sockfd &lt; 0)
+            continue;        /* error - try next one */
+
+        if (bind(sockfd, res-&gt;ai_addr, res-&gt;ai_addrlen) == 0)
+            break;            /* success */
+
+        Close(sockfd);        /* bind error - close and try next one */
+    } while ( (res = res-&gt;ai_next) != NULL);
+
+    if (res == NULL)    /* errno from final socket() or bind() */
+        err_sys("udp_server error for %s, %s", host, serv);
+
+    if (addrlenp)
+        *addrlenp = res-&gt;ai_addrlen;    /* return size of protocol address */
+
+    freeaddrinfo(ressave);
+
+    return(sockfd);
+}</code></pre> 
+<p style="margin-left:0;text-align:justify;">        UDP不设置SO_REUSEADDR选项；</p> 
+<p style="margin-left:0;text-align:justify;">协议无关时间获取服务器程序：</p> 
+<pre><code class="language-cpp">#include    "unp.h"
+#include    &lt;time.h&gt;
+
+int
+main(int argc, char **argv)
+{
+    int                sockfd;
+    ssize_t            n;
+    char            buff[MAXLINE];
+    time_t            ticks;
+    socklen_t        len;
+    struct sockaddr_storage    cliaddr;
+
+    if (argc == 2)
+        sockfd = Udp_server(NULL, argv[1], NULL);
+    else if (argc == 3)
+        sockfd = Udp_server(argv[1], argv[2], NULL);
+    else
+        err_quit("usage: daytimeudpsrv [ &lt;host&gt; ] &lt;service or port&gt;");
+
+    for ( ; ; ) {
+        len = sizeof(cliaddr);
+        n = Recvfrom(sockfd, buff, MAXLINE, 0, (SA *)&amp;cliaddr, &amp;len);
+        printf("datagram from %s\n", Sock_ntop((SA *)&amp;cliaddr, len));
+
+        ticks = time(NULL);
+        snprintf(buff, sizeof(buff), "%.24s\r\n", ctime(&amp;ticks));
+        Sendto(sockfd, buff, strlen(buff), 0, (SA *)&amp;cliaddr, len);
+    }
+}</code></pre> 
+<p style="margin-left:0;text-align:justify;">15、getnameInfo函数</p> 
+<p style="margin-left:0;text-align:justify;">简述：是getaddrinfo的互补函数，是以套接字地址为参数，返回描述其中主机的一个字符串和描述其中服务的另一个字符串，该函数协议无关；</p> 
+<p style="margin-left:0;text-align:justify;">函数定义：</p> 
+<pre><code class="language-cpp">#include &lt;netdb.h&gt;
+int getnameinfo(const struct sockaddr *sockaddr,socklen_t addrlen,
+                char *host,socklen_t hostlen,
+                char *serv,socklen_t servlen,int flag);</code></pre> 
+<p style="margin-left:0;text-align:justify;">解释：</p> 
+<p style="margin-left:0;text-align:justify;">如果用户不想要获取主机或者端口名字，仅仅需要设置相应的len为0；sock_ntop和getnameinfo的区别在于，前者不涉及dns，只是返回可显示版本；后者则尝试获取主机和服务端名字</p> 
+<p style="margin-left:0;text-align:justify;">flags有以下六个标志：</p> 
+<p style="margin-left:0;text-align:justify;"><img alt="" height="229" src="https://images2.imgbox.com/40/84/K1zGm80x_o.png" width="504"></p> 
+<p style="margin-left:0;text-align:justify;">        如果我们知道是数据报套接字，我们就需要设置NI_DGRAM了，因为套接字地址结构中给出的仅仅是IP地址和端口号，所以getnameinfo无法确定所用的协议（TCP或者UDP)，而一些端口号在TCP和UDP上的服务是不一致的，比如说514在tcp上是rsh服务，在udp上则是syslog服务；</p> 
+<p style="margin-left:0;text-align:justify;">        如果无法使用DNS反向解析出主机名字，设置了NI_NAMEREQD标志会导致返回一个错误；</p> 
+<p style="margin-left:0;text-align:justify;">        NI_NOFQDN会导致返回主机名第一个点号后面的内容被删去，比方说不设置的话返回aix.unpbook.com，设置的话返回aix；</p> 
+<p style="margin-left:0;text-align:justify;">        NI_NUMERICHOST告知不要调用dns（会耗时），而是以字符串的方式返回IP地址（内部可能是用inet_ntop实现)。NI_NUMERICSERV会返回端口号而避免查找服务名；NI_NUMERICSCOPE会以数值返回范围标识来代替名字。由于客户的端口号一般没有关联的服务名（是临时的），所以一般服务器应该设置NI_NUMERICSERV标志</p> 
+<h4 style="margin-left:0px;text-align:justify;">15、可重入函数</h4> 
+<p>        如果一个函数在相同的时间点可以被多个线程安全地调用，就称该函数是线程安全的，也就是可重入函数；gethostbyname,gethosybyaddr,getservbyname,getservbyport四个函数都是不可重入的。而inet_pton和inet_ntop是重入的，但是inet_ntoa是不可重入的。getaddrinfo和getnameinfo由于自身的处理，所以是可重入的errno变量的话，是每个进程都有一个副本，如果是多线程情况下，那么也可能发生问题；</p> 
+<p style="margin-left:0;text-align:justify;">通常来说，解决不可重入函数的问题的办法，就是不在信号处理函数中调用任何不可重入函数。对于errno问题，我们可以将信号处理函数设置成事先保存，事后恢复值的办法，如下图所示</p> 
+<pre><code class="language-cpp">void sig_alrm(int signo){
+
+    int errno_save;
+
+    errno_save=errno;//存储
+
+    if (write(...)!=nbytes)
+
+        fprintf(stderr, "write error, error = %d\n", errno);//错误处理
+     errno=errno_save;//恢复
+}</code></pre> 
+<h4 style="text-align:justify;">16、gethostbyname_r、gethostbyaddr_r函数</h4> 
+<p style="text-align:justify;">相比不可重入函数进行的修改：</p> 
+<p style="text-align:justify;">1、把不可重入函数填写并返回静态结构的做法改为由调用者分配再由可重入函数填写的结构；</p> 
+<p style="text-align:justify;">2、由可重入函数调用malloc函数动态分配内存空间：必须调用freeaddrinfo释放动态分配空间，同时该方法会导致内存量不断增长，内存开销大；</p> 
+<pre><code class="language-cpp">#include &lt;netdb.h&gt;
+
+struct hostent *gethostbyname_r(const char *hostname, struct hostent *result, char *buf, int buflen, int *h_errnop);
+
+struct hostent *gethostbyaddr_r(const char *addr, int len, int type, struct hostent *result, char *buf, int buflen, int *h_errnop);
+// 返回：成功则为非空指针，若出错则为NULL;</code></pre> 
+<p style="text-align:justify;">        每个函数都需要4个额外的参数。其中result参数指向由调用者分配并由被调用函数填写的nostent结构。成功返回时本指针同时作为函数的返回值。<br>         buf参数指向由调用者分配且大小为buflen的缓冲区。该缓冲区用于存放规范主机名、别名指针数组、各个别名字符串、地址指针数组以及各个实际地址。由result指向的hostent结构中的所有指针都指向该缓冲区内部。那这个缓冲区要有多大才行呢?不幸的是，就该缓冲区的大小而言，大多数手册页面只是含糊地说“该缓冲区必须大得足以存放与hostent结构关联的所有数据”。gethostbyname当前的实现最多能够返回35个别名指针和35个地址指针，并内部使用一个8192字节的缓冲区存放这些别名和地址。因此大小为8192字节的缓冲区应该足够了。<br> 如果出错，错误码就通过h_errnop指针而不是全局变量h_errno返回。</p> 
+<h4 style="text-align:justify;">17、其他</h4> 
+<p style="text-align:justify;">1、作废的ipv6地址解析函数</p> 
+<p style="text-align:justify;">RES_USE_INET6常值</p> 
+<p style="text-align:justify;">gethostbyname2函数</p> 
+<p style="text-align:justify;">getipnodebyname函数</p> 
+<p style="text-align:justify;">2、其他网络相关信息</p> 
+<p style="text-align:justify;">        应用进程可能想要查找四类与网络相关的信息:主机、网络、协议和服务。大多数查找针<br> 对的是主机(gethostbyname和gethostbyaddr), 一小部分查找针对的是服务(getservbyname<br> 和getservbyport)，更小-部分 查找针对的是网络和协议。<br> 所有四类信息都可以存放在一个文件中，每类信息各定义有三个访问函数:<br> (1)函数getXXXent读出文件中的下一个表项，必要的话首先打开文件;<br> (2)函数setXXXent打开(如果尚未打开的话)并回绕文件;<br> (3)函数endXXXent关闭文件。<br>         每类信息都定义了各自的结构，包括hostent、 netent、protoent 和servent.这些定义<br> 通过包含头文件&lt;netdb. h&gt;提供。<br>         除了用于顺序处理文件的get、set和ena这三个函数外，每类信息还提供-些键值查找<br> (keyed loopup)函数。这些函数顺序遍历整个文件(通过调用getXXXent函数读出每一行)， 但<br> 是不把每- -行都返回给调用者，而是寻找与某个参数匹配的一一个表项。 这些键值查找函数具有<br> 形如getXXXbyYYY的名字。举例来说，针对主机信息的两个键值查找函数是gethostbyname(查<br> 找匹配某个主机名的表项)和gethostbyaddr (查找匹配某个IP地址的表项)。</p> 
+<p style="text-align:justify;"><img alt="" height="187" src="https://images2.imgbox.com/83/56/pw0uOWeV_o.png" width="653"></p> 
+<p style="text-align:justify;">        首先，只有主机和网络信息可通过DNS获取，协议和服务信息总是从相应的文件中读取。我们早先在本章中（随图11-1）提到过，不同的实现有不同的方法供系统管理员指定是使用DNS还是使用文件来查找主机和网络信息。<br>         其次，如果使用DNS查找主机和网络信息，那么只有键值查找函数才有意义。举例来说，你不能使用gethostent并期待顺序遍历DNS中的所有表项。如果调用gethostent，那么它仅仅读取/etc/hosts文件并避免访问DNS。</p> 
+<h4>18、小结</h4> 
+<p>        应用程序用来把主机名转换成IP地址或做相反转换的一组函数称为解析器。gethostbyname和gethostbyaddr是解析器曾常用的入口点。随着向IPv6和线程化编程模型的转移，getaddrinfo和getnameinfo显得更为有用，因为它们既能解析IPv6地址，又符合线程安全调用约定。<br>         处理服务名和端口号的常用函数是getservbyname，它接受一个服务名作为参数，并返回-个包含相应端口号的结构。这种映射关系通常包含在一个文本文件中。还有用于把协议名映射成协议号以及把网络名映射成网络号的函数，不过很少使用。<br>         我们没有提到的另一种可选方法是:直接调用解析器函数，以代替使用gethostbyname和gethostbyaddr。如此直接应用DNS的程序之一是sendmai因为它需要搜索MiX资源记录，这是gethostbyXXX函数无法做到的。解析器函数都有以res_开头的名字，res_init函数就是一-个例子。[Albitz and Liu2001]第15章讲述了这些函数，并有调用它们的一个例子程序，键入"man resolver”应该得到这些函数的手册页面。<br>         getaddrinfo是一个非常有用的函数，它允许我们编写协议无关的代码。然而直接调用它要花多个步骤，而且对于不同的情形仍有反复出现的细节需要处理:如遍历所有返回的结构，忽略socket返回的错误，为TCP服务器设置so_REUSEADDR套按字选项，等等。我们编写了5个访问getaddrinfo的接口函数tcp_connect、tcp_listen、udp_client、udp_connect 、udp_server，以简化所有这些细节。我们通过编写TCP上或UDP上时间获取客户和服务器程序的协议无关版本展示了这些函数的用法。<br>         gethostbyname和gethostbyaddr通常也是不可重入的函数。这两个函数共享一个静态的结果结构，都返回指向该结构的一个指针。到第26章介绍线程时我们还会遇到并讨论重入问题。我们介绍了一些厂商提供的这两个函数的_r版本。它们提供了一种解决方法，但是需要对调用这些函数的所有应用程序加以修改。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e78ddd4a2bed343721b3336dc917410f/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Live2D使用分享</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/163136571c67c5506c388c34c6e94acc/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">GeoJSON 格式入门 —— 大数据处理地理信息的基础（内含中国省级数据）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

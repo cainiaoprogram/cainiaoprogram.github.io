@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>JavaEE 企业级分布式高级架构师（二十）RocketMQ学习笔记（2） - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="JavaEE 企业级分布式高级架构师（二十）RocketMQ学习笔记（2）" />
+<meta property="og:description" content="RocketMQ学习笔记 进阶篇消息样例普通消息消息发送发送同步消息发送异步消息单向发送消息三种发送方式的对比 消费消息 顺序消息如何保证顺序顺序的实现MessageListenerOrderly与MessageListenerConcurrently区别 广播消息集群消费模式广播消费模式示例 延时消息介绍第三方存储选型要求RocketMQ中的延时消息实现原理第一步:修改消息Topic名称和队列信息第二步:转发消息到延迟主题的CosumeQueue中第三步:延迟服务消费SCHEDULE_TOPIC_XXXX消息第四步:将信息重新存储到CommitLog中延迟消息存放 批量消息过滤消息TAG模式过滤SQL表达式过滤支持的语法支持的类型 类过滤模式(基于4.2.0版本) 事务消息概念介绍分布式事务消息的优势典型场景交互流程事务消息发送步骤事务消息回查步骤 注意事项示例 进阶篇 消息样例 rocketmq提供丰富的消息类型，满足各种严苛场景下的高级特性需求，当前支持的消息类型涵盖普通消息、顺序消息(全局顺序 / 分区顺序)、分布式事务消息、定时消息/延时消息。java中要使用rocktmq，需要引入依赖： &lt;dependency&gt; &lt;groupId&gt;org.apache.rocketmq&lt;/groupId&gt; &lt;artifactId&gt;rocketmq-client&lt;/artifactId&gt; &lt;version&gt;4.7.1&lt;/version&gt; &lt;/dependency&gt; 普通消息 普通消息是指消息队列 RocketMQ 版中无特性的消息，区别于有特性的定时和延时消息、顺序消息和事务消息。 消息发送 发送同步消息 原理：同步发送是指消息发送方发出一条消息后，会在收到服务端返回响应之后才发下一条消息的通讯方式。 应用场景：此种方式应用场景非常广泛，例如重要通知邮件、报名短信通知、营销短信系统等。 // 1、封装producer(生产者组), 2、指定nameServer, 3、开启Producer, 4、构造消息、指定tag、设置key, 5、关闭生产者 发送异步消息 原理：异步发送是指发送方发出一条消息后，不等服务端返回响应，接着发送下一条消息的通讯方式。消息队列 RocketMQ 版的异步发送，需要用户实现异步发送回调接口(SendCallback)。消息发送方在发送了一条消息后，不需要等待服务端响应即可发送第二条消息。发送方通过回调接口接收服务端响应，并处理响应结果。 异步场景：异步发送一般用于链路耗时较⻓，对响应时间较为敏感的业务场景，例如用户视频上传后通知启动转码服务，转码完成后通知推送转码结果等。 单向发送消息 原理：发送方只负责发送消息，不等待服务端返回响应且没有回调函数触发，即只发送请求不等待应答。此方式发送消息的过程耗时非常短，一般在微秒级别。 应用场景：适用于某些耗时非常短，但对可靠性要求并不高的场景，例如日志收集。 三种发送方式的对比 下表概括了三者的特点和主要区别： 发送方式发送TPS发送结果反馈可靠性同步发送快有不丢失异步发送快有不丢失单向发送最快无可能丢失 消费消息 顺序消息 顺序消息(FIFO 消息)是消息队列 RocketMQ 版提供的一种严格按照顺序来发布和消费的消息。顺序发布和顺序消费是指对于指定的一个 Topic，生产者按照一定的先后顺序发布消息;消费者按照既定的先后顺序订阅消息，即先发布的消息一定会先被客户端接收到。 如何保证顺序 在MQ的模型中，顺序需要由3个阶段去保障： 消息被发送时保持顺序消息被存储时保持和发送的顺序一致消息被消费时保持和存储的顺序一致 发送时保持顺序意味着对于有顺序要求的消息，用户应该在同一个线程中采用同步的方式发送。存储保持和发送的顺序一致则要求在同一线程中被发送出来的消息A和B，存储时在空间上A一定在B之前。而消费保持和存储一致则要求消息A、B到达Consumer之后必须按照先A后B的顺序被处理。如下图所示：对于两个订单的消息的原始数据：a1、b1、b2、a2、a3、b3（绝对时间下发生的顺序） 在发送时，a订单的消息需要保持a1、a2、a3的顺序，b订单的消息也相同，但是a、b订单之间的消息没有顺序关系，这意味着a、b订单的消息可以在不同的线程中被发送出去。在存储时，需要分别保证a、b订单的消息的顺序，但是a、b订单之间的消息的顺序可以不保证 a1、b1、b2、a2、a3、b3是可以接受的a1、a2、b1、b2、a3、b3也是可以接受的a1、a3、b1、b2、a2、b3是不能接受的 消费时保证顺序的简单方式就是“什么都不做”，不对收到的消息的顺序进行调整，即只要一个分区的消息只由一个线程处理即可；当然，如果a、b在一个分区中，在收到消息后也可以将他们拆分到不同线程中处理，不过要权衡一下收益。 顺序的实现 顺序消息分为全局顺序消息和分区顺序消息。全局顺序：对于指定的一个 Topic，所有消息按照严格的先入先出(First In First Out，简称 FIFO)的顺序进行发布和消费。分区顺序：对于指定的一个 Topic，所有消息根据 Sharding Key 进行区块分区。 同一个分区内的消息按照严格的 FIFO 顺序进行发布和消费。Sharding Key 是顺序消息中用来区分不同分区的关键字段，和普通消息的 Key 是完全不同的概念。 消息生产示例： 消息消费示例： MessageListenerOrderly与MessageListenerConcurrently区别 MessageListenerOrderly：有序消费，同一队列的消息同一时刻只能一个线程消费，可保证消息在同一队列严格有序消费。MessageListenerConcurrently：并发消费 广播消息 集群消费模式 适用场景：适用于消费端集群化部署，每条消息只需要被处理一次的场景。此外，由于消费进度在服务端维护，可靠性更高。具体消费示例如下图所示： 注意事项" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/a0ac55613ebd86fdb1e175930bfcd52b/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-10-24T15:44:32+08:00" />
+<meta property="article:modified_time" content="2020-10-24T15:44:32+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">JavaEE 企业级分布式高级架构师（二十）RocketMQ学习笔记（2）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>RocketMQ学习笔记</h4> 
+ <ul><li><a href="#_1" rel="nofollow">进阶篇</a></li><li><ul><li><a href="#_2" rel="nofollow">消息样例</a></li><li><ul><li><a href="#_12" rel="nofollow">普通消息</a></li><li><ul><li><a href="#_14" rel="nofollow">消息发送</a></li><li><ul><li><a href="#_15" rel="nofollow">发送同步消息</a></li><li><a href="#_24" rel="nofollow">发送异步消息</a></li><li><a href="#_31" rel="nofollow">单向发送消息</a></li><li><a href="#_38" rel="nofollow">三种发送方式的对比</a></li></ul> 
+     </li><li><a href="#_46" rel="nofollow">消费消息</a></li></ul> 
+    </li><li><a href="#_48" rel="nofollow">顺序消息</a></li><li><ul><li><a href="#_50" rel="nofollow">如何保证顺序</a></li><li><a href="#_65" rel="nofollow">顺序的实现</a></li><li><a href="#MessageListenerOrderlyMessageListenerConcurrently_79" rel="nofollow">MessageListenerOrderly与MessageListenerConcurrently区别</a></li></ul> 
+    </li><li><a href="#_82" rel="nofollow">广播消息</a></li><li><ul><li><a href="#_83" rel="nofollow">集群消费模式</a></li><li><a href="#_90" rel="nofollow">广播消费模式</a></li><li><a href="#_102" rel="nofollow">示例</a></li></ul> 
+    </li><li><a href="#_104" rel="nofollow">延时消息</a></li><li><ul><li><a href="#_105" rel="nofollow">介绍</a></li><li><a href="#_120" rel="nofollow">第三方存储选型要求</a></li><li><a href="#RocketMQ_136" rel="nofollow">RocketMQ中的延时消息</a></li><li><ul><li><a href="#_146" rel="nofollow">实现原理</a></li><li><a href="#Topic_168" rel="nofollow">第一步:修改消息Topic名称和队列信息</a></li><li><a href="#CosumeQueue_202" rel="nofollow">第二步:转发消息到延迟主题的CosumeQueue中</a></li><li><a href="#SCHEDULE_TOPIC_XXXX_244" rel="nofollow">第三步:延迟服务消费SCHEDULE_TOPIC_XXXX消息</a></li><li><a href="#CommitLog_274" rel="nofollow">第四步:将信息重新存储到CommitLog中</a></li><li><a href="#_291" rel="nofollow">延迟消息存放</a></li></ul> 
+    </li></ul> 
+    </li><li><a href="#_308" rel="nofollow">批量消息</a></li><li><a href="#_317" rel="nofollow">过滤消息</a></li><li><ul><li><a href="#TAG_320" rel="nofollow">TAG模式过滤</a></li><li><a href="#SQL_324" rel="nofollow">SQL表达式过滤</a></li><li><ul><li><a href="#_326" rel="nofollow">支持的语法</a></li><li><a href="#_331" rel="nofollow">支持的类型</a></li></ul> 
+     </li><li><a href="#420_338" rel="nofollow">类过滤模式(基于4.2.0版本)</a></li></ul> 
+    </li><li><a href="#_340" rel="nofollow">事务消息</a></li><li><ul><li><a href="#_342" rel="nofollow">概念介绍</a></li><li><a href="#_346" rel="nofollow">分布式事务消息的优势</a></li><li><a href="#_350" rel="nofollow">典型场景</a></li><li><a href="#_352" rel="nofollow">交互流程</a></li><li><ul><li><a href="#_355" rel="nofollow">事务消息发送步骤</a></li><li><a href="#_360" rel="nofollow">事务消息回查步骤</a></li></ul> 
+     </li><li><a href="#_364" rel="nofollow">注意事项</a></li><li><a href="#_371" rel="nofollow">示例</a></li></ul> 
+   </li></ul> 
+  </li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h2><a id="_1"></a>进阶篇</h2> 
+<h3><a id="_2"></a>消息样例</h3> 
+<ul><li>rocketmq提供丰富的消息类型，满足各种严苛场景下的高级特性需求，当前支持的消息类型涵盖普通消息、顺序消息(全局顺序 / 分区顺序)、分布式事务消息、定时消息/延时消息。</li><li>java中要使用rocktmq，需要引入依赖：</li></ul> 
+<pre><code class="prism language-xml"><span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>dependency</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>groupId</span><span class="token punctuation">&gt;</span></span>org.apache.rocketmq<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>groupId</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>artifactId</span><span class="token punctuation">&gt;</span></span>rocketmq-client<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>artifactId</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>version</span><span class="token punctuation">&gt;</span></span>4.7.1<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>version</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>dependency</span><span class="token punctuation">&gt;</span></span>
+</code></pre> 
+<h4><a id="_12"></a>普通消息</h4> 
+<ul><li>普通消息是指消息队列 RocketMQ 版中无特性的消息，区别于有特性的定时和延时消息、顺序消息和事务消息。</li></ul> 
+<h5><a id="_14"></a>消息发送</h5> 
+<h6><a id="_15"></a>发送同步消息</h6> 
+<ul><li><strong>原理</strong>：同步发送是指消息发送方发出一条消息后，会在收到服务端返回响应之后才发下一条消息的通讯方式。</li></ul> 
+<p><img src="https://images2.imgbox.com/f7/e5/6Ty0IWpg_o.png" alt="在这里插入图片描述"></p> 
+<ul><li><strong>应用场景</strong>：此种方式应用场景非常广泛，例如重要通知邮件、报名短信通知、营销短信系统等。</li></ul> 
+<pre><code class="prism language-java"><span class="token comment">// 1、封装producer(生产者组), 2、指定nameServer, 3、开启Producer, 4、构造消息、指定tag、设置key, 5、关闭生产者</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/bb/26/hP4PtnE3_o.png" alt="在这里插入图片描述"></p> 
+<h6><a id="_24"></a>发送异步消息</h6> 
+<ul><li><strong>原理</strong>：异步发送是指发送方发出一条消息后，不等服务端返回响应，接着发送下一条消息的通讯方式。消息队列 RocketMQ 版的异步发送，需要用户实现异步发送回调接口(SendCallback)。消息发送方在发送了一条消息后，不需要等待服务端响应即可发送第二条消息。发送方通过回调接口接收服务端响应，并处理响应结果。</li></ul> 
+<p><img src="https://images2.imgbox.com/b5/23/ZAShhL6s_o.png" alt="在这里插入图片描述"></p> 
+<ul><li><strong>异步场景</strong>：异步发送一般用于链路耗时较⻓，对响应时间较为敏感的业务场景，例如用户视频上传后通知启动转码服务，转码完成后通知推送转码结果等。</li></ul> 
+<p><img src="https://images2.imgbox.com/68/fa/Th2XbKjV_o.png" alt="在这里插入图片描述"></p> 
+<h6><a id="_31"></a>单向发送消息</h6> 
+<ul><li><strong>原理</strong>：发送方只负责发送消息，不等待服务端返回响应且没有回调函数触发，即只发送请求不等待应答。此方式发送消息的过程耗时非常短，一般在微秒级别。</li></ul> 
+<p><img src="https://images2.imgbox.com/e9/3f/VuRL3FJ0_o.png" alt="在这里插入图片描述"></p> 
+<ul><li><strong>应用场景</strong>：适用于某些耗时非常短，但对可靠性要求并不高的场景，例如日志收集。</li></ul> 
+<p><img src="https://images2.imgbox.com/e4/e8/Hp5wgzDB_o.png" alt="在这里插入图片描述"></p> 
+<h6><a id="_38"></a>三种发送方式的对比</h6> 
+<ul><li>下表概括了三者的特点和主要区别：</li></ul> 
+<table><thead><tr><th>发送方式</th><th>发送TPS</th><th>发送结果反馈</th><th>可靠性</th></tr></thead><tbody><tr><td>同步发送</td><td>快</td><td>有</td><td>不丢失</td></tr><tr><td>异步发送</td><td>快</td><td>有</td><td>不丢失</td></tr><tr><td>单向发送</td><td>最快</td><td>无</td><td>可能丢失</td></tr></tbody></table> 
+<h5><a id="_46"></a>消费消息</h5> 
+<p><img src="https://images2.imgbox.com/52/3a/Hsyt3sb4_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="_48"></a>顺序消息</h4> 
+<ul><li>顺序消息(FIFO 消息)是消息队列 RocketMQ 版提供的一种<strong>严格按照顺序来发布和消费的消息</strong>。顺序发布和顺序消费是指对于指定的一个 Topic，生产者按照一定的先后顺序发布消息;消费者按照既定的先后顺序订阅消息，即先发布的消息一定会先被客户端接收到。</li></ul> 
+<h5><a id="_50"></a>如何保证顺序</h5> 
+<ul><li>在MQ的模型中，顺序需要由3个阶段去保障： 
+  <ul><li>消息被发送时保持顺序</li><li>消息被存储时保持和发送的顺序一致</li><li>消息被消费时保持和存储的顺序一致</li></ul> </li><li>发送时保持顺序意味着对于有顺序要求的消息，用户应该在同一个线程中采用同步的方式发送。存储保持和发送的顺序一致则要求在同一线程中被发送出来的消息A和B，存储时在空间上A一定在B之前。而消费保持和存储一致则要求消息A、B到达Consumer之后必须按照先A后B的顺序被处理。</li><li>如下图所示：对于两个订单的消息的原始数据：a1、b1、b2、a2、a3、b3（绝对时间下发生的顺序）</li></ul> 
+<p><img src="https://images2.imgbox.com/a2/68/V3NtAHjB_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>在发送时，a订单的消息需要保持a1、a2、a3的顺序，b订单的消息也相同，但是a、b订单之间的消息没有顺序关系，这意味着a、b订单的消息可以在不同的线程中被发送出去。</li><li>在存储时，需要分别保证a、b订单的消息的顺序，但是a、b订单之间的消息的顺序可以不保证 
+  <ul><li>a1、b1、b2、a2、a3、b3是可以接受的</li><li>a1、a2、b1、b2、a3、b3也是可以接受的</li><li>a1、a3、b1、b2、a2、b3是不能接受的</li></ul> </li><li>消费时保证顺序的简单方式就是“什么都不做”，不对收到的消息的顺序进行调整，即<strong>只要一个分区的消息只由一个线程处理</strong>即可；当然，如果a、b在一个分区中，在收到消息后也可以将他们拆分到不同线程中处理，不过要权衡一下收益。</li></ul> 
+<h5><a id="_65"></a>顺序的实现</h5> 
+<ul><li>顺序消息分为<strong>全局顺序消息</strong>和<strong>分区顺序消息</strong>。</li><li><strong>全局顺序</strong>：对于指定的一个 Topic，所有消息按照严格的先入先出(First In First Out，简称 FIFO)的顺序进行发布和消费。</li><li><strong>分区顺序</strong>：对于指定的一个 Topic，所有消息根据 Sharding Key 进行区块分区。 同一个分区内的消息按照严格的 FIFO 顺序进行发布和消费。Sharding Key 是顺序消息中用来区分不同分区的关键字段，和普通消息的 Key 是完全不同的概念。</li></ul> 
+<p><img src="https://images2.imgbox.com/ee/2d/ywUI10nN_o.png" alt="在这里插入图片描述"></p> 
+<p><img src="https://images2.imgbox.com/35/49/vKvZrwOw_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>消息生产示例：</li></ul> 
+<p><img src="https://images2.imgbox.com/c8/00/B9s9dZAf_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>消息消费示例：</li></ul> 
+<p><img src="https://images2.imgbox.com/d8/4d/j2kMSVli_o.png" alt="在这里插入图片描述"></p> 
+<h5><a id="MessageListenerOrderlyMessageListenerConcurrently_79"></a>MessageListenerOrderly与MessageListenerConcurrently区别</h5> 
+<ul><li>MessageListenerOrderly：有序消费，同一队列的消息同一时刻只能一个线程消费，可保证消息在同一队列严格有序消费。</li><li>MessageListenerConcurrently：并发消费</li></ul> 
+<h4><a id="_82"></a>广播消息</h4> 
+<h5><a id="_83"></a>集群消费模式</h5> 
+<ul><li>适用场景：适用于消费端集群化部署，每条消息只需要被处理一次的场景。此外，由于消费进度在服务端维护，可靠性更高。具体消费示例如下图所示：</li></ul> 
+<p><img src="https://images2.imgbox.com/3e/7f/IFIc4qp3_o.png" alt="在这里插入图片描述"></p> 
+<blockquote> 
+ <p>注意事项</p> 
+</blockquote> 
+<ul><li>集群消费模式下，每一条消息都只会被分发到一台机器上处理。如果需要被集群下的每一台机器都处理，请使用广播模式。</li><li>集群消费模式下，不保证每一次失败重投的消息路由到同一台机器上。</li></ul> 
+<h5><a id="_90"></a>广播消费模式</h5> 
+<ul><li>适用场景：适用于消费端集群化部署，每条消息需要被集群下的每个消费者处理的场景。具体消费示例如下图所示：</li></ul> 
+<p><img src="https://images2.imgbox.com/03/64/s463vfEB_o.png" alt="在这里插入图片描述"></p> 
+<blockquote> 
+ <p>注意事项</p> 
+</blockquote> 
+<ul><li>广播消费模式下不支持顺序消息。</li><li>广播消费模式下不支持重置消费位点。</li><li>每条消息都需要被相同订阅逻辑的多台机器处理。</li><li>广播模式下服务端不维护消费进度，消费进度在客户端维护。</li><li>广播模式下，消息队列 RocketMQ 版保证每条消息至少被每台客户端消费一次，但是并不会重投消费失败的消息，因此业务方需要关注消费失败的情况。</li><li>广播模式下，客户端每一次重启都会从最新消息消费。客户端在被停止期间发送至服务端的消息将会被自动跳过，请谨慎选择。</li><li>广播模式下，每条消息都会被大量的客户端重复处理，因此推荐尽可能使用集群模式。</li></ul> 
+<h5><a id="_102"></a>示例</h5> 
+<p><img src="https://images2.imgbox.com/32/a8/Wt1tF59y_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="_104"></a>延时消息</h4> 
+<h5><a id="_105"></a>介绍</h5> 
+<ul><li>延时消息(延迟消息)用于指定消息发送到消息队列 RocketMQ 版的服务端后，延时一段时间才被投递到客户端进行消费(例如 3 秒后才被消费)，适用于解决一些消息生产和消费有时间窗口要求的场景，或者通过消息触发延迟任务的场景，类似于延迟队列。</li><li>场景案例：用户下了一个订单之后，需要在指定时间内(例如30分钟)进行支付，在到期之前可以发送一个消息提醒用户进行支付。</li><li>实现这类需求通常有两种方式： 
+  <ul><li>轮询定时任务：给定周期内扫描所有未支付的订单，查看时间是否到期。</li><li>延时消息：订单创建的时候发送一条 N 分钟到期的信息，一旦消息消费后便可判断订单是否可以取消。</li></ul> </li><li>一些消息中间件的Broker端内置了延迟消息支持的能力，核心实现思路都是一样：<strong>将延迟消息通过一个临时存储进行暂存，到期后才投递到目标Topic中</strong>。如下图所示：</li></ul> 
+<p><img src="https://images2.imgbox.com/d7/5c/b7sYz7El_o.png" alt="在这里插入图片描述"></p> 
+<blockquote> 
+ <p>步骤说明：</p> 
+</blockquote> 
+<ul><li>producer要将一个延迟消息发送到某个Topic中。</li><li>Broker判断这是一个延迟消息后，将其通过临时存储进行暂存。</li><li>Broker内部通过一个延迟服务(delay service)检查消息是否到期，将到期的消息投递到目标Topic中。这个的延迟服务名字为delay service，不同消息中间件的延迟服务模块名称可能不同。</li><li>消费者消费目标topic中的延迟投递的消息。</li><li><strong>显然，临时存储模块和延迟服务模块，是延迟消息实现的关键</strong>。上图中，临时存储和延迟服务都是在Broker内部实现，对业务透明。</li></ul> 
+<h5><a id="_120"></a>第三方存储选型要求</h5> 
+<blockquote> 
+ <p>对于第三方临时存储，其需要满足以下几个特点：</p> 
+</blockquote> 
+<ul><li><strong>高性能</strong>：写入延迟要低，MQ的一个重要作用是削峰填谷，在选择临时存储时，写入性能必须要高，关系型数据库通常不满足需求。</li><li><strong>高可靠</strong>：延迟消息写入后，不能丢失，需要进行持久化，并进行备份。</li><li><strong>支持排序</strong>：支持按照某个字段对消息进行排序，对于延迟消息需要按照时间进行排序。普通消息通常先发送的会被先消费，延迟消息与普通消息不同，需要进行排序。例如先发一条延迟10s的消息，再发一条延迟5s的消息，那么后发送的消息需要被先消费。</li><li><strong>支持⻓时间保存</strong>：一些业务的延迟消息，需要延迟几个月，甚至更⻓，所以延迟消息必须能⻓时间保留。不过通常不建议延迟太⻓时间，存储成本比较大，且业务逻辑可能已经发生变化，已经不需要消费这些消息。</li><li>例如，滴滴开源的消息中间件DDMQ，底层消息中间件的基础上加了一层代理，独立部署延迟服务模块，使用<strong>rocksdb</strong>进行临时存储。rocksdb是一个高性能的KV存储，并支持排序。</li><li>此时对于延迟消息的流转如下图所示：</li></ul> 
+<p><img src="https://images2.imgbox.com/a0/0d/AfmPGQP9_o.png" alt="在这里插入图片描述"></p> 
+<blockquote> 
+ <p>步骤说明：</p> 
+</blockquote> 
+<ul><li>生产者将发送给producer proxy，proxy判断是延迟消息，将其投递到一个缓冲Topic中。</li><li>delay service启动消费者，用于从缓冲topic中消费延迟消息，以时间为key，存储到rocksdb中。</li><li>delay service判断消息到期后，将其投递到目标Topic中。</li><li>消费者消费目标topic中的数据。</li><li>这种方式的好处是，因为delay service的延迟投递能力是独立于broker实现的，不需要对broker做任何改造，对于任意MQ类型都可以提供支持延迟消息的能力，例如DDMQ对RocketMQ、Kafka都提供了秒级精度的延迟消息投递能力，RocketMQ虽然支持延迟消息，但不支持秒级精度。</li></ul> 
+<h5><a id="RocketMQ_136"></a>RocketMQ中的延时消息</h5> 
+<ul><li>注意：<strong>RocketMQ不支持任意时间的延时</strong>，只支持以下几个固定的延时等级</li></ul> 
+<pre><code class="prism language-java"><span class="token class-name">String</span> messageDelayLevel <span class="token operator">=</span> <span class="token string">"1s 5s 10s 30s 1m 2m 3m 4m 5m 6m 7m 8m 9m 10m 20m 30m 1h 2h"</span><span class="token punctuation">;</span>
+</code></pre> 
+<ul><li>RocketMQ的延迟等级可以进行修改，以满足自己的业务需求，可以修改/添加新的level。</li><li>例如：你想支持1天的延迟，修改最后一个level的值为1d，这个时候依然是18个level；也可以增加一个1d，这个时候总共就有19个level。</li></ul> 
+<pre><code class="prism language-java"><span class="token class-name">String</span> messageDelayLevel <span class="token operator">=</span> <span class="token string">"1s 5s 10s 30s 1m 2m 3m 4m 5m 6m 7m 8m 9m 10m 20m 30m 1h 2h 1d"</span><span class="token punctuation">;</span>
+</code></pre> 
+<h6><a id="_146"></a>实现原理</h6> 
+<ul><li>延迟队列的核心思路是：所有的延迟消息由producer发出之后，都会存放到同一个topic(<strong>SCHEDULE_TOPIC_XXXX</strong>)下，根据延迟level的个数，创建对应数量的队列，也就是说18个level对应了18个队列。注意，这并不是说这个内部主题只会有18个队列，因为Broker通常是集群模式部署的，因此每个节点都有18个队列。不同的延迟级别会对应不同的队列序号，当延迟时间到之后，由定时线程读取转换为普通的消息存入真实指定的topic下，此时对于consumer端此消息才可⻅，从而被consumer消费。</li><li>生产者在发送延迟消息非常简单，只需要设置一个<strong>延迟级别</strong>即可，注意不是具体的延迟时间，如：</li></ul> 
+<pre><code class="prism language-java"><span class="token class-name">Message</span> msg <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Message</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+msg<span class="token punctuation">.</span><span class="token function">setTopic</span><span class="token punctuation">(</span><span class="token string">"TopicA"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+msg<span class="token punctuation">.</span><span class="token function">setTags</span><span class="token punctuation">(</span><span class="token string">"Tag"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+msg<span class="token punctuation">.</span><span class="token function">setBody</span><span class="token punctuation">(</span><span class="token string">"this is a delay message"</span><span class="token punctuation">.</span><span class="token function">getBytes</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">// 设置延迟level为5，对应延迟1分钟</span>
+msg<span class="token punctuation">.</span><span class="token function">setDelayTimeLevel</span><span class="token punctuation">(</span><span class="token number">5</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+producer<span class="token punctuation">.</span><span class="token function">send</span><span class="token punctuation">(</span>msg<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<ul><li>延迟消息在RocketMQ Broker端的流转如下图所示：</li></ul> 
+<p><img src="https://images2.imgbox.com/40/e0/Xzk8wkAu_o.png" alt="在这里插入图片描述"></p> 
+<blockquote> 
+ <p>步骤说明：</p> 
+</blockquote> 
+<ul><li>① 修改消息Topic名称和队列信息</li><li>② 转发消息到延迟主题SCHEDULE_TOPIC_XXXX的CosumeQueue中</li><li>③ 延迟服务消费SCHEDULE_TOPIC_XXXX消息</li><li>④ 将信息重新存储到CommitLog中</li><li>⑤ 将消息投递到目标Topic中</li><li>⑥ 消费者消费目标topic中的数据</li></ul> 
+<h6><a id="Topic_168"></a>第一步:修改消息Topic名称和队列信息</h6> 
+<ul><li>RocketMQ Broker端在存储生产者写入的消息时，首先都会将其写入到CommitLog中。之后根据消息中的Topic信息和队列信息，将其转发到目标Topic的指定队列(ConsumeQueue)中。</li><li>由于消息一旦存储到ConsumeQueue中，消费者就能消费到，而延迟消息不能被立即消费，所以这里将Topic的名称修改为SCHEDULE_TOPIC_XXXX，并根据延迟级别确定要投递到哪个队列下。</li><li>同时，还会将消息原来要发送到的目标Topic和队列信息存储到消息的属性中。相关源码如下所示：</li></ul> 
+<pre><code class="prism language-java"><span class="token comment">// org.apache.rocketmq.store.CommitLog#putMessage</span>
+<span class="token keyword">public</span> <span class="token class-name">PutMessageResult</span> <span class="token function">putMessage</span><span class="token punctuation">(</span><span class="token keyword">final</span> <span class="token class-name">MessageExtBrokerInner</span> msg<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// ...</span>
+        <span class="token comment">// Delay Delivery</span>
+        <span class="token comment">// 如果是延迟消息</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>msg<span class="token punctuation">.</span><span class="token function">getDelayTimeLevel</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        	<span class="token comment">// 如果设置的级别超过了最大级别，重置延迟级别</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>msg<span class="token punctuation">.</span><span class="token function">getDelayTimeLevel</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token keyword">this</span><span class="token punctuation">.</span>defaultMessageStore<span class="token punctuation">.</span><span class="token function">getScheduleMessageService</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getMaxDelayLevel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                msg<span class="token punctuation">.</span><span class="token function">setDelayTimeLevel</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span>defaultMessageStore<span class="token punctuation">.</span><span class="token function">getScheduleMessageService</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getMaxDelayLevel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+			<span class="token comment">// 修改Topic的投递目标为内部主题SCHEDULE_TOPIC_XXXX</span>
+            topic <span class="token operator">=</span> <span class="token class-name">TopicValidator</span><span class="token punctuation">.</span>RMQ_SYS_SCHEDULE_TOPIC<span class="token punctuation">;</span>
+            <span class="token comment">// 根据delayLevel，确定将消息投递到SCHEDULE_TOPIC_XXXX内部的哪个队列中</span>
+            queueId <span class="token operator">=</span> <span class="token class-name">ScheduleMessageService</span><span class="token punctuation">.</span><span class="token function">delayLevel2QueueId</span><span class="token punctuation">(</span>msg<span class="token punctuation">.</span><span class="token function">getDelayTimeLevel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token comment">// Backup real topic, queueId</span>
+            <span class="token comment">// 记录原始topic, queueId</span>
+            <span class="token class-name">MessageAccessor</span><span class="token punctuation">.</span><span class="token function">putProperty</span><span class="token punctuation">(</span>msg<span class="token punctuation">,</span> <span class="token class-name">MessageConst</span><span class="token punctuation">.</span>PROPERTY_REAL_TOPIC<span class="token punctuation">,</span> msg<span class="token punctuation">.</span><span class="token function">getTopic</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token class-name">MessageAccessor</span><span class="token punctuation">.</span><span class="token function">putProperty</span><span class="token punctuation">(</span>msg<span class="token punctuation">,</span> <span class="token class-name">MessageConst</span><span class="token punctuation">.</span>PROPERTY_REAL_QUEUE_ID<span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">.</span><span class="token function">valueOf</span><span class="token punctuation">(</span>msg<span class="token punctuation">.</span><span class="token function">getQueueId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            msg<span class="token punctuation">.</span><span class="token function">setPropertiesString</span><span class="token punctuation">(</span><span class="token class-name">MessageDecoder</span><span class="token punctuation">.</span><span class="token function">messageProperties2String</span><span class="token punctuation">(</span>msg<span class="token punctuation">.</span><span class="token function">getProperties</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			
+			<span class="token comment">// 更新消息投递目标为SCHEDULE_TOPIC_XXXX和queueId</span>
+            msg<span class="token punctuation">.</span><span class="token function">setTopic</span><span class="token punctuation">(</span>topic<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            msg<span class="token punctuation">.</span><span class="token function">setQueueId</span><span class="token punctuation">(</span>queueId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+	<span class="token comment">// ...</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h6><a id="CosumeQueue_202"></a>第二步:转发消息到延迟主题的CosumeQueue中</h6> 
+<ul><li>CommitLog中的消息转发到CosumeQueue中是异步进行的。在转发过程中，会对延迟消息进行特殊处理，主要是计算这条延迟消息需要在什么时候进行投递。</li></ul> 
+<pre><code class="prism language-xml">投递时间 = 消息存储时间(storeTimestamp) + 延迟级别对应的时间
+</code></pre> 
+<ul><li>需要注意的是，会将计算出的投递时间当做消息Tag的哈希值存储到CosumeQueue中，CosumeQueue单个存储单元组成结构如下图所示：</li></ul> 
+<p><img src="https://images2.imgbox.com/16/79/XqhCTn4t_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>Commit Log Offset：记录在CommitLog中的位置。</li><li>Size：记录消息的大小。</li><li>Message Tag HashCode：记录消息Tag的哈希值，用于消息过滤。<strong>特别的，对于延迟消息，这个字段记录的是消息的投递时间戳</strong>。这也是为什么java中hashCode方法返回一个int型，只占用4个字节，而这里Message Tag HashCode字段确设计成8个字节的原因。</li><li>相关源码如下所示：</li></ul> 
+<pre><code class="prism language-java"><span class="token comment">// CommitLog#checkMessageAndReturnSize</span>
+<span class="token keyword">public</span> <span class="token class-name">DispatchRequest</span> <span class="token function">checkMessageAndReturnSize</span><span class="token punctuation">(</span><span class="token class-name"><span class="token namespace">java<span class="token punctuation">.</span>nio<span class="token punctuation">.</span></span>ByteBuffer</span> byteBuffer<span class="token punctuation">,</span> <span class="token keyword">final</span> <span class="token keyword">boolean</span> checkCRC<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">checkMessageAndReturnSize</span><span class="token punctuation">(</span>byteBuffer<span class="token punctuation">,</span> checkCRC<span class="token punctuation">,</span> <span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+    ↓↓↓↓↓
+<span class="token keyword">public</span> <span class="token class-name">DispatchRequest</span> <span class="token function">checkMessageAndReturnSize</span><span class="token punctuation">(</span><span class="token class-name"><span class="token namespace">java<span class="token punctuation">.</span>nio<span class="token punctuation">.</span></span>ByteBuffer</span> byteBuffer<span class="token punctuation">,</span> <span class="token keyword">final</span> <span class="token keyword">boolean</span> checkCRC<span class="token punctuation">,</span>
+    <span class="token keyword">final</span> <span class="token keyword">boolean</span> readBody<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">// ...</span>
+            <span class="token comment">// Timing message processing</span>
+            <span class="token punctuation">{<!-- --></span>
+            	<span class="token comment">// 如果消息需要投递到延迟主题SCHEDULE_TOPIC_XXX中</span>
+                <span class="token class-name">String</span> t <span class="token operator">=</span> propertiesMap<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token class-name">MessageConst</span><span class="token punctuation">.</span>PROPERTY_DELAY_TIME_LEVEL<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token class-name">TopicValidator</span><span class="token punctuation">.</span>RMQ_SYS_SCHEDULE_TOPIC<span class="token punctuation">.</span><span class="token function">equals</span><span class="token punctuation">(</span>topic<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> t <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token keyword">int</span> delayLevel <span class="token operator">=</span> <span class="token class-name">Integer</span><span class="token punctuation">.</span><span class="token function">parseInt</span><span class="token punctuation">(</span>t<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span>delayLevel <span class="token operator">&gt;</span> <span class="token keyword">this</span><span class="token punctuation">.</span>defaultMessageStore<span class="token punctuation">.</span><span class="token function">getScheduleMessageService</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getMaxDelayLevel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        delayLevel <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>defaultMessageStore<span class="token punctuation">.</span><span class="token function">getScheduleMessageService</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getMaxDelayLevel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+					<span class="token comment">// 如果延迟级别大于0，计算目标投递时间，并将其当做tag哈希值</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span>delayLevel <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        tagsCode <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>defaultMessageStore<span class="token punctuation">.</span><span class="token function">getScheduleMessageService</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">computeDeliverTimestamp</span><span class="token punctuation">(</span>delayLevel<span class="token punctuation">,</span>
+                            storeTimestamp<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+	<span class="token comment">// ...</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h6><a id="SCHEDULE_TOPIC_XXXX_244"></a>第三步:延迟服务消费SCHEDULE_TOPIC_XXXX消息</h6> 
+<ul><li>Broker内部有一个ScheduleMessageService类，其充当延迟服务，消费SCHEDULE_TOPIC_XXXX中的消息，并投递到目标Topic中。</li><li>ScheduleMessageService在启动时，其会创建一个定时器Timer，并根据延迟级别的个数，启动对应数量的TimerTask，每个TimerTask负责一个延迟级别的消费与投递。</li><li>相关源码如下所示：</li></ul> 
+<pre><code class="prism language-java"><span class="token comment">// ScheduleMessageService#start</span>
+<span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">start</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>started<span class="token punctuation">.</span><span class="token function">compareAndSet</span><span class="token punctuation">(</span><span class="token boolean">false</span><span class="token punctuation">,</span> <span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// 1、创建定时器Timer</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>timer <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Timer</span><span class="token punctuation">(</span><span class="token string">"ScheduleMessageTimerThread"</span><span class="token punctuation">,</span> <span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+         <span class="token comment">// 2、针对每个延迟级别，创建一个TimerTask</span>
+         <span class="token comment">// 2.1、迭代每个延迟级别:delayLevelTable是一个Map记录了每个延迟级别对应的延迟时间</span>
+         <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">Map<span class="token punctuation">.</span>Entry</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Integer</span><span class="token punctuation">,</span> <span class="token class-name">Long</span><span class="token punctuation">&gt;</span></span> entry <span class="token operator">:</span> <span class="token keyword">this</span><span class="token punctuation">.</span>delayLevelTable<span class="token punctuation">.</span><span class="token function">entrySet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+             <span class="token comment">// 2.2、获得每个每个延迟级别的level和对应的延迟时间</span>
+             <span class="token class-name">Integer</span> level <span class="token operator">=</span> entry<span class="token punctuation">.</span><span class="token function">getKey</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+             <span class="token class-name">Long</span> timeDelay <span class="token operator">=</span> entry<span class="token punctuation">.</span><span class="token function">getValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+             <span class="token class-name">Long</span> offset <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>offsetTable<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>level<span class="token punctuation">)</span><span class="token punctuation">;</span>
+             <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">null</span> <span class="token operator">==</span> offset<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                 offset <span class="token operator">=</span> <span class="token number">0L</span><span class="token punctuation">;</span>
+             <span class="token punctuation">}</span>
+             <span class="token comment">// 2.3、针对每个级别创建一个对应的TimerTask</span>
+             <span class="token keyword">if</span> <span class="token punctuation">(</span>timeDelay <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                 <span class="token keyword">this</span><span class="token punctuation">.</span>timer<span class="token punctuation">.</span><span class="token function">schedule</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">DeliverDelayedMessageTimerTask</span><span class="token punctuation">(</span>level<span class="token punctuation">,</span> offset<span class="token punctuation">)</span><span class="token punctuation">,</span> FIRST_DELAY_TIME<span class="token punctuation">)</span><span class="token punctuation">;</span>
+             <span class="token punctuation">}</span>
+         <span class="token punctuation">}</span>
+		 <span class="token comment">// ...</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>需要注意的是，每个TimeTask在检查消息是否到期时，首先检查对应队列中尚未投递第一条消息，如果这条消息没到期，那么之后的消息都不会检查。如果到期了，则进行投递，并检查之后的消息是否到期。</li></ul> 
+<h6><a id="CommitLog_274"></a>第四步:将信息重新存储到CommitLog中</h6> 
+<ul><li>在将消息到期后，需要投递到目标Topic。由于在第一步已经记录了原来的Topic和队列信息，因此这里重新设置，再存储到CommitLog即可。此外，由于之前Message Tag HashCode字段存储的是消息的投递时间，这里需要重新计算tag的哈希值后再存储。</li><li>相关源码如下所示：</li></ul> 
+<pre><code class="prism language-java"><span class="token comment">// DeliverDelayedMessageTimerTask#messageTimeup方法</span>
+<span class="token keyword">private</span> <span class="token class-name">MessageExtBrokerInner</span> <span class="token function">messageTimeup</span><span class="token punctuation">(</span><span class="token class-name">MessageExt</span> msgExt<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token class-name">MessageExtBrokerInner</span> msgInner <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">MessageExtBrokerInner</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// ...</span>
+
+    <span class="token class-name">TopicFilterType</span> topicFilterType <span class="token operator">=</span> <span class="token class-name">MessageExt</span><span class="token punctuation">.</span><span class="token function">parseTopicFilterType</span><span class="token punctuation">(</span>msgInner<span class="token punctuation">.</span><span class="token function">getSysFlag</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 由于之前Message Tag HashCode字段存储的是消息的投递时间，这里需要重新计算tag的哈希值后再存储。</span>
+    <span class="token keyword">long</span> tagsCodeValue <span class="token operator">=</span> <span class="token class-name">MessageExtBrokerInner</span><span class="token punctuation">.</span><span class="token function">tagsString2tagsCode</span><span class="token punctuation">(</span>topicFilterType<span class="token punctuation">,</span> msgInner<span class="token punctuation">.</span><span class="token function">getTags</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    msgInner<span class="token punctuation">.</span><span class="token function">setTagsCode</span><span class="token punctuation">(</span>tagsCodeValue<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// ...</span>
+    <span class="token keyword">return</span> msgInner<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h6><a id="_291"></a>延迟消息存放</h6> 
+<ul><li>延迟消息存放的结构如下图所示：</li></ul> 
+<p><img src="https://images2.imgbox.com/8e/ca/avgGSlLR_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>其中不同的延迟级别放在不同的队列序号下(queueId=delayLevel-1)。每一个延迟级别对应的延迟消息转换为普通消息的位置标识存放在~/store/config/delayOffset.json文件内。</li><li>key为对应的延迟级别，value对应不同延迟级别转换为普通消息的offset值。</li></ul> 
+<pre><code class="prism language-json"><span class="token punctuation">{<!-- --></span>
+	<span class="token string">"offsetTable"</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span><span class="token number">3</span><span class="token operator">:</span><span class="token number">202</span><span class="token punctuation">,</span> <span class="token number">4</span><span class="token operator">:</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">5</span><span class="token operator">:</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">6</span><span class="token operator">:</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">7</span><span class="token operator">:</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">8</span><span class="token operator">:</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">9</span><span class="token operator">:</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">10</span><span class="token operator">:</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">11</span><span class="token operator">:</span><span class="token number">2</span><span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>发送延时消息：</li></ul> 
+<p><img src="https://images2.imgbox.com/98/50/7N4e9UhR_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>消息延时消息：</li></ul> 
+<p><img src="https://images2.imgbox.com/72/e7/OOIUjZYg_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="_308"></a>批量消息</h4> 
+<ul><li>批量发送可以提高发送性能，但有一定的限制： 
+  <ul><li>topic 相同。</li><li>waitStoreMsgOK 相同 (首先我们建设消息的iswaitstoremsgok=true(默认为true), 如果没有异常,我们将始终收到"OK"，org.apache.rocketmq.common.message.Message#isWaitStoreMsgOK)。</li><li>不支持延时发送。</li><li>一批消息的大小不能大于 1M。</li></ul> </li><li>大小限制需要特殊注意，因为消息是动态的，不注意的话就可能超限，就会报错。</li></ul> 
+<p><img src="https://images2.imgbox.com/5f/4f/Yd3mTfE9_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="_317"></a>过滤消息</h4> 
+<p><img src="https://images2.imgbox.com/ad/e0/jbamtTDi_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>消息过滤包括<strong>基于表达式过滤</strong>与<strong>基于类模式</strong>两种过滤模式。其中<strong>表达式过滤又分为TAG和SQL92模式</strong>。</li></ul> 
+<h5><a id="TAG_320"></a>TAG模式过滤</h5> 
+<ul><li>发送消息时我们会为每一条消息设置TAG标签，同一大类中的消息放在一个主题TOPIC下，但是如果进行分类我们则可以根据TAG进行分类，每一类消费者可能不是关系某个主题下的所有消息，我们就可以通过TAG进行过滤，订阅关注的某一类数据。</li></ul> 
+<p><img src="https://images2.imgbox.com/51/a8/hbqEY6lm_o.png" alt="在这里插入图片描述"></p> 
+<h5><a id="SQL_324"></a>SQL表达式过滤</h5> 
+<ul><li>SQL92表达式消息过滤，是通过<strong>消息的属性</strong>运行SQL过滤表达式进行条件匹配，消息发送时需要设置用户的属性putUserProperty方法设置属性。</li></ul> 
+<h6><a id="_326"></a>支持的语法</h6> 
+<ul><li>数值比较，如：&gt;、&gt;=、&lt;、&lt;=、BETWEEN、=</li><li>字符比较，如：=、&lt;&gt;、IN</li><li>IS NULL or IS NOT NULL</li><li>逻辑连接符：AND、OR、NOT</li></ul> 
+<h6><a id="_331"></a>支持的类型</h6> 
+<ul><li>数值型，如：123、3.1415</li><li>字符型，如：‘abc’ 必须单引号</li><li>NULL、特殊常数</li><li>布尔值：TRUE、FALSE</li></ul> 
+<p><img src="https://images2.imgbox.com/d3/2c/ZSZc1rXl_o.png" alt="在这里插入图片描述"></p> 
+<h5><a id="420_338"></a>类过滤模式(基于4.2.0版本)</h5> 
+<ul><li>RocketMQ通过定义消息过滤类的接口实现消息过滤。</li></ul> 
+<h4><a id="_340"></a>事务消息</h4> 
+<ul><li>消息队列 RocketMQ 版提供的分布式事务消息适用于所有对数据最终一致性有强需求的场景。</li></ul> 
+<h5><a id="_342"></a>概念介绍</h5> 
+<ul><li>事务消息：消息队列 RocketMQ 版提供类似 X/Open XA 的分布式事务功能，通过消息队列 RocketMQ 事务消息能达到分布式事务的最终一致。</li><li><strong>半事务消息</strong>：暂不能投递的消息，发送方已经成功地将消息发送到了消息队列 RocketMQ 版服务端，但是服务端未收到生产者对该消息的二次确认，此时该消息被标记成“暂不能投递”状态，处于该种状态下的消息即半事务消息。</li><li>消息回查：由于网络闪断、生产者应用重启等原因，导致某条事务消息的二次确认丢失，消息队列 RocketMQ 版服务端通过扫描发现某条消息⻓期处于“半事务消息”时，需要主动向消息生产者询问该消息的最终状态(Commit 或是 Rollback)，该询问过程即消息回查。</li></ul> 
+<h5><a id="_346"></a>分布式事务消息的优势</h5> 
+<ul><li>消息队列 RocketMQ 版分布式事务消息不仅可以实现应用之间的解耦，又能保证数据的最终一致性。同时，传统的大事务可以被拆分为小事务，不仅能提升效率，还不会因为某一个关联应用的不可用导致整体回滚，从而最大限度保证核心系统的可用性。在极端情况下，如果关联的某一个应用始终无法处理成功，也只需对当前应用进行补偿或数据订正处理，而无需对整体业务进行回滚。</li></ul> 
+<p><img src="https://images2.imgbox.com/b1/d2/YnvUohG4_o.png" alt="在这里插入图片描述"></p> 
+<h5><a id="_350"></a>典型场景</h5> 
+<ul><li>在淘宝购物⻋下单时，涉及到购物⻋系统和交易系统，这两个系统之间的数据最终一致性可以通过分布式事务消息的异步处理实现。在这种场景下，交易系统是最为核心的系统，需要最大限度地保证下单成功。而购物⻋系统只需要订阅消息队列 RocketMQ 版的交易订单消息，做相应的业务处理，即可保证最终的数据一致性。</li></ul> 
+<h5><a id="_352"></a>交互流程</h5> 
+<ul><li>事务消息交互流程如下图所示<br> <img src="https://images2.imgbox.com/9c/75/F82Yemsz_o.png" alt="在这里插入图片描述"></li></ul> 
+<h6><a id="_355"></a>事务消息发送步骤</h6> 
+<ul><li>1、发送方将半事务消息发送至消息队列 RocketMQ 版服务端。</li><li>2、消息队列 RocketMQ 版服务端将消息持久化成功之后，向发送方返回 Ack 确认消息已经发送成功，此时消息为半事务消息。</li><li>3、发送方开始执行本地事务逻辑。</li><li>4、发送方根据本地事务执行结果向服务端提交二次确认（Commit 或是 Rollback），服务端收到 Commit 状态则将半事务消息标记为可投递，订阅方最终将收到该消息；服务端收到 Rollback 状态则删除半事务消息，订阅方将不会接受该消息。</li></ul> 
+<h6><a id="_360"></a>事务消息回查步骤</h6> 
+<ul><li>1、在断网或者是应用重启的特殊情况下，上述步骤 4 提交的二次确认最终未到达服务端，经过固定时间后服务端将对该消息发起消息回查。</li><li>2、发送方收到消息回查后，需要检查对应消息的本地事务执行的最终结果。</li><li>3、发送方根据检查得到的本地事务的最终状态再次提交二次确认，服务端仍按照步骤 4 对半事务消息进行操作。</li></ul> 
+<h5><a id="_364"></a>注意事项</h5> 
+<ul><li>事务消息不支持延时消息和批量消息。</li><li>为了避免单个消息被检查太多次而导致半队列消息累积，我们默认将单个消息的检查次数限制为15 次，但是用户可以通过 Broker 配置文件的 transactionCheckMax 参数来修改此限制。如果已经检查某条消息超过 N 次的话( N = transactionCheckMax ) 则 Broker 将丢弃此消息，并在默认情况下同时打印错误日志。用户可以通过重写 AbstractTransactionalMessageCheckListener 类来修改这个行为。</li><li>事务消息将在 Broker 配置文件中的参数 transactionTimeout 这样的特定时间⻓度之后被检查。当发送事务消息时，用户还可以通过设置用户属性 CHECK_IMMUNITY_TIME_IN_SECONDS 来改变这个限制，该参数优先于 transactionTimeout 参数。</li><li>事务性消息可能不止一次被检查或消费，做好幂等性的检查。</li><li>提交给用户的目标主题消息可能会失败，目前这依日志的记录而定。它的高可用性通过 RocketMQ 本身的高可用性机制来保证，如果希望确保事务消息不丢失、并且事务完整性得到保证，建议使用同步的双重写入机制。</li><li>事务消息的生产者 ID 不能与其他类型消息的生产者 ID 共享。与其他类型的消息不同，事务消息允许反向查询、MQ服务器能通过它们的生产者 ID 查询到消费者。</li></ul> 
+<h5><a id="_371"></a>示例</h5> 
+<ul><li>要使用RocketMQ的事务消息，要实现一个TransactionListener的接口，这个接口中有两个方法，如下：</li></ul> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">interface</span> <span class="token class-name">TransactionListener</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">/**
+     * When send transactional prepare(half) message succeed, this method will be invoked to execute local transaction.
+     * 执行本地事务
+     * @param msg Half(prepare) message
+     * @param arg Custom business parameter
+     * @return Transaction state
+     */</span>
+    <span class="token class-name">LocalTransactionState</span> <span class="token function">executeLocalTransaction</span><span class="token punctuation">(</span><span class="token keyword">final</span> <span class="token class-name">Message</span> msg<span class="token punctuation">,</span> <span class="token keyword">final</span> <span class="token class-name">Object</span> arg<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/**
+     * When no response to prepare(half) message. broker will send check message to check the transaction status, and this
+     * method will be invoked to get local transaction status.
+     * 消息回查后，需要检查对应消息的本地事务执行的最终结果
+     * @param msg Check message
+     * @return Transaction state
+     */</span>
+    <span class="token class-name">LocalTransactionState</span> <span class="token function">checkLocalTransaction</span><span class="token punctuation">(</span><span class="token keyword">final</span> <span class="token class-name">MessageExt</span> msg<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>RocketMQ的事务消息是基于两阶段提交实现的，也就是说消息有两个状态，prepared和commited。当消息执行完send方法后，进入的prepared状态，进入prepared状态以后，就要执行executeLocalTransaction方法，这个方法的返回值有3个，也决定着这个消息的命运： 
+  <ul><li>LocalTransactionState.COMMIT_MESSAGE：提交消息，这个消息由prepared状态进入到commited状态，消费者可以消费这个消息。</li><li>LocalTransactionState.ROLLBACK_MESSAGE：回滚，这个消息将被删除，消费者不能消费这个消息。</li><li>LocalTransactionState.UNKNOW：未知，这个状态有点意思，如果返回这个状态，这个消息既不提交，也不回滚，还是保持prepared状态，而最终决定这个消息命运的，是checkLocalTransaction这个方法。</li></ul> </li><li>当executeLocalTransaction方法返回UNKNOW以后，RocketMQ会每隔一段时间调用一次checkLocalTransaction，这个方法的返回值决定着这个消息的最终归宿。那么checkLocalTransaction这个方法<strong>多⻓时间调用一次呢</strong>?我们在BrokerConfig类中可以找到：</li></ul> 
+<pre><code class="prism language-java"><span class="token comment">/**
+ * Transaction message check interval.
+ */</span>
+<span class="token annotation punctuation">@ImportantField</span>
+<span class="token keyword">private</span> <span class="token keyword">long</span> transactionCheckInterval <span class="token operator">=</span> <span class="token number">60</span> <span class="token operator">*</span> <span class="token number">1000</span><span class="token punctuation">;</span>
+</code></pre> 
+<ul><li>这个值是在brokder.conf中配置的，默认值是60*1000，也就是1分钟。那么<strong>会检查多少次呢</strong>?如果每次都返回UNKNOW，也不能无休止的检查吧，我们在BrokerConfig类中可以找到：</li></ul> 
+<pre><code class="prism language-java"><span class="token comment">/**
+ *The maximum number of times the message was checked, if exceed this value, this message will be discarded.
+ * 这个是检查的最大次数，超过这个次数，如果还返回UNKNOW，这个消息将被删除。
+ */</span>
+<span class="token annotation punctuation">@ImportantField</span>
+<span class="token keyword">private</span> <span class="token keyword">int</span> transactionCheckMax <span class="token operator">=</span> <span class="token number">15</span><span class="token punctuation">;</span>
+</code></pre> 
+<ul><li>事务消息中，TransactionListener这个最核心的概念介绍完后，我们看看代码如何实现：</li></ul> 
+<p><img src="https://images2.imgbox.com/87/b6/CMy6QDpT_o.png" alt="在这里插入图片描述"></p> 
+<p><img src="https://images2.imgbox.com/dc/46/XMf11LXJ_o.png" alt="在这里插入图片描述"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/282ddf0110dcdea1253f0cde26f196b1/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">CNN基础知识笔记</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/43c51535009c9552743e3f026dd3c792/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">squeezenet论文详解</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

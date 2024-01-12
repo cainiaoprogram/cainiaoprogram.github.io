@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Linux VRF(Virtual Routing Forwarding)的原理和实现 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Linux VRF(Virtual Routing Forwarding)的原理和实现" />
+<meta property="og:description" content="VRF顾名思义就是虚拟路由转发(Virtual Routing Forwarding)，简单点来讲，就是把一台路由器当多台虚拟路由器来用，这种技术在二层就是VLan技术，或者更加通用的虚拟交换机(在多网卡的Linux BOX上，创建多个bridge设备并把不同的网卡加入其中，就是一台携带多个虚拟交换机的物理交换机)，我把二层的方案列如下：
+那么，三层的VRF自然而然就是下面
+现在考虑一个非常常见的场景，即OpenVPN典型的多处理拓扑，在一台服务器上会构建超级多的TAP网卡，每个TAP服务一个特定的VPN客户端，有了VRF的支撑后，不同的VPN节点便可以使用相同的IP网段了，所要做的仅仅是将不同的TAP网卡置入不同的VRF域即可。
+大致明白了VRF的原理之后，我们来看一下VRF和策略路由的关系。
+我们已经知道VRF是一台物理路由器当多台虚拟路由器使用的，那么在这多台虚拟路由器之间就必须做到从物理层到三层路由的全部隔离(请注意，路由器是个三层设备)，而策略路由仅仅是路由表的隔离，甚至在仅仅使能了策略路由的路由器上，其二层三层之间的邻居表都是共享的。不过，策略路由确实是实现VRF的组件之一，它确实可以完成VRF的路由表隔离，本文的后续可以看到，Linux正是使用策略路由来实现VRF路由表隔离的。
+但是仅仅依靠策略路由机制是无法构建完整的VRF体系的，为了实现二层隔离以及网卡的隔离，还需要另外的技术，Linux的VRF实现中，采用了一种叫做L3mdev的技术来支持一种三层的虚拟网卡，利用这种虚拟网卡来隐藏网卡之间的可见性。
+(2). Linux VRF的使用和配置
+本节是例行的一节，如果你都没让系统跑起来就去研究它的原理，那势必是本末倒置的，研究技术的目的是更好地使用技术，所以必然要先用起来VRF。
+但我不准备在本节着墨太多，因此我选择了引用的方式。因为几个老外已经把使用和配置写得淋漓尽致了，这些东西，我再写也只是复制粘贴，显得毫无意义，因此我引用他们写好的东西，同时，作为补充，本节以下我写一些他们没有提到的东西。
+本节的重点就是下面几个链接，文章都不长，全部都是Step by step式的Howto，请把它们看完，你将学会Linux VRF的使用方法！
+Virtual Routing and Forwarding (VRF) Document：https://www.kernel.org/doc/Documentation/networking/vrf.txt
+Virtual Routing and Forwarding (VRF)：https://github.com/Mellanox/mlxsw/wiki/Virtual-Routing-and-Forwarding-(VRF)
+Lwn-net: VRF support：https://lwn.net/Articles/632522/
+Working with VRF on Linux：http://www.routereflector.com/2016/11/working-with-vrf-on-linux/
+Using VRFs with linux：https://andir.github.io/posts/linux-ip-vrf/
+(3). Linux VRF实现概览
+要说实现，虚拟网卡！本文提到的VRF也是基于虚拟网卡实现，每一个VRF域都表现为一个虚拟网卡，然后将具体的物理网卡(或者是别的虚拟网卡)添加到特定的VRF虚拟网卡，从而实现隔离：
+从OpenVPN使用Tap/Tun，IPSec VTI，到Bridge，Bonding，VLan，VXLan…这些在Linux系统中，全部基于虚拟网卡来实现！总体来讲，所有这些虚拟网卡，最终都要有真实的东西附着在上面，比如：
+附着字符设备在上面的：OpenVPN的Tun/Tap网卡
+附着物理网卡的：Bridge，Bonding，VLan
+附着加密引擎的：VTI
+可见，VRF虚拟网卡实现了三层逻辑，该三层逻辑就是VRF路由表隔离,具体的实现细节下面的小节会结合代码详述，本节只是给出概览。
+（4） Linux VRF的实现细节
+VRF实现两阶段：
+4.3内核~4.8内核：第一阶段基础版。基础设施不完善，需要外部策略路由规则配合才可用
+4.8内核以后：第二阶段完备版。引入了L3mdev，完善的基础设施支持
+数据包在被物理网卡ethX接收后，在netif_receive_skb中，会有rx_handler回调来截获数据包。VRF会注册一个rx_handler回调，该回调中将skb的dev字段替换为VRF虚拟网卡Device对象，这个处理是和Bridge处理一致的。接下来，系统依赖以下的事实来实现VRF逻辑：
+数据包skb的dev字段已经是VRF设备，表明数据包看起来是通过VRF X来接收的用户显式配置的Policy Routing的rule要求来自VRF X接收的数据包要查询X号路由表.
+这就实现了VRF逻辑。
+可以看到，用户需要自己来手工完成策略路由表的定向操作，这个配置是重点，没有它的话，便不会让VRF网卡接收的数据包查询策略路由表。
+这明显是一种很初级但可用(我的做法确实Low，但是就是可用！这是Linux的一种典型的文化)的做法。很自然的，Linux 4.8内核开始，VRF有了第二阶段的实现方法，省略了用户自己手工配置策略路由这个步骤。
+VRF第二阶段 L3mdev 机制" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/723f8031fc9a33d73a3c4b364ca26945/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-04-06T14:02:54+08:00" />
+<meta property="article:modified_time" content="2021-04-06T14:02:54+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Linux VRF(Virtual Routing Forwarding)的原理和实现</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>VRF顾名思义就是虚拟路由转发(Virtual Routing Forwarding)，简单点来讲，就是把一台路由器当多台虚拟路由器来用，这种技术在二层就是VLan技术，或者更加通用的虚拟交换机(在多网卡的Linux BOX上，创建多个bridge设备并把不同的网卡加入其中，就是一台携带多个虚拟交换机的物理交换机)，我把二层的方案列如下：<br> <img src="https://images2.imgbox.com/e7/94/VzBDsgLi_o.png" alt="在这里插入图片描述"><br> 那么，三层的VRF自然而然就是下面</p> 
+<p><img src="https://images2.imgbox.com/23/a9/gyYU3DcC_o.png" alt="在这里插入图片描述"><br> 现在考虑一个非常常见的场景，即OpenVPN典型的多处理拓扑，在一台服务器上会构建超级多的TAP网卡，每个TAP服务一个特定的VPN客户端，有了VRF的支撑后，不同的VPN节点便可以使用相同的IP网段了，所要做的仅仅是将不同的TAP网卡置入不同的VRF域即可。</p> 
+<p>大致明白了VRF的原理之后，我们来看一下VRF和策略路由的关系。<br>    我们已经知道VRF是一台物理路由器当多台虚拟路由器使用的，那么在这多台虚拟路由器之间就必须做到从物理层到三层路由的全部隔离(请注意，路由器是个三层设备)，而策略路由仅仅是路由表的隔离，甚至在仅仅使能了策略路由的路由器上，其二层三层之间的邻居表都是共享的。不过，策略路由确实是实现VRF的组件之一，它确实可以完成VRF的路由表隔离，本文的后续可以看到，Linux正是使用策略路由来实现VRF路由表隔离的。</p> 
+<p>但是仅仅依靠策略路由机制是无法构建完整的VRF体系的，为了实现二层隔离以及网卡的隔离，还需要另外的技术，Linux的VRF实现中，采用了一种叫做L3mdev的技术来支持一种三层的虚拟网卡，利用这种虚拟网卡来隐藏网卡之间的可见性。</p> 
+<p>(2). Linux VRF的使用和配置<br> 本节是例行的一节，如果你都没让系统跑起来就去研究它的原理，那势必是本末倒置的，研究技术的目的是更好地使用技术，所以必然要先用起来VRF。<br>    但我不准备在本节着墨太多，因此我选择了引用的方式。因为几个老外已经把使用和配置写得淋漓尽致了，这些东西，我再写也只是复制粘贴，显得毫无意义，因此我引用他们写好的东西，同时，作为补充，本节以下我写一些他们没有提到的东西。<br>    本节的重点就是下面几个链接，文章都不长，全部都是Step by step式的Howto，请把它们看完，你将学会Linux VRF的使用方法！</p> 
+<p>Virtual Routing and Forwarding (VRF) Document：https://www.kernel.org/doc/Documentation/networking/vrf.txt<br> Virtual Routing and Forwarding (VRF)：https://github.com/Mellanox/mlxsw/wiki/Virtual-Routing-and-Forwarding-(VRF)<br> Lwn-net: VRF support：https://lwn.net/Articles/632522/<br> Working with VRF on Linux：http://www.routereflector.com/2016/11/working-with-vrf-on-linux/<br> Using VRFs with linux：https://andir.github.io/posts/linux-ip-vrf/</p> 
+<p>(3). Linux VRF实现概览<br> 要说实现，虚拟网卡！本文提到的VRF也是基于虚拟网卡实现，每一个VRF域都表现为一个虚拟网卡，然后将具体的物理网卡(或者是别的虚拟网卡)添加到特定的VRF虚拟网卡，从而实现隔离：<br> <img src="https://images2.imgbox.com/24/05/MZbV6g5X_o.png" alt="在这里插入图片描述"><br> 从OpenVPN使用Tap/Tun，IPSec VTI，到Bridge，Bonding，VLan，VXLan…这些在Linux系统中，全部基于虚拟网卡来实现！总体来讲，所有这些虚拟网卡，最终都要有真实的东西附着在上面，比如：</p> 
+<p>附着字符设备在上面的：OpenVPN的Tun/Tap网卡<br> 附着物理网卡的：Bridge，Bonding，VLan<br> 附着加密引擎的：VTI</p> 
+<p>可见，VRF虚拟网卡实现了三层逻辑，该三层逻辑就是VRF路由表隔离,具体的实现细节下面的小节会结合代码详述，本节只是给出概览。</p> 
+<p>（4） Linux VRF的实现细节</p> 
+<p>VRF实现两阶段：<br> 4.3内核~4.8内核：第一阶段基础版。基础设施不完善，需要外部策略路由规则配合才可用<br> 4.8内核以后：第二阶段完备版。引入了L3mdev，完善的基础设施支持<br> <img src="https://images2.imgbox.com/a7/97/74kTSLgN_o.png" alt="在这里插入图片描述"><br> 数据包在被物理网卡ethX接收后，在netif_receive_skb中，会有rx_handler回调来截获数据包。VRF会注册一个rx_handler回调，该回调中将skb的dev字段替换为VRF虚拟网卡Device对象，这个处理是和Bridge处理一致的。接下来，系统依赖以下的事实来实现VRF逻辑：<br> 数据包skb的dev字段已经是VRF设备，表明数据包看起来是通过VRF X来接收的用户显式配置的Policy Routing的rule要求来自VRF X接收的数据包要查询X号路由表.<br> 这就实现了VRF逻辑。</p> 
+<p>可以看到，用户需要自己来手工完成策略路由表的定向操作，这个配置是重点，没有它的话，便不会让VRF网卡接收的数据包查询策略路由表。<br>   这明显是一种很初级但可用(我的做法确实Low，但是就是可用！这是Linux的一种典型的文化)的做法。很自然的，Linux 4.8内核开始，VRF有了第二阶段的实现方法，省略了用户自己手工配置策略路由这个步骤。</p> 
+<p>VRF第二阶段 L3mdev 机制<br> 在Linux 4.8内核以及以后，系统提供了一种更加优雅的做法，即引入了一个叫做L3mdev(Layer 3 master device)的机制，有了这个L3mdev机制，便省去了显式配置策略路由的必要。在创建一个VRF虚拟网卡的时候，系统便将其与一个特定的策略路由表自动关联，L3mdev机制基于这种关联来完成策略路由表的定向操作。<br>   这种L3mdev机制事实上相当于又一个3层的Hook，该Hook将感兴趣流量伪装成从一个虚拟网卡接收，用该虚拟网卡来实现一些特定于3层的处理逻辑，这种风格实际上只是利用了虚拟网卡，而并不是非用不可。  <img src="https://images2.imgbox.com/cb/9c/6FwQtxh6_o.png" alt="在这里插入图片描述"><br> 对比一下4.8内核之前的处理方法，就知道如今的L3mdev有多么高尚了，老的注册rx_handler回调的方法如下图：<br> <img src="https://images2.imgbox.com/10/40/NWjsoOqn_o.png" alt="在这里插入图片描述"><br> 现在，我给出采用新的L3mdev机制的VRF实现框图(请与老的rx_handler回调方式做对比)：<br> <img src="https://images2.imgbox.com/ea/ee/HhMKVfvL_o.png" alt="在这里插入图片描述"><br> 以上就是VRF实现的总体架构了，接下来我会给出一些细节，在分析这些细节之前，我先将VRF的实现分成了两个部分：</p> 
+<p>控制路径部分<br> 这部分主要控制VRF虚拟网卡的创建，策略路由表的关联等。<br> 数据路径部分<br> 这部分主要描述数据时如何通过VRF路由的。</p> 
+<p>(5). 控制路径的实现逻辑<br> 当我们创建了一个VRF域的时候，发生了什么？我想下图是可以解释的：<br> <img src="https://images2.imgbox.com/8a/c5/LrKLfTFU_o.png" alt="在这里插入图片描述"><br> （6）. 数据路径的实现逻辑<br> 以下(即Linux 4.8及以后的VRF内核实现)来用两个情景分析的方式阐述VRF的实现，通过这两个情景分析，基本上VRF的实现也就了然于胸了。(如果我这里的论述显得晦涩，那就权当是提纲吧，这部分代码很简单，自己走读一下即可)</p> 
+<p>从独立的物理网卡，比如eth0收到数据包，依次经过网卡驱动程序，netif_receive_skb，ip_rcv等调用，直到ip_rcv_finish被调用之前，VRF的逻辑和非VRF逻辑并没有任何不同支持，在ip_rcv_finish中，事情起了变化：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">ip_rcv_finish</span><span class="token punctuation">(</span><span class="token keyword">struct</span> net <span class="token operator">*</span>net<span class="token punctuation">,</span> <span class="token keyword">struct</span> sock <span class="token operator">*</span>sk<span class="token punctuation">,</span> <span class="token keyword">struct</span> sk_buff <span class="token operator">*</span>skb<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">const</span> <span class="token keyword">struct</span> iphdr <span class="token operator">*</span>iph <span class="token operator">=</span> <span class="token function">ip_hdr</span><span class="token punctuation">(</span>skb<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> rtable <span class="token operator">*</span>rt<span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> net_device <span class="token operator">*</span>dev <span class="token operator">=</span> skb<span class="token operator">-</span><span class="token operator">&gt;</span>dev<span class="token punctuation">;</span>
+ 
+    <span class="token comment">/* if ingress device is enslaved to an L3 master device pass the
+     * skb to its handler for processing
+     */</span>
+    <span class="token comment">// 这里增加了这么一个L3mdev调用，正是该L3mdev逻辑的处理，实现了VRF的核心：路由表使用与VRF域关联的策略路由表</span>
+    skb <span class="token operator">=</span> <span class="token function">l3mdev_ip_rcv</span><span class="token punctuation">(</span>skb<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 后面的逻辑直到定位路由表，VRF逻辑和常规逻辑没有任何不同</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>具体来讲，l3mdev_ip_rcv的逻辑非常简单，对于VRF而言，实现l3mdev_l3_rcv回调函数完成的功能仅仅是：<br> 将skb的dev字段重新修改为该dev的master设备，即该物理网卡附着的VRF虚拟网卡设备。</p> 
+<p>我们接下来看下上述的l3mdev_ip_rcv里做的关于skb的dev字段的修改在什么时候会用到。可以想象的是，当然是在定位策略路由表的时候用的咯，问题是，在代码层面这是怎么实现的。</p> 
+<p>我们跳过中间步骤，直达策略路由表的定位，在定位路由表的时候，实际上是在定位一个rule，系统会遍历所有的rules链表，比较典型的rules链表可以通过下面的命令查看：ip rule ls<br>   一般情况下，我们会看到以下结果：</p> 
+<pre><code class="prism language-cpp"><span class="token number">0</span><span class="token operator">:</span>      from all lookup local 
+<span class="token number">32766</span><span class="token operator">:</span>  from all lookup main 
+<span class="token number">32767</span><span class="token operator">:</span>  from all lookup <span class="token keyword">default</span> 
+</code></pre> 
+<p>然而，当我们配置了至少一个VRF域的时候，我们将会看到如下的结果：</p> 
+<pre><code class="prism language-cpp"><span class="token number">0</span><span class="token operator">:</span>      from all lookup local 
+<span class="token number">1000</span><span class="token operator">:</span>   from all lookup <span class="token punctuation">[</span>l3mdev<span class="token operator">-</span>table<span class="token punctuation">]</span> 
+<span class="token number">32766</span><span class="token operator">:</span>  from all lookup main 
+<span class="token number">32767</span><span class="token operator">:</span>  from all lookup <span class="token keyword">default</span>  
+</code></pre> 
+<p>嗯，多了一个l3mdev-table，系统在遍历rules链表的时候，遇到[l3mdev-table]表的时候，采用的是一种隐式的处理方式。意思是说，即便你创建了多个VRF域，关联了多张策略路由表，系统中依然只能看到一张[l3mdev-table]表。既然这样，系统又是如何定位到与特定的VRF域关联的那张路由表呢？比如说，vrf-blue关联了路由表10，vrf-red关联了路由表20，此时正在处理的包属于vrf-blue，系统如何定位到要查找路由表10而不是路由表20呢？<br> 为了了解[l3mdev-table]的工作方式，就需要看下fib_rule_match的逻辑：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">fib_rule_match</span><span class="token punctuation">(</span><span class="token keyword">struct</span> fib_rule <span class="token operator">*</span>rule<span class="token punctuation">,</span> <span class="token keyword">struct</span> fib_rules_ops <span class="token operator">*</span>ops<span class="token punctuation">,</span>
+              <span class="token keyword">struct</span> flowi <span class="token operator">*</span>fl<span class="token punctuation">,</span> <span class="token keyword">int</span> flags<span class="token punctuation">,</span>
+              <span class="token keyword">struct</span> fib_lookup_arg <span class="token operator">*</span>arg<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> ret <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+ 
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token comment">// 前面的逻辑是常规的iif，oif，mark等匹配，以下的这个l3mdev不一般！</span>
+    <span class="token comment">// rule-&gt;l3mdev即ip rule ls看到的那个[l3mdev-table]</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>rule<span class="token operator">-</span><span class="token operator">&gt;</span>l3mdev <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span><span class="token function">l3mdev_fib_rule_match</span><span class="token punctuation">(</span>rule<span class="token operator">-</span><span class="token operator">&gt;</span>fr_net<span class="token punctuation">,</span> fl<span class="token punctuation">,</span> arg<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token keyword">goto</span> out<span class="token punctuation">;</span>
+ 
+    ret <span class="token operator">=</span> ops<span class="token operator">-</span><span class="token operator">&gt;</span><span class="token function">match</span><span class="token punctuation">(</span>rule<span class="token punctuation">,</span> fl<span class="token punctuation">,</span> flags<span class="token punctuation">)</span><span class="token punctuation">;</span>
+out<span class="token operator">:</span>
+    <span class="token keyword">return</span> <span class="token punctuation">(</span>rule<span class="token operator">-</span><span class="token operator">&gt;</span>flags <span class="token operator">&amp;</span> FIB_RULE_INVERT<span class="token punctuation">)</span> <span class="token operator">?</span> <span class="token operator">!</span>ret <span class="token operator">:</span> ret<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>我们重点看下l3mdev_fib_rule_match：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">int</span> <span class="token function">l3mdev_fib_rule_match</span><span class="token punctuation">(</span><span class="token keyword">struct</span> net <span class="token operator">*</span>net<span class="token punctuation">,</span> <span class="token keyword">struct</span> flowi <span class="token operator">*</span>fl<span class="token punctuation">,</span>
+              <span class="token keyword">struct</span> fib_lookup_arg <span class="token operator">*</span>arg<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">struct</span> net_device <span class="token operator">*</span>dev<span class="token punctuation">;</span>
+    <span class="token keyword">int</span> rc <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+ 
+    <span class="token function">rcu_read_lock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span> <span class="token comment">// 我们仅仅分析iif情景</span>
+ 
+    dev <span class="token operator">=</span> <span class="token function">dev_get_by_index_rcu</span><span class="token punctuation">(</span>net<span class="token punctuation">,</span> fl<span class="token operator">-</span><span class="token operator">&gt;</span>flowi_iif<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 如果这个dev是一个VRF master虚拟网卡设备</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>dev <span class="token operator">&amp;&amp;</span> <span class="token function">netif_is_l3_master</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span>
+        dev<span class="token operator">-</span><span class="token operator">&gt;</span>l3mdev_ops<span class="token operator">-</span><span class="token operator">&gt;</span>l3mdev_fib_table<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// 那么便通过其自身的回调函数取出和该VRF关联的策略路由表！</span>
+        arg<span class="token operator">-</span><span class="token operator">&gt;</span>table <span class="token operator">=</span> dev<span class="token operator">-</span><span class="token operator">&gt;</span>l3mdev_ops<span class="token operator">-</span><span class="token operator">&gt;</span><span class="token function">l3mdev_fib_table</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        rc <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+        <span class="token keyword">goto</span> out<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+ 
+out<span class="token operator">:</span>
+    <span class="token function">rcu_read_unlock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+ 
+    <span class="token keyword">return</span> rc<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>到此为止呢，我们的一幅图景就闭合了：<br> 首先在ip_rcv_finish的l3mdev_ip_rcv调用中定位到与收包物理网卡关联的VRF master虚拟网卡；<br> 然后在fib_lookup内层的l3mdev_fib_rule_match调用中取出与VRF master虚拟网卡关联的策略路由表；<br> 最终在该特定的路由表中进行路由查找。</p> 
+<p>(7). 本地始发包的VRF实现分析<br> 由于本地的数据包全部来自于某个socket而不是网卡，socket是不和网卡关联的，所以IP层在查路由之前无法知道一个数据包和哪个网卡关联，就更别提去选择使用哪张路由表了…<br> 因此，如若一个socket程序想使用VRF机制，就必须为一个socket去绑定一个特定的网卡：</p> 
+<pre><code class="prism language-cpp"><span class="token function">setsockopt</span><span class="token punctuation">(</span>sd<span class="token punctuation">,</span> SOL_SOCKET<span class="token punctuation">,</span> SO_BINDTODEVICE<span class="token punctuation">,</span> vrf_dev<span class="token punctuation">,</span> <span class="token function">strlen</span><span class="token punctuation">(</span>vrf_dev<span class="token punctuation">)</span><span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>有了这个调用，在ip_queue_xmit中查找路由的时候，自然就会在fib_rule_match中定位到与参数vrf_dev关联的策略路由表了，然而，如果socket程序并不知情，它只是bind了一个隶属于该vrf_dev的slave物理网卡，比如eth0，那要怎么处理呢？<br> 显然SO_BINDTODEVICE参数会为数据包在__ip_route_output_key_hash调用中的路由查找失败而负责，为其暂时绑定一个dummy dst_entry，从而逻辑可以到达__ip_local_out：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">int</span> <span class="token function">__ip_local_out</span><span class="token punctuation">(</span><span class="token keyword">struct</span> net <span class="token operator">*</span>net<span class="token punctuation">,</span> <span class="token keyword">struct</span> sock <span class="token operator">*</span>sk<span class="token punctuation">,</span> <span class="token keyword">struct</span> sk_buff <span class="token operator">*</span>skb<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">struct</span> iphdr <span class="token operator">*</span>iph <span class="token operator">=</span> <span class="token function">ip_hdr</span><span class="token punctuation">(</span>skb<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ 
+    iph<span class="token operator">-</span><span class="token operator">&gt;</span>tot_len <span class="token operator">=</span> <span class="token function">htons</span><span class="token punctuation">(</span>skb<span class="token operator">-</span><span class="token operator">&gt;</span>len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">ip_send_check</span><span class="token punctuation">(</span>iph<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ 
+    <span class="token comment">/* if egress device is enslaved to an L3 master device pass the
+     * skb to its handler for processing
+     */</span>
+    skb <span class="token operator">=</span> <span class="token function">l3mdev_ip_out</span><span class="token punctuation">(</span>sk<span class="token punctuation">,</span> skb<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>和网卡收包过程的l3mdev调用一样，我们看下这个与l3mdev_ip_rcv相对的l3mdev_ip_out调用里做了什么文章，实现对应回调函数的是vrf_ip_out：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">static</span> <span class="token keyword">struct</span> sk_buff <span class="token operator">*</span><span class="token function">vrf_ip_out</span><span class="token punctuation">(</span><span class="token keyword">struct</span> net_device <span class="token operator">*</span>vrf_dev<span class="token punctuation">,</span>
+                  <span class="token keyword">struct</span> sock <span class="token operator">*</span>sk<span class="token punctuation">,</span>
+                  <span class="token keyword">struct</span> sk_buff <span class="token operator">*</span>skb<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">struct</span> net_vrf <span class="token operator">*</span>vrf <span class="token operator">=</span> <span class="token function">netdev_priv</span><span class="token punctuation">(</span>vrf_dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token comment">// 取出VRF关联的那个唯一的dst_entry，以便将数据包定向到vrf_xmit</span>
+    rth <span class="token operator">=</span> <span class="token function">rcu_dereference</span><span class="token punctuation">(</span>vrf<span class="token operator">-</span><span class="token operator">&gt;</span>rth<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">likely</span><span class="token punctuation">(</span>rth<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        dst <span class="token operator">=</span> <span class="token operator">&amp;</span>rth<span class="token operator">-</span><span class="token operator">&gt;</span>dst<span class="token punctuation">;</span>
+        <span class="token function">dst_hold</span><span class="token punctuation">(</span>dst<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token function">skb_dst_set</span><span class="token punctuation">(</span>skb<span class="token punctuation">,</span> dst<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ 
+    <span class="token keyword">return</span> skb<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>很简单，在这里仅仅是将skb的那个dummy dst_entry换成了和VRF设备绑定的那个dst_entry。</p> 
+<p>事实上，与VRF设备绑定的dst_entry只有一个且只做一件事，那就是，调用VRF设备的dev_hard_xmit回调函数，VRF机制正是在该dev_hard_xmit回调函数中实现了真正的路由查询，在dev_hard_xmit回调中真正做事的函数是vrf_process_v4_outbound：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">static</span> netdev_tx_t <span class="token function">vrf_process_v4_outbound</span><span class="token punctuation">(</span><span class="token keyword">struct</span> sk_buff <span class="token operator">*</span>skb<span class="token punctuation">,</span>
+                       <span class="token keyword">struct</span> net_device <span class="token operator">*</span>vrf_dev<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">struct</span> iphdr <span class="token operator">*</span>ip4h <span class="token operator">=</span> <span class="token function">ip_hdr</span><span class="token punctuation">(</span>skb<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">int</span> ret <span class="token operator">=</span> NET_XMIT_DROP<span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> flowi4 fl4 <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">/* needed to match OIF rule */</span>
+        <span class="token comment">// 这个会让l3mdev_fib_rule_match定位到正确的路由表</span>
+        <span class="token punctuation">.</span>flowi4_oif <span class="token operator">=</span> vrf_dev<span class="token operator">-</span><span class="token operator">&gt;</span>ifindex<span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>flowi4_iif <span class="token operator">=</span> LOOPBACK_IFINDEX<span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>flowi4_tos <span class="token operator">=</span> <span class="token function">RT_TOS</span><span class="token punctuation">(</span>ip4h<span class="token operator">-</span><span class="token operator">&gt;</span>tos<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>flowi4_flags <span class="token operator">=</span> FLOWI_FLAG_ANYSRC <span class="token operator">|</span> FLOWI_FLAG_SKIP_NH_OIF<span class="token punctuation">,</span>
+        <span class="token punctuation">.</span>daddr <span class="token operator">=</span> ip4h<span class="token operator">-</span><span class="token operator">&gt;</span>daddr<span class="token punctuation">,</span>
+    <span class="token punctuation">}</span><span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> net <span class="token operator">*</span>net <span class="token operator">=</span> <span class="token function">dev_net</span><span class="token punctuation">(</span>vrf_dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> rtable <span class="token operator">*</span>rt<span class="token punctuation">;</span>
+    <span class="token comment">// 真实查路由</span>
+    rt <span class="token operator">=</span> <span class="token function">ip_route_output_flow</span><span class="token punctuation">(</span>net<span class="token punctuation">,</span> <span class="token operator">&amp;</span>fl4<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token comment">// 真实发送skb</span>
+    ret <span class="token operator">=</span> <span class="token function">vrf_ip_local_out</span><span class="token punctuation">(</span><span class="token function">dev_net</span><span class="token punctuation">(</span><span class="token function">skb_dst</span><span class="token punctuation">(</span>skb<span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span>dev<span class="token punctuation">)</span><span class="token punctuation">,</span> skb<span class="token operator">-</span><span class="token operator">&gt;</span>sk<span class="token punctuation">,</span> skb<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>整个流程就这样结束了！</p> 
+<p>（8）.总结</p> 
+<p>到此为止，我可以给出一幅整个的图景了，结合源代码观摩，定有收获：<br> <img src="https://images2.imgbox.com/db/bd/Pq7j4M1w_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>关于Linux VRF的小Trick</strong><br> 突然觉得Linux自2.6.32以来真的更新了太多，和本文相关的，有两个问题，首先是local路由表的问题，其次是TCP Listener的问题，和本文不相关的还有一个命令行问题，听我细说。</p> 
+<p>Local路由表问题<br> 早在几年前的时候，我曾经抱怨说：<br> 数据包来了之后首先要看看是不是本地接收的<br> 要想理解这个，首先你得知道Linux系统中策略路由表匹配的原理。很简单，就是一个典型的switch-case语句：</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">switch</span> elements<span class="token operator">:</span>
+    <span class="token keyword">case</span> rule1<span class="token operator">:</span>
+        table<span class="token operator">=</span>tab1
+        <span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token keyword">case</span> rule1<span class="token operator">:</span>
+        table<span class="token operator">=</span>tab1
+        <span class="token comment">//fall through; 即匹配下一条rule</span>
+    <span class="token keyword">case</span> rule1<span class="token operator">:</span>
+        table<span class="token operator">=</span>tab1
+        <span class="token keyword">break</span><span class="token punctuation">;</span>
+    <span class="token keyword">default</span><span class="token operator">:</span>
+        unreachable<span class="token operator">?</span> <span class="token comment">// 或者任意别的什么...</span>
+</code></pre> 
+<p>这在Linux的网络协议栈实现中体现为要先强制查询Local路由表，然后再查Main路由表…这个顺序并不意味着什么大不了的事，关键在于，曾经Local路由表全系统仅此一张，因此，如果本机的应用层有两个属于不同VRF域但是却侦听同一个IP地址的服务，势必会造成混乱，早先的系统中，唯一的Local路由表是IP路由系统第一个无条件要查询的，它可以绕过任何其它的路由判断，包括策略路由表，即Local路由表必须在策略路由表之前被匹配，如果不成功才Fall through到后面的路由表。</p> 
+<p>然而，在引入VRF后，Local表不再是全局唯一的了，每一个VRF域都有一张Local路由表，当你把一个网卡添加进一个VRF域的时候，此网卡相关的Local路由将全部重置到此VRF域的Local路由表中。</p> 
+<p>然而，全局来看，系统中还是会有一张Local路由表，它看起来在所有rule匹配之前被匹配，不过事情起了变化。当你看到下面的策略路由表时：</p> 
+<pre><code class="prism language-cpp"><span class="token number">0</span><span class="token operator">:</span>      from all lookup local 
+<span class="token number">1000</span><span class="token operator">:</span>   from all lookup <span class="token punctuation">[</span>l3mdev<span class="token operator">-</span>table<span class="token punctuation">]</span> 
+<span class="token number">32766</span><span class="token operator">:</span>  from all lookup main 
+<span class="token number">32767</span><span class="token operator">:</span>  from all lookup <span class="token keyword">default</span>
+</code></pre> 
+<p>你可通过下面的命令删除Local表(请注意，这在低版本的内核以及iproute2中是不允许的)：</p> 
+<pre><code class="prism language-cpp">ip rule del pref <span class="token number">0</span>
+</code></pre> 
+<p>但为了避免你使用的ssh即时中断(其实是为了做到无缝切换)，你要在del之前先add，因此整个切换过程的脚本变成了下面的样子：</p> 
+<pre><code class="prism language-cpp">ip rule add pref <span class="token number">30000</span> table local
+ip rule del pref <span class="token number">0</span>
+</code></pre> 
+<p>即你在添加一条策略路由前，必须先添加一条。<br> 这也是人之常情了。然后，你会发现，事情的局面变成了下面的样子(当你再次执行ip rule ls时)：</p> 
+<pre><code class="prism language-cpp"><span class="token number">1000</span><span class="token operator">:</span>   from all lookup <span class="token punctuation">[</span>l3mdev<span class="token operator">-</span>table<span class="token punctuation">]</span> 
+<span class="token number">30000</span><span class="token operator">:</span>  from all lookup local 
+<span class="token number">32766</span><span class="token operator">:</span>  from all lookup main 
+<span class="token number">32767</span><span class="token operator">:</span>  from all lookup <span class="token keyword">default</span> 
+</code></pre> 
+<p>了解了这个事实之后，我们明白了，解决之道当然是隔离。看懂了这个ip rule ls的显式，我们的心情安顿了，是的，Linux的VRF做到了完全的三层隔离。</p> 
+<p><strong>TCP Listener问题</strong><br> 对于本地始发的流量，我们知道，必须要为其通过显式的setsockopt调用绑定一个VRF设备才能终安，道理是这样，事实也是这样。</p> 
+<p>由于绑定VRF虚拟网卡设备的setsockopt是针对特定socket的，如果我们仅仅针对Listener socket做了这样的setsocketopt(事实上我们也仅仅能这么做)，那么对于别的那些被这个Listener socket给Accept的那些socket，谁来负责呢(需要一种机制，让所有相关的socket都绑定VRF网卡)？</p> 
+<p>嗯，我们实在没有必要在accept返回后为每一个返回的client socket都去bind一个VRF device，系统可以自动做到这一点：</p> 
+<pre><code class="prism language-cpp">sysctl <span class="token operator">-</span>w net<span class="token punctuation">.</span>ipv4<span class="token punctuation">.</span>tcp_l3mdev_accept<span class="token operator">=</span><span class="token number">0</span>
+</code></pre> 
+<p>OK，这就好了！<br> 该内核参数的另一个作用是，自动识别那些从隶属于某个VRF域的网卡上收到的数据包所属的具体VRF域</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/8f4d7f24ea1f734556b6e78185f841d5/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">vue使用vedio.js播放视频（切换视频源）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/89273ac5f4c1f402f9ca2280c13b4f42/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">计算机药物设计---分子对接--薛定谔--AUTODOCK等案例解析</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

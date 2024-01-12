@@ -1,0 +1,1143 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>MEW-UNet：医学图像分割中的频域多轴表示学习 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="MEW-UNet：医学图像分割中的频域多轴表示学习" />
+<meta property="og:description" content="文章目录 摘要1、简介2、相关研究2.1、医学图像分割2.2、基于ViT的技术 3、我们的方法3.1、准备工作3.2、多轴外部权重块3.3、外部权重生成器 4、实验4.1、数据集4.2、实现细节4.3、与当前最佳方法的比较4.4、消融实验4.5、可视化 5、结论声明 摘要 https://arxiv.org/pdf/2312.17030v1.pdf
+最近，视觉Transformer (ViT)在医学图像分割（MIS）中得到了广泛应用，这归功于其在空间域应用自注意力机制来建模全局知识。然而，许多研究都侧重于改进空间域模型，而忽略了频率域信息的重要性。因此，我们提出了基于U-shape架构的多轴外部权重UNet（MEW-UNet），通过将ViT中的自注意力替换为我们的多轴外部权重块。具体来说，我们的块对输入特征的三个轴进行傅里叶变换，并在频率域中分配由我们的外部权重生成器生成的外部权重。然后，进行逆傅里叶变换以将特征变回空间域。我们在Synapse、ACDC、ISIC17和ISIC18数据集上评估了我们的模型，由于其有效地利用了频率域信息，我们的方法表现出了竞争力。
+代码：https://github.com/jcruan519/mew-unet
+关键词：医学图像分割、注意力机制、频率域信息
+1、简介 医学图像分割（MIS）具有巨大的实用价值，因为它可以帮助相关医务人员定位病变区域，提高临床治疗的效率。近年来，基于U-shape架构的编码器-解码器模型UNet被广泛应用于MIS，因为它具有较强的可扩展性。因此，基于U-shape架构的研究有很多，如UNet&#43;&#43;（Zhou等，2018），它通过引入密集连接减少了编码器和解码器之间的语义鸿沟。此外，Att-UNet（Oktay等，2018）引入了门控机制，使模型能够专注于特定的目标。
+上述改进都是基于卷积神经网络（CNNs）的，由于卷积操作的固有局部性，它们在获取全局信息方面表现不佳。相比之下，ViT（Dosovitskiy等，2020a）引入了自注意力机制（SA），增强了长距离依赖关系的建模能力，并有效地捕获了图像语义信息的整体图像语义信息，使其成为图像分割等密集预测任务的理想选择。因此，最近的进展可以分为两类。一方面，结合CNN和ViT的混合结构越来越受欢迎。例如，UCTransNet（Wang等，2022a）用CTrans模块替换了UNet中的跳过连接，缓解了编码器和解码器之间不兼容特征的问题。MT-UNet（Wang等，2022c）在浅层使用CNN，在深层使用局部全局SA和外部注意力机制，以获得更丰富的表示信息。另一方面，一些研究利用了纯ViT，如Swin-UNet（Cao等，2021），它用Swin Transformer Block替换了U-Net中的卷积操作，并取得了优越的结果。
+尽管上述模型在医学图像领域或其他视觉领域（Xiang等，2022，2023b）取得了显著的成果，但它们主要集中在空间域上，并且缺乏从频率域角度研究医学图像分割（MIS）的研究。在一般的计算机视觉中，已经在频率域中展示了特征提取是一种强大的方法（Zhong等，2022；Rao等，2021）。例如，GFNet（Rao等，2021）利用二维离散傅里叶变换（2D DFT）将特征从空间域转换为频率域，并在频率域中使用滤波器进行学习表示。对于MIS，许多病理区域在空间域中很难提取，而在频率域中更容易提取（Huang等，2021）。然而，之前的方法仅在单个轴上提取频率域信息，导致某些信号仍然难以区分，这可以通过图1进行解释。在图1（a）中，从空间域的角度来看，很难从视觉上区分这三个区域。相比之下，图1（b）显示了三个区域在频率域中的信号强度，揭示了它们之间信号强度相对明显的差异。然而，在仅对单个轴（高度-宽度轴）使用DFT的情况下，绿色和红色曲线之间仍存在一些信号强度交集。通过同时考虑三个轴的频率域信号强度（如图1（c）所示），很明显三条曲线之间没有信号强度交集。受此观察的启发，我们提出使用多轴方法提取和融合特征。
+基于上述发现，我们提出了多轴外部权重机制（MEW），它可以同时捕获更全面的全局和局部信息。具体来说，特征图沿通道维度被分为四个分支。对于前三个分支，特征通过沿三个不同轴（高度-宽度、通道-宽度和通道-高度轴）的二维离散傅里叶变换（2D DFT）转换为频率域。随后，使用相应的可学习权重乘以频率域映射，以获得频率域信息和全局知识。此外，对于剩下的分支，使用深度分离卷积操作（DW convolution operation）来获取局部信息。此后，MEW通过替换SA模块集成到ViT中，形成多轴外部权重块（MEWB）。最后，基于MEWB和U-shape架构，提出了一个强大的医学图像分割网络，称为MEW-UNet。
+为此，我们工作的主要贡献可以总结如下：
+提出了多轴外部权重块（MEW），以同时获取全局和局部信息，并引入频率域特征信号，更有效地理解上下文。
+基于U-shape和ViT的结构，我们将ViT中的自注意力块替换为我们提出的块，从而构建了一个强大的医学图像分割模型，称为MEW-UNet。
+在四个数据集上进行了全面实验，并获得了最佳结果，证明了我们的方法的有效性。
+本文其余部分的结构如下。在第2节中，我们介绍了与医学图像分割和基于ViT的技术的相关研究，然后简要介绍了我们的方法。在第3节中，我们介绍了基于U-shape架构的多轴外部权重UNet的细节。在第4节中，我们对提出的方法进行了与当前最佳方法的全面比较和评估，并对所提出的方法进行了全面分析。最后，第5节提供了本文的结论和对未来工作的讨论。
+2、相关研究 2.1、医学图像分割 本质上，医学图像处理在疾病诊断方面要求极高精度（Chen等，2023）。在医学成像中，分割是指像素级或体素级的分割。一般来说，多细胞和器官之间的边界在图像上很难区分。
+首先，很多研究集中于分割过程。这些方法克服了常规医学分割技术在各种限制。然而，没有一种策略被认为对不同类型的图像来说是更好的技术；这些技术只适用于特定图像和其他应用（Xiang等，2023d）。
+其次，医学图像是从各种医疗设备获取的，这些设备和CT/MR3机器的标注或性能标准并不统一。因此，与深度学习相关的训练模型只适用于特定场景（Xiang等，2023c）。同时，泛化能力较弱的深度网络可能容易从分析的医学图像中捕获错误的特征。此外，负样本和正样本的大小之间总是存在显著的不平等，这可能对分割产生更大的影响。然而，U-Net提供了一种方法，可以在减少过度拟合问题上取得更好的性能。
+2.2、基于ViT的技术 Transformer模型（Dosovitskiy等，2020b）完全依赖于自注意力机制来构建长距离依赖关系，这在几乎所有的自然语言处理任务中都取得了巨大的成功（Gao等，2023）。Vision Transformer（ViT）（Xiang等，2023a）是较早将Transformer模型引入视觉任务的尝试之一，它采用纯Transformer架构对非重叠的图像块进行图像分类，并取得了最先进的准确度。由于ViT模型在捕获空间信息方面表现出色，它们也被扩展到更具挑战性的任务中，包括动作检测（Li等，2023）、图像检索（Xiang等，2020）和分割（You等，2023）。例如，UCTransNet（Wang等，2022b）用通道Transformer（CTrans）模块替换了跳过连接。Karimi等（Karimi等，2021）通过修改视觉变换器的MHSA机制，在相邻图像块之间应用了自注意力。尽管在多个图像分割任务中表现出色，但视觉变换器仍然存在计算负载过大的问题，这一问题尚未解决。
+为了解决这个问题，在这项工作中，我们首次尝试利用频率域信息来提高医学图像分割任务的性能。据我们所知，这是首次尝试利用多轴外部权重机制（MEW），可以同时捕获更全面的全局和局部信息。我们希望这项工作能为医学图像领域潜在的任务提供新的思路。
+3、我们的方法 3.1、准备工作 医学图像分割问题通常可以表述为优化一个适当定义的目标函数的问题。目标函数通常是复杂的、多模态的、不连续的，并且不能用可以解析求解的封闭数学形式来描述。在这项工作中，我们做出了新的尝试，并提出了一个用于全局和局部信息的全新多轴外部权重块。在此基础上，引入了频率域特征信号，以帮助模型充分理解上下文。总的来说，本文的目标是利用频率域信息来学习用于下游医学图像分割任务的鉴别性嵌入。图2展示了所提出架构的概述。
+3.2、多轴外部权重块 在医学图像分割中，最近的方法主要集中在获取空间域的信息，而忽略了频率域的重要性。在空间域中，分割对象和背景之间的边界往往是模糊的，而在频率域中，对象位于不同的频率上，可以很容易地区分出来（Huang等，2021）。虽然利用频率域的想法在之前的作品中已经介绍过（Huang等，2021）和（Rao等，2021），但在单个轴上提取频率域特征阻止了模型进一步清晰地区分分割边界，导致性能下降。因此，我们提出了基于不同轴的2D DFT的MEW，以获取更全面的频率域信息，如图2（b）所示。
+考虑一个输入特征图 X ∈ R C × H × W X \in \mathbb{R}^{C \times H \times W} X∈RC×H×W，其中 C C C、 H H H和 W W W分别表示图的通道、高度和宽度。 X X X首先沿着通道维度被分为四个相等的部分，然后被送入四个不同的分支。MEW机制由式1至式4表示。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/8a0c7bfde969e373d09415bb89b7bc78/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-05T06:19:09+08:00" />
+<meta property="article:modified_time" content="2024-01-05T06:19:09+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">MEW-UNet：医学图像分割中的频域多轴表示学习</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atelier-sulphurpool-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><a href="#_1" rel="nofollow">摘要</a></li><li><a href="#1_8" rel="nofollow">1、简介</a></li><li><a href="#2_29" rel="nofollow">2、相关研究</a></li><li><ul><li><a href="#21_30" rel="nofollow">2.1、医学图像分割</a></li><li><a href="#22ViT_38" rel="nofollow">2.2、基于ViT的技术</a></li></ul> 
+  </li><li><a href="#3_46" rel="nofollow">3、我们的方法</a></li><li><ul><li><a href="#31_47" rel="nofollow">3.1、准备工作</a></li><li><a href="#32_51" rel="nofollow">3.2、多轴外部权重块</a></li><li><a href="#33_85" rel="nofollow">3.3、外部权重生成器</a></li></ul> 
+  </li><li><a href="#4_96" rel="nofollow">4、实验</a></li><li><ul><li><a href="#41_97" rel="nofollow">4.1、数据集</a></li><li><a href="#42_108" rel="nofollow">4.2、实现细节</a></li><li><a href="#43_117" rel="nofollow">4.3、与当前最佳方法的比较</a></li><li><a href="#44_122" rel="nofollow">4.4、消融实验</a></li><li><a href="#45_127" rel="nofollow">4.5、可视化</a></li></ul> 
+  </li><li><a href="#5_132" rel="nofollow">5、结论</a></li><li><a href="#_138" rel="nofollow">声明</a></li></ul> 
+</div> 
+<p></p> 
+<h2><a id="_1"></a>摘要</h2> 
+<p>https://arxiv.org/pdf/2312.17030v1.pdf<br> 最近，视觉Transformer (ViT)在医学图像分割（MIS）中得到了广泛应用，这归功于其在空间域应用自注意力机制来建模全局知识。然而，许多研究都侧重于改进空间域模型，而忽略了频率域信息的重要性。因此，我们提出了基于U-shape架构的多轴外部权重UNet（MEW-UNet），通过将ViT中的自注意力替换为我们的多轴外部权重块。具体来说，我们的块对输入特征的三个轴进行傅里叶变换，并在频率域中分配由我们的外部权重生成器生成的外部权重。然后，进行逆傅里叶变换以将特征变回空间域。我们在Synapse、ACDC、ISIC17和ISIC18数据集上评估了我们的模型，由于其有效地利用了频率域信息，我们的方法表现出了竞争力。<br> 代码：https://github.com/jcruan519/mew-unet</p> 
+<p>关键词：医学图像分割、注意力机制、频率域信息</p> 
+<h2><a id="1_8"></a>1、简介</h2> 
+<p>医学图像分割（MIS）具有巨大的实用价值，因为它可以帮助相关医务人员定位病变区域，提高临床治疗的效率。近年来，基于U-shape架构的编码器-解码器模型UNet被广泛应用于MIS，因为它具有较强的可扩展性。因此，基于U-shape架构的研究有很多，如UNet++（Zhou等，2018），它通过引入密集连接减少了编码器和解码器之间的语义鸿沟。此外，Att-UNet（Oktay等，2018）引入了门控机制，使模型能够专注于特定的目标。</p> 
+<p>上述改进都是基于卷积神经网络（CNNs）的，由于卷积操作的固有局部性，它们在获取全局信息方面表现不佳。相比之下，ViT（Dosovitskiy等，2020a）引入了自注意力机制（SA），增强了长距离依赖关系的建模能力，并有效地捕获了图像语义信息的整体图像语义信息，使其成为图像分割等密集预测任务的理想选择。因此，最近的进展可以分为两类。一方面，结合CNN和ViT的混合结构越来越受欢迎。例如，UCTransNet（Wang等，2022a）用CTrans模块替换了UNet中的跳过连接，缓解了编码器和解码器之间不兼容特征的问题。MT-UNet（Wang等，2022c）在浅层使用CNN，在深层使用局部全局SA和外部注意力机制，以获得更丰富的表示信息。另一方面，一些研究利用了纯ViT，如Swin-UNet（Cao等，2021），它用Swin Transformer Block替换了U-Net中的卷积操作，并取得了优越的结果。</p> 
+<p><img src="https://images2.imgbox.com/c4/2f/nNdNg78Z_o.png" alt="在这里插入图片描述"></p> 
+<p>尽管上述模型在医学图像领域或其他视觉领域（Xiang等，2022，2023b）取得了显著的成果，但它们主要集中在空间域上，并且缺乏从频率域角度研究医学图像分割（MIS）的研究。在一般的计算机视觉中，已经在频率域中展示了特征提取是一种强大的方法（Zhong等，2022；Rao等，2021）。例如，GFNet（Rao等，2021）利用二维离散傅里叶变换（2D DFT）将特征从空间域转换为频率域，并在频率域中使用滤波器进行学习表示。对于MIS，许多病理区域在空间域中很难提取，而在频率域中更容易提取（Huang等，2021）。然而，之前的方法仅在单个轴上提取频率域信息，导致某些信号仍然难以区分，这可以通过图1进行解释。在图1（a）中，从空间域的角度来看，很难从视觉上区分这三个区域。相比之下，图1（b）显示了三个区域在频率域中的信号强度，揭示了它们之间信号强度相对明显的差异。然而，在仅对单个轴（高度-宽度轴）使用DFT的情况下，绿色和红色曲线之间仍存在一些信号强度交集。通过同时考虑三个轴的频率域信号强度（如图1（c）所示），很明显三条曲线之间没有信号强度交集。受此观察的启发，我们提出使用多轴方法提取和融合特征。</p> 
+<p>基于上述发现，我们提出了多轴外部权重机制（MEW），它可以同时捕获更全面的全局和局部信息。具体来说，特征图沿通道维度被分为四个分支。对于前三个分支，特征通过沿三个不同轴（高度-宽度、通道-宽度和通道-高度轴）的二维离散傅里叶变换（2D DFT）转换为频率域。随后，使用相应的可学习权重乘以频率域映射，以获得频率域信息和全局知识。此外，对于剩下的分支，使用深度分离卷积操作（DW convolution operation）来获取局部信息。此后，MEW通过替换SA模块集成到ViT中，形成多轴外部权重块（MEWB）。最后，基于MEWB和U-shape架构，提出了一个强大的医学图像分割网络，称为MEW-UNet。</p> 
+<p>为此，我们工作的主要贡献可以总结如下：</p> 
+<ul><li> <p>提出了多轴外部权重块（MEW），以同时获取全局和局部信息，并引入频率域特征信号，更有效地理解上下文。</p> </li><li> <p>基于U-shape和ViT的结构，我们将ViT中的自注意力块替换为我们提出的块，从而构建了一个强大的医学图像分割模型，称为MEW-UNet。</p> </li><li> <p>在四个数据集上进行了全面实验，并获得了最佳结果，证明了我们的方法的有效性。</p> </li></ul> 
+<p>本文其余部分的结构如下。在第2节中，我们介绍了与医学图像分割和基于ViT的技术的相关研究，然后简要介绍了我们的方法。在第3节中，我们介绍了基于U-shape架构的多轴外部权重UNet的细节。在第4节中，我们对提出的方法进行了与当前最佳方法的全面比较和评估，并对所提出的方法进行了全面分析。最后，第5节提供了本文的结论和对未来工作的讨论。</p> 
+<h2><a id="2_29"></a>2、相关研究</h2> 
+<h3><a id="21_30"></a>2.1、医学图像分割</h3> 
+<p>本质上，医学图像处理在疾病诊断方面要求极高精度（Chen等，2023）。在医学成像中，分割是指像素级或体素级的分割。一般来说，多细胞和器官之间的边界在图像上很难区分。</p> 
+<p>首先，很多研究集中于分割过程。这些方法克服了常规医学分割技术在各种限制。然而，没有一种策略被认为对不同类型的图像来说是更好的技术；这些技术只适用于特定图像和其他应用（Xiang等，2023d）。</p> 
+<p>其次，医学图像是从各种医疗设备获取的，这些设备和CT/MR3机器的标注或性能标准并不统一。因此，与深度学习相关的训练模型只适用于特定场景（Xiang等，2023c）。同时，泛化能力较弱的深度网络可能容易从分析的医学图像中捕获错误的特征。此外，负样本和正样本的大小之间总是存在显著的不平等，这可能对分割产生更大的影响。然而，U-Net提供了一种方法，可以在减少过度拟合问题上取得更好的性能。</p> 
+<h3><a id="22ViT_38"></a>2.2、基于ViT的技术</h3> 
+<p>Transformer模型（Dosovitskiy等，2020b）完全依赖于自注意力机制来构建长距离依赖关系，这在几乎所有的自然语言处理任务中都取得了巨大的成功（Gao等，2023）。Vision Transformer（ViT）（Xiang等，2023a）是较早将Transformer模型引入视觉任务的尝试之一，它采用纯Transformer架构对非重叠的图像块进行图像分类，并取得了最先进的准确度。由于ViT模型在捕获空间信息方面表现出色，它们也被扩展到更具挑战性的任务中，包括动作检测（Li等，2023）、图像检索（Xiang等，2020）和分割（You等，2023）。例如，UCTransNet（Wang等，2022b）用通道Transformer（CTrans）模块替换了跳过连接。Karimi等（Karimi等，2021）通过修改视觉变换器的MHSA机制，在相邻图像块之间应用了自注意力。尽管在多个图像分割任务中表现出色，但视觉变换器仍然存在计算负载过大的问题，这一问题尚未解决。</p> 
+<p>为了解决这个问题，在这项工作中，我们首次尝试利用频率域信息来提高医学图像分割任务的性能。据我们所知，这是首次尝试利用多轴外部权重机制（MEW），可以同时捕获更全面的全局和局部信息。我们希望这项工作能为医学图像领域潜在的任务提供新的思路。</p> 
+<p><img src="https://images2.imgbox.com/44/09/xCgvunc2_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="3_46"></a>3、我们的方法</h2> 
+<h3><a id="31_47"></a>3.1、准备工作</h3> 
+<p>医学图像分割问题通常可以表述为优化一个适当定义的目标函数的问题。目标函数通常是复杂的、多模态的、不连续的，并且不能用可以解析求解的封闭数学形式来描述。在这项工作中，我们做出了新的尝试，并提出了一个用于全局和局部信息的全新多轴外部权重块。在此基础上，引入了频率域特征信号，以帮助模型充分理解上下文。总的来说，本文的目标是利用频率域信息来学习用于下游医学图像分割任务的鉴别性嵌入。图2展示了所提出架构的概述。</p> 
+<h3><a id="32_51"></a>3.2、多轴外部权重块</h3> 
+<p>在医学图像分割中，最近的方法主要集中在获取空间域的信息，而忽略了频率域的重要性。在空间域中，分割对象和背景之间的边界往往是模糊的，而在频率域中，对象位于不同的频率上，可以很容易地区分出来（Huang等，2021）。虽然利用频率域的想法在之前的作品中已经介绍过（Huang等，2021）和（Rao等，2021），但在单个轴上提取频率域特征阻止了模型进一步清晰地区分分割边界，导致性能下降。因此，我们提出了基于不同轴的2D DFT的MEW，以获取更全面的频率域信息，如图2（b）所示。</p> 
+<p>考虑一个输入特征图<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         X 
+        
+       
+         ∈ 
+        
+        
+        
+          R 
+         
+         
+         
+           C 
+          
+         
+           × 
+          
+         
+           H 
+          
+         
+           × 
+          
+         
+           W 
+          
+         
+        
+       
+      
+        X \in \mathbb{R}^{C \times H \times W} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7224em; vertical-align: -0.0391em;"></span><span class="mord mathnormal" style="margin-right: 0.0785em;">X</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">∈</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.8413em;"></span><span class="mord"><span class="mord mathbb">R</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.8413em;"><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0715em;">C</span><span class="mbin mtight">×</span><span class="mord mathnormal mtight" style="margin-right: 0.0813em;">H</span><span class="mbin mtight">×</span><span class="mord mathnormal mtight" style="margin-right: 0.1389em;">W</span></span></span></span></span></span></span></span></span></span></span></span></span>，其中<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         C 
+        
+       
+      
+        C 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.0715em;">C</span></span></span></span></span>、<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         H 
+        
+       
+      
+        H 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.0813em;">H</span></span></span></span></span>和<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         W 
+        
+       
+      
+        W 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.1389em;">W</span></span></span></span></span>分别表示图的通道、高度和宽度。<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         X 
+        
+       
+      
+        X 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.0785em;">X</span></span></span></span></span>首先沿着通道维度被分为四个相等的部分，然后被送入四个不同的分支。MEW机制由式1至式4表示。<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+          
+          
+           
+            
+            
+              x 
+             
+            
+              1 
+             
+            
+           
+             , 
+            
+            
+            
+              x 
+             
+            
+              2 
+             
+            
+           
+             , 
+            
+            
+            
+              x 
+             
+            
+              3 
+             
+            
+           
+             , 
+            
+            
+            
+              x 
+             
+            
+              4 
+             
+            
+           
+             = 
+            
+           
+             Split 
+            
+           
+             ⁡ 
+            
+           
+             ( 
+            
+           
+             X 
+            
+           
+             ) 
+            
+           
+          
+          
+          
+          
+            (1) 
+           
+          
+         
+        
+       
+         x_{1}, x_{2}, x_{3}, x_{4}=\operatorname{Split}(X) \tag{1} 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em; vertical-align: -0.1944em;"></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3011em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">1</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3011em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">2</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3011em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">3</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3011em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">4</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mop"><span class="mord mathrm">Split</span></span><span class="mopen">(</span><span class="mord mathnormal" style="margin-right: 0.0785em;">X</span><span class="mclose">)</span></span><span class="tag"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord text"><span class="mord">(</span><span class="mord"><span class="mord">1</span></span><span class="mord">)</span></span></span></span></span></span></span></p> 
+<p><span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+          
+          
+           
+            
+            
+              x 
+             
+             
+             
+               i 
+              
+             
+               ( 
+              
+             
+               I 
+              
+             
+               , 
+              
+             
+               J 
+              
+             
+               ) 
+              
+             
+            
+           
+             = 
+            
+            
+            
+              W 
+             
+             
+             
+               ( 
+              
+             
+               I 
+              
+             
+               , 
+              
+             
+               J 
+              
+             
+               ) 
+              
+             
+            
+           
+             ⊙ 
+            
+            
+            
+              F 
+             
+             
+             
+               ( 
+              
+             
+               I 
+              
+             
+               , 
+              
+             
+               J 
+              
+             
+               ) 
+              
+             
+            
+            
+            
+              [ 
+             
+             
+             
+               x 
+              
+             
+               i 
+              
+             
+            
+              ] 
+             
+            
+           
+          
+          
+          
+          
+            (2) 
+           
+          
+         
+        
+       
+         x_{i(I, J)}=W_{(I, J)} \odot \mathcal{F}_{(I, J)}\left[x_{i}\right] \tag{2} 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7858em; vertical-align: -0.3552em;"></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3448em;"><span class="" style="top: -2.5198em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight">i</span><span class="mopen mtight">(</span><span class="mord mathnormal mtight" style="margin-right: 0.0785em;">I</span><span class="mpunct mtight">,</span><span class="mord mathnormal mtight" style="margin-right: 0.0962em;">J</span><span class="mclose mtight">)</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.3552em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 1.0385em; vertical-align: -0.3552em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.1389em;">W</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3448em;"><span class="" style="top: -2.5198em; margin-left: -0.1389em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mopen mtight">(</span><span class="mord mathnormal mtight" style="margin-right: 0.0785em;">I</span><span class="mpunct mtight">,</span><span class="mord mathnormal mtight" style="margin-right: 0.0962em;">J</span><span class="mclose mtight">)</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.3552em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">⊙</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 1.1052em; vertical-align: -0.3552em;"></span><span class="mord"><span class="mord mathcal" style="margin-right: 0.0993em;">F</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3448em;"><span class="" style="top: -2.5198em; margin-left: -0.0993em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mopen mtight">(</span><span class="mord mathnormal mtight" style="margin-right: 0.0785em;">I</span><span class="mpunct mtight">,</span><span class="mord mathnormal mtight" style="margin-right: 0.0962em;">J</span><span class="mclose mtight">)</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.3552em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="minner"><span class="mopen delimcenter" style="top: 0em;">[</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3117em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight">i</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mclose delimcenter" style="top: 0em;">]</span></span></span><span class="tag"><span class="strut" style="height: 1.1052em; vertical-align: -0.3552em;"></span><span class="mord text"><span class="mord">(</span><span class="mord"><span class="mord">2</span></span><span class="mord">)</span></span></span></span></span></span></span><br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+          
+          
+           
+            
+            
+              x 
+             
+            
+              i 
+             
+            
+              ′ 
+             
+            
+           
+             = 
+            
+            
+            
+              F 
+             
+             
+             
+               ( 
+              
+             
+               I 
+              
+             
+               , 
+              
+             
+               J 
+              
+             
+               ) 
+              
+             
+             
+             
+               − 
+              
+             
+               1 
+              
+             
+            
+            
+            
+              [ 
+             
+             
+             
+               x 
+              
+              
+              
+                i 
+               
+              
+                ( 
+               
+              
+                I 
+               
+              
+                , 
+               
+              
+                J 
+               
+              
+                ) 
+               
+              
+             
+            
+              ] 
+             
+            
+           
+             , 
+            
+            
+            
+              x 
+             
+            
+              4 
+             
+            
+              ′ 
+             
+            
+           
+             = 
+            
+           
+             D 
+            
+           
+             W 
+            
+            
+            
+              ( 
+             
+             
+             
+               x 
+              
+             
+               4 
+              
+             
+            
+              ) 
+             
+            
+           
+          
+          
+          
+          
+            (3) 
+           
+          
+         
+        
+       
+         x_{i}^{\prime}=\mathcal{F}_{(I, J)}^{-1}\left[x_{i(I, J)}\right], x_{4}^{\prime}=D W\left(x_{4}\right) \tag{3} 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.0489em; vertical-align: -0.247em;"></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8019em;"><span class="" style="top: -2.453em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="" style="top: -3.113em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">′</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.247em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 1.3694em; vertical-align: -0.5053em;"></span><span class="mord"><span class="mord mathcal" style="margin-right: 0.0993em;">F</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8641em;"><span class="" style="top: -2.3697em; margin-left: -0.0993em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mopen mtight">(</span><span class="mord mathnormal mtight" style="margin-right: 0.0785em;">I</span><span class="mpunct mtight">,</span><span class="mord mathnormal mtight" style="margin-right: 0.0962em;">J</span><span class="mclose mtight">)</span></span></span></span><span class="" style="top: -3.113em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">−</span><span class="mord mtight">1</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.5053em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="minner"><span class="mopen delimcenter" style="top: 0em;"><span class="delimsizing size1">[</span></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3448em;"><span class="" style="top: -2.5198em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight">i</span><span class="mopen mtight">(</span><span class="mord mathnormal mtight" style="margin-right: 0.0785em;">I</span><span class="mpunct mtight">,</span><span class="mord mathnormal mtight" style="margin-right: 0.0962em;">J</span><span class="mclose mtight">)</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.3552em;"><span class=""></span></span></span></span></span></span><span class="mclose delimcenter" style="top: 0em;"><span class="delimsizing size1">]</span></span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8019em;"><span class="" style="top: -2.453em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">4</span></span></span></span><span class="" style="top: -3.113em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">′</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.247em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord mathnormal" style="margin-right: 0.0278em;">D</span><span class="mord mathnormal" style="margin-right: 0.1389em;">W</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="minner"><span class="mopen delimcenter" style="top: 0em;">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3011em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">4</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mclose delimcenter" style="top: 0em;">)</span></span></span><span class="tag"><span class="strut" style="height: 1.3694em; vertical-align: -0.5053em;"></span><span class="mord text"><span class="mord">(</span><span class="mord"><span class="mord">3</span></span><span class="mord">)</span></span></span></span></span></span></span><br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+          
+          
+           
+           
+             Y 
+            
+           
+             = 
+            
+           
+             Concat 
+            
+           
+             ⁡ 
+            
+            
+            
+              ( 
+             
+             
+             
+               x 
+              
+             
+               1 
+              
+             
+               ′ 
+              
+             
+            
+              , 
+             
+             
+             
+               x 
+              
+             
+               2 
+              
+             
+               ′ 
+              
+             
+            
+              , 
+             
+             
+             
+               x 
+              
+             
+               3 
+              
+             
+               ′ 
+              
+             
+            
+              , 
+             
+             
+             
+               x 
+              
+             
+               4 
+              
+             
+               ′ 
+              
+             
+            
+              ) 
+             
+            
+           
+             + 
+            
+           
+             X 
+            
+           
+          
+          
+          
+          
+            (4) 
+           
+          
+         
+        
+       
+         Y=\operatorname{Concat}\left(x_{1}^{\prime}, x_{2}^{\prime}, x_{3}^{\prime}, x_{4}^{\prime}\right)+X \tag{4} 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.2222em;">Y</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 1.0519em; vertical-align: -0.25em;"></span><span class="mop"><span class="mord mathrm">Concat</span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="minner"><span class="mopen delimcenter" style="top: 0em;">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8019em;"><span class="" style="top: -2.453em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">1</span></span></span></span><span class="" style="top: -3.113em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">′</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.247em;"><span class=""></span></span></span></span></span></span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8019em;"><span class="" style="top: -2.453em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">2</span></span></span></span><span class="" style="top: -3.113em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">′</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.247em;"><span class=""></span></span></span></span></span></span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8019em;"><span class="" style="top: -2.453em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">3</span></span></span></span><span class="" style="top: -3.113em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">′</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.247em;"><span class=""></span></span></span></span></span></span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8019em;"><span class="" style="top: -2.453em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">4</span></span></span></span><span class="" style="top: -3.113em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">′</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.247em;"><span class=""></span></span></span></span></span></span><span class="mclose delimcenter" style="top: 0em;">)</span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.0785em;">X</span></span><span class="tag"><span class="strut" style="height: 1.0519em; vertical-align: -0.25em;"></span><span class="mord text"><span class="mord">(</span><span class="mord"><span class="mord">4</span></span><span class="mord">)</span></span></span></span></span></span></span></p> 
+<p>其中<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         i 
+        
+       
+         = 
+        
+       
+         1 
+        
+       
+         、 
+        
+       
+         2 
+        
+       
+         、 
+        
+       
+         3 
+        
+       
+      
+        i=1、2、3 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6595em;"></span><span class="mord mathnormal">i</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord">1</span><span class="mord cjk_fallback">、</span><span class="mord">2</span><span class="mord cjk_fallback">、</span><span class="mord">3</span></span></span></span></span>分别对应前三个分支。<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          W 
+         
+         
+         
+           ( 
+          
+         
+           I 
+          
+         
+           , 
+          
+         
+           J 
+          
+         
+           ) 
+          
+         
+        
+       
+      
+        W_{(I, J)} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.0385em; vertical-align: -0.3552em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.1389em;">W</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3448em;"><span class="" style="top: -2.5198em; margin-left: -0.1389em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mopen mtight">(</span><span class="mord mathnormal mtight" style="margin-right: 0.0785em;">I</span><span class="mpunct mtight">,</span><span class="mord mathnormal mtight" style="margin-right: 0.0962em;">J</span><span class="mclose mtight">)</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.3552em;"><span class=""></span></span></span></span></span></span></span></span></span></span>和<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          F 
+         
+         
+         
+           ( 
+          
+         
+           I 
+          
+         
+           , 
+          
+         
+           J 
+          
+         
+           ) 
+          
+         
+        
+       
+      
+        \mathcal{F}_{(I, J)} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.0385em; vertical-align: -0.3552em;"></span><span class="mord"><span class="mord mathcal" style="margin-right: 0.0993em;">F</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3448em;"><span class="" style="top: -2.5198em; margin-left: -0.0993em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mopen mtight">(</span><span class="mord mathnormal mtight" style="margin-right: 0.0785em;">I</span><span class="mpunct mtight">,</span><span class="mord mathnormal mtight" style="margin-right: 0.0962em;">J</span><span class="mclose mtight">)</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.3552em;"><span class=""></span></span></span></span></span></span></span></span></span></span>表示对应的轴的可学习外部权重和2D DFT。当i=1时，I和J表示Height-Width轴。当i=2时，I和J表示Channel-Width轴。当<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         i 
+        
+       
+         = 
+        
+       
+         3 
+        
+       
+      
+        \mathrm{i}=3 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6679em;"></span><span class="mord mathrm">i</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">3</span></span></span></span></span>时，I和J表示Channel-Height轴。<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         ⊙ 
+        
+       
+      
+        \odot 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6667em; vertical-align: -0.0833em;"></span><span class="mord">⊙</span></span></span></span></span>是逐元素的乘法。<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          F 
+         
+         
+         
+           ( 
+          
+         
+           I 
+          
+         
+           , 
+          
+         
+           J 
+          
+         
+           ) 
+          
+         
+         
+         
+           − 
+          
+         
+           1 
+          
+         
+        
+       
+      
+        \mathcal{F}_{(I, J)}^{-1} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.3694em; vertical-align: -0.5152em;"></span><span class="mord"><span class="mord mathcal" style="margin-right: 0.0993em;">F</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8542em;"><span class="" style="top: -2.3598em; margin-left: -0.0993em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mopen mtight">(</span><span class="mord mathnormal mtight" style="margin-right: 0.0785em;">I</span><span class="mpunct mtight">,</span><span class="mord mathnormal mtight" style="margin-right: 0.0962em;">J</span><span class="mclose mtight">)</span></span></span></span><span class="" style="top: -3.1031em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">−</span><span class="mord mtight">1</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.5152em;"><span class=""></span></span></span></span></span></span></span></span></span></span>指2D逆DFT。Split和Concat表示沿着通道维度的拆分和拼接操作。</p> 
+<p>在第一分支中，通过在Height-Width轴上执行2D DFT将特征图转换为频率域。随后，在特征图和相应的可学习外部权重之间进行逐元素的乘法操作。最后，通过应用2D逆DFT将地图转换回空间域。同样，第二和第三分支分别在Channel-Width和Channel-Height轴上执行上述操作。这种多轴操作能够学习更全面的全局信息。需要注意的是，外部权重由我们的外部权重生成器生成，如下一节所述。此外，局部信息对于MIS任务也很关键。因此，对于第四个分支，使用DW卷积来获取局部信息。随后，四个分支的特征图在通道维度上进行拼接，以恢复与输入相同的大小。最后，使用输入的残差连接来获得输出。</p> 
+<p>如图2（c）所示，我们将ViT中的SA替换为我们的MEW，得到MEWB，可以表示为式5和式6。<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+          
+          
+           
+            
+            
+              X 
+             
+            
+              ′ 
+             
+            
+           
+             = 
+            
+           
+             MEW 
+            
+           
+             ⁡ 
+            
+           
+             ( 
+            
+           
+             GroupNorm 
+            
+           
+             ⁡ 
+            
+           
+             ( 
+            
+           
+             X 
+            
+           
+             ) 
+            
+           
+             ) 
+            
+           
+             + 
+            
+           
+             X 
+            
+           
+          
+          
+          
+          
+            (5) 
+           
+          
+         
+        
+       
+         X^{\prime}=\operatorname{MEW}(\operatorname{GroupNorm}(X))+X \tag{5} 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.8019em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.0785em;">X</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.8019em;"><span class="" style="top: -3.113em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">′</span></span></span></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mop"><span class="mord mathrm" style="margin-right: 0.0139em;">MEW</span></span><span class="mopen">(</span><span class="mop"><span class="mord mathrm">GroupNorm</span></span><span class="mopen">(</span><span class="mord mathnormal" style="margin-right: 0.0785em;">X</span><span class="mclose">))</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.0785em;">X</span></span><span class="tag"><span class="strut" style="height: 1.0519em; vertical-align: -0.25em;"></span><span class="mord text"><span class="mord">(</span><span class="mord"><span class="mord">5</span></span><span class="mord">)</span></span></span></span></span></span></span></p> 
+<p><span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+          
+          
+           
+           
+             Y 
+            
+           
+             = 
+            
+           
+             FFN 
+            
+           
+             ⁡ 
+            
+            
+            
+              ( 
+             
+            
+              GroupNorm 
+             
+            
+              ⁡ 
+             
+             
+             
+               ( 
+              
+              
+              
+                X 
+               
+              
+                ′ 
+               
+              
+             
+               ) 
+              
+             
+            
+              ) 
+             
+            
+           
+             + 
+            
+            
+            
+              X 
+             
+            
+              ′ 
+             
+            
+           
+          
+          
+          
+          
+            (6) 
+           
+          
+         
+        
+       
+         Y=\operatorname{FFN}\left(\operatorname{GroupNorm}\left(X^{\prime}\right)\right)+X^{\prime} \tag{6} 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.2222em;">Y</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 1.0519em; vertical-align: -0.25em;"></span><span class="mop"><span class="mord mathrm">FFN</span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="minner"><span class="mopen delimcenter" style="top: 0em;">(</span><span class="mop"><span class="mord mathrm">GroupNorm</span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="minner"><span class="mopen delimcenter" style="top: 0em;">(</span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.0785em;">X</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.8019em;"><span class="" style="top: -3.113em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">′</span></span></span></span></span></span></span></span></span><span class="mclose delimcenter" style="top: 0em;">)</span></span><span class="mclose delimcenter" style="top: 0em;">)</span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 0.8019em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.0785em;">X</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.8019em;"><span class="" style="top: -3.113em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">′</span></span></span></span></span></span></span></span></span></span><span class="tag"><span class="strut" style="height: 1.0519em; vertical-align: -0.25em;"></span><span class="mord text"><span class="mord">(</span><span class="mord"><span class="mord">6</span></span><span class="mord">)</span></span></span></span></span></span></span></p> 
+<h3><a id="33_85"></a>3.3、外部权重生成器</h3> 
+<p>医学图像分割被归类为布局特定的任务，其中特定医学数据集中的样本之间的变化较小，但样本内的变化很大（Chen等，2022）。仅仅依靠随机初始化的可学习权重无法有效地建立不同区域之间的语义关系。因此，本文引入了一个外部权重生成器来转换初始化的权重。我们的生成器可以表示为式7。<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+          
+          
+           
+            
+            
+              W 
+             
+             
+             
+               ( 
+              
+             
+               I 
+              
+             
+               , 
+              
+             
+               J 
+              
+             
+               ) 
+              
+             
+            
+           
+             = 
+            
+           
+             IRB 
+            
+           
+             ⁡ 
+            
+            
+            
+              ( 
+             
+            
+              B 
+             
+            
+              I 
+             
+             
+             
+               ( 
+              
+              
+              
+                W 
+               
+               
+               
+                 ( 
+                
+               
+                 I 
+                
+               
+                 , 
+                
+               
+                 J 
+                
+               
+                 ) 
+                
+               
+              
+                init  
+               
+              
+             
+               ) 
+              
+             
+            
+              ) 
+             
+            
+           
+          
+          
+          
+          
+            (7) 
+           
+          
+         
+        
+       
+         W_{(I, J)}=\operatorname{IRB}\left(B I\left(W_{(I, J)}^{\text {init }}\right)\right) \tag{7} 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.0385em; vertical-align: -0.3552em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.1389em;">W</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3448em;"><span class="" style="top: -2.5198em; margin-left: -0.1389em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mopen mtight">(</span><span class="mord mathnormal mtight" style="margin-right: 0.0785em;">I</span><span class="mpunct mtight">,</span><span class="mord mathnormal mtight" style="margin-right: 0.0962em;">J</span><span class="mclose mtight">)</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.3552em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 1.8em; vertical-align: -0.65em;"></span><span class="mop"><span class="mord mathrm">IRB</span></span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="minner"><span class="mopen delimcenter" style="top: 0em;"><span class="delimsizing size2">(</span></span><span class="mord mathnormal" style="margin-right: 0.0502em;">B</span><span class="mord mathnormal" style="margin-right: 0.0785em;">I</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="minner"><span class="mopen delimcenter" style="top: 0em;"><span class="delimsizing size2">(</span></span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.1389em;">W</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8805em;"><span class="" style="top: -2.428em; margin-left: -0.1389em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mopen mtight">(</span><span class="mord mathnormal mtight" style="margin-right: 0.0785em;">I</span><span class="mpunct mtight">,</span><span class="mord mathnormal mtight" style="margin-right: 0.0962em;">J</span><span class="mclose mtight">)</span></span></span></span><span class="" style="top: -3.113em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord text mtight"><span class="mord mtight">init </span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.447em;"><span class=""></span></span></span></span></span></span><span class="mclose delimcenter" style="top: 0em;"><span class="delimsizing size2">)</span></span></span><span class="mclose delimcenter" style="top: 0em;"><span class="delimsizing size2">)</span></span></span></span><span class="tag"><span class="strut" style="height: 1.8em; vertical-align: -0.65em;"></span><span class="mord text"><span class="mord">(</span><span class="mord"><span class="mord">7</span></span><span class="mord">)</span></span></span></span></span></span></span><br> 其中<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          W 
+         
+         
+         
+           ( 
+          
+         
+           I 
+          
+         
+           , 
+          
+         
+           J 
+          
+         
+           ) 
+          
+         
+        
+          init  
+         
+        
+       
+      
+        W_{(I, J)}^{\text {init }} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.3275em; vertical-align: -0.497em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.1389em;">W</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8305em;"><span class="" style="top: -2.378em; margin-left: -0.1389em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mopen mtight">(</span><span class="mord mathnormal mtight" style="margin-right: 0.0785em;">I</span><span class="mpunct mtight">,</span><span class="mord mathnormal mtight" style="margin-right: 0.0962em;">J</span><span class="mclose mtight">)</span></span></span></span><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord text mtight"><span class="mord mtight">init </span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.497em;"><span class=""></span></span></span></span></span></span></span></span></span></span>表示初始的可学习张量。BI表示双线性插值操作。IRB指倒装残差块（Sandler等，2018）。</p> 
+<p>具体来说，外部权重生成器包含几个深度可分离卷积（DW卷积），用于生成对应于高度-宽度、通道-宽度和通道-高度轴的权重。例如，为了生成高度-宽度轴的权重，随机初始化一个可学习的张量，然后对其进行双线性插值操作。随后，该可学习的张量经过倒残差块以获得最终的权重，该权重用于元素乘积操作（参考式2以更好地理解）。类似地，通过相同的过程获得通道-宽度和通道-高度轴的权重。</p> 
+<h2><a id="4_96"></a>4、实验</h2> 
+<h3><a id="41_97"></a>4.1、数据集</h3> 
+<p>我们在三个基准数据集上评估了我们的方法，包括ISIC17（Berseth，2017）、ISIC18（Codella等，2019）、Synapse（Landman等，2015）和ACDC（Bernard等，2018）。在展示我们的实验结果之前，我们详细阐述了评估协议。</p> 
+<p>ISIC17（Berseth，2017）和ISIC18（Codella等，2019）是两个公开的皮肤病变分割数据集，包含2150张和2694张带有标注的皮肤镜图像。我们以7:3的比例随机将数据集分为训练集和测试集。报告了五个评估指标，包括平均交并比（mIoU）、Dice相似性系数（DSC）、准确度（Acc）、敏感度（Sen）和特异度（Spe）。</p> 
+<p>Synapse（Landman等，2015）是一个公开的多器官分割数据集，由30个腹部CT病例组成。按照Chen等（2021）的方法，我们使用其中18个病例进行训练，其余12个病例进行测试。在这个数据集上，我们使用Dice相似性系数（DSC）和95％Hausdorff距离（HD95）来评估我们的方法。</p> 
+<p>ACDC（Bernard等，2018）是一个公开的心脏MRI数据集，由100个MRI扫描组成。按照Wang等（2022c）的方法，我们使用相同的分割方式，将数据集分为70个训练病例、10个验证病例和20个测试病例。在这个数据集上，我们报告了Dice相似性系数（DSC）和95％Hausdorff距离（HD95）作为评估指标。</p> 
+<h3><a id="42_108"></a>4.2、实现细节</h3> 
+<p>与之前的作品（Ruan等，2022；Wang等，2022c）一样，对于ISIC17和ISIC18数据集，我们将所有图像调整为 256 × 256 的大小。对于Synapse和ACDC数据集，我们将所有图像调整为 224 × 224 的大小。为了防止过拟合，我们进行了数据增强，包括随机翻转和随机旋转。损失函数是BceDice损失。我们将批处理大小设置为8，并使用CosineAnnealingLR（Loshchilov和Hutter，2016）作为调度器。按照Loshchilov和Hutter（2017）中的训练过程，三个数据集的初始学习率（lr）、最大训练周期数（ep）和优化器（opt）如下：</p> 
+<ul><li>ISIC17和ISIC18： lr=1e-3 ； ep=300 ； opt=AdamW；</li><li>Synapse： lr=3e-3 ； ep=600 ； opt=SGD 。</li></ul> 
+<p>对于ACDC数据集，除了我们将批处理大小设置为4之外，其余设置与Wang等（2022c）中的设置相同。所有实验都在单个NVIDIA RTX A6000 GPU上完成。</p> 
+<h3><a id="43_117"></a>4.3、与当前最佳方法的比较</h3> 
+<p>我们将我们的模型与近年来的一些当前最佳方法进行了比较，例如MTUNet（Wang等，2022c）、UCTransNet（Wang等，2022a）、TransFuse（Zhang等，2021）、SANet（Wei等，2021）等。实验结果如表1、表2和表3所示。对于ISIC17和ISIC18数据集，我们的MEW-UNet在mIoU和DSC指标上优于所有其他当前最佳方法。对于Synapse数据集，我们的MEW-UNet在DSC指标上比MT-UNet和UCTransNet高出0.33％和0.69％。此外，值得注意的是，我们的模型在HD95指标上比MT-UNet和UCTransNet分别高出10.15mm和10.31mm。对于ACDC数据集，我们的MEW-UNet在DSC和HD95指标上也优于MT-UNet。<br> <img src="https://images2.imgbox.com/06/3c/9lVh8DOI_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="44_122"></a>4.4、消融实验</h3> 
+<p>MEW-UNet架构的基本概念在于其多轴操作。为了评估这种方法的有效性，我们逐步增加了多轴操作的次数，并进行了消融实验，结果如表4所示。可以观察到，仅采用DW卷积会导致mIoU指标下降近2%。同样，当仅使用单轴频率域变换时，mIoU指标也会下降1%。结果表明，我们的多轴操作可以有效地捕获全面的频率域信息和全局知识。此外，即使使用了多轴操作，如果第四个分支中省略DW卷积，性能仍然会有轻微的下降，这进一步强调了局部信息的重要性。最后，我们通过仅随机初始化可学习权重而不使用IRB来展示外部权重生成器的有效性，可以清楚地看到性能的下降，这强调了使用IRB进行可学习权重的转换的重要性。<br> <img src="https://images2.imgbox.com/6f/30/CeQmzAmv_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="45_127"></a>4.5、可视化</h3> 
+<p>为了进一步说明，我们还给出了我们提出的名为MEW-UNet的多轴外部权重UNet的一些定性结果。图3提供了由ITK-SNAP（Yushkevich等，2006）提供的可视化分割结果。例如，与MT-UNet相比，我们的MEW-UNet在Synapse数据集上有一个洞和缺失的边界。此外，与TransFuse（Zhang等，2021）相比，在ISIC2018数据集上，我们的模型在这项具有挑战性的分割任务上具有更清晰的边界。<br> <img src="https://images2.imgbox.com/d7/5a/z6qq3jz0_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="5_132"></a>5、结论</h2> 
+<p>本文提出了一种多轴外部权重块，以更全面地获取频率域信息。我们的外部权重生成器被应用于为不同轴获取可学习的权重。此外，我们将自注意力块替换为我们的块来构建MEW-UNet。实验结果表明，我们的模型达到了当前最佳性能。我们相信，我们的工作将为频率域中后续模型的发展提供新的见解。未来，我们计划将我们的多轴设计扩展到其他医疗任务中。</p> 
+<p>感谢致辞。这项工作得到了中国国家自然科学基金委员会（Grant No. 62301315）和上海交通大学青年教师启动基金（Grant No.23X010501967）的部分资助。作者感谢匿名审稿人提出的宝贵建议和建设性的批评。</p> 
+<h2><a id="_138"></a>声明</h2> 
+<ul><li>资金支持</li></ul> 
+<p>这项工作得到了中国国家自然科学基金委员会（Grant No. 62301315）和上海交通大学青年教师启动基金（Grant No.23X010501967）的部分资助。</p> 
+<ul><li>利益冲突<br> 作者声明，他们没有利益冲突。</li><li>伦理审查<br> 不适用。所使用的数据集和本工作不包含个人或敏感信息，因此没有涉及伦理问题。</li><li>参与者同意<br> 作者同意该作品由《Machine Learning Journal》提交和发表。由于本工作不涉及人类研究，因此这一方面不适用。</li><li>发布同意<br> 作者同意将该作品（包括所有内容、数据和图像）由《Machine Learning Journal》发布。</li><li>数据和材料的可用性<br> 用于实验的数据集可在线获取，更多细节参见第4.1节。</li><li>代码可用性<br> 代码在GitHub上公开可用，链接为https://github.com/JCruan519/MEWUNet。</li><li>作者贡献<br> Suncheng Xiang和Jiacheng Ruan共同构想了这项研究，参与了实验过程，并解释了模型结果。Suncheng Xiang为本项目获得了资金，并为项目提供了临床指导。Suncheng Xiang起草了本文。所有作者都参与了本文的修订，并阅读并批准了提交的版本。</li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/7801f8514837460b6a4e29c8c80c4299/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">微信小程序：flex常用布局</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/3de49f7d2e52a8085145a9251f37a5bb/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">uniapp使用tcp和udp的区别和例子</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

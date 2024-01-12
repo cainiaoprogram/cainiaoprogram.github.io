@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【沃趣科技】MySQL高可用工具Orchestrator系列四：拓扑恢复 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【沃趣科技】MySQL高可用工具Orchestrator系列四：拓扑恢复" />
+<meta property="og:description" content="沃趣科技作为国内领先的数据库云平台解决方案提供商，一直致力于企业级数据库云平台产品的研发，为用户提供高性能、高可用、可扩展的的数据库云环境及不同业务场景需求的数据库平台，满足客户对极致性能、数据安全、容灾备份、业务永续等需求。沃趣科技凭借专业的团队，优质的产品，前沿的技术，贴心的服务赢得了客户的信任与尊重，也获得了市场的认同。
+前言 上篇文章讲了orchestrator的探测机制。本篇文章翻译自orchestrator官方文档，讲一讲orchestrator的拓扑恢复。
+拓扑恢复 orch能够从一系列故障场景中进行恢复。尤其是，它能够对主库或者中间主库的故障场景进行恢复。
+自动和手动
+orch支持：
+自动恢复（对意外故障采取措施）。
+优雅地、有计划地主从切换。
+手动恢复。
+手动，强制failover。
+要求
+要运行任何类型的故障转移，拓扑必须支持以下任一种：
+Oracle GTID（master_auto_position=1）
+MariaDB GTID
+Pseudo GTID（伪GTID）
+Binlog Servers
+什么是恢复
+恢复基于故障检测，并且由一系列事件组成：
+恢复前的hooks（hook：外部的执行过程或者脚本）。
+修复拓扑。
+恢复后的hooks。
+注意：
+恢复前的hooks由用户自己配置。
+- 顺序执行。
+- 任何一个hook的失败（非零退出码）都将中止故障转移。
+拓扑修复是由orch管理的，并且是基于状态，而不是基于配置。orch在考虑到现有拓扑、版本、服务器配置等因素的情况下，会力图尽力而为。
+恢复后的hooks也是由用户自己配置。
+恢复场景1：中间主库挂掉
+一个简单的恢复案例是DeadIntermediateMaster。它的replicas被孤立了，但是当使用了GTID或者Pseudo GTID的情况下，replicas仍然能够被重连到拓扑中。我们可能会选择这样做：
+找到已失效的中间主服务器的同级，然后将孤立的副本移到所述同级之下。
+从孤立的副本中提升某个副本，使得这个副本成为同级的中间主库，然后将这个副本连接到拓扑。
+重置所有的孤立副本。
+结合以上部分做法。
+实际的实现方式很大程度上取决于拓扑设置（哪些实例设置了log-slave-updates、实例是否有延迟、是否存在复制过滤、mysql的版本等等）。你的拓扑很有可能至少支持以上一种方式（特别是，匹配副本是一个简单的解决方案，除非使用了复制过滤）。
+恢复场景2：主库挂掉
+从挂掉的主库恢复是一个更为复杂的操作，有很多种原因：
+有潜在的运行中断（停电、网络），恢复要尽可能地快。
+在恢复过程中，有些servers可能会丢失。orch需要确定会是哪个。
+拓扑的状态可能是用户希望阻止恢复。
+必须进行主服务发现：应用必须能够与新的主库进行通讯（潜在地被告知主库已经更改了）。
+需要找到最合适的replica，将其提升为主库。
+- 一个天真的方法是选择最新的副本，但这不一定总是正确的选择。
+- 最新的副本不一定有必要的配置来作为其他replica的主库（比如：binlog format、mysql版本、复制过滤器等）。盲目地提升最新的副本为主库，可能会失去副本冗余的能力。
+- orch会尝试提升保留最大服务容量的副本为主库。
+提升所述副本，接管它的同级。
+使它的同级保持最新状态（up to date）。
+也许，要做一个二阶段提升；用户可能已经标记了要提升的特定服务器（参考register-candidate命令）。
+调用hooks。
+主服务发现很大程度上是需要用户去实现的。常见的解决方案有：
+基于DNS的发现；orch需要调用能修改DNS入口的hook。
+ZooKeeper/Consul KV/etcd/其他基于键值的发现；orch内置了对Consul KV的支持，否则外部的hook必须更新k-v存储系统。
+基于proxy的发现；orch会调用外部的hook去更新proxy的配置，或者更新如上所说的Consul/Zk/etcd，这本身就会触发更新proxy的配置。
+其他方式。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/e2b214340d1eada6f69c77c31666f3a9/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2019-11-27T09:41:10+08:00" />
+<meta property="article:modified_time" content="2019-11-27T09:41:10+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【沃趣科技】MySQL高可用工具Orchestrator系列四：拓扑恢复</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>沃趣科技作为国内领先的数据库云平台解决方案提供商，一直致力于企业级数据库云平台产品的研发，为用户提供高性能、高可用、可扩展的的数据库云环境及不同业务场景需求的数据库平台，满足客户对极致性能、数据安全、容灾备份、业务永续等需求。沃趣科技凭借专业的团队，优质的产品，前沿的技术，贴心的服务赢得了客户的信任与尊重，也获得了市场的认同。</p> 
+<hr> 
+<h3><strong>前言</strong></h3> 
+<p>上篇文章讲了orchestrator的探测机制。本篇文章翻译自orchestrator官方文档，讲一讲orchestrator的拓扑恢复。</p> 
+<h3><strong>拓扑恢复</strong></h3> 
+<p>orch能够从一系列故障场景中进行恢复。尤其是，它能够对主库或者中间主库的故障场景进行恢复。</p> 
+<p><strong>自动和手动</strong></p> 
+<p>orch支持：</p> 
+<ul><li> <p>自动恢复（对意外故障采取措施）。</p> </li><li> <p>优雅地、有计划地主从切换。</p> </li><li> <p>手动恢复。</p> </li><li> <p>手动，强制failover。</p> </li></ul> 
+<p><strong>要求</strong></p> 
+<p>要运行任何类型的故障转移，拓扑必须支持以下任一种：</p> 
+<ul><li> <p>Oracle GTID（master_auto_position=1）</p> </li><li> <p>MariaDB GTID</p> </li><li> <p>Pseudo GTID（伪GTID）</p> </li><li> <p>Binlog Servers</p> </li></ul> 
+<p><strong>什么是恢复</strong></p> 
+<p>恢复基于故障检测，并且由一系列事件组成：</p> 
+<ul><li> <p>恢复前的hooks（hook：外部的执行过程或者脚本）。</p> </li><li> <p>修复拓扑。</p> </li><li> <p>恢复后的hooks。</p> </li></ul> 
+<p>注意：</p> 
+<ul><li> <p>恢复前的hooks由用户自己配置。</p> <p>- 顺序执行。</p> <p>- 任何一个hook的失败（非零退出码）都将中止故障转移。</p> </li><li> <p>拓扑修复是由orch管理的，并且是基于状态，而不是基于配置。orch在考虑到现有拓扑、版本、服务器配置等因素的情况下，会力图尽力而为。</p> </li></ul> 
+<ul><li> <p>恢复后的hooks也是由用户自己配置。</p> </li></ul> 
+<p><strong>恢复场景1：中间主库挂掉</strong></p> 
+<p>一个简单的恢复案例是DeadIntermediateMaster。它的replicas被孤立了，但是当使用了GTID或者Pseudo GTID的情况下，replicas仍然能够被重连到拓扑中。我们可能会选择这样做：</p> 
+<ul><li> <p>找到已失效的中间主服务器的同级，然后将孤立的副本移到所述同级之下。</p> </li><li> <p>从孤立的副本中提升某个副本，使得这个副本成为同级的中间主库，然后将这个副本连接到拓扑。</p> </li><li> <p>重置所有的孤立副本。</p> </li><li> <p>结合以上部分做法。</p> </li></ul> 
+<p>实际的实现方式很大程度上取决于拓扑设置（哪些实例设置了log-slave-updates、实例是否有延迟、是否存在复制过滤、mysql的版本等等）。你的拓扑很有可能至少支持以上一种方式（特别是，匹配副本是一个简单的解决方案，除非使用了复制过滤）。</p> 
+<p><strong>恢复场景2：主库挂掉</strong></p> 
+<p>从挂掉的主库恢复是一个更为复杂的操作，有很多种原因：</p> 
+<ul><li> <p>有潜在的运行中断（停电、网络），恢复要尽可能地快。</p> </li><li> <p>在恢复过程中，有些servers可能会丢失。orch需要确定会是哪个。</p> </li><li> <p>拓扑的状态可能是用户希望阻止恢复。</p> </li><li> <p>必须进行主服务发现：应用必须能够与新的主库进行通讯（潜在地被告知主库已经更改了）。</p> </li><li> <p>需要找到最合适的replica，将其提升为主库。</p> <p>- 一个天真的方法是选择最新的副本，但这不一定总是正确的选择。</p> <p>- 最新的副本不一定有必要的配置来作为其他replica的主库（比如：binlog format、mysql版本、复制过滤器等）。盲目地提升最新的副本为主库，可能会失去副本冗余的能力。</p> <p>- orch会尝试提升保留最大服务容量的副本为主库。</p> </li><li> <p>提升所述副本，接管它的同级。</p> </li><li> <p>使它的同级保持最新状态（up to date）。</p> </li><li> <p>也许，要做一个二阶段提升；用户可能已经标记了要提升的特定服务器（参考register-candidate命令）。</p> </li><li> <p>调用hooks。</p> </li></ul> 
+<p>主服务发现很大程度上是需要用户去实现的。常见的解决方案有：</p> 
+<ul><li> <p>基于DNS的发现；orch需要调用能修改DNS入口的hook。</p> </li><li> <p>ZooKeeper/Consul KV/etcd/其他基于键值的发现；orch内置了对Consul KV的支持，否则外部的hook必须更新k-v存储系统。</p> </li><li> <p>基于proxy的发现；orch会调用外部的hook去更新proxy的配置，或者更新如上所说的Consul/Zk/etcd，这本身就会触发更新proxy的配置。</p> </li><li> <p>其他方式。</p> </li></ul> 
+<p>orch尝试作为一种通用的解决方案，因此，不限制用户的服务发现方法。</p> 
+<p><strong>自动恢复</strong></p> 
+<p>可选。自动恢复可能会应用于所有（"*"）集群或者特定集群。</p> 
+<p>恢复是在检测之后进行的，并且假设恢复没有被阻碍（请参阅下文）。</p> 
+<p>为了更好的解决方案，将不同的配置应用于主恢复和中间主恢复。一下是与恢复相关的配置的详细分类。</p> 
+<p>分析机制始终运行，并定期检查故障/恢复情况。它将对以下进行自动恢复：</p> 
+<ul><li> <p>一种可操作的场景（只有一个主库的情况就不符合）。</p> </li><li> <p>未处于downtime的实例。</p> </li><li> <p>对于属于某个集群的实例，这个集群通过配置明确启用了恢复。</p> </li><li> <p>对于最近尚未恢复的集群中的实例，除非确认了这些最近的恢复。</p> </li><li> <p>启用了全局恢复。</p> </li></ul> 
+<p><strong>优雅的主库提升</strong></p> 
+<p>使用这个来按计划、有序地替换主库。</p> 
+<p>通常，出于升级，主机维护等，会要将主库替换成另一台。这就是优雅的提升主库。</p> 
+<p>在优雅的接管中：</p> 
+<ul><li> <p>指定一台server去提升。</p> </li><li> <p>orch会将master设置成read-only。</p> </li><li> <p>orch确保指定的服务器追上了复制。</p> </li><li> <p>orch将指定的server提升为新的主库。</p> </li><li> <p>orch将提升的server设置为可写。</p> </li></ul> 
+<p>该操作会花费几秒钟的时间，在此期间应用看到的主库是read-only。</p> 
+<p>除了标准的hooks，orch提供了专门的hooks来运行graceful takeover：</p> 
+<ul><li> <p>PreGracefulTakeoverProcesses</p> </li><li> <p>PostGracefulTakeoverProcesses</p> </li></ul> 
+<p>例如，你可能想在计划的故障转移期间禁用寻呼机。高级的用法是将流量停滞在代理层。</p> 
+<p>在优雅的提升主库中，必须满足以下任一种：</p> 
+<ul><li> <p>指定要提升的server（必须是master的直接replica）。</p> </li><li> <p>设置拓扑，使得master下只存在一个直接replica（在这种情况下，指定副本的身份不重要，无需提及）。</p> </li></ul> 
+<p>通过以下方式调用graceful takeover：</p> 
+<ul><li> <p>命令行：orchestrator-client -c graceful-master-takeover -alias mycluster -s designated.master.to.promote:3306</p> </li><li> <p>web api：</p> <p>- /api/graceful-master-takeover/:clusterHint/:designatedHost/:designatedPort</p> <p>优雅地提升新主库（计划的故障转移），指定要提升的服务器。</p> <p>- /api/graceful-master-takeover/:clusterHint</p> <p>优雅地提升新主库（计划的故障转移）。未指定服务器，在master只有一个直接副本时起作用。</p> </li><li> <p>web界面：</p> <p>- 将master的直接副本拖拽到master框的左半边。</p> </li></ul> 
+<p><strong>手动恢复</strong></p> 
+<p>当实例被识别为fail但自动恢复被禁用或者被阻塞的情况下，使用手动恢复方式。</p> 
+<p>可以通过提供一个失败的特定实例来让orch来进行恢复。该实例必须被识别为failure。可以对处于downtime的实例请求恢复（因为这是手动恢复，能够覆盖掉自动的配置）。通过以下方式恢复：</p> 
+<ul><li> <p>命令行：orchestrator-client -c recover -i dead.instance.com:3306 --debug</p> </li><li> <p>web api：/api/recover/dead.instance.com/:3306</p> </li><li> <p>web界面：实例变成了黑色；点击recovery按钮。</p> </li></ul> 
+<p>手动恢复不受参数RecoveryPeriodBlockSeconds影响，也不受参数RecoverMasterClusterFilters和RecoverIntermediateMasterClusterFilters的影响。因此，用户总是可以按需要来进行恢复。当一个数据库实例已经有恢复在运行的时候，这个实例的同一时刻的恢复才有可能会阻塞。</p> 
+<p><strong>手动，强制故障转移</strong></p> 
+<p>强制故障转移会忽略orch自己的想法。</p> 
+<p>也许，orch不认为某个实例fail了，或者你的应用逻辑要求master此刻必须change，或者也许orch对fail的类型不是很确定。你希望此刻就进行故障转移，可以这么做：</p> 
+<ul><li> <p>命令行：orchestrator-client -c force-master-failover --alias mycluster</p> <p>或者orchestrator-client -c force-master-failover -i instance.in.that.cluster</p> </li><li> <p>web api：/api/force-master-failover/mycluster</p> <p>或者/api/force-master-failover/instance.in.that.cluster/3306</p> </li></ul> 
+<p><strong>web，api，命令行</strong></p> 
+<p>通过以下方式审计恢复情况：</p> 
+<ul><li> <p>/web/audit-recovery</p> </li><li> <p>/api/audit-recovery</p> </li><li> <p>/api/audit-recovery-steps/:uid</p> </li></ul> 
+<p>通过以下方式进行审计和控制：</p> 
+<ul><li> <p>/api/blocked-recoveries: 被阻塞的恢复。</p> </li><li> <p>/api/ack-recovery/cluster/:clusterHint: 确认给定集群上的恢复。</p> </li><li> <p>/api/ack-all-recoveries: 确认所有恢复。</p> </li><li> <p>/api/disable-global-recoveries: 全局开关以禁用orch运行任何恢复。</p> </li><li> <p>/api/enable-global-recoveries: 重新启用恢复。</p> </li><li> <p>/api/check-global-recoveries: 检查是否启用了全局恢复。</p> </li></ul> 
+<p>运行手动恢复：</p> 
+<ul><li> <p>/api/recover/:host/:port: 恢复指定主机，假定orch认同发生了故障。</p> </li><li> <p>/api/recover-lite/:host/:port: 和上面相同，不使用外部hooks （对测试有用）。</p> </li><li> <p>/api/graceful-master-takeover/:clusterHint/:designatedHost/:designatedPort: 优雅地提升一个新主（计划的故障转移）, 指定要提升的服务器。</p> </li><li> <p>/api/graceful-master-takeover/:clusterHint: 优雅地提升一个新主（计划的故障转移）。未指定服务器，在master只有一个直接副本时起作用。</p> </li><li> <p>/api/force-master-failover/:clusterHint: 紧急情况下，强制给定集群进行故障转移。</p> </li></ul> 
+<p>一些相应的命令行调用：</p> 
+<ul><li> <p>orchestrator-client -c recover -i some.instance:3306</p> </li><li> <p>orchestrator-client -c graceful-master-takeover -i some.instance.in.somecluster:3306</p> </li><li> <p>orchestrator-client -c graceful-master-takeover -alias somecluster</p> </li><li> <p>orchestrator-client -c force-master-takeover -alias somecluster</p> </li><li> <p>orchestrator-client -c ack-cluster-recoveries -alias somecluster</p> </li><li> <p>orchestrator-client -c ack-all-recoveries</p> </li><li> <p>orchestrator-client -c disable-global-recoveries</p> </li><li> <p>orchestrator-client -c enable-global-recoveries</p> </li><li> <p>orchestrator-client -c check-global-recoveries</p> </li></ul> 
+<p><strong>阻塞，确认，防震荡</strong></p> 
+<p>orch通过引入阻塞时间段来避免发生震荡（连锁故障导致了连续的中断和资源消耗）。在任何给定的集群上，除非用户明确允许，否则orch都不会在小于该阻塞时间段的时间间隔启用自动恢复。</p> 
+<p>阻塞时间段用参数RecoveryPeriodBlockSeconds表示。它仅用于在同一集群上的恢复。在不同集群上的并行恢复是不受影响的。</p> 
+<p>处于pending状态中的恢复一旦超过了RecoveryPeriodBlockSeconds时间或者已经被确认（acknowledged），则阻塞就被解除。</p> 
+<p>可以通过Web API /界面（查看audit/recovery page）或通过命令行界面（orchestrator-client -c ack-cluster-recoveries -alias somealias）确认恢复。</p> 
+<p>请注意，手动恢复（例如orchestrator-client -c recover或orchstrator-client -c force-master-failover）会忽略阻塞时间段。</p> 
+<p><strong>添加提升规则</strong></p> 
+<p>在发生故障转移时，某些服务器更适合被提升为主库，某些服务器则不适合被提升为主库。例如：</p> 
+<ul><li> <p>某个服务器的硬件配置较差。偏向于不提升它为主库。</p> </li><li> <p>某个服务器位于远程的数据中心，不想要把它提升为主库。</p> </li><li> <p>某个服务器用作备份源，并且始终打开LVM快照。不想要把它提升为主库。</p> </li><li> <p>某个服务器配置不错，非常适合作为candidate。偏向于提升它为主库。</p> </li><li> <p>某个服务器配置一般，没有特别的偏好。</p> </li></ul> 
+<p>可以通过以下方式来设置偏好：</p> 
+<pre class="has"><code>orchestrator -c register-candidate -i ${::fqdn} --promotion-rule ${promotion_rule}</code></pre> 
+<p>提升规则有：</p> 
+<ul><li> <p>prefer</p> </li><li> <p>neutral</p> </li><li> <p>prefer_not</p> </li><li> <p>must_not</p> </li></ul> 
+<p>提升规则默认有效期1个小时（参数：CandidateInstanceExpireMinutes）。这符合orch的动态特质。可以通过设置cron job的方式来指定提升规则：</p> 
+<pre class="has"><code>*/2 * * * * root "/usr/bin/perl -le 'sleep rand 10' &amp;&amp; /usr/bin/orchestrator-client -c register-candidate -i this.hostname.com --promotion-rule prefer"</code></pre> 
+<p>此设置来自生产环境。这个cron会通过puppet来更新，来表示合适的promotion_rule。某个服务器可能在某个时刻会是perfer，但5分钟过后变成了prefer_not。整合你自己的服务发现方法、脚本，来提供最新的promotion_rule。</p> 
+<p><strong>停机时间（Downtime）</strong></p> 
+<p>所有的故障/恢复已经分析了。但是，还应该考虑实例的停机状态。某个实例可以通过orchestrator-client -c begin-downtime被停机。自动恢复会跳过停机的服务器。</p> 
+<p>实际上，停机是专门为此目的而创建的，它使DBA可以阻止自动故障转移到特定服务器。</p> 
+<p>请注意，手动恢复（例如orchestrator-client -c recover）将覆盖停机时间。</p> 
+<p><strong>recovery hooks</strong></p> 
+<p>orch支持hooks——在恢复过程中调用的外部脚本。这些是通过shell调用的命令数组，尤其是bash。</p> 
+<ul><li> <p>OnFailureDetectionProcesses：当检测故障转移现象时执行（在决定是否进行故障转移之前）。</p> </li><li> <p>PreGracefulTakeoverProcesses：graceful master takeover时执行，在master变成read-only之前立即执行。</p> </li><li> <p>PreFailoverProcesses：在orch进行恢复操作之前立即执行。在这个过程中任何的失败（非零退出代码）都会终止恢复。提示：这使得有机会根据系统的某些内部状态中止恢复。</p> </li><li> <p>PostMasterFailoverProcesses：在主恢复成功结束时执行。</p> </li><li> <p>PostIntermediateMasterFailoverProcesses：在中间主恢复成功结束时执行。</p> </li><li> <p>PostFailoverProcesses：在任何成功的恢复结束时执行（包括以及补充到PostMasterFailoverProcesses、PostIntermediateMasterFailoverProcesses）。</p> </li><li> <p>PostUnsuccessfulFailoverProcesses：在任何不成功的恢复结束时执行。</p> </li><li> <p>PostGracefulTakeoverProcesses：在有计划地、优雅地主库切换的时候会执行，在旧主库位于新主库之后执行。</p> </li></ul> 
+<p>原文：</p> 
+<p>https://github.com/github/orchestrator/blob/master/docs/topology-recovery.md</p> 
+<p> </p> 
+<p><strong>|  译者简介</strong></p> 
+<p><strong>韩杰  沃趣科技高级数据库工程师</strong></p> 
+<p>专注MySQL数据库三年，精通MySQL体系结构，数据库优化，trouble shooting。服务过多家银行客户，熟悉银行业务及系统下数据库不同架构使用场景。熟悉MySQL主从复制原理，及应用的各种高可用场景。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/a389bd0f696bf4cca96c662163d21c04/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">图像透视变换应用</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/95a4536d8fab711b3ceb4be2c180c5cf/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">小程序中使用动画的四种方式</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

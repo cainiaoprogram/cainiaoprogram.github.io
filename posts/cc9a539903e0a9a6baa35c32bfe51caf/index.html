@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>C&#43;&#43;编译期分支选择相关技术 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="C&#43;&#43;编译期分支选择相关技术" />
+<meta property="og:description" content="文章目录 一、函数重载和标签分发1.1 函数重载1.2 标签分发 二、模板特化三、 SFINAE3.1 类型相关3.2 表达式相关3.3 偏特化相关 四、 if constexpr 程序员写的代码里，最核心的内容之一就是根据不同的条件判断执行不同的逻辑分支，也就是所谓的if else，而分支判断又可以分为运行时和编译期两种，运行时的判断大家都很熟悉，比如对于后端服务，根据请求里字段的不同走不同的逻辑分支。另一类则是编译期就可以确定的分支选择，通常和特定的类型有关，比如对于一个object pool，因为需要重复利用对象，我们可以写一个通用的函数模板来执行clear，不同的类型有不同的clear操作，同时编译期计算在性能上也有很大帮助，运行时就不需要再进行额外的判断或计算了，这也是模板元编程的核心理念。 一、函数重载和标签分发 1.1 函数重载 函数重载大家都不陌生，其实这也是C&#43;&#43;里最基本的最常用的编译期分支选择技术，可以有多个同名的函数，编译器会根据实参和形参的匹配情况来选择最合适的版本。下面引用Exceptional C&#43;&#43; Style关于函数重载的一个例子：
+#include &lt;complex&gt; class Calc { public: double Twice(double); private: int Twice(int i); std::complex&lt;float&gt; Twice(std::complex&lt;float&gt; c); }; int main() { Calc c; c.Twice(21); //编译出错，因为int Twice(int i) 是private的 } 以上的代码的函数重载主要有以下几个步骤：
+（1）名字查找：编译器会首先寻找至少包含一个名为Twice的实体作用域，并将其放入候选实体列表。本例中，编译器的名字查找首先是从Calc的作用域中开始，编译器会查看Calc中是否至少存在一个名为Twice的成员，如果没有，就会继续依次在其基类和外围空间中查找，直到找到一个至少具有一个候选函数的作用域。这里是在Calc类内部找到三个名为Twice的候选函数。
+（2）重载决议。编译器在候选的重载函数中选出唯一的最佳匹配。因为c.Twice(21)参数是21，所以最佳匹配是Twice(int)。这种是精准匹配的情况，如果没有这种精准匹配，会尝试隐式转换后可以匹配的函数，如果仍然没有，编译报错。
+（3）可访问性检查。最后编译器会检查函数的可访问性，因为Twice(int)是private，不可访问从而导致编译失败，是的，会直接失败而不是退而求其次选double的版本。
+通过函数重载，本质上也就是在编译期选择了不同的代码分支。
+1.2 标签分发 而标签分发（tag dispatch），则是对函数重载机制的利用，和我们平常习惯的函数重载不一样的点在于，会用一个参数仅仅作为一个标签，这个标签并不参与任何代码逻辑，仅仅用于指导编译器选择合适的重载版本，这也是标签分发名称的由来，标签分发通常是为了解决参数相同但需要走不同的函数的问题，
+标签参数通常都是一个空类，此项技术在stl库里面也有大量使用（c&#43;&#43;20之后可以用concept更方便地实现）。这里来看一个迭代器的例子，我们知道stl里不同容器的迭代器的类型是不一样的，对于list这种，因为底层是双链表，不能随机访问，只能每次向前向后挪一，属于bidirectional_iterator，而vector这种，因为底层是连续内存空间，因此可以直接进行指针运算跳到需要的位置，属于random_access_iterator。
+我们再来看std::advance函数的实现，如果需要前进n，对于random_access_iterator，我们是可以直接&#43;n的，而对于普通的forward_iterator_tag，只能n次单加，因此可以利用标签分发写出类似以下的实现：
+这里属于函数模板里使用标签分发，但是本质上和普通函数的重载是一样的。第三个参数就是标签，仅仅用于选择不同的函数，这个标签可以通过std::iterator_traits从迭代器中萃取出来。有了不同tag的impl函数，我们可以使用一个统一的入口函数来调impl，从而让编译器根据标签选择合适的版本。
+下面是cppreference上的一个基于迭代器做自定义算法的标签分发的例子：
+二、模板特化 模板特化指的是除了主模板之外，针对特定的模板参数额外提供特定的实现，分为全特化合偏特化两种：
+（1）全特化：指定所有的模板参数
+（2）偏特化：指定部分模板参数
+函数模板在选择过程也有重载决议，和函数重载类似，编译器也会从候选集中选取最合适的版本进行实例化，对于特化情况，编译器会优先选择特化程度最高的，从而让程序员能够在部分或者全部参数为特定类型的情况下提供不同的实现。
+三、 SFINAE SFINAE（Substitution Failure Is Not An Error），即替换失败不是错误，这是一条针对函数模板重载决议的规则，详细的定义是：当模板形参在替换成显式指定的类型或推导出的类型失败时，只是从重载集中丢弃这个特化，而不会直接导致编译失败。通俗地来说就是，在编译器check模板调用的过程中，尝试使用某些版本会导致failure并不会导致编译失败，只要有能够正常用的，其余的failure会被忽略，这也是模板元编程经常用到的一个重要特性。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/cc9a539903e0a9a6baa35c32bfe51caf/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-01-31T21:37:14+08:00" />
+<meta property="article:modified_time" content="2022-01-31T21:37:14+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">C&#43;&#43;编译期分支选择相关技术</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><a href="#_2" rel="nofollow">一、函数重载和标签分发</a></li><li><ul><li><a href="#11__3" rel="nofollow">1.1 函数重载</a></li><li><a href="#12__29" rel="nofollow">1.2 标签分发</a></li></ul> 
+  </li><li><a href="#_40" rel="nofollow">二、模板特化</a></li><li><a href="#_SFINAE_49" rel="nofollow">三、 SFINAE</a></li><li><ul><li><a href="#31__55" rel="nofollow">3.1 类型相关</a></li><li><a href="#32__60" rel="nofollow">3.2 表达式相关</a></li><li><a href="#33__63" rel="nofollow">3.3 偏特化相关</a></li></ul> 
+  </li><li><a href="#_if_constexpr_66" rel="nofollow">四、 if constexpr</a></li></ul> 
+</div> 
+<br> 程序员写的代码里，最核心的内容之一就是根据不同的条件判断执行不同的逻辑分支，也就是所谓的if else，而分支判断又可以分为运行时和编译期两种，运行时的判断大家都很熟悉，比如对于后端服务，根据请求里字段的不同走不同的逻辑分支。另一类则是编译期就可以确定的分支选择，通常和特定的类型有关，比如对于一个object pool，因为需要重复利用对象，我们可以写一个通用的函数模板来执行clear，不同的类型有不同的clear操作，同时编译期计算在性能上也有很大帮助，运行时就不需要再进行额外的判断或计算了，这也是模板元编程的核心理念。 
+<p></p> 
+<h2><a id="_2"></a>一、函数重载和标签分发</h2> 
+<h3><a id="11__3"></a>1.1 函数重载</h3> 
+<p>函数重载大家都不陌生，其实这也是C++里最基本的最常用的编译期分支选择技术，可以有多个同名的函数，编译器会根据实参和形参的匹配情况来选择最合适的版本。下面引用Exceptional C++ Style关于函数重载的一个例子：</p> 
+<pre><code class="prism language-cpp"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;complex&gt;</span></span>
+
+<span class="token keyword">class</span> <span class="token class-name">Calc</span> <span class="token punctuation">{<!-- --></span>
+<span class="token keyword">public</span><span class="token operator">:</span>
+    <span class="token keyword">double</span> <span class="token function">Twice</span><span class="token punctuation">(</span><span class="token keyword">double</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">private</span><span class="token operator">:</span>
+    <span class="token keyword">int</span> <span class="token function">Twice</span><span class="token punctuation">(</span><span class="token keyword">int</span> i<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    std<span class="token operator">::</span>complex<span class="token operator">&lt;</span><span class="token keyword">float</span><span class="token operator">&gt;</span> <span class="token function">Twice</span><span class="token punctuation">(</span>std<span class="token operator">::</span>complex<span class="token operator">&lt;</span><span class="token keyword">float</span><span class="token operator">&gt;</span> c<span class="token punctuation">)</span><span class="token punctuation">;</span>      
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    Calc c<span class="token punctuation">;</span>
+    c<span class="token punctuation">.</span><span class="token function">Twice</span><span class="token punctuation">(</span><span class="token number">21</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//编译出错，因为int Twice(int i) 是private的</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>以上的代码的函数重载主要有以下几个步骤：<br> （1）名字查找：编译器会首先寻找至少包含一个名为Twice的实体作用域，并将其放入候选实体列表。本例中，编译器的名字查找首先是从Calc的作用域中开始，编译器会查看Calc中是否至少存在一个名为Twice的成员，如果没有，就会继续依次在其基类和外围空间中查找，直到找到一个至少具有一个候选函数的作用域。这里是在Calc类内部找到三个名为Twice的候选函数。<br> （2）重载决议。编译器在候选的重载函数中选出唯一的最佳匹配。因为c.Twice(21)参数是21，所以最佳匹配是Twice(int)。这种是精准匹配的情况，如果没有这种精准匹配，会尝试隐式转换后可以匹配的函数，如果仍然没有，编译报错。<br> （3）可访问性检查。最后编译器会检查函数的可访问性，因为Twice(int)是private，不可访问从而导致编译失败，是的，会直接失败而不是退而求其次选double的版本。</p> 
+<p>通过函数重载，本质上也就是在编译期选择了不同的代码分支。</p> 
+<h3><a id="12__29"></a>1.2 标签分发</h3> 
+<p>而标签分发（tag dispatch），则是对函数重载机制的利用，和我们平常习惯的函数重载不一样的点在于，会用一个参数仅仅作为一个标签，这个标签并不参与任何代码逻辑，仅仅用于指导编译器选择合适的重载版本，这也是标签分发名称的由来，<strong>标签分发通常是为了解决参数相同但需要走不同的函数的问题</strong>，</p> 
+<p>标签参数通常都是一个空类，此项技术在stl库里面也有大量使用（c++20之后可以用concept更方便地实现）。这里来看一个迭代器的例子，我们知道stl里不同容器的迭代器的类型是不一样的，对于list这种，因为底层是双链表，不能随机访问，只能每次向前向后挪一，属于bidirectional_iterator，而vector这种，因为底层是连续内存空间，因此可以直接进行指针运算跳到需要的位置，属于random_access_iterator。</p> 
+<p>我们再来看std::advance函数的实现，如果需要前进n，对于random_access_iterator，我们是可以直接+n的，而对于普通的forward_iterator_tag，只能n次单加，因此可以利用标签分发写出类似以下的实现：<br> <img src="https://images2.imgbox.com/2d/f6/pfnmORx9_o.png" alt="在这里插入图片描述"><br> 这里属于函数模板里使用标签分发，但是本质上和普通函数的重载是一样的。第三个参数就是标签，仅仅用于选择不同的函数，这个标签可以通过std::iterator_traits从迭代器中萃取出来。有了不同tag的impl函数，我们可以使用一个统一的入口函数来调impl，从而让编译器根据标签选择合适的版本。</p> 
+<p>下面是cppreference上的一个基于迭代器做自定义算法的标签分发的例子：<br> <img src="https://images2.imgbox.com/d8/67/dYjLXtGI_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="_40"></a>二、模板特化</h2> 
+<p>模板特化指的是除了主模板之外，针对特定的模板参数额外提供特定的实现，分为全特化合偏特化两种：<br> （1）全特化：指定所有的模板参数<br> <img src="https://images2.imgbox.com/94/c1/ihZTMD3v_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/59/79/Dx2ARBqz_o.png" alt="在这里插入图片描述"><br> （2）偏特化：指定部分模板参数<br> <img src="https://images2.imgbox.com/2b/ac/Obu1nApe_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/e8/56/Ie7Ao0rD_o.png" alt="在这里插入图片描述"><br> 函数模板在选择过程也有重载决议，和函数重载类似，编译器也会从候选集中选取最合适的版本进行实例化，对于特化情况，编译器会优<strong>先选择特化程度最高</strong>的，从而让程序员能够在部分或者全部参数为特定类型的情况下提供不同的实现。</p> 
+<h2><a id="_SFINAE_49"></a>三、 SFINAE</h2> 
+<p>SFINAE（Substitution Failure Is Not An Error），即替换失败不是错误，这是一条针对函数模板重载决议的规则，详细的定义是：当模板形参在替换成显式指定的类型或推导出的类型失败时，只是从重载集中丢弃这个特化，而不会直接导致编译失败。通俗地来说就是，在编译器check模板调用的过程中，尝试使用某些版本会导致failure并不会导致编译失败，只要有能够正常用的，其余的failure会被忽略，这也是模板元编程经常用到的一个重要特性。</p> 
+<p>SFINAE是个很古老的特性，c++11之前就被大量运用了，到了c++11之后，标准库提供了更多的组件来简化该特性的使用，c++ 20之后又引入了concept来更简单地实现SFINAE能做地事情，但鉴于现在20完全不普及，SFINAE仍然有比较重要的价值。</p> 
+<p>SFINAE规则在模板的各个涉及到参数的部分都能生效，主要可以分为以下三类：</p> 
+<h3><a id="31__55"></a>3.1 类型相关</h3> 
+<p>这里列两个典型的例子：<br> <img src="https://images2.imgbox.com/17/99/DDKE4pU0_o.png" alt="在这里插入图片描述"><br> 数组长度为0会被认为是failure，因此奇数偶数会分别使用这两个版本。 <img src="https://images2.imgbox.com/42/47/Hr0AfXzP_o.png" alt="在这里插入图片描述"><br> Int类型里没有B所以会选第二个。</p> 
+<h3><a id="32__60"></a>3.2 表达式相关</h3> 
+<p><img src="https://images2.imgbox.com/83/85/vgtACvSi_o.png" alt="在这里插入图片描述"><br> 这个例子里，重载版本1里需要根据二者相加的表达式来推导返回类型，但X没有重载+运算符不能相加，所以是个Failure，从而会选重载2，不然虽然2是普通函数但是由于需要隐式转换优先级不如能匹配的模板.</p> 
+<h3><a id="33__63"></a>3.3 偏特化相关</h3> 
+<p><img src="https://images2.imgbox.com/d5/e3/2NFLCxV8_o.png" alt="在这里插入图片描述"><br> 主模板接收两个模板参数，类型T和默认为void的类型，特化版本是对第二个类型参数进行特化为std::void_t&lt;T&amp;&gt;，如果T是void，std::void_t&lt;T&amp;&gt;会failure，从而match到主模板，否则特化版本优先级高，从而实现不可引用类型返回原类型，可引用类型添加引用。</p> 
+<h2><a id="_if_constexpr_66"></a>四、 if constexpr</h2> 
+<p>constexpr是C++11引入的一个关键字，表明是编译器常量，实际使用中有两种用途，一个是修饰变量，一个是修饰函数返回值，修饰变量表明该变量是编译期常量，必须编译器就能确定，否则会报错。而constexpr函数如果传入的实参是编译器已知的，就会产生编译器结果，否则和没有constexpr修饰的函数没有区别。const表示readonly，constexpr则进一步限定在编译器已知。</p> 
+<p>C++17进而引入了if constexpr语法，可以方便地进行编译期分支选择，比如以下方式可以定义一个通用的取值函数，输入既支持指针，也支持原始值：<br> <img src="https://images2.imgbox.com/6a/8e/LJEk4sb7_o.png" alt="在这里插入图片描述"><br> [参考]<br> 1.<a href="https://en.cppreference.com/w/cpp/language/sfinae" rel="nofollow">https://en.cppreference.com/w/cpp/language/sfinae</a><br> 2.<a href="https://arne-mertz.de/2016/10/tag-dispatch/" rel="nofollow">https://arne-mertz.de/2016/10/tag-dispatch/</a><br> 3.<a href="https://www.fluentcpp.com/2018/04/27/tag-dispatching/" rel="nofollow">https://www.fluentcpp.com/2018/04/27/tag-dispatching/</a><br> 4.Exceptional C++ Style<br> 5.<a href="http://en.cppreference.com/w/cpp/language/template_specialization" rel="nofollow">http://en.cppreference.com/w/cpp/language/template_specialization</a><br> 6.<a href="http://en.cppreference.com/w/cpp/language/partial_specialization" rel="nofollow">http://en.cppreference.com/w/cpp/language/partial_specialization</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/51fa879eb4f6a7e7560e9a853b4063f0/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">变量4 大国的腾挪 何帆</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/b8d8e4e638443fbe12c67acfbc43c400/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">【论文阅读】Deep Neural Networks for Learning Graph Representations | day14，15</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

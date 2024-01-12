@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>rockscache：保证与DB最终或强一致性的Redis缓 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="rockscache：保证与DB最终或强一致性的Redis缓" />
+<meta property="og:description" content="随着缓存的引入，分布式系统中的一致性问题出现了，因为数据同时存储在两个地方：数据库和Redis。
+到目前为止，我们看到的所有缓存解决方案，如果没有在应用程序级别引入版本控制，都无法解决数据不一致场景。目前还没有成熟的解决方案来保证最终一致性
+即使您使用锁来进行更新，仍然存在可能导致不一致的特殊情况。
+解决方案
+现有的解决方案都没有完全解决该问题，但有多种选择。
+设置稍短的过期时间：在这个过期时间内，会不一致。缺点是过期时间越短意味着数据库负载越高
+双重删除：删除一次缓存，延迟几百毫秒再删除一次。这种做法只是进一步降低了不一致的概率，但并不是禁止的
+在应用层引入类似版本的机制：应用层必须维护版本，因此这种方案限制了通用性并且不易重用
+该项目为您带来了一种全新的解决方案，无需引入版本，即可保证缓存与数据库之间的数据一致性。该解决方案是同类解决方案中的首创，已获得专利，现已开源供所有人使用。
+我们实现了名为“标记为已删除”的缓存策略，彻底解决了这个问题，确保缓存和数据库之间的数据保持一致。
+解决原理如下：
+缓存中的数据是具有以下字段的哈希。
+值：数据本身
+lockUtil：数据锁过期时间，当一个进程查询缓存没有数据时，则锁定缓存一小段时间，然后查询DB，然后更新缓存
+所有者：数据锁uuid
+查询缓存时。
+如果数据为空并被锁定，则休眠100ms并再次查询
+如果数据为空且未锁定，则同步执行“取数据”并返回结果
+如果数据不为空，则立即返回结果，异步执行“取数据”
+“获取数据”操作定义为
+判断是否需要更新缓存，如果满足以下两个条件之一，则需要更新缓存 数据为空且未锁定数据锁定已过期 如果需要更新缓存，则锁定缓存，查询DB，如果验证锁持有者未更改，则更新并解锁缓存。
+当DB数据更新时，通过dtm成功更新数据后，保证缓存被标记为已删除
+TagAsDeleted 设置数据过期时间为10s，并设置锁过期，下次查询到缓存时会触发“取数据” 通过上述策略：
+如果最后写入数据库的版本是Vi，最后写入缓存的版本是V，写入V的uuid是uuidv，那么一定有如下的事件序列：
+数据库写入Vi -&gt; 缓存数据标记为已删除 -&gt; 某些查询锁定数据并写入uuidv -&gt; 查询数据库结果V -&gt; 缓存中的locker是uuidv，写入结果V在这个序列中，V的读取发生在Vi的写入之后，所以V等于Vi，保证了缓存数据的最终一致性。 dtm-labs/rockscache已经实现了上述方法，并且能够保证缓存数据的最终一致性。
+Fetch函数实现了之前的查询缓存
+TagAsDeleted函数实现“标记已删除”逻辑
+当开发者Fetch在读取数据时调用，并确保TagAsDeleted在更新数据库后调用，那么缓存就可以保证最终的一致性。
+dtm-labs致力于解决数据一致性问题，在分析业界现有实践后，提出了新的解决方案dtm-labs/dtm &#43; dtm-labs/rockscache，彻底解决了上述问题。另外，该方案作为成熟的方案，还具有防渗透、防击穿、防雪崩的能力，也可以应用于需要强数据一致性的场景。
+有关完整的可运行示例，请参阅dtm-cases/cache
+背景
+DB 和缓存操作的原子性
+对于缓存管理，业界一般采用写入数据库后删除/更新缓存数据的策略。由于保存到缓存和保存到数据库操作不是原子的，必然存在时间差，因此两个数据之间会存在一个不一致的窗口，该窗口通常很小，影响也较小。然而，由于两项操作之间可能会出现停机和各种网络错误，因此有可能其中一项完成而另一项无法完成，从而导致长时间的不一致。
+为了说明上面的不一致场景，数据用户修改了数据A到B。应用程序修改数据库后，然后删除/更新缓存，如果没有异常发生，那么数据库和缓存中的数据是一致的。
+然而在分布式系统中，可能会出现进程崩溃和宕机事件，所以如果一个进程在更新数据库之后、删除/更新缓存之前崩溃，那么数据库和缓存中的数据可能会长时间不一致。
+要彻底解决这里长时间的不一致并不是一件容易的事，因此我们在下面介绍各种解决方案。
+解决方案一：设置较短的过期时间
+这种方案是最简单的方案，适合低并发的应用。开发者只需将缓存的过期时间设置为一个较短的值，例如一分钟。这种策略非常容易理解和实现，并且缓存系统提供的语义使得大多数情况下缓存和数据库之间不一致的时间窗口很短。当进程崩溃时，不一致的时间窗口可能会持续一分钟。
+对于这种解决方案，数据库应该能够在每分钟生成所有访问的缓存数据，这对于许多高并发的应用程序来说可能过于昂贵。
+方案二：消息队列
+这是由
+更新数据库时，同时向本地表写入一条消息。这两个操作都在一个事务中。
+编写一个轮询任务，不断轮询消息表中的数据，并将它们发送到消息队列。
+消费消息队列中的消息并更新/删除缓存
+这种方法可确保缓存始终在数据库更新后更新。但是这个架构非常繁重，这些部分的开发和维护成本都不低：消息队列的维护；开发和维护高效的轮询任务。
+方案三：订阅Binlog
+这个方案和场景2很相似，原理和数据库的主从同步类似，数据库的主从同步是通过订阅binlog并从master向slave应用更新来完成的，而这个解决方案是通过订阅 binlog 并将更新从数据库应用到缓存来完成。这是由
+部署并配置debezium以订阅数据库的binlog
+监听数据更新并同步更新/删除到缓存
+这个方案也保证了数据库更新后缓存也会更新，但是和之前的消息队列方案一样，这个架构也很重。一方面，Debezium 的学习和维护成本较高，另一方面，开发人员可能只需要少量数据来更新缓存，订阅所有 binlog 来执行此操作是对资源的浪费。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/b950fbe844d186e8fdbfc2e148b0eb6b/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-09T06:23:16+08:00" />
+<meta property="article:modified_time" content="2024-01-09T06:23:16+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">rockscache：保证与DB最终或强一致性的Redis缓</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>随着<a href="https://www.jdon.com/cache.html" rel="nofollow"><strong>缓存</strong></a>的引入，分布式系统中的一致性问题出现了，因为<a href="https://www.jdon.com/tag-49580/" rel="nofollow"><strong>数据</strong></a>同时存储在两个地方：数据库和Redis。</p> 
+<p>到目前为止，我们看到的所有缓存解决方案，如果没有在应用程序级别引入版本控制，都无法解决数据不一致场景。目前还没有成熟的解决方案来保证最终一致性</p> 
+<p>即使您使用锁来进行更新，仍然存在可能导致不一致的特殊情况。</p> 
+<p><img src="https://images2.imgbox.com/9f/3d/cswJOX8n_o.png" alt=""><br> <strong>解决方案</strong><br> 现有的解决方案都没有完全解决该问题，但有多种选择。</p> 
+<ul><li> <p>设置稍短的过期时间：在这个过期时间内，会不一致。缺点是过期时间越短意味着数据库负载越高</p> </li><li> <p>双重删除：删除一次缓存，延迟几百毫秒再删除一次。这种做法只是进一步降低了不一致的概率，但并不是禁止的</p> </li><li> <p>在应用层引入类似版本的机制：应用层必须维护版本，因此这种方案限制了通用性并且不易重用</p> </li></ul> 
+<p>该项目为您带来了一种全新的解决方案，无需引入版本，即可保证缓存与数据库之间的数据一致性。该解决方案是同类解决方案中的首创，已获得专利，现已开源供所有人使用。</p> 
+<p>我们实现了名为“标记为已删除”的缓存策略，彻底解决了这个问题，确保缓存和数据库之间的数据保持一致。</p> 
+<p>解决原理如下：<br> 缓存中的数据是具有以下字段的哈希。</p> 
+<ul><li> <p>值：数据本身</p> </li><li> <p>lockUtil：数据锁过期时间，当一个进程查询缓存没有数据时，则锁定缓存一小段时间，然后查询DB，然后更新缓存</p> </li><li> <p>所有者：数据锁uuid</p> </li></ul> 
+<p>查询缓存时。</p> 
+<ol><li> <p>如果数据为空并被锁定，则休眠100ms并再次查询</p> </li><li> <p>如果数据为空且未锁定，则同步执行“取数据”并返回结果</p> </li><li> <p>如果数据不为空，则立即返回结果，异步执行“取数据”</p> </li></ol> 
+<p>“获取数据”操作定义为</p> 
+<ol><li>判断是否需要更新缓存，如果满足以下两个条件之一，则需要更新缓存 
+  <ul><li>数据为空且未锁定</li><li>数据锁定已过期</li></ul> </li></ol> 
+<ul><li> <p>如果需要更新缓存，则锁定缓存，查询DB，如果验证锁持有者未更改，则更新并解锁缓存。<br> 当DB数据更新时，通过dtm成功更新数据后，保证缓存被标记为已删除</p> 
+  <ul><li>TagAsDeleted 设置数据过期时间为10s，并设置锁过期，下次查询到缓存时会触发“取数据”</li></ul> <p>通过上述策略：<br> 如果最后写入数据库的版本是Vi，最后写入缓存的版本是V，写入V的uuid是uuidv，那么一定有如下的<a href="https://www.jdon.com/event.html" rel="nofollow"><strong>事件</strong></a>序列：</p> 
+  <ul><li>数据库写入Vi -&gt; 缓存数据标记为已删除 -&gt; 某些查询锁定数据并写入uuidv -&gt; 查询数据库结果V -&gt; 缓存中的locker是uuidv，写入结果V</li><li>在这个序列中，V的读取发生在Vi的写入之后，所以V等于Vi，保证了缓存数据的最终一致性。</li></ul> <p><a href="https://github.com/dtm-labs/rockscache">dtm-labs/rockscache</a>已经实现了上述方法，并且能够保证缓存数据的最终一致性。</p> 
+  <ul><li> <p>Fetch函数实现了之前的查询缓存</p> </li><li> <p>TagAsDeleted函数实现“标记已删除”逻辑</p> </li></ul> <p>当开发者Fetch在读取数据时调用，并确保TagAsDeleted在更新数据库后调用，那么缓存就可以保证最终的一致性。</p> <p><a href="https://github.com/dtm-labs">dtm-labs</a>致力于解决数据一致性问题，在分析业界现有实践后，提出了新的解决方案<a href="https://github.com/dtm-labs/dtm">dtm-labs/dtm</a> + <a href="https://github.com/dtm-labs/rockscache">dtm-labs/rockscache</a>，彻底解决了上述问题。另外，该方案作为成熟的方案，还具有防渗透、防击穿、防雪崩的能力，也可以应用于需要强数据一致性的场景。</p> <p>有关完整的可运行示例，请参阅<a href="https://github.com/dtm-labs/dtm-cases/tree/main/cache">dtm-cases/cache</a></p> <p><strong>背景<br> DB 和缓存操作的原子性</strong><br> 对于缓存管理，业界一般采用写入数据库后删除/更新缓存数据的策略。由于保存到缓存和保存到数据库操作不是原子的，必然存在时间差，因此两个数据之间会存在一个不一致的窗口，该窗口通常很小，影响也较小。然而，由于两项操作之间可能会出现停机和各种网络错误，因此有可能其中一项完成而另一项无法完成，从而导致长时间的不一致。</p> <p>为了说明上面的不一致场景，数据用户修改了数据A到B。应用程序修改数据库后，然后删除/更新缓存，如果没有异常发生，那么数据库和缓存中的数据是一致的。<br> 然而在分布式系统中，可能会出现进程崩溃和宕机事件，所以如果一个进程在更新数据库之后、删除/更新缓存之前崩溃，那么数据库和缓存中的数据可能会长时间不一致。</p> <p>要彻底解决这里长时间的不一致并不是一件容易的事，因此我们在下面介绍各种解决方案。</p> <p><strong>解决方案一：设置较短的过期时间</strong><br> 这种方案是最简单的方案，适合低<a href="https://www.jdon.com/tag-4973/" rel="nofollow"><strong>并发</strong></a>的应用。开发者只需将缓存的过期时间设置为一个较短的值，例如一分钟。这种策略非常容易理解和实现，并且缓存系统提供的语义使得大多数情况下缓存和数据库之间不一致的时间窗口很短。当进程崩溃时，不一致的时间窗口可能会持续一分钟。</p> <p>对于这种解决方案，数据库应该能够在每分钟生成所有访问的缓存数据，这对于许多高并发的应用程序来说可能过于昂贵。</p> <p><strong>方案二：<a href="https://www.jdon.com/tag-26269/" rel="nofollow"><strong>消息</strong></a>队列</strong><br> 这是由</p> 
+  <ul><li> <p>更新数据库时，同时向本地表写入一条消息。这两个操作都在一个<a href="https://www.jdon.com/transaction.html" rel="nofollow"><strong>事务</strong></a>中。</p> </li><li> <p>编写一个轮询任务，不断轮询消息表中的数据，并将它们发送到消息队列。</p> </li><li> <p>消费消息队列中的消息并更新/删除缓存</p> </li></ul> <p>这种方法可确保缓存始终在数据库更新后更新。但是这个<a href="https://www.jdon.com/tag-249/" rel="nofollow"><strong>架构</strong></a>非常繁重，这些部分的开发和维护成本都不低：消息队列的维护；开发和维护高效的轮询任务。</p> <p><strong>方案三：订阅Binlog</strong><br> 这个方案和场景2很相似，原理和数据库的主从同步类似，数据库的主从同步是通过订阅binlog并从master向slave应用更新来完成的，而这个解决方案是通过订阅 binlog 并将更新从数据库应用到缓存来完成。这是由</p> 
+  <ul><li> <p>部署并配置<a href="https://github.com/debezium/debezium">debezium</a>以订阅数据库的binlog</p> </li><li> <p>监听数据更新并同步更新/删除到缓存</p> </li></ul> <p>这个方案也保证了数据库更新后缓存也会更新，但是和之前的消息队列方案一样，这个架构也很重。一方面，Debezium 的学习和维护成本较高，另一方面，开发人员可能只需要少量数据来更新缓存，订阅所有 binlog 来执行此操作是对资源的浪费。</p> <p><strong>解决方案 4：DTM 2 阶段消息传递#</strong><br> dtm中的2阶段消息<a href="https://www.jdon.com/designpatterns/" rel="nofollow"><strong>模式</strong></a>非常适合这里修改数据库后更新/删除缓存，主要代码如下。</p> <p>msg := dtmcli.NewMsg(DtmServer, gid).<br> Add(busi.Busi+"/DeleteRedis", &amp;Req{Key: key1})<br> err := msg.DoAndSubmitDB(busi.Busi+"/QueryPrepared", db, func(tx *sql.Tx) error { <em>// update db data with key1</em><br> })</p> <p>在此代码中，DoAndSubmitDB 将执行本地数据库操作来修改数据库数据，修改完成后，它将提交一个两阶段消息事务，该事务将异步调用DeleteRedis。QueryPrepared，保证本地事务提交成功后，DeleteRedis 至少执行一次。</p> <p>检查逻辑非常简单，只需复制如下代码即可。</p> <p>app.GET(Busi<a href="https://www.jdon.com/tag-33426/" rel="nofollow"><strong>API</strong></a>+"/QueryPrepared", dtmutil.WrapHandler(func(c *gin.Context) <strong>interface</strong>{} {<!-- --><br> <strong>return</strong> MustBarrierFromGin(c).QueryPrepared(dbGet())<br> }))</p> <p>该解决方案的优点。</p> 
+  <ul><li>该解决方案使用简单，代码简短易读</li><li>dtm本身是一个无状态的通用应用，依赖于存储引擎redis/mysql作为通用基础设施，不需要额外维护消息队列或canal</li><li>相关操作是<a href="https://www.jdon.com/tag-9899/" rel="nofollow"><strong>模块</strong></a>化的且易于维护，无需在消息队列或 debezium 等其他地方编写消费者逻辑</li></ul> <p><strong>主从缓存延迟</strong><br> 在上面的场景中，假设删除缓存后，服务在进行数据查询时始终能够查找到最新的数据。但在真实的生产环境中，可能存在主从架构，主从延迟不是一个可控变量，那么如何处理呢？</p> <p>一是区分缓存数据的高低一致性，查询数据时，一致性高的数据必须从master读取，一致性低的数据必须从slave读取。对于使用rockscache的应用来说，高并发的请求在Redis层被拦截，一条数据的请求最多会到达数据库，因此数据库的负载明显降低，主读是一个实用的解决方案。</p> <p>另一种选择是主从分离需要单链架构而不分叉，因此链末端的从机必须是延迟最长的。此时就采用了监听binlog的方案，需要监听链尾的slave binlog，当收到数据变化通知时，按照上述方案将缓存标记为已删除。</p> <p>这两种方案各有优缺点，企业可以根据自身特点采用。</p> <p><strong>抗击穿</strong><br> Rockscache还具有防故障功能。当数据发生变化时，流行的方法可以选择更新缓存或删除缓存，每种方法都有自己的优点和缺点。“标记为已删除”结合了两种方法的优点并克服了两者的缺点。</p> <p><strong>更新缓存</strong><br> 如果采用更新缓存策略，那么对于所有的DB数据更新都会生成一个缓存，而不区分冷热数据，那么就会存在以下问题。</p> 
+  <ul><li>在内存中，即使一条数据没有被读取，它也保留在缓存中，浪费了昂贵的内存资源。</li><li>计算上，即使一条数据没有被读取，也可能因为多次更新而被计算多次，浪费昂贵的计算资源。</li><li>上述不一致问题发生的概率较高。</li></ul> <p><strong>删除缓存</strong><br> 由于之前更新缓存的方法存在较多问题，因此大多数实践采用删除缓存策略，并在查询时按需生成缓存。这种方法解决了更新缓存中的问题，但引入了一个新问题。</p> 
+  <ul><li> <p>如果在高并发情况下删除热点，会导致大量请求无法命中缓存。</p> </li></ul> <p>防止缓存未命中的一种常见方法是使用分布式 Redis 锁来确保仅向数据库发出一个请求，并且在生成缓存后共享其他请求。这个方案可以适用于很多场景，但也有一些场景不适合。</p> 
+  <ul><li>例如，如果有一个重要的热点数据，计算成本很高，需要3s才能得到结果，那么上面的方案会删除一条热点数据，会有大量的请求等待3s才能返回结果。一方面可能会造成大量请求超时，另一方面很多连接都在这3s内hold住，会导致并发连接数突然增加，可能会造成系统不稳定。</li><li>另外，在使用Redis锁时，通常会定期对未获得锁的用户群进行轮询，而这个睡眠时间并不好设置。如果设置较大的休眠时间1s，则10ms计算结果的缓存数据返回太慢；如果您设置的睡眠时间太短，则会非常消耗 CPU 和 Redis <a href="https://www.jdon.com/tag-300/" rel="nofollow"><strong>性能</strong></a>。</li></ul> <p><strong>标记为已删除方法</strong><br> 前面介绍的dtm-labs/rockscache实现的“Tag as Deleted”方法也是一种删除方法，但是它彻底解决了删除缓存中的缓存未命中问题，以及附带的问题。</p> <p>缓存击穿问题：在tag-as-deleted方法中，如果缓存中的数据不存在，则缓存中的该数据被锁定，从而避免多个请求命中后端数据库。<br> 上述大量请求需要3秒返回数据以及定时轮询的问题，在延迟删除中也不存在，因为当热点数据被标记为删除时，旧版本的数据仍在缓存中，并且会被返回立即，无需等待。</p> <p>让我们看看 tag-as-deleted 方法对于不同的数据访问频率如何执行。</p> 
+  <ol><li>热点数据，1K qps，计算成本5ms：tag-as-deleted方法会在5<del>8ms左右返回过期数据，而先更新DB然后缓存也会在0</del>3ms左右返回过期数据，因为需要时间更新缓存，所以两者没有太大区别。</li><li>热点数据，1K qps，计算成本3s：此时tag-as-deleted方法，在3s左右的时间内，会返回过期的数据。返回旧数据通常比等待 3 秒返回数据更好。</li><li>普通数据，50 qps，计算成本1s：分析tag-as-deleted方法的行为时，结果与2类似，没有问题。</li><li>低频数据，每5秒访问一次，计算成本3s：当tag-as-deleted方法的行为与delete-cache策略本质上相同时，没有问题</li><li>冷数据，每10分钟访问一次：tag-as-deleted方式和delete缓存策略基本相同，只是数据比delete缓存方式保留时间长10s，占用空间不大，无问题</li></ol> <p>有一种极端情况，缓存中没有数据，突然有大量请求到来，这种场景对更新缓存方法、删除缓存方法或标记为删除方法都不友好。这是开发者需要避免的场景，需要通过预热缓存来解决，而不是直接扔给缓存系统。当然，“标记为删除”方法的性能并不比任何其他解决方案差，因为它已经最大限度地减少了访问数据库的请求量。</p> <p><strong>防渗透、防雪崩</strong><br> <a href="https://github.com/dtm-labs/rockscache">dtm-labs/rockscache</a>还实现了防渗透和防雪崩。<br> 缓存穿透是指大量请求缓存或数据库中不可用的数据。由于数据不存在，缓存也不存在，所有请求都定向到数据库。RocksCache可以EmptyExpire设置空结果的缓存时间，如果设置为0，则不缓存空数据并关闭反渗透。</p> <p>缓存雪崩是指缓存中存在大量数据，这些数据在同一时间点或短时间内全部过期，而当缓存中没有数据的请求进来时，它们都会请求数据库，会导致数据库压力突然增大，应付不了就会下降。Rockscache 可以设置RandomExpireAdjustment在过期时间上添加一个随机值，以避免同时过期。</p> <p><strong>强一致性？</strong><br> 上面已经描述了缓存一致性的各种场景以及相关的解决方案，但是是否可以在保证缓存的使用的同时仍然提供强一致的数据读写呢？强一致性读写<a href="https://www.jdon.com/colorUML.html" rel="nofollow"><strong>需求</strong></a>比之前的最终一致性需求场景少见，但在金融领域的场景还是不少的。</p> <p>当我们在这里讨论强一致性时，我们需要首先明确一致性的含义。</p> <p>开发者对强一致性最直观的理解很可能是数据库和缓存是相同的，无论是直接从数据库读取还是直接从缓存读取，在写入期间和写入之后都有最新的写入。两个独立系统之间的这种“强一致性”，说得很清楚，理论上是不可能的，因为更新数据库和更新缓存是在不同的机器上，不能同时进行；无论如何都会有一个时间窗口，期间一定会出现不一致的情况。</p> <p>然而，应用程序级别的强一致性是可能的。简单考虑一下熟悉的场景：CPU 缓存作为内存的缓存，内存作为磁盘的缓存。这些是不会发生一致性问题的缓存场景。为什么？这真的很简单：所有数据用户只需要从缓存中读取和写入数据。</p> <p>对于DB和Redis来说，如果所有的数据读取都只能由缓存提供，那么很容易实现强一致性，不会出现不一致的情况。我们根据DB和Redis的特点来分解一下它们的缓存系统的设计。</p> <p><strong>首先更新缓存或数据库</strong><br> 类比CPU缓存或者磁盘缓存，两个系统都是先修改缓存，再修改底层存储，那么对于现在的DB缓存场景，是不是也应该先修改缓存，再修改DB呢？</p> <p>在绝大多数应用场景中，开发者都会将Redis视为缓存，而当Redis发生故障时，那么应用程序需要支持降级处理，并且仍然能够访问数据库并提供一些服务能力。在这种场景下，如果发生降级，在写入DB之前先写入缓存就会出现问题，因为如果数据还没有写入DB，Redis中的数据可能会丢失。因此，在Redis作为缓存的场景中，绝大多数系统将被设计为先写入数据库，然后再写入缓存</p> <p><strong>写入数据库成功但缓存失败</strong><br> 如果进程崩溃并且写入数据库成功，但 tag-as-deleted 第一次失败怎么办？虽然几秒后会重试成功，但是用户在这几秒内去读取缓存时仍然保留着旧版本的数据。例如，如果用户发起转账，DB中余额更新成功，只有缓存更新失败，那么从缓存中看到的余额仍然是旧值。</p> <p>这种情况的处理非常简单：当写入数据库成功时，应用程序不会向用户返回成功，而是等到缓存更新也成功时再向用户返回成功。如果用户查询转账事务，则要查询DB和缓存是否都成功（可以查询2阶段消息全局事务是否成功），只有都成功才返回成功。</p> <p>在上述策略下，当用户发起转账时，直到缓存更新后，用户看到交易仍在处理中，结果未知，符合强一致性要求；当用户看到事务处理成功，即缓存更新成功，那么缓存中的所有数据都是更新后的数据，这也符合强一致性的要求。</p> <p><a href="https://github.com/dtm-labs/rockscache">dtm-labs/rockscache</a>已经实现了强一致性要求。当该StrongConsistency选项打开时，Fetchrockscache中的功能提供强一致性缓存读取。原理和原来的 tag-as-deleted 方法没有太大区别，只是没有返回旧版本的数据，而是同步等待 fetch 的最新结果</p> <p>当然这种改变是有性能损失的，相对于最终一致的数据读取，强一致性读取一方面要等待当前“fetch”的最新结果，增加了读取延迟，另一方面另一方面必须等待其他进程的结果，导致睡眠等待并消耗资源。</p> <p><strong>缓存降级强一致性</strong><br> 上述强一致方案指出，强一致性的前提是“所有数据的读取只能由缓存来完成”。但是，如果Redis出现故障，需要降级，降级的过程可能很短，只需要几秒钟，但是这个前提不满足，因为在这几秒钟内，会出现读缓存和读DB的混合。但由于Redis很少出现故障，而且需要强一致性的应用通常都会配备专有的Redis，因此遇到故障降级的概率较低，很多应用在这种情况下不会提出苛刻的要求。</p> <p>然而，数据一致性领域的领导者 dtm-labs 也深入研究了这个问题，并为这种苛刻的条件提供了解决方案。</p> <p><strong>升级和降级流程</strong><br> 现在让我们考虑一下针对 Redis 缓存问题应用升级和降级的过程。通常这个降级开关位于配置中心，当配置被修改时，各个应用进程会陆续收到降级配置变化的通知，然后进行行为降级。在降级的过程中，会出现缓存和DB访问的混合，我们上面的解决方案可能会出现不一致的情况。那么，我们如何处理这个问题，以确保应用程序在这种混合访问的情况下仍然获得强一致的结果呢？</p> <p>在混合访问的情况下，我们可以采用以下策略来保证DB和Cache混合访问时的数据一致性。</p> 
+  <ul><li>更新数据时，使用分布式事务，保证后面的操作是原子的 
+    <ul><li>将缓存标记为“已锁定”</li><li>更新数据库</li><li>删除缓存“锁定”标志并将其标记为已删除</li></ul> </li><li>读取缓存数据时，对于标记为“已锁定”的数据，休眠等待后再读取；对于标记为已删除的数据，不返回旧数据，等待新数据完成后再返回。</li><li>读取DB数据时，直接读取，无需任何额外操作</li></ul> <p>这个策略和之前不考虑降级场景的强一致方案没有太大区别，读取数据部分完全不变，需要改变的只是更新数据。Rockscache 假设更新 DB 是一个在业务中可能会失败的操作，因此使用 SAGA 事务来保证原子操作，参见示例<a href="https:" rel="nofollow">dtm-cases/cache</a> [url=<a href="http://github.com/dtm-labs/dtm-cases/tree/main/cache%5C%5Dgithub.com/dtm-labs/dtm-cases/tree/main/cache%5C%5B/url%5C%5D%EF%BC%89">http://github.com/dtm-labs/dtm-cases/tree/main/cache\]github.com/dtm-labs/dtm-cases/tree/main/cache\[/url\]）</a></p> <p>升级和降级的开启和关闭有顺序要求。无法同时打开缓存读取和写入。所以关键的一点是，当我们从cache读取的时候，我们要保证所有的写操作都必须同时写DB和cache，让cache提供最新的数据。</p> <p>降级的具体流程如下。</p> 
+  <ol><li>初始状态。 
+    <ul><li>阅读：混合阅读</li><li>写入：数据库+缓存</li></ul> </li></ol> </li><li> <p>读取退化。</p> 
+  <ul><li>读取：缓存读取关闭。混合读取 =&gt; 仅数据库</li><li>写入：数据库+缓存</li></ul> </li><li> <p>写退化。</p> 
+  <ul><li> <p>阅读：DB.</p> </li><li> <p>Write：缓存注销。DB+缓存 =&gt; 仅数据库</p> </li></ul> <p>升级过程相反，如下所示。</p> 
+  <ol><li>初始状态。 
+    <ul><li>阅读：数据库</li><li>写入：数据库</li></ul> </li></ol> </li><li> <p>写升级。</p> 
+  <ul><li>阅读：数据库</li><li>写入：写入缓存。数据库=&gt;数据库+缓存。</li></ul> </li><li> <p>阅读升级。</p> 
+  <ul><li> <p>读取：读取缓存。DB =&gt; 混合读</p> </li><li> <p>写入：数据库+缓存</p> </li></ul> <p>dtm <a href="https://github.com/dtm-labs/rockscache">-labs/rockscache</a>已经实现了上述强一致性缓存管理方法。</p> <p><strong>概括</strong><br> 这篇文章比较长，很多分析比较晦涩难懂，所以最后总结一下Redis缓存是如何使用的。</p> 
+  <ul><li> <p>最简单的办法：只设置较短的缓存时间，允许少量的数据库更改不同步到缓存。</p> </li><li> <p>确保最终一致性，并防止缓存崩溃：两阶段消息 + tag-as-deleted(rockscache)</p> </li><li> <p>强一致性：2阶段消息+已删除标签（启用StrongConsistency）</p> </li><li> <p>最严格的一致性要求：2阶段消息+rockscache+降级策略</p> </li></ul> <p>对于后三种方法，我们建议使用<a href="https://github.com/dtm-labs/rockscache">dtm-labs/rockscache</a>作为缓存解决方案</p> </li></ul> 
+<p><a href="https://www.jdon.com/71687.html" rel="nofollow">https://www.jdon.com/71687.html</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/9b5cd57705c63f553e464ef6613a2df4/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【EAI 007】Mobile ALOHA：一个低成本的收集人类示教数据的双臂移动操作硬件系统</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/399def33d0efcdd80b718a2f8997b741/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">使用Trie数据结构实现搜索自动完成功能</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

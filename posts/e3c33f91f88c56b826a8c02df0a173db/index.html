@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>菜菜sklearn——XGBoost(3) - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="菜菜sklearn——XGBoost(3)" />
+<meta property="og:description" content="4 XGBoost应用中的其他问题 4.1 过拟合：剪枝参数与回归模型调参 class xgboost.XGBRegressor (max_depth=3, learning_rate=0.1, n_estimators=100, silent=True,objective=‘reg:linear’, booster=‘gbtree’, n_jobs=1, nthread=None, gamma=0, min_child_weight=1,max_delta_step=0, subsample=1, colsample_bytree=1, colsample_bylevel=1, reg_alpha=0, reg_lambda=1,scale_pos_weight=1, base_score=0.5, random_state=0, seed=None, missing=None, importance_type=‘gain’, kwargs)
+作为天生过拟合的模型，XGBoost应用的核心之一就是减轻过拟合带来的影响。作为树模型，减轻过拟合的方式主要是靠对决策树剪枝来降低模型的复杂度，以求降低方差。在之前的讲解中，我们已经学习了好几个可以用来防止过拟合的参数，包括上一节提到的复杂度控制 γ \gamma γ，正则化的两个参数 λ \lambda λ和 α \alpha α，控制迭代速度的参数 η \eta η以及管理每次迭代前进行的随机有放回抽样的参数subsample。所有的这些参数都可以用来减轻过拟合。但除此之外，我们还有几个影响重大的，专用于剪枝的参数：
+这些参数中，树的最大深度是决策树中的剪枝法宝，算是最常用的剪枝参数，不过在XGBoost中，最大深度的功能与参数 γ \gamma γ相似，因此如果先调节了 γ \gamma γ ，则最大深度可能无法展示出巨大的效果。当然，如果先调整了最大深度，则 γ \gamma γ也有可能无法显示明显的效果。通常来说，这两个参数中我们只使用一个，不过两个都试试也没有坏处。
+三个随机抽样特征的参数中，前两个比较常用。在建立树时对特征进行抽样其实是决策树和随机森林中比较常见的一种方法，但是在XGBoost之前，这种方法并没有被使用到boosting算法当中过。Boosting算法一直以抽取样本（横向抽样）来调整模型过拟合的程度，而实践证明其实纵向抽样（抽取特征）更能够防止过拟合。
+参数min_child_weight不太常用，它是一篇叶子上的二阶导数 h i h_{i} hi​之和，当样本所对应的二阶导数很小时，比如说为0.01，min_child_weight若设定为1，则说明一片叶子上至少需要100个样本。本质上来说，这个参数其实是在控制叶子上所需的最小样本量，因此对于样本量很大的数据会比较有效。如果样本量很小（比如我们现在使用的波士顿房价数据集，则这个参数效用不大）。就剪枝的效果来说，这个参数的功能也被 γ \gamma γ替代了一部分，通常来说我们会试试看这个参数，但这个参数不是我的优先选择。
+通常当我们获得了一个数据集后，我们先使用网格搜索找出比较合适的n_estimators和eta组合，然后使用gamma或者max_depth观察模型处于什么样的状态（过拟合还是欠拟合，处于方差-偏差图像的左边还是右边？），最后再决定是否要进行剪枝。通常来说，对于XGB模型，大多数时候都是需要剪枝的。接下来我们就来看看使用xgb.cv这个类来进行剪枝调参，以调整出一组泛化能力很强的参数。
+让我们先从最原始的，设定默认参数开始，先观察一下默认参数下，我们的交叉验证曲线长什么样：
+dfull = xgb.DMatrix(X,y) param1 = {&#39;silent&#39;:True ,&#39;obj&#39;:&#39;reg:linear&#39; ,&#34;subsample&#34;:1 ,&#34;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/e3c33f91f88c56b826a8c02df0a173db/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-02-21T16:25:32+08:00" />
+<meta property="article:modified_time" content="2022-02-21T16:25:32+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">菜菜sklearn——XGBoost(3)</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="4_XGBoost_0"></a>4 XGBoost应用中的其他问题</h2> 
+<h3><a id="41__1"></a>4.1 过拟合：剪枝参数与回归模型调参</h3> 
+<p>class xgboost.XGBRegressor (max_depth=3, learning_rate=0.1, n_estimators=100, silent=True,objective=‘reg:linear’, booster=‘gbtree’, n_jobs=1, nthread=None, gamma=0, min_child_weight=1,max_delta_step=0, subsample=1, colsample_bytree=1, colsample_bylevel=1, reg_alpha=0, reg_lambda=1,scale_pos_weight=1, base_score=0.5, random_state=0, seed=None, missing=None, importance_type=‘gain’, kwargs)</p> 
+<p>作为天生过拟合的模型，XGBoost应用的核心之一就是减轻过拟合带来的影响。<mark>作为树模型，减轻过拟合的方式主要是靠对决策树剪枝来降低模型的复杂度，以求降低方差</mark>。在之前的讲解中，我们已经学习了好几个可以用来防止过拟合的参数，包括上一节提到的复杂度控制 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         γ 
+        
+       
+      
+        \gamma 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em; vertical-align: -0.19444em;"></span><span class="mord mathdefault" style="margin-right: 0.05556em;">γ</span></span></span></span></span>，正则化的两个参数<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         λ 
+        
+       
+      
+        \lambda 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.69444em; vertical-align: 0em;"></span><span class="mord mathdefault">λ</span></span></span></span></span>和<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         α 
+        
+       
+      
+        \alpha 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em; vertical-align: 0em;"></span><span class="mord mathdefault" style="margin-right: 0.0037em;">α</span></span></span></span></span>，控制迭代速度的参数<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         η 
+        
+       
+      
+        \eta 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em; vertical-align: -0.19444em;"></span><span class="mord mathdefault" style="margin-right: 0.03588em;">η</span></span></span></span></span>以及管理每次迭代前进行的随机有放回抽样的参数subsample。所有的这些参数都可以用来减轻过拟合。但除此之外，我们还有几个影响重大的，专用于剪枝的参数：<img src="https://images2.imgbox.com/d9/6b/jH5L9i2R_o.png" alt="在这里插入图片描述"><br> 这些参数中，树的最大深度是决策树中的剪枝法宝，算是最常用的剪枝参数，不过在XGBoost中，最大深度的功能与参数<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         γ 
+        
+       
+      
+        \gamma 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em; vertical-align: -0.19444em;"></span><span class="mord mathdefault" style="margin-right: 0.05556em;">γ</span></span></span></span></span>相似，因此如果先调节了<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         γ 
+        
+       
+      
+        \gamma 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em; vertical-align: -0.19444em;"></span><span class="mord mathdefault" style="margin-right: 0.05556em;">γ</span></span></span></span></span> ，则最大深度可能无法展示出巨大的效果。当然，如果先调整了最大深度，则<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         γ 
+        
+       
+      
+        \gamma 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em; vertical-align: -0.19444em;"></span><span class="mord mathdefault" style="margin-right: 0.05556em;">γ</span></span></span></span></span>也有可能无法显示明显的效果。通常来说，这两个参数中我们只使用一个，不过两个都试试也没有坏处。</p> 
+<p>三个随机抽样特征的参数中，前两个比较常用。在建立树时对特征进行抽样其实是决策树和随机森林中比较常见的一种方法，但是在XGBoost之前，这种方法并没有被使用到boosting算法当中过。Boosting算法一直以抽取样本（横向抽样）来调整模型过拟合的程度，而实践证明其实纵向抽样（抽取特征）更能够防止过拟合。</p> 
+<p><mark>参数min_child_weight不太常用</mark>，它是一篇叶子上的二阶导数<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          h 
+         
+        
+          i 
+         
+        
+       
+      
+        h_{i} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.84444em; vertical-align: -0.15em;"></span><span class="mord"><span class="mord mathdefault">h</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight">i</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span></span></span></span></span>之和，当样本所对应的二阶导数很小时，比如说为0.01，min_child_weight若设定为1，则说明一片叶子上至少需要100个样本。本质上来说，这个参数其实是在控制叶子上所需的最小样本量，因此对于样本量很大的数据会比较有效。如果样本量很小（比如我们现在使用的波士顿房价数据集，则这个参数效用不大）。就剪枝的效果来说，这个参数的功能也被<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         γ 
+        
+       
+      
+        \gamma 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em; vertical-align: -0.19444em;"></span><span class="mord mathdefault" style="margin-right: 0.05556em;">γ</span></span></span></span></span>替代了一部分，通常来说我们会试试看这个参数，但这个参数不是我的优先选择。</p> 
+<p>通常当我们获得了一个数据集后，<mark>我们先使用网格搜索找出比较合适的n_estimators和eta组合，然后使用gamma或者max_depth观察模型处于什么样的状态（过拟合还是欠拟合，处于方差-偏差图像的左边还是右边？），最后再决定是否要进行剪枝</mark>。通常来说，对于XGB模型，大多数时候都是需要剪枝的。接下来我们就来看看使用xgb.cv这个类来进行剪枝调参，以调整出一组泛化能力很强的参数。</p> 
+<p>让我们先从最原始的，设定默认参数开始，先观察一下默认参数下，我们的交叉验证曲线长什么样：</p> 
+<pre><code class="prism language-python">dfull <span class="token operator">=</span> xgb<span class="token punctuation">.</span>DMatrix<span class="token punctuation">(</span>X<span class="token punctuation">,</span>y<span class="token punctuation">)</span>
+
+param1 <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">'silent'</span><span class="token punctuation">:</span><span class="token boolean">True</span>
+          <span class="token punctuation">,</span><span class="token string">'obj'</span><span class="token punctuation">:</span><span class="token string">'reg:linear'</span>
+          <span class="token punctuation">,</span><span class="token string">"subsample"</span><span class="token punctuation">:</span><span class="token number">1</span>
+          <span class="token punctuation">,</span><span class="token string">"max_depth"</span><span class="token punctuation">:</span><span class="token number">6</span>
+          <span class="token punctuation">,</span><span class="token string">"eta"</span><span class="token punctuation">:</span><span class="token number">0.3</span>
+          <span class="token punctuation">,</span><span class="token string">"gamma"</span><span class="token punctuation">:</span><span class="token number">0</span>
+          <span class="token punctuation">,</span><span class="token string">"lambda"</span><span class="token punctuation">:</span><span class="token number">1</span>
+          <span class="token punctuation">,</span><span class="token string">"alpha"</span><span class="token punctuation">:</span><span class="token number">0</span>
+          <span class="token punctuation">,</span><span class="token string">"colsample_bytree"</span><span class="token punctuation">:</span><span class="token number">1</span>
+          <span class="token punctuation">,</span><span class="token string">"colsample_bylevel"</span><span class="token punctuation">:</span><span class="token number">1</span>
+          <span class="token punctuation">,</span><span class="token string">"colsample_bynode"</span><span class="token punctuation">:</span><span class="token number">1</span>
+          <span class="token punctuation">,</span><span class="token string">"nfold"</span><span class="token punctuation">:</span><span class="token number">5</span><span class="token punctuation">}</span>
+num_round <span class="token operator">=</span> <span class="token number">200</span>
+
+time0 <span class="token operator">=</span> time<span class="token punctuation">(</span><span class="token punctuation">)</span>
+cvresult1 <span class="token operator">=</span> xgb<span class="token punctuation">.</span>cv<span class="token punctuation">(</span>param1<span class="token punctuation">,</span> dfull<span class="token punctuation">,</span> num_round<span class="token punctuation">)</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>datetime<span class="token punctuation">.</span>datetime<span class="token punctuation">.</span>fromtimestamp<span class="token punctuation">(</span>time<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">-</span>time0<span class="token punctuation">)</span><span class="token punctuation">.</span>strftime<span class="token punctuation">(</span><span class="token string">"%M:%S:%f"</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+fig<span class="token punctuation">,</span>ax <span class="token operator">=</span> plt<span class="token punctuation">.</span>subplots<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span>figsize<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">15</span><span class="token punctuation">,</span><span class="token number">8</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>set_ylim<span class="token punctuation">(</span>top<span class="token operator">=</span><span class="token number">5</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>grid<span class="token punctuation">(</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>plot<span class="token punctuation">(</span><span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">201</span><span class="token punctuation">)</span><span class="token punctuation">,</span>cvresult1<span class="token punctuation">.</span>iloc<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span>c<span class="token operator">=</span><span class="token string">"red"</span><span class="token punctuation">,</span>label<span class="token operator">=</span><span class="token string">"train,original"</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>plot<span class="token punctuation">(</span><span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">201</span><span class="token punctuation">)</span><span class="token punctuation">,</span>cvresult1<span class="token punctuation">.</span>iloc<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">,</span>c<span class="token operator">=</span><span class="token string">"orange"</span><span class="token punctuation">,</span>label<span class="token operator">=</span><span class="token string">"test,original"</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>legend<span class="token punctuation">(</span>fontsize<span class="token operator">=</span><span class="token string">"xx-large"</span><span class="token punctuation">)</span>
+plt<span class="token punctuation">.</span>show<span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token comment">#00:00:513584</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/96/81/EBR9kRzw_o.png" alt="在这里插入图片描述"><br> 从曲线上可以看出，模型现在处于过拟合的状态。我们决定要进行剪枝。我们的目标是：训练集和测试集的结果尽量接近，如果测试集上的结果不能上升，那训练集上的结果降下来也是不错的选择（让模型不那么具体到训练数据，增加泛化能力）。在这里，我们要使用三组曲线。一组用于展示原始数据上的结果，一组用于展示上一个参数调节完毕后的结果，最后一组用于展示现在我们在调节的参数的结果。具体怎样使用，我们来看：</p> 
+<pre><code class="prism language-python">param1 <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">'silent'</span><span class="token punctuation">:</span><span class="token boolean">True</span>
+         <span class="token punctuation">,</span><span class="token string">'obj'</span><span class="token punctuation">:</span><span class="token string">'reg:linear'</span>
+         <span class="token punctuation">,</span><span class="token string">"subsample"</span><span class="token punctuation">:</span><span class="token number">1</span>
+         <span class="token punctuation">,</span><span class="token string">"max_depth"</span><span class="token punctuation">:</span><span class="token number">6</span>
+         <span class="token punctuation">,</span><span class="token string">"eta"</span><span class="token punctuation">:</span><span class="token number">0.3</span>
+         <span class="token punctuation">,</span><span class="token string">"gamma"</span><span class="token punctuation">:</span><span class="token number">0</span>
+         <span class="token punctuation">,</span><span class="token string">"lambda"</span><span class="token punctuation">:</span><span class="token number">1</span>
+         <span class="token punctuation">,</span><span class="token string">"alpha"</span><span class="token punctuation">:</span><span class="token number">0</span>
+         <span class="token punctuation">,</span><span class="token string">"colsample_bytree"</span><span class="token punctuation">:</span><span class="token number">1</span>
+         <span class="token punctuation">,</span><span class="token string">"colsample_bylevel"</span><span class="token punctuation">:</span><span class="token number">1</span>
+         <span class="token punctuation">,</span><span class="token string">"colsample_bynode"</span><span class="token punctuation">:</span><span class="token number">1</span>
+         <span class="token punctuation">,</span><span class="token string">"nfold"</span><span class="token punctuation">:</span><span class="token number">5</span><span class="token punctuation">}</span>
+num_round <span class="token operator">=</span> <span class="token number">200</span>
+time0 <span class="token operator">=</span> time<span class="token punctuation">(</span><span class="token punctuation">)</span>
+cvresult1 <span class="token operator">=</span> xgb<span class="token punctuation">.</span>cv<span class="token punctuation">(</span>param1<span class="token punctuation">,</span> dfull<span class="token punctuation">,</span> num_round<span class="token punctuation">)</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>datetime<span class="token punctuation">.</span>datetime<span class="token punctuation">.</span>fromtimestamp<span class="token punctuation">(</span>time<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">-</span>time0<span class="token punctuation">)</span><span class="token punctuation">.</span>strftime<span class="token punctuation">(</span><span class="token string">"%M:%S:%f"</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+fig<span class="token punctuation">,</span>ax <span class="token operator">=</span> plt<span class="token punctuation">.</span>subplots<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span>figsize<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">15</span><span class="token punctuation">,</span><span class="token number">8</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>set_ylim<span class="token punctuation">(</span>top<span class="token operator">=</span><span class="token number">5</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>grid<span class="token punctuation">(</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>plot<span class="token punctuation">(</span><span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">201</span><span class="token punctuation">)</span><span class="token punctuation">,</span>cvresult1<span class="token punctuation">.</span>iloc<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span>c<span class="token operator">=</span><span class="token string">"red"</span><span class="token punctuation">,</span>label<span class="token operator">=</span><span class="token string">"train,original"</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>plot<span class="token punctuation">(</span><span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">201</span><span class="token punctuation">)</span><span class="token punctuation">,</span>cvresult1<span class="token punctuation">.</span>iloc<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">,</span>c<span class="token operator">=</span><span class="token string">"orange"</span><span class="token punctuation">,</span>label<span class="token operator">=</span><span class="token string">"test,original"</span><span class="token punctuation">)</span>
+param2 <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">'silent'</span><span class="token punctuation">:</span><span class="token boolean">True</span>
+         <span class="token punctuation">,</span><span class="token string">'obj'</span><span class="token punctuation">:</span><span class="token string">'reg:linear'</span>
+         <span class="token punctuation">,</span><span class="token string">"nfold"</span><span class="token punctuation">:</span><span class="token number">5</span><span class="token punctuation">}</span>
+param3 <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">'silent'</span><span class="token punctuation">:</span><span class="token boolean">True</span>
+         <span class="token punctuation">,</span><span class="token string">'obj'</span><span class="token punctuation">:</span><span class="token string">'reg:linear'</span>
+         <span class="token punctuation">,</span><span class="token string">"nfold"</span><span class="token punctuation">:</span><span class="token number">5</span><span class="token punctuation">}</span>
+time0 <span class="token operator">=</span> time<span class="token punctuation">(</span><span class="token punctuation">)</span>
+cvresult2 <span class="token operator">=</span> xgb<span class="token punctuation">.</span>cv<span class="token punctuation">(</span>param2<span class="token punctuation">,</span> dfull<span class="token punctuation">,</span> num_round<span class="token punctuation">)</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>datetime<span class="token punctuation">.</span>datetime<span class="token punctuation">.</span>fromtimestamp<span class="token punctuation">(</span>time<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">-</span>time0<span class="token punctuation">)</span><span class="token punctuation">.</span>strftime<span class="token punctuation">(</span><span class="token string">"%M:%S:%f"</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+time0 <span class="token operator">=</span> time<span class="token punctuation">(</span><span class="token punctuation">)</span>
+cvresult3 <span class="token operator">=</span> xgb<span class="token punctuation">.</span>cv<span class="token punctuation">(</span>param3<span class="token punctuation">,</span> dfull<span class="token punctuation">,</span> num_round<span class="token punctuation">)</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>datetime<span class="token punctuation">.</span>datetime<span class="token punctuation">.</span>fromtimestamp<span class="token punctuation">(</span>time<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">-</span>time0<span class="token punctuation">)</span><span class="token punctuation">.</span>strftime<span class="token punctuation">(</span><span class="token string">"%M:%S:%f"</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>plot<span class="token punctuation">(</span><span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">201</span><span class="token punctuation">)</span><span class="token punctuation">,</span>cvresult2<span class="token punctuation">.</span>iloc<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span>c<span class="token operator">=</span><span class="token string">"green"</span><span class="token punctuation">,</span>label<span class="token operator">=</span><span class="token string">"train,last"</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>plot<span class="token punctuation">(</span><span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">201</span><span class="token punctuation">)</span><span class="token punctuation">,</span>cvresult2<span class="token punctuation">.</span>iloc<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">,</span>c<span class="token operator">=</span><span class="token string">"blue"</span><span class="token punctuation">,</span>label<span class="token operator">=</span><span class="token string">"test,last"</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>plot<span class="token punctuation">(</span><span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">201</span><span class="token punctuation">)</span><span class="token punctuation">,</span>cvresult3<span class="token punctuation">.</span>iloc<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span>c<span class="token operator">=</span><span class="token string">"gray"</span><span class="token punctuation">,</span>label<span class="token operator">=</span><span class="token string">"train,this"</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>plot<span class="token punctuation">(</span><span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">201</span><span class="token punctuation">)</span><span class="token punctuation">,</span>cvresult3<span class="token punctuation">.</span>iloc<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">,</span>c<span class="token operator">=</span><span class="token string">"pink"</span><span class="token punctuation">,</span>label<span class="token operator">=</span><span class="token string">"test,this"</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>legend<span class="token punctuation">(</span>fontsize<span class="token operator">=</span><span class="token string">"xx-large"</span><span class="token punctuation">)</span>
+plt<span class="token punctuation">.</span>show<span class="token punctuation">(</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>在这里，为大家提供我调出来的结果，供大家参考：</p> 
+<pre><code class="prism language-python">param1 <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">'silent'</span><span class="token punctuation">:</span><span class="token boolean">True</span>
+          <span class="token punctuation">,</span><span class="token string">'obj'</span><span class="token punctuation">:</span><span class="token string">'reg:linear'</span>
+          <span class="token punctuation">,</span><span class="token string">"subsample"</span><span class="token punctuation">:</span><span class="token number">1</span>
+          <span class="token punctuation">,</span><span class="token string">"max_depth"</span><span class="token punctuation">:</span><span class="token number">6</span>
+          <span class="token punctuation">,</span><span class="token string">"eta"</span><span class="token punctuation">:</span><span class="token number">0.3</span>
+          <span class="token punctuation">,</span><span class="token string">"gamma"</span><span class="token punctuation">:</span><span class="token number">0</span>
+          <span class="token punctuation">,</span><span class="token string">"lambda"</span><span class="token punctuation">:</span><span class="token number">1</span>
+          <span class="token punctuation">,</span><span class="token string">"alpha"</span><span class="token punctuation">:</span><span class="token number">0</span>
+          <span class="token punctuation">,</span><span class="token string">"colsample_bytree"</span><span class="token punctuation">:</span><span class="token number">1</span>
+          <span class="token punctuation">,</span><span class="token string">"colsample_bylevel"</span><span class="token punctuation">:</span><span class="token number">1</span>
+          <span class="token punctuation">,</span><span class="token string">"colsample_bynode"</span><span class="token punctuation">:</span><span class="token number">1</span>
+          <span class="token punctuation">,</span><span class="token string">"nfold"</span><span class="token punctuation">:</span><span class="token number">5</span><span class="token punctuation">}</span>
+num_round <span class="token operator">=</span> <span class="token number">200</span>
+
+time0 <span class="token operator">=</span> time<span class="token punctuation">(</span><span class="token punctuation">)</span>
+cvresult1 <span class="token operator">=</span> xgb<span class="token punctuation">.</span>cv<span class="token punctuation">(</span>param1<span class="token punctuation">,</span> dfull<span class="token punctuation">,</span> num_round<span class="token punctuation">)</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>datetime<span class="token punctuation">.</span>datetime<span class="token punctuation">.</span>fromtimestamp<span class="token punctuation">(</span>time<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">-</span>time0<span class="token punctuation">)</span><span class="token punctuation">.</span>strftime<span class="token punctuation">(</span><span class="token string">"%M:%S:%f"</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+fig<span class="token punctuation">,</span>ax <span class="token operator">=</span> plt<span class="token punctuation">.</span>subplots<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span>figsize<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">15</span><span class="token punctuation">,</span><span class="token number">8</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>set_ylim<span class="token punctuation">(</span>top<span class="token operator">=</span><span class="token number">5</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>grid<span class="token punctuation">(</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>plot<span class="token punctuation">(</span><span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">201</span><span class="token punctuation">)</span><span class="token punctuation">,</span>cvresult1<span class="token punctuation">.</span>iloc<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span>c<span class="token operator">=</span><span class="token string">"red"</span><span class="token punctuation">,</span>label<span class="token operator">=</span><span class="token string">"train,original"</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>plot<span class="token punctuation">(</span><span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">201</span><span class="token punctuation">)</span><span class="token punctuation">,</span>cvresult1<span class="token punctuation">.</span>iloc<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">,</span>c<span class="token operator">=</span><span class="token string">"orange"</span><span class="token punctuation">,</span>label<span class="token operator">=</span><span class="token string">"test,original"</span><span class="token punctuation">)</span>
+
+param2 <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">'silent'</span><span class="token punctuation">:</span><span class="token boolean">True</span>
+          <span class="token punctuation">,</span><span class="token string">'obj'</span><span class="token punctuation">:</span><span class="token string">'reg:linear'</span>
+          <span class="token punctuation">,</span><span class="token string">"max_depth"</span><span class="token punctuation">:</span><span class="token number">2</span>
+          <span class="token punctuation">,</span><span class="token string">"eta"</span><span class="token punctuation">:</span><span class="token number">0.05</span>
+          <span class="token punctuation">,</span><span class="token string">"gamma"</span><span class="token punctuation">:</span><span class="token number">0</span>
+          <span class="token punctuation">,</span><span class="token string">"lambda"</span><span class="token punctuation">:</span><span class="token number">1</span>
+          <span class="token punctuation">,</span><span class="token string">"alpha"</span><span class="token punctuation">:</span><span class="token number">0</span>
+          <span class="token punctuation">,</span><span class="token string">"colsample_bytree"</span><span class="token punctuation">:</span><span class="token number">1</span>
+          <span class="token punctuation">,</span><span class="token string">"colsample_bylevel"</span><span class="token punctuation">:</span><span class="token number">0.4</span>
+          <span class="token punctuation">,</span><span class="token string">"colsample_bynode"</span><span class="token punctuation">:</span><span class="token number">1</span>
+          <span class="token punctuation">,</span><span class="token string">"nfold"</span><span class="token punctuation">:</span><span class="token number">5</span><span class="token punctuation">}</span>
+
+param3 <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">'silent'</span><span class="token punctuation">:</span><span class="token boolean">True</span>
+          <span class="token punctuation">,</span><span class="token string">'obj'</span><span class="token punctuation">:</span><span class="token string">'reg:linear'</span>
+          <span class="token punctuation">,</span><span class="token string">"subsample"</span><span class="token punctuation">:</span><span class="token number">1</span>
+          <span class="token punctuation">,</span><span class="token string">"eta"</span><span class="token punctuation">:</span><span class="token number">0.05</span>
+          <span class="token punctuation">,</span><span class="token string">"gamma"</span><span class="token punctuation">:</span><span class="token number">20</span>
+          <span class="token punctuation">,</span><span class="token string">"lambda"</span><span class="token punctuation">:</span><span class="token number">3.5</span>
+          <span class="token punctuation">,</span><span class="token string">"alpha"</span><span class="token punctuation">:</span><span class="token number">0.2</span>
+          <span class="token punctuation">,</span><span class="token string">"max_depth"</span><span class="token punctuation">:</span><span class="token number">4</span>
+          <span class="token punctuation">,</span><span class="token string">"colsample_bytree"</span><span class="token punctuation">:</span><span class="token number">0.4</span>
+          <span class="token punctuation">,</span><span class="token string">"colsample_bylevel"</span><span class="token punctuation">:</span><span class="token number">0.6</span>
+          <span class="token punctuation">,</span><span class="token string">"colsample_bynode"</span><span class="token punctuation">:</span><span class="token number">1</span>
+          <span class="token punctuation">,</span><span class="token string">"nfold"</span><span class="token punctuation">:</span><span class="token number">5</span><span class="token punctuation">}</span>
+
+time0 <span class="token operator">=</span> time<span class="token punctuation">(</span><span class="token punctuation">)</span>
+cvresult2 <span class="token operator">=</span> xgb<span class="token punctuation">.</span>cv<span class="token punctuation">(</span>param2<span class="token punctuation">,</span> dfull<span class="token punctuation">,</span> num_round<span class="token punctuation">)</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>datetime<span class="token punctuation">.</span>datetime<span class="token punctuation">.</span>fromtimestamp<span class="token punctuation">(</span>time<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">-</span>time0<span class="token punctuation">)</span><span class="token punctuation">.</span>strftime<span class="token punctuation">(</span><span class="token string">"%M:%S:%f"</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+time0 <span class="token operator">=</span> time<span class="token punctuation">(</span><span class="token punctuation">)</span>
+cvresult3 <span class="token operator">=</span> xgb<span class="token punctuation">.</span>cv<span class="token punctuation">(</span>param3<span class="token punctuation">,</span> dfull<span class="token punctuation">,</span> num_round<span class="token punctuation">)</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>datetime<span class="token punctuation">.</span>datetime<span class="token punctuation">.</span>fromtimestamp<span class="token punctuation">(</span>time<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">-</span>time0<span class="token punctuation">)</span><span class="token punctuation">.</span>strftime<span class="token punctuation">(</span><span class="token string">"%M:%S:%f"</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+ax<span class="token punctuation">.</span>plot<span class="token punctuation">(</span><span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">201</span><span class="token punctuation">)</span><span class="token punctuation">,</span>cvresult2<span class="token punctuation">.</span>iloc<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span>c<span class="token operator">=</span><span class="token string">"green"</span><span class="token punctuation">,</span>label<span class="token operator">=</span><span class="token string">"train,last"</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>plot<span class="token punctuation">(</span><span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">201</span><span class="token punctuation">)</span><span class="token punctuation">,</span>cvresult2<span class="token punctuation">.</span>iloc<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">,</span>c<span class="token operator">=</span><span class="token string">"blue"</span><span class="token punctuation">,</span>label<span class="token operator">=</span><span class="token string">"test,last"</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>plot<span class="token punctuation">(</span><span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">201</span><span class="token punctuation">)</span><span class="token punctuation">,</span>cvresult3<span class="token punctuation">.</span>iloc<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span>c<span class="token operator">=</span><span class="token string">"gray"</span><span class="token punctuation">,</span>label<span class="token operator">=</span><span class="token string">"train,this"</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>plot<span class="token punctuation">(</span><span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">201</span><span class="token punctuation">)</span><span class="token punctuation">,</span>cvresult3<span class="token punctuation">.</span>iloc<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">,</span>c<span class="token operator">=</span><span class="token string">"pink"</span><span class="token punctuation">,</span>label<span class="token operator">=</span><span class="token string">"test,this"</span><span class="token punctuation">)</span>
+ax<span class="token punctuation">.</span>legend<span class="token punctuation">(</span>fontsize<span class="token operator">=</span><span class="token string">"xx-large"</span><span class="token punctuation">)</span>
+plt<span class="token punctuation">.</span>show<span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token comment">#00:00:532621</span>
+<span class="token comment">#00:00:223373</span>
+<span class="token comment">#00:00:259346</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/29/a1/dBja1Ghn_o.png" alt="在这里插入图片描述"><br> <mark>调参顺序：<br> （1）eta+num_round<br> （2）gamma/max_depth<br> （3）抽样进行调整<br> （4）正则化参数</mark><br> 在这个调整过程中，大家可能会有几个问题：</p> 
+<ol><li>一个个参数调整太麻烦，可不可以使用网格搜索呢？</li></ol> 
+<p>当然可以！只要电脑有足够的计算资源，并且你信任网格搜索，那任何时候我们都可以使用网格搜索。只是使用的时候要注意，首先XGB的参数非常多，参数可取的范围也很广，究竟是使用np.linspace或者np.arange作为参数的备选值也会影响结果，而且网格搜索的运行速度往往不容乐观，因此建议至少先使用xgboost.cv来确认参数的范围，否则很可能花很长的时间做了无用功。</p> 
+<p>并且，在使用网格搜索的时候，最好不要一次性将所有的参数都放入进行搜索，最多一次两三个。有一些互相影响的参数需要放在一起使用，比如学习率eta和树的数量n_estimators。</p> 
+<p>另外，如果网格搜索的结果与你的理解相违背，与你手动调参的结果相违背，选择模型效果较好的一个。如果两者效果差不多，那选择相信手动调参的结果。网格毕竟是枚举出结果，很多时候得出的结果可能会是具体到数据的巧合，我们无法去一一解释网格搜索得出的结论为何是这样。如果你感觉都无法解释，那就不要去在意，直接选择结果较好的一个。</p> 
+<ol start="2"><li>调参的时候参数的顺序会影响调参结果吗？</li></ol> 
+<p>会影响，因此在现实中，我们会优先调整那些对模型影响巨大的参数。在这里，我建议的剪枝上的调参顺序是：n_estimators与eta共同调节，gamma或者max_depth，采样和抽样参数（纵向抽样影响更大），最后才是正则化的两个参数。当然，可以根据自己的需求来进行调整。</p> 
+<ol start="3"><li>调参之后测试集上的效果还没有原始设定上的效果好怎么办？</li></ol> 
+<p>如果调参之后，交叉验证曲线确实显示测试集和训练集上的模型评估效果是更加接近的，推荐使用调参之后的效果。我们希望增强模型的泛化能力，然而泛化能力的增强并不代表着在新数据集上模型的结果一定优秀，因为未知数据集并非一定符合全数据的分布，在一组未知数据上表现十分优秀，也不一定就能够在其他的未知数据集上表现优秀。因此不必过于纠结在现有的测试集上是否表现优秀。当然了，在现有数据上如果能够实现训练集和测试集都非常优秀，<br> 那模型的泛化能力自然也会是很强的。自己找一个数据集，剪枝试试看吧。</p> 
+<h3><a id="42_XGBoost_181"></a>4.2 XGBoost模型的保存和调用</h3> 
+<p>在使用Python进行编程时，我们可能会需要编写较为复杂的程序或者建立复杂的模型。比如XGBoost模型，这个模型的参数复杂繁多，并且调参过程不是太容易，一旦训练完毕，我们往往希望将训练完毕后的模型保存下来，以便日后用于新的数据集。在Python中，保存模型的方法有许多种。我们以XGBoost为例，来讲解两种主要的模型保存和<br> 调用方法。</p> 
+<h4><a id="421_Pickle_184"></a>4.2.1 使用Pickle保存和调用模型</h4> 
+<p>pickle是python编程中比较标准的一个保存和调用模型的库，我们可以使用pickle和open函数的连用，来将我们的模型保存到本地。以刚才我们已经调整好的参数和训练好的模型为例，我们可以这样来使用pickle：</p> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> pickle
+dtrain <span class="token operator">=</span> xgb<span class="token punctuation">.</span>DMatrix<span class="token punctuation">(</span>Xtrain<span class="token punctuation">,</span>Ytrain<span class="token punctuation">)</span>
+
+<span class="token comment">#设定参数，对模型进行训练</span>
+param <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">'silent'</span><span class="token punctuation">:</span><span class="token boolean">True</span>
+          <span class="token punctuation">,</span><span class="token string">'obj'</span><span class="token punctuation">:</span><span class="token string">'reg:linear'</span>
+          <span class="token punctuation">,</span><span class="token string">"subsample"</span><span class="token punctuation">:</span><span class="token number">1</span>
+          <span class="token punctuation">,</span><span class="token string">"eta"</span><span class="token punctuation">:</span><span class="token number">0.05</span>
+          <span class="token punctuation">,</span><span class="token string">"gamma"</span><span class="token punctuation">:</span><span class="token number">20</span>
+          <span class="token punctuation">,</span><span class="token string">"lambda"</span><span class="token punctuation">:</span><span class="token number">3.5</span>
+          <span class="token punctuation">,</span><span class="token string">"alpha"</span><span class="token punctuation">:</span><span class="token number">0.2</span>
+          <span class="token punctuation">,</span><span class="token string">"max_depth"</span><span class="token punctuation">:</span><span class="token number">4</span>
+          <span class="token punctuation">,</span><span class="token string">"colsample_bytree"</span><span class="token punctuation">:</span><span class="token number">0.4</span>
+          <span class="token punctuation">,</span><span class="token string">"colsample_bylevel"</span><span class="token punctuation">:</span><span class="token number">0.6</span>
+          <span class="token punctuation">,</span><span class="token string">"colsample_bynode"</span><span class="token punctuation">:</span><span class="token number">1</span><span class="token punctuation">}</span>
+num_round <span class="token operator">=</span> <span class="token number">180</span>
+
+bst <span class="token operator">=</span> xgb<span class="token punctuation">.</span>train<span class="token punctuation">(</span>param<span class="token punctuation">,</span> dtrain<span class="token punctuation">,</span> num_round<span class="token punctuation">)</span>
+<span class="token comment">#保存模型</span>
+pickle<span class="token punctuation">.</span>dump<span class="token punctuation">(</span>bst<span class="token punctuation">,</span> <span class="token builtin">open</span><span class="token punctuation">(</span><span class="token string">"xgboostonboston.dat"</span><span class="token punctuation">,</span><span class="token string">"wb"</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token comment">#注意，open中我们往往使用w或者r作为读取的模式，但其实w与r只能用于文本文件 - txt</span>
+<span class="token comment">#当我们希望导入的不是文本文件，而是模型本身的时候，我们使用"wb"和"rb"作为读取的模式</span>
+<span class="token comment">#其中wb表示以二进制写入，rb表示以二进制读入，使用open进行保存的这个文件中是一个可以进行读取或者调用的模型</span>
+
+<span class="token comment">#看看模型被保存到了哪里？</span>
+<span class="token keyword">import</span> sys
+sys<span class="token punctuation">.</span>path
+<span class="token comment">#['C:\\Pythonwork\\micro-class\\11 xgboost',</span>
+<span class="token comment"># 'C:\\Python\\python37.zip',</span>
+<span class="token comment"># 'C:\\Python\\DLLs',</span>
+<span class="token comment"># 'C:\\Python\\lib',</span>
+<span class="token comment"># 'C:\\Python',</span>
+<span class="token comment"># '',</span>
+<span class="token comment"># 'C:\\Python\\lib\\site-packages',</span>
+<span class="token comment"># 'C:\\Python\\lib\\site-packages\\win32',</span>
+<span class="token comment"># 'C:\\Python\\lib\\site-packages\\win32\\lib',</span>
+<span class="token comment"># 'C:\\Python\\lib\\site-packages\\Pythonwin',</span>
+<span class="token comment"># 'C:\\Python\\lib\\site-packages\\IPython\\extensions',</span>
+<span class="token comment"># 'C:\\Users\\Shuyu\\.ipython']</span>
+
+<span class="token comment">#重新打开jupyter lab</span>
+
+<span class="token keyword">from</span> sklearn<span class="token punctuation">.</span>datasets <span class="token keyword">import</span> load_boston
+<span class="token keyword">from</span> sklearn<span class="token punctuation">.</span>model_selection <span class="token keyword">import</span> train_test_split <span class="token keyword">as</span> TTS
+<span class="token keyword">from</span> sklearn<span class="token punctuation">.</span>metrics <span class="token keyword">import</span> mean_squared_error <span class="token keyword">as</span> MSE
+<span class="token keyword">import</span> pickle
+<span class="token keyword">import</span> xgboost <span class="token keyword">as</span> xgb
+
+data <span class="token operator">=</span> load_boston<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+X <span class="token operator">=</span> data<span class="token punctuation">.</span>data
+y <span class="token operator">=</span> data<span class="token punctuation">.</span>target
+
+Xtrain<span class="token punctuation">,</span>Xtest<span class="token punctuation">,</span>Ytrain<span class="token punctuation">,</span>Ytest <span class="token operator">=</span> TTS<span class="token punctuation">(</span>X<span class="token punctuation">,</span>y<span class="token punctuation">,</span>test_size<span class="token operator">=</span><span class="token number">0.3</span><span class="token punctuation">,</span>random_state<span class="token operator">=</span><span class="token number">420</span><span class="token punctuation">)</span>
+<span class="token comment">#注意，如果我们保存的模型是xgboost库中建立的模型，则导入的数据类型也必须是xgboost库中的数据类型</span>
+dtest <span class="token operator">=</span> xgb<span class="token punctuation">.</span>DMatrix<span class="token punctuation">(</span>Xtest<span class="token punctuation">,</span>Ytest<span class="token punctuation">)</span>
+<span class="token comment">#导入模型</span>
+loaded_model <span class="token operator">=</span> pickle<span class="token punctuation">.</span>load<span class="token punctuation">(</span><span class="token builtin">open</span><span class="token punctuation">(</span><span class="token string">"xgboostonboston.dat"</span><span class="token punctuation">,</span> <span class="token string">"rb"</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"Loaded model from: xgboostonboston.dat"</span><span class="token punctuation">)</span>
+<span class="token comment">#Loaded model from: xgboostonboston.dat</span>
+<span class="token comment">#做预测，直接调用接口predict</span>
+ypreds <span class="token operator">=</span> loaded_model<span class="token punctuation">.</span>predict<span class="token punctuation">(</span>dtest<span class="token punctuation">)</span>
+ypreds
+<span class="token comment">#array([ 9.244746, 22.536953, 28.47614 , 13.126131,  9.944413, 21.356094,</span>
+<span class="token comment">#       15.187935, 15.559099, 15.629611, 15.555439, 21.427156, 35.502792,</span>
+<span class="token comment">#       20.827318, 29.397932, 21.669186, 11.906522, 21.464252, 26.143337,</span>
+<span class="token comment">#       。。。</span>
+<span class="token comment">#        8.979549, 28.35794 , 29.80491 , 21.987814, 19.893597, 19.730898,</span>
+<span class="token comment">#       10.501988, 17.405378, 40.51527 , 17.420282, 24.272373, 19.771631,</span>
+<span class="token comment">#       32.620422, 19.19032 , 12.364113, 38.63305 , 24.189354, 23.38174 ,</span>
+<span class="token comment">#       16.924698, 22.633028], dtype=float32)</span>
+<span class="token keyword">from</span> sklearn<span class="token punctuation">.</span>metrics <span class="token keyword">import</span> mean_squared_error <span class="token keyword">as</span> MSE<span class="token punctuation">,</span> r2_score
+MSE<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>ypreds<span class="token punctuation">)</span>
+<span class="token comment">#9.107608696116197</span>
+r2_score<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>ypreds<span class="token punctuation">)</span>
+<span class="token comment">#0.9021254331073938</span>
+</code></pre> 
+<h3><a id="422_Joblib_265"></a>4.2.2 使用Joblib保存和调用模型</h3> 
+<p>Joblib是SciPy生态系统中的一部分，它为Python提供保存和调用管道和对象的功能，处理NumPy结构的数据尤其高效，对于很大的数据集和巨大的模型非常有用。Joblib与pickle API非常相似，来看看代码：</p> 
+<pre><code class="prism language-python">bst <span class="token operator">=</span> xgb<span class="token punctuation">.</span>train<span class="token punctuation">(</span>param<span class="token punctuation">,</span> dtrain<span class="token punctuation">,</span> num_round<span class="token punctuation">)</span>
+<span class="token keyword">import</span> joblib
+
+<span class="token comment">#同样可以看看模型被保存到了哪里</span>
+joblib<span class="token punctuation">.</span>dump<span class="token punctuation">(</span>bst<span class="token punctuation">,</span><span class="token string">"xgboost-boston.dat"</span><span class="token punctuation">)</span>
+<span class="token comment">#['xgboost-boston.dat']</span>
+loaded_model <span class="token operator">=</span> joblib<span class="token punctuation">.</span>load<span class="token punctuation">(</span><span class="token string">"xgboost-boston.dat"</span><span class="token punctuation">)</span>
+dtest <span class="token operator">=</span> xgb<span class="token punctuation">.</span>DMatrix<span class="token punctuation">(</span>Xtest<span class="token punctuation">,</span>Ytest<span class="token punctuation">)</span>
+ypreds <span class="token operator">=</span> loaded_model<span class="token punctuation">.</span>predict<span class="token punctuation">(</span>dtest<span class="token punctuation">)</span>
+ypreds
+<span class="token comment">#array([ 9.244746, 22.536953, 28.47614 , 13.126131,  9.944413, 21.356094,</span>
+<span class="token comment">#       15.187935, 15.559099, 15.629611, 15.555439, 21.427156, 35.502792,</span>
+<span class="token comment">#       20.827318, 29.397932, 21.669186, 11.906522, 21.464252, 26.143337,</span>
+<span class="token comment">#       26.300356, 23.474188, 18.186035, 15.851086, 22.928507, 22.919674,</span>
+<span class="token comment">#       。。。</span>
+<span class="token comment">#        8.979549, 28.35794 , 29.80491 , 21.987814, 19.893597, 19.730898,</span>
+<span class="token comment">#       10.501988, 17.405378, 40.51527 , 17.420282, 24.272373, 19.771631,</span>
+<span class="token comment">#       32.620422, 19.19032 , 12.364113, 38.63305 , 24.189354, 23.38174 ,</span>
+<span class="token comment">#       16.924698, 22.633028], dtype=float32)</span>
+MSE<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span> ypreds<span class="token punctuation">)</span>
+<span class="token comment">#9.107608696116197</span>
+r2_score<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>ypreds<span class="token punctuation">)</span>
+<span class="token comment">#0.9021254331073938</span>
+</code></pre> 
+<p>在这两种保存方法下，我们都可以找到保存下来的dat文件，将这些文件移动到任意计算机上的python下的环境变量路径中（使用sys.path进行查看），则可以使用import来对模型进行调用。注意，模型的保存调用与自写函数的保存调用是两回事，大家要注意区分。</p> 
+<h3><a id="43_XGB_294"></a>4.3 分类案例：XGB中的样本不均衡问题</h3> 
+<p>在之前的学习中，我们一直以回归作为演示的例子，这是由于回归是XGB的常用领域的缘故。然而作为机器学习中的大头，分类算法也是不可忽视的，XGB作为分类的例子自然也是非常多。存在分类，就会存在样本不平衡问题带来的影响，XGB中存在着调节样本不平衡的参数scale_pos_weight，这个参数非常类似于之前随机森林和支持向量机中我们都使用到过的class_weight参数，通常我们在参数中输入的是负样本量与正样本量之比<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+         
+         
+            sum  
+          
+         
+           ( 
+          
+         
+            negative instances  
+          
+         
+           ) 
+          
+         
+        
+           sum(positive instances)  
+         
+        
+       
+      
+        \frac{\text { sum }(\text { negative instances })}{\text { sum(positive instances) }} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.53em; vertical-align: -0.52em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.01em;"><span class="" style="top: -2.655em;"><span class="pstrut" style="height: 3em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord text mtight"><span class="mord mtight"> sum(positive instances) </span></span></span></span></span><span class="" style="top: -3.23em;"><span class="pstrut" style="height: 3em;"></span><span class="frac-line" style="border-bottom-width: 0.04em;"></span></span><span class="" style="top: -3.485em;"><span class="pstrut" style="height: 3em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord text mtight"><span class="mord mtight"> sum </span></span><span class="mopen mtight">(</span><span class="mord text mtight"><span class="mord mtight"> negative instances </span></span><span class="mclose mtight">)</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.52em;"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span></span></span></span></span><br> <img src="https://images2.imgbox.com/36/ce/wbrlgEIj_o.png" alt="在这里插入图片描述"><br> 来看看如何使用这个参数吧。</p> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> numpy <span class="token keyword">as</span> np
+<span class="token keyword">import</span> xgboost <span class="token keyword">as</span> xgb
+<span class="token keyword">import</span> matplotlib<span class="token punctuation">.</span>pyplot <span class="token keyword">as</span> plt
+<span class="token keyword">from</span> xgboost <span class="token keyword">import</span> XGBClassifier <span class="token keyword">as</span> XGBC
+<span class="token keyword">from</span> sklearn<span class="token punctuation">.</span>datasets <span class="token keyword">import</span> make_blobs <span class="token comment">#自创数据集</span>
+<span class="token keyword">from</span> sklearn<span class="token punctuation">.</span>model_selection <span class="token keyword">import</span> train_test_split <span class="token keyword">as</span> TTS
+<span class="token keyword">from</span> sklearn<span class="token punctuation">.</span>metrics <span class="token keyword">import</span> confusion_matrix <span class="token keyword">as</span> cm<span class="token punctuation">,</span> recall_score <span class="token keyword">as</span> recall<span class="token punctuation">,</span> roc_auc_score <span class="token keyword">as</span> auc
+class_1 <span class="token operator">=</span> <span class="token number">500</span> <span class="token comment">#类别1有500个样本</span>
+class_2 <span class="token operator">=</span> <span class="token number">50</span> <span class="token comment">#类别2只有50个</span>
+centers <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">[</span><span class="token number">0.0</span><span class="token punctuation">,</span> <span class="token number">0.0</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token punctuation">[</span><span class="token number">2.0</span><span class="token punctuation">,</span> <span class="token number">2.0</span><span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token comment">#设定两个类别的中心</span>
+clusters_std <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token number">1.5</span><span class="token punctuation">,</span> <span class="token number">0.5</span><span class="token punctuation">]</span> <span class="token comment">#设定两个类别的方差，通常来说，样本量比较大的类别会更加松散</span>
+X<span class="token punctuation">,</span> y <span class="token operator">=</span> make_blobs<span class="token punctuation">(</span>n_samples<span class="token operator">=</span><span class="token punctuation">[</span>class_1<span class="token punctuation">,</span> class_2<span class="token punctuation">]</span><span class="token punctuation">,</span>
+                  centers<span class="token operator">=</span>centers<span class="token punctuation">,</span>
+                  cluster_std<span class="token operator">=</span>clusters_std<span class="token punctuation">,</span>
+                  random_state<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">,</span> shuffle<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span>
+X<span class="token punctuation">.</span>shape
+<span class="token comment">#(550, 2)</span>
+y
+<span class="token comment">#array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1,</span>
+<span class="token comment">#       1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,</span>
+<span class="token comment">#       1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])</span>
+<span class="token punctuation">(</span>y <span class="token operator">==</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token builtin">sum</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">/</span> y<span class="token punctuation">.</span>shape<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token comment">#9%</span>
+<span class="token comment">#0.09090909090909091</span>
+Xtrain<span class="token punctuation">,</span> Xtest<span class="token punctuation">,</span> Ytrain<span class="token punctuation">,</span> Ytest <span class="token operator">=</span> TTS<span class="token punctuation">(</span>X<span class="token punctuation">,</span>y<span class="token punctuation">,</span>test_size<span class="token operator">=</span><span class="token number">0.3</span><span class="token punctuation">,</span>random_state<span class="token operator">=</span><span class="token number">420</span><span class="token punctuation">)</span>
+<span class="token comment">#在sklearn下建模#</span>
+
+clf <span class="token operator">=</span> XGBC<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>fit<span class="token punctuation">(</span>Xtrain<span class="token punctuation">,</span>Ytrain<span class="token punctuation">)</span>
+ypred <span class="token operator">=</span> clf<span class="token punctuation">.</span>predict<span class="token punctuation">(</span>Xtest<span class="token punctuation">)</span>
+ypred
+<span class="token comment">#array([0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,</span>
+<span class="token comment">#       1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,</span>
+<span class="token comment">#       0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1])</span>
+clf<span class="token punctuation">.</span>score<span class="token punctuation">(</span>Xtest<span class="token punctuation">,</span>Ytest<span class="token punctuation">)</span> <span class="token comment">#默认模型评估指标 - 准确率</span>
+<span class="token comment">#0.9272727272727272</span>
+cm<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>ypred<span class="token punctuation">,</span>labels<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token comment">#少数类写在前面</span>
+<span class="token comment">#array([[  9,   4],</span>
+<span class="token comment">#       [  8, 144]], dtype=int64)</span>
+recall<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>ypred<span class="token punctuation">)</span>
+<span class="token comment">#0.6923076923076923</span>
+auc<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>clf<span class="token punctuation">.</span>predict_proba<span class="token punctuation">(</span>Xtest<span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+<span class="token comment">#0.9671052631578947</span>
+</code></pre> 
+<pre><code class="prism language-python"><span class="token comment">#负/正样本比例</span>
+clf_ <span class="token operator">=</span> XGBC<span class="token punctuation">(</span>scale_pos_weight<span class="token operator">=</span><span class="token number">10</span><span class="token punctuation">)</span><span class="token punctuation">.</span>fit<span class="token punctuation">(</span>Xtrain<span class="token punctuation">,</span>Ytrain<span class="token punctuation">)</span>
+ypred_ <span class="token operator">=</span> clf_<span class="token punctuation">.</span>predict<span class="token punctuation">(</span>Xtest<span class="token punctuation">)</span>
+clf_<span class="token punctuation">.</span>score<span class="token punctuation">(</span>Xtest<span class="token punctuation">,</span>Ytest<span class="token punctuation">)</span>
+<span class="token comment">#0.95151515151515</span>
+cm<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>ypred_<span class="token punctuation">,</span>labels<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+<span class="token comment">#array([[ 13,   0],</span>
+<span class="token comment">#       [  8, 144]])</span>
+recall<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>ypred_<span class="token punctuation">)</span>
+<span class="token comment">#1.0</span>
+auc<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>clf_<span class="token punctuation">.</span>predict_proba<span class="token punctuation">(</span>Xtest<span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+<span class="token comment">#0.9696356275303644</span>
+<span class="token comment">#随着样本权重逐渐增加，模型的recall,auc和准确率如何变化？</span>
+<span class="token keyword">for</span> i <span class="token keyword">in</span> <span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">5</span><span class="token punctuation">,</span><span class="token number">10</span><span class="token punctuation">,</span><span class="token number">20</span><span class="token punctuation">,</span><span class="token number">30</span><span class="token punctuation">]</span><span class="token punctuation">:</span>
+    clf_ <span class="token operator">=</span> XGBC<span class="token punctuation">(</span>scale_pos_weight<span class="token operator">=</span>i<span class="token punctuation">)</span><span class="token punctuation">.</span>fit<span class="token punctuation">(</span>Xtrain<span class="token punctuation">,</span>Ytrain<span class="token punctuation">)</span>
+    ypred_ <span class="token operator">=</span> clf_<span class="token punctuation">.</span>predict<span class="token punctuation">(</span>Xtest<span class="token punctuation">)</span>
+    <span class="token keyword">print</span><span class="token punctuation">(</span>i<span class="token punctuation">)</span>
+    <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"\tAccuracy:{}"</span><span class="token punctuation">.</span><span class="token builtin">format</span><span class="token punctuation">(</span>clf_<span class="token punctuation">.</span>score<span class="token punctuation">(</span>Xtest<span class="token punctuation">,</span>Ytest<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"\tRecall:{}"</span><span class="token punctuation">.</span><span class="token builtin">format</span><span class="token punctuation">(</span>recall<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>ypred_<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"\tAUC:{}"</span><span class="token punctuation">.</span><span class="token builtin">format</span><span class="token punctuation">(</span>auc<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>clf_<span class="token punctuation">.</span>predict_proba<span class="token punctuation">(</span>Xtest<span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token comment">#1</span>
+<span class="token comment">#	 Accuracy:0.9272727272727272</span>
+<span class="token comment">#	 Recall:0.6923076923076923</span>
+<span class="token comment">#	 AUC:0.9671052631578947</span>
+<span class="token comment">#5</span>
+<span class="token comment">#	 Accuracy:0.9454545454545454</span>
+<span class="token comment">#	 Recall:0.9230769230769231</span>
+<span class="token comment">#	 AUC:0.9665991902834008</span>
+<span class="token comment">#10</span>
+<span class="token comment">#	 Accuracy:0.9515151515151515</span>
+<span class="token comment">#	 Recall:1.0</span>
+<span class="token comment">#	 AUC:0.9696356275303644</span>
+<span class="token comment">#20</span>
+<span class="token comment">#	 Accuracy:0.9515151515151515</span>
+<span class="token comment">#	 Recall:1.0</span>
+<span class="token comment">#	 AUC:0.9706477732793523</span>
+<span class="token comment">#30</span>
+<span class="token comment">#	 Accuracy:0.9515151515151515</span>
+<span class="token comment">#	 Recall:1.0</span>
+<span class="token comment">#	 AUC:0.9701417004048584</span>
+
+<span class="token comment">#负/正样本比例</span>
+clf_ <span class="token operator">=</span> XGBC<span class="token punctuation">(</span>scale_pos_weight<span class="token operator">=</span><span class="token number">20</span><span class="token punctuation">)</span><span class="token punctuation">.</span>fit<span class="token punctuation">(</span>Xtrain<span class="token punctuation">,</span>Ytrain<span class="token punctuation">)</span>
+ypred_ <span class="token operator">=</span> clf_<span class="token punctuation">.</span>predict<span class="token punctuation">(</span>Xtest<span class="token punctuation">)</span>
+clf_<span class="token punctuation">.</span>score<span class="token punctuation">(</span>Xtest<span class="token punctuation">,</span>Ytest<span class="token punctuation">)</span>
+<span class="token comment">#0.9515151515151515</span>
+cm<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>ypred_<span class="token punctuation">,</span>labels<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+<span class="token comment">#array([[ 13,   0],</span>
+<span class="token comment">#       [  8, 144]], dtype=int64)</span>
+recall<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>ypred_<span class="token punctuation">)</span>
+<span class="token comment">#1.0</span>
+auc<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>clf_<span class="token punctuation">.</span>predict_proba<span class="token punctuation">(</span>Xtest<span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+<span class="token comment">#0.9706477732793523</span>
+</code></pre> 
+<pre><code class="prism language-python">dtrain <span class="token operator">=</span> xgb<span class="token punctuation">.</span>DMatrix<span class="token punctuation">(</span>Xtrain<span class="token punctuation">,</span>Ytrain<span class="token punctuation">)</span>
+dtest <span class="token operator">=</span> xgb<span class="token punctuation">.</span>DMatrix<span class="token punctuation">(</span>Xtest<span class="token punctuation">,</span>Ytest<span class="token punctuation">)</span>
+<span class="token comment">#看看xgboost库自带的predict接口</span>
+param <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">'silent'</span><span class="token punctuation">:</span><span class="token boolean">True</span><span class="token punctuation">,</span><span class="token string">'objective'</span><span class="token punctuation">:</span><span class="token string">'binary:logistic'</span><span class="token punctuation">,</span><span class="token string">"eta"</span><span class="token punctuation">:</span><span class="token number">0.1</span><span class="token punctuation">,</span><span class="token string">"scale_pos_weight"</span><span class="token punctuation">:</span><span class="token number">1</span><span class="token punctuation">}</span>
+num_round <span class="token operator">=</span> <span class="token number">100</span>
+bst <span class="token operator">=</span> xgb<span class="token punctuation">.</span>train<span class="token punctuation">(</span>param<span class="token punctuation">,</span> dtrain<span class="token punctuation">,</span> num_round<span class="token punctuation">)</span>
+preds <span class="token operator">=</span> bst<span class="token punctuation">.</span>predict<span class="token punctuation">(</span>dtest<span class="token punctuation">)</span>
+<span class="token comment">#看看preds返回了什么？</span>
+preds
+<span class="token comment">#array([0.00110357, 0.00761518, 0.00110357, 0.00110357, 0.93531454,</span>
+<span class="token comment">#       0.00466839, 0.00110357, 0.00110357, 0.00110357, 0.00110357,</span>
+<span class="token comment">#       0.00110357, 0.00410493, 0.00454478, 0.00571528, 0.00751026,</span>
+<span class="token comment">#       . . . </span>
+<span class="token comment">#       0.9830577 , 0.00110357, 0.00644181, 0.00110357, 0.00571528,</span>
+<span class="token comment">#       0.00110357, 0.00110357, 0.00110357, 0.00110357, 0.00466839,</span>
+<span class="token comment">#       0.00110357, 0.00110357, 0.92388713, 0.90231985, 0.80084217],</span>
+<span class="token comment">#      dtype=float32)</span>
+<span class="token comment">#xgb库分类返回的是概率</span>
+<span class="token comment">#自己设定阈值</span>
+ypred <span class="token operator">=</span> preds<span class="token punctuation">.</span>copy<span class="token punctuation">(</span><span class="token punctuation">)</span>
+ypred<span class="token punctuation">[</span>preds <span class="token operator">&gt;</span> <span class="token number">0.5</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">1</span>
+ypred<span class="token punctuation">[</span>ypred <span class="token operator">!=</span> <span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">0</span>
+ypred
+<span class="token comment">#array([0., 0., 0., 0., 1., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,</span>
+<span class="token comment">#       0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,</span>
+<span class="token comment">#       0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,</span>
+<span class="token comment">#       0., 0., 0., 0., 0., 0., 1., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,</span>
+<span class="token comment">#       0., 0., 0., 0., 0., 0., 1., 0., 0., 1., 0., 0., 0., 0., 0., 0., 1.,</span>
+<span class="token comment">#       0., 0., 0., 1., 0., 0., 0., 0., 0., 1., 0., 1., 0., 0., 0., 0., 1.,</span>
+<span class="token comment">#       0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 1., 0., 1., 0., 0., 0.,</span>
+<span class="token comment">#       0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,</span>
+<span class="token comment">#       1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 0., 0., 0., 0., 1., 0., 0.,</span>
+<span class="token comment">#       0., 0., 0., 0., 0., 0., 0., 0., 0., 1., 1., 1.], dtype=float32)</span>
+
+<span class="token comment">#写明参数</span>
+scale_pos_weight <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">5</span><span class="token punctuation">,</span><span class="token number">10</span><span class="token punctuation">]</span>
+names <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token string">"negative vs positive: 1"</span>
+         <span class="token punctuation">,</span><span class="token string">"negative vs positive: 5"</span>
+         <span class="token punctuation">,</span><span class="token string">"negative vs positive: 10"</span><span class="token punctuation">]</span>
+<span class="token punctuation">[</span><span class="token operator">*</span><span class="token builtin">zip</span><span class="token punctuation">(</span>names<span class="token punctuation">,</span>scale_pos_weight<span class="token punctuation">)</span><span class="token punctuation">]</span>
+<span class="token comment">#[('negative vs positive: 1', 1),</span>
+<span class="token comment"># ('negative vs positive: 5', 5),</span>
+<span class="token comment"># ('negative vs positive: 10', 10)]</span>
+<span class="token comment">#导入模型评估指标</span>
+<span class="token keyword">from</span> sklearn<span class="token punctuation">.</span>metrics <span class="token keyword">import</span> accuracy_score <span class="token keyword">as</span> accuracy<span class="token punctuation">,</span> recall_score <span class="token keyword">as</span> recall<span class="token punctuation">,</span> roc_auc_score <span class="token keyword">as</span> auc
+
+<span class="token keyword">for</span> name<span class="token punctuation">,</span>i <span class="token keyword">in</span> <span class="token builtin">zip</span><span class="token punctuation">(</span>names<span class="token punctuation">,</span>scale_pos_weight<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    param <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">'silent'</span><span class="token punctuation">:</span><span class="token boolean">True</span><span class="token punctuation">,</span><span class="token string">'objective'</span><span class="token punctuation">:</span><span class="token string">'binary:logistic'</span>
+            <span class="token punctuation">,</span><span class="token string">"eta"</span><span class="token punctuation">:</span><span class="token number">0.1</span><span class="token punctuation">,</span><span class="token string">"scale_pos_weight"</span><span class="token punctuation">:</span>i<span class="token punctuation">}</span>
+    num_round <span class="token operator">=</span> <span class="token number">100</span>
+    clf <span class="token operator">=</span> xgb<span class="token punctuation">.</span>train<span class="token punctuation">(</span>param<span class="token punctuation">,</span> dtrain<span class="token punctuation">,</span> num_round<span class="token punctuation">)</span>
+    preds <span class="token operator">=</span> clf<span class="token punctuation">.</span>predict<span class="token punctuation">(</span>dtest<span class="token punctuation">)</span>
+    ypred <span class="token operator">=</span> preds<span class="token punctuation">.</span>copy<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    ypred<span class="token punctuation">[</span>preds <span class="token operator">&gt;</span> <span class="token number">0.5</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">1</span>
+    ypred<span class="token punctuation">[</span>ypred <span class="token operator">!=</span> <span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">0</span>
+    <span class="token keyword">print</span><span class="token punctuation">(</span>name<span class="token punctuation">)</span>
+    <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"\tAccuracy:{}"</span><span class="token punctuation">.</span><span class="token builtin">format</span><span class="token punctuation">(</span>accuracy<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>ypred<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"\tRecall:{}"</span><span class="token punctuation">.</span><span class="token builtin">format</span><span class="token punctuation">(</span>recall<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>ypred<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"\tAUC:{}"</span><span class="token punctuation">.</span><span class="token builtin">format</span><span class="token punctuation">(</span>auc<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>preds<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token comment">#negative vs positive: 1</span>
+<span class="token comment">#	Accuracy:0.9272727272727272</span>
+<span class="token comment">#	Recall:0.6923076923076923</span>
+<span class="token comment">#	AUC:0.9741902834008097</span>
+<span class="token comment">#negative vs positive: 5</span>
+<span class="token comment">#	Accuracy:0.9393939393939394</span>
+<span class="token comment">#	Recall:0.8461538461538461</span>
+<span class="token comment">#	AUC:0.9635627530364372</span>
+<span class="token comment">#negative vs positive: 10</span>
+<span class="token comment">#	Accuracy:0.9515151515151515</span>
+<span class="token comment">#	Recall:1.0</span>
+<span class="token comment">#	AUC:0.9665991902834008</span>
+<span class="token comment">#当然我们也可以尝试不同的阈值</span>
+<span class="token keyword">for</span> name<span class="token punctuation">,</span>i <span class="token keyword">in</span> <span class="token builtin">zip</span><span class="token punctuation">(</span>names<span class="token punctuation">,</span>scale_pos_weight<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">for</span> thres <span class="token keyword">in</span> <span class="token punctuation">[</span><span class="token number">0.3</span><span class="token punctuation">,</span><span class="token number">0.5</span><span class="token punctuation">,</span><span class="token number">0.7</span><span class="token punctuation">,</span><span class="token number">0.9</span><span class="token punctuation">]</span><span class="token punctuation">:</span>
+        param<span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">'silent'</span><span class="token punctuation">:</span><span class="token boolean">True</span><span class="token punctuation">,</span><span class="token string">'objective'</span><span class="token punctuation">:</span><span class="token string">'binary:logistic'</span>
+                <span class="token punctuation">,</span><span class="token string">"eta"</span><span class="token punctuation">:</span><span class="token number">0.1</span><span class="token punctuation">,</span><span class="token string">"scale_pos_weight"</span><span class="token punctuation">:</span>i<span class="token punctuation">}</span>
+        clf <span class="token operator">=</span> xgb<span class="token punctuation">.</span>train<span class="token punctuation">(</span>param<span class="token punctuation">,</span> dtrain<span class="token punctuation">,</span> num_round<span class="token punctuation">)</span>
+        preds <span class="token operator">=</span> clf<span class="token punctuation">.</span>predict<span class="token punctuation">(</span>dtest<span class="token punctuation">)</span>
+        ypred <span class="token operator">=</span> preds<span class="token punctuation">.</span>copy<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        ypred<span class="token punctuation">[</span>preds <span class="token operator">&gt;</span> thres<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">1</span>
+        ypred<span class="token punctuation">[</span>ypred <span class="token operator">!=</span> <span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">0</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"{},thresholds:{}"</span><span class="token punctuation">.</span><span class="token builtin">format</span><span class="token punctuation">(</span>name<span class="token punctuation">,</span>thres<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"\tAccuracy:{}"</span><span class="token punctuation">.</span><span class="token builtin">format</span><span class="token punctuation">(</span>accuracy<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>ypred<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"\tRecall:{}"</span><span class="token punctuation">.</span><span class="token builtin">format</span><span class="token punctuation">(</span>recall<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>ypred<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"\tAUC:{}"</span><span class="token punctuation">.</span><span class="token builtin">format</span><span class="token punctuation">(</span>auc<span class="token punctuation">(</span>Ytest<span class="token punctuation">,</span>preds<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token comment">#negative vs positive: 1,thresholds:0.3</span>
+<span class="token comment">#	Accuracy:0.9393939393939394</span>
+<span class="token comment">#	Recall:0.8461538461538461</span>
+<span class="token comment">#	AUC:0.9741902834008097</span>
+<span class="token comment">#negative vs positive: 1,thresholds:0.5</span>
+<span class="token comment">#	Accuracy:0.9272727272727272</span>
+<span class="token comment">#	Recall:0.6923076923076923</span>
+<span class="token comment">#	AUC:0.9741902834008097</span>
+<span class="token comment">#negative vs positive: 1,thresholds:0.7</span>
+<span class="token comment">#	Accuracy:0.9212121212121213</span>
+<span class="token comment">#	Recall:0.6153846153846154</span>
+<span class="token comment">#	AUC:0.9741902834008097</span>
+<span class="token comment">#negative vs positive: 1,thresholds:0.9</span>
+<span class="token comment">#	Accuracy:0.9515151515151515</span>
+<span class="token comment">#	Recall:0.5384615384615384</span>
+<span class="token comment">#	AUC:0.9741902834008097</span>
+<span class="token comment">#negative vs positive: 5,thresholds:0.3</span>
+<span class="token comment">#	Accuracy:0.9515151515151515</span>
+<span class="token comment">#	Recall:1.0</span>
+<span class="token comment">#	AUC:0.9635627530364372</span>
+<span class="token comment">#negative vs positive: 5,thresholds:0.5</span>
+<span class="token comment">#	Accuracy:0.9393939393939394</span>
+<span class="token comment">#	Recall:0.8461538461538461</span>
+<span class="token comment">#	AUC:0.9635627530364372</span>
+<span class="token comment">#negative vs positive: 5,thresholds:0.7</span>
+<span class="token comment">#	Accuracy:0.9272727272727272</span>
+<span class="token comment">#	Recall:0.6923076923076923</span>
+<span class="token comment">#	AUC:0.9635627530364372</span>
+<span class="token comment">#negative vs positive: 5,thresholds:0.9</span>
+<span class="token comment">#	Accuracy:0.9212121212121213</span>
+<span class="token comment">#	Recall:0.6153846153846154</span>
+<span class="token comment">#	AUC:0.9635627530364372</span>
+<span class="token comment">#negative vs positive: 10,thresholds:0.3</span>
+<span class="token comment">#	Accuracy:0.9515151515151515</span>
+<span class="token comment">#	Recall:1.0</span>
+<span class="token comment">#	AUC:0.9665991902834008</span>
+<span class="token comment">#negative vs positive: 10,thresholds:0.5</span>
+<span class="token comment">#	Accuracy:0.9515151515151515</span>
+<span class="token comment">#	Recall:1.0</span>
+<span class="token comment">#	AUC:0.9665991902834008</span>
+<span class="token comment">#negative vs positive: 10,thresholds:0.7</span>
+<span class="token comment">#	Accuracy:0.9393939393939394</span>
+<span class="token comment">#	Recall:0.8461538461538461</span>
+<span class="token comment">#	AUC:0.9665991902834008</span>
+<span class="token comment">#negative vs positive: 10,thresholds:0.9</span>
+<span class="token comment">#	Accuracy:0.9212121212121213</span>
+<span class="token comment">#	Recall:0.6153846153846154</span>
+<span class="token comment">#	AUC:0.9665991902834008</span>
+</code></pre> 
+<p>可以看出，在xgboost库和sklearnAPI中，参数scale_pos_weight都非常有效。本质上来说，scale_pos_weight参数是通过调节预测的概率值来调节，大家可以通过查看bst.predict(Xtest)返回的结果来观察概率受到了怎样的影响。因此，当我们只关心预测出的结果是否准确，AUC面积或者召回率是否足够好，我们就可以使用scale_pos_weight参数来帮助我们。然而xgboost除了可以做分类和回归，还有其他的多种功能，在一些需要使用精确概率的领域（比如排序ranking），我们希望能够保持概率原有的模样，而提升模型的效果。这种时候，我们就无法使用scale_pos_weight来帮助我们。来看看xgboost官网是怎么说明这个问题的：<img src="https://images2.imgbox.com/f6/b4/sAnsbeBx_o.png" alt="在这里插入图片描述"><br> 官网上说，如果我们只在意模型的整表现，则使用AUC作为模型评估指标，使用scale_pos_weight来处理样本不平衡问题，如果我们在意预测出正确的概率，那我们就无法通过调节scale_pos_weight来减轻样本不平衡问题带来的影响。</p> 
+<p>这种时候，我们需要考虑另一个参数：max_delta_step。</p> 
+<p>这个参数非常难以理解，它被称之为是“树的权重估计中允许的单次最大增量”，既可以考虑成是影响的估计的参数。xgboost官网上认为，如果我们在处理样本不均衡问题，并且十分在意得到正确的预测概率，则可以设置max_delta_step参数为一个有限的数（比如1）来帮助收敛。max_delta_step参数通常不进行使用，二分类下的样本不均衡问题时这个参数唯一的用途。</p> 
+<h3><a id="44_XGBoost_567"></a>4.4 XGBoost类中的其他参数和功能</h3> 
+<p>到目前为止，我们已经讲解了XGBoost类中的大部分参数和功能。这些参数和功能主要覆盖了XGBoost中的梯度提升树的原理以及XGBoost自身所带的一些特性。还有一些其他的参数和用法，是算法实际应用时需要考虑的问题。接下来，我们就来看看这些参数。<img src="https://images2.imgbox.com/9f/c6/F0bWW3w2_o.png" alt="在这里插入图片描述"></p> 
+<ul><li> <p>更多计算资源：n_jobs<br> nthread和n_jobs都是算法运行所使用的线程，与sklearn中规则一样，输入整数表示使用的线程，输入-1表示使用计算机全部的计算资源。如果我们的数据量很大，则我们可能需要这个参数来为我们调用更多线程。</p> </li><li> <p>降低学习难度：base_score<br> base_score是一个比较容易被混淆的参数，它被叫做全局偏差，在分类问题中，它是我们希望关注的分类的先验概率。比如说，如果我们有1000个样本，其中300个正样本，700个负样本，则base_score就是0.3。对于回归来说，这个分数默认0.5，但其实这个分数在这种情况下并不有效。许多使用XGBoost的人已经提出，当使用回归的时候base_score的默认应该是标签的均值，不过现在xgboost库尚未对此做出改进。使用这个参数，我们便是在告诉模型一些我们了解但模型不一定能够从数据中学习到的信息。通常我们不会使用这个参数，但对于严重的样本不均衡问题，设置一个正确的base_score取值是很有必要的。</p> </li><li> <p>生成树的随机模式：random_state<br> 在xgb库和sklearn中，都存在空值生成树的随机模式的参数random_state。在之前的剪枝中，我们提到可以通过随机抽样样本，随机抽样特征来减轻过拟合的影响，我们可以通过其他参数来影响随机抽样的比例，却无法对随机抽样干涉更多，因此，真正的随机性还是由模型自己生成的。如果希望控制这种随机性，可以在random_state参数中输入固定整数。需要注意的是，xgb库和sklearn库中，在random_state参数中输入同一个整数未必表示同一个随机模式，不一定会得到相同的结果，因此导致模型的feature_importances也会不一致。</p> </li><li> <p>自动处理缺失值：missing<br> XGBoost被设计成是能够自动处理缺失值的模型，这个设计的初衷其实是为了让XGBoost能够处理稀疏矩阵。我们可以在参数missing中输入一个对象，比如np.nan，或数据的任意取值，表示将所有含有这个对象的数据作为空值处理。XGBoost会将所有的空值当作稀疏矩阵中的0来进行处理，因此在使用XGBoost的时候，我们也可以不处理缺失值。当然，通常来说，如果我们了解业务并且了解缺失值的来源，我们还是希望手动填补缺失值。</p> </li></ul> 
+<p>XGBoost结语<br> 作为工程能力强，效果优秀的算法，XGBoost应用广泛并且原理复杂。不过在我们为大家解读完毕XGBoost之后，相信大家已经意识到，XGBoost的难点在于它是一个集大成的模型。它所涉及到的知识点和模型流程，多半在其他常用的机器学习模型中出现过：比如树的迭代过程，其实可以和逻辑回归中的梯度下降过程进行类比；比如剪枝的过程，许多都可以与随机森林和决策树中的知识进行对比。当然，XGBoost还有很多可以进行探索，能够使用XGB算法的库和模块也不止sklearn和xgboost，许多库对xgboost的底层原理进行了更多优化，让它变得更快更优秀（比如lightGBM，比如使用分布式进行计算等等）。本周我们学习了许多内容，大家已经对XGBoost算法有了基本的认识，了解了如何使用它来建立模型，如何使用它进行基本的调整。本周的课程只不过是梯度提升算法和XGB上的一个向导，希望大家继续探索XGBoost这个可爱的算法，再接再厉。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/57d8fe93d6acefaba325b1cbe2300803/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">菜菜sklearn——XGBoost(2)</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/7be32c820444820f0a3e91a2caba4b40/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">vscode编辑器快捷键</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

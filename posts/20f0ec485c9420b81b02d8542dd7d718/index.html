@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>linux tc流量控制（一）：classless qdisc - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="linux tc流量控制（一）：classless qdisc" />
+<meta property="og:description" content="什么是tc tc全称为traffic control，是iproute2包中控制内核中流量的工具。在内核的网络协议栈中，专门有这样一个处理网络流量的地方（在XDP之后，netfilter之前），tc就是在这个地方读取网络数据包（此时已经是sk_buffer）进行控制、分发、丢弃等操作。需要注意的是，tc既可以处理传出的数据包（egress），也可以处理传入的数据包（ingress），但对传入的数据包处理的功能较少。本文不涉及ingress内容。
+核心概念：qdisc 我们使用tc的时候，最先会遇到一个叫做qdisc的名词，其实我们经常能看见它，就是在每次我们执行ip命令的时时候
+root@ubuntu:~# ip l 1: lo: &lt;LOOPBACK,UP,LOWER_UP&gt; mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000 link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00 2: ens33: &lt;BROADCAST,MULTICAST,UP,LOWER_UP&gt; mtu 1500 qdisc fq_codel state UP mode DEFAULT group default qlen 1000 link/ether 00:0c:29:58:48:55 brd ff:ff:ff:ff:ff:ff altname enp2s1 比如在这里，我们可以看到每个网络设备都在mtu后面都有一个qdisc，qdisc后面还有一个词，上面的lo的qdisc是noqueue，ens33的qdisc是fq_codel。
+qdisc实际是queueing discipline的缩写，我们可以将其看作一个具有一定规则的队列。当tc处理网络包时，会将包入队到qdisc中，这些包会根据指定的规则被内核按照一定顺序取出。tc中已经内置了很多不同的qdisc，有些qdisc可以带参数，比如ens33上面的qdisc参数是这样的。
+root@ubuntu:~# tc qdisc show dev ens33 qdisc fq_codel 0: root refcnt 2 limit 10240p flows 1024 quantum 1514 target 5." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/20f0ec485c9420b81b02d8542dd7d718/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-12-15T16:23:06+08:00" />
+<meta property="article:modified_time" content="2022-12-15T16:23:06+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">linux tc流量控制（一）：classless qdisc</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h3 id="h_449755341_0"><strong>什么是tc</strong></h3> 
+<p>tc全称为traffic control，是iproute2包中控制内核中流量的工具。在内核的网络协议栈中，专门有这样一个处理网络流量的地方（在XDP之后，netfilter之前），tc就是在这个地方读取网络数据包（此时已经是sk_buffer）进行控制、分发、丢弃等操作。需要注意的是，tc既可以处理传出的数据包（egress），也可以处理传入的数据包（ingress），但对传入的数据包处理的功能较少。本文不涉及ingress内容。</p> 
+<h3 id="h_449755341_1"><strong>核心概念：qdisc</strong></h3> 
+<p>我们使用tc的时候，最先会遇到一个叫做qdisc的名词，其实我们经常能看见它，就是在每次我们执行ip命令的时时候</p> 
+<pre><code>root@ubuntu:~# ip l
+1: lo: &lt;LOOPBACK,UP,LOWER_UP&gt; mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+2: ens33: &lt;BROADCAST,MULTICAST,UP,LOWER_UP&gt; mtu 1500 qdisc fq_codel state UP mode DEFAULT group default qlen 1000
+    link/ether 00:0c:29:58:48:55 brd ff:ff:ff:ff:ff:ff
+    altname enp2s1</code></pre> 
+<p>比如在这里，我们可以看到每个网络设备都在mtu后面都有一个qdisc，qdisc后面还有一个词，上面的lo的qdisc是noqueue，ens33的qdisc是fq_codel。</p> 
+<p>qdisc实际是queueing discipline的缩写，我们可以将其看作一个具有一定规则的队列。当tc处理网络包时，会将包入队到qdisc中，这些包会根据指定的规则被内核按照一定顺序取出。tc中已经内置了很多不同的qdisc，有些qdisc可以带参数，比如ens33上面的qdisc参数是这样的。</p> 
+<pre><code>root@ubuntu:~# tc qdisc show dev ens33
+qdisc fq_codel 0: root refcnt 2 limit 10240p flows 1024 quantum 1514 target 5.0ms interval 100.0ms memory_limit 32Mb ecn </code></pre> 
+<p>注意到lo上面的qdisc是noqueue，那我们可不可以把ens33的qdisc删掉呢，尝试：</p> 
+<pre><code>root@ubuntu:~# tc qdisc del dev ens33 root
+Error: Cannot delete qdisc with handle of zero.</code></pre> 
+<p>先暂时忽略命令里的root。这条删除命令失败，网络上的<a href="https://link.zhihu.com/?target=https%3A//ahelpme.com/linux/tips/changing-the-queueing-discipline-error-cannot-delete-qdisc-with-handle-of-zero/" rel="nofollow" title="一篇文章">一篇文章</a>给出的结论是，对于这种非虚拟的网络设备（虽然是虚拟机的网卡，它也不是虚拟设备哈），不可以将其qdisc删除掉使其设置为noqueue，所以如果我们想修改他的qdisc，不能先删除再添加，但可以通过add和replace进行修改，该文章也提到了add和replace效果是一样的。对此我有不同的看法。</p> 
+<p>首先试试再添加一个其他类型的qdisc上去：</p> 
+<pre><code>root@ubuntu:~# tc qdisc add dev ens33 root pfifo
+root@ubuntu:~# tc qdisc show dev ens33
+qdisc pfifo 8005: root refcnt 2 limit 1000p</code></pre> 
+<p>添加成功，那我们在添加一个其他类型的qdisc上去：</p> 
+<pre><code>root@ubuntu:~# tc qdisc add dev ens33 root pfifo_fast
+Error: Exclusivity flag on, cannot modify.
+root@ubuntu:~# tc qdisc show dev ens33
+qdisc pfifo 8005: root refcnt 2 limit 1000p</code></pre> 
+<p>这样会报错，还是使用原先的qdisc。此时我们尝试使用del进行删除</p> 
+<pre><code>root@ubuntu:~# tc qdisc del dev ens33 root
+root@ubuntu:~# tc qdisc show dev ens33
+qdisc fq_codel 0: root refcnt 2 limit 10240p flows 1024 quantum 1514 target 5.0ms interval 100.0ms memory_limit 32Mb ecn </code></pre> 
+<p>发现它又变回了fq_codel。如果我们这里使用replace再删除，结果是这样的</p> 
+<pre><code>root@ubuntu:~# tc qdisc replace dev ens33 root pfifo_fast
+root@ubuntu:~# tc qdisc show dev ens33
+qdisc pfifo_fast 8006: root refcnt 2 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1
+root@ubuntu:~# tc qdisc replace dev ens33 root pfifo
+root@ubuntu:~# tc qdisc show dev ens33
+qdisc pfifo 8007: root refcnt 2 limit 1000p
+root@ubuntu:~# tc qdisc del dev ens33 root
+root@ubuntu:~# tc qdisc del dev ens33 root
+Error: Cannot delete qdisc with handle of zero.
+root@ubuntu:~# tc qdisc show dev ens33
+qdisc fq_codel 0: root refcnt 2 limit 10240p flows 1024 quantum 1514 target 5.0ms interval 100.0ms memory_limit 32Mb ecn </code></pre> 
+<p>所以我们可以推测：fq_codel是非虚拟设备的默认值，此时网络设备并没有设置qdisc，所以执行删除会报错，但我们可以为其设定qdisc（使用add或者replace），此时设置了qdisc，删除便不会失败，删除后qdisc又变成了默认值。注意到lo的值是noqueue，如果我们用ip link命令手动添加设备，它们的qdisc也是noqueue，所以我们也可以推测虚拟设备的默认值是noqueue。</p> 
+<p>这里的命令中有一个root参数，实际上这个参数表示对出口流量（egress）处理的根节点，从上面的命令可以看出，一个网络设备的root点只能设置一个qdisc。执行tc qdisc show命令，可以看到当前qdisc的参数，有些qdisc不可以指定参数，有些可以，如果需要指定参数，可以在add命令的结尾添加：</p> 
+<pre><code>tc qdisc add dev &lt;dev&gt; root &lt;qdisc&gt; &lt;qdisc-param&gt;</code></pre> 
+<p>qdisc有两类，一类qdisc比较简单，向上面展示的一样，只能设置一些参数然后在设备的（egress）root点生效，这种的叫做classless qdisc。另一类比较复杂，他们内部还包括叫做class的组件，还可以进一步将包传递给其他的qdisc，所有的数据包在一个类似树的结构中流动，这种叫做classful qdisc。这篇文章只会介绍相对简单的classless qdisc。</p> 
+<h3 id="h_449755341_2"><strong>一些classless qdisc</strong></h3> 
+<p>tc内置了以下的classless qdisc</p> 
+<ul><li>choke</li><li>codel</li><li>bfifo、qfifo</li><li>fq</li><li>fq_codel</li><li>gred</li><li>hhf</li><li>ingress</li><li>mqprio</li><li>multiq</li><li>netem</li><li>pfifo_fast</li><li>pie</li><li>red</li><li>rr</li><li>sfb</li><li>sfq</li><li>tbf</li></ul> 
+<p>这里介绍其中的几种qdisc</p> 
+<h4 id="h_449755341_3"><strong>tbf</strong></h4> 
+<p>tbf全称为token bucket filter，从名字可以看出，tbf具有令牌和桶两个概念。其工作原理如下图所示。</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/7d/54/A50I9syp_o.jpg"></p> 
+<p></p> 
+<p>到来的数据包需要获取的令牌与数据包的大小有关，并且任意大小的数据包都需要消耗令牌，如果某个数据包没有足够的令牌，将会放入队列中，等待令牌补充，后续到来的数据包同样进入队列中等待，直到队列被填满，后续包将被丢弃。可以看到，如果我们限制桶的容量，或者限制令牌的补充速度，就可以限制整体的包处理速度。</p> 
+<p>tbf可以配置的参数如下</p> 
+<ul><li>limit：队列可以保存的数据包的容量，bytes单位。或者可以通过另一个参数latency来指定类似的等待效果</li><li>burst：桶的容量，bytes单位</li><li>rate：令牌添加数量</li><li>mpu：指定最少需要的令牌数量</li><li>peakrate：桶的最大消耗速率，tbf通过添加第二个容量较小的桶来实现</li><li>mtu/minburst：第二个桶的容量</li></ul> 
+<p>测试一下tbf限速的效果</p> 
+<p>安装iperf3启动服务，分别测试noqueue和tbf限制时的效果：</p> 
+<pre><code>#另一终端执行 iperf3 -s 
+​
+root@ubuntu:~# ip l show lo
+1: lo: &lt;LOOPBACK,UP,LOWER_UP&gt; mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+​
+root@ubuntu:~# iperf3 -c 127.0.0.1
+Connecting to host 127.0.0.1, port 5201
+[  5] local 127.0.0.1 port 56294 connected to 127.0.0.1 port 5201
+[ ID] Interval           Transfer     Bitrate         Retr  Cwnd
+[  5]   0.00-1.00   sec  4.49 GBytes  38.6 Gbits/sec    0   3.25 MBytes       
+[  5]   1.00-2.00   sec  4.47 GBytes  38.4 Gbits/sec    0   3.25 MBytes       
+[  5]   2.00-3.00   sec  4.41 GBytes  37.9 Gbits/sec    0   3.25 MBytes       
+[  5]   3.00-4.00   sec  4.39 GBytes  37.8 Gbits/sec    0   3.25 MBytes       
+[  5]   4.00-5.00   sec  4.63 GBytes  39.8 Gbits/sec    0   3.25 MBytes       
+[  5]   5.00-6.00   sec  4.72 GBytes  40.5 Gbits/sec    0   3.25 MBytes       
+[  5]   6.00-7.00   sec  4.58 GBytes  39.4 Gbits/sec    0   3.25 MBytes       
+[  5]   7.00-8.00   sec  4.59 GBytes  39.4 Gbits/sec    0   3.25 MBytes       
+[  5]   8.00-9.00   sec  4.61 GBytes  39.6 Gbits/sec    0   3.25 MBytes       
+[  5]   9.00-10.00  sec  4.66 GBytes  40.0 Gbits/sec    0   3.25 MBytes       
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[ ID] Interval           Transfer     Bitrate         Retr
+[  5]   0.00-10.00  sec  45.6 GBytes  39.1 Gbits/sec    0             sender
+[  5]   0.00-10.00  sec  45.6 GBytes  39.1 Gbits/sec                  receiver
+​
+iperf Done.
+​
+​
+root@ubuntu:~# tc qdisc add dev lo  root tbf  limit 100mb rate 10mbit burst 5mb
+root@ubuntu:~# tc qdisc show dev lo
+qdisc tbf 800a: root refcnt 2 rate 10Mbit burst 5Mb lat 79.7s 
+root@ubuntu:~# iperf3 -c 127.0.0.1
+Connecting to host 127.0.0.1, port 5201
+[  5] local 127.0.0.1 port 56304 connected to 127.0.0.1 port 5201
+[ ID] Interval           Transfer     Bitrate         Retr  Cwnd
+[  5]   0.00-1.00   sec  8.75 MBytes  73.3 Mbits/sec    1   1.37 MBytes       
+[  5]   1.00-2.00   sec  1.25 MBytes  10.5 Mbits/sec    0   1.37 MBytes       
+[  5]   2.00-3.00   sec  1.25 MBytes  10.5 Mbits/sec    0   1.37 MBytes       
+[  5]   3.00-4.00   sec  1.25 MBytes  10.5 Mbits/sec    0   1.37 MBytes       
+[  5]   4.00-5.00   sec  1.25 MBytes  10.5 Mbits/sec    0   1.37 MBytes       
+[  5]   5.00-6.00   sec  1.25 MBytes  10.5 Mbits/sec    0   1.37 MBytes       
+[  5]   6.00-7.00   sec  1.25 MBytes  10.5 Mbits/sec    0   1.37 MBytes       
+[  5]   7.00-8.00   sec  1.25 MBytes  10.5 Mbits/sec    0   1.37 MBytes       
+[  5]   8.00-9.00   sec  1.25 MBytes  10.5 Mbits/sec    0   1.37 MBytes       
+[  5]   9.00-10.00  sec  1.25 MBytes  10.5 Mbits/sec    0   1.37 MBytes       
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[ ID] Interval           Transfer     Bitrate         Retr
+[  5]   0.00-10.00  sec  20.0 MBytes  16.8 Mbits/sec    1             sender
+[  5]   0.00-10.09  sec  16.9 MBytes  14.0 Mbits/sec                  receiver
+​
+iperf Done.
+​</code></pre> 
+<p>可以看到，网络带宽明显的下降了</p> 
+<p></p> 
+<p>比较神奇的是，tc的man page里面介绍tbf是classless qdisc，而tc-tbf里面说它是classful qdisc。尝试一下给tbf添加class，结果会报错，所以tbf应为classless qdisc吧，怀疑tc-tbf的man-page把classic写错成classful了。</p> 
+<pre><code>root@ubuntu:~# tc qdisc add dev lo root handle 1:0 tbf limit 100M rate 100Mbit burst 100M
+root@ubuntu:~# tc qdisc show dev lo
+qdisc tbf 1: root refcnt 2 rate 100Mbit burst 100Mb lat 0us 
+qdisc ingress ffff: parent ffff:fff1 ---------------- 
+root@ubuntu:~# tc class add dev lo parent 1: classid 1:1 htb rate 100Mbit
+RTNETLINK answers: File exists</code></pre> 
+<p></p> 
+<h4 id="h_449755341_4"><strong>netem</strong></h4> 
+<p>netem时network emulator的缩写，可以模拟网络延迟、丢包率等网络特征。还是拿本地环路接口进行测试，手动将其延迟变为100ms（ping 发送和接收icmp延迟翻倍），以及添加丢包率</p> 
+<pre><code>root@ubuntu:~# tc qdisc del dev lo root
+root@ubuntu:~# ping 127.0.0.1 -c 3
+PING 127.0.0.1 (127.0.0.1) 56(84) bytes of data.
+64 bytes from 127.0.0.1: icmp_seq=1 ttl=64 time=0.034 ms
+64 bytes from 127.0.0.1: icmp_seq=2 ttl=64 time=0.052 ms
+64 bytes from 127.0.0.1: icmp_seq=3 ttl=64 time=0.040 ms
+​
+--- 127.0.0.1 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2026ms
+rtt min/avg/max/mdev = 0.034/0.042/0.052/0.007 ms
+root@ubuntu:~# tc qdisc add dev lo root netem delay 100ms
+root@ubuntu:~# ping 127.0.0.1 -c 3
+PING 127.0.0.1 (127.0.0.1) 56(84) bytes of data.
+64 bytes from 127.0.0.1: icmp_seq=1 ttl=64 time=200 ms
+64 bytes from 127.0.0.1: icmp_seq=2 ttl=64 time=200 ms
+64 bytes from 127.0.0.1: icmp_seq=3 ttl=64 time=201 ms
+​
+--- 127.0.0.1 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2004ms
+rtt min/avg/max/mdev = 200.426/200.586/200.855/0.191 ms
+​
+root@ubuntu:~# tc qdisc del dev lo root
+​
+root@ubuntu:~# iperf3 -c 127.0.0.1 -u -i 10 -b 100M
+Connecting to host 127.0.0.1, port 5201
+[  5] local 127.0.0.1 port 58834 connected to 127.0.0.1 port 5201
+[ ID] Interval           Transfer     Bitrate         Total Datagrams
+[  5]   0.00-10.00  sec   119 MBytes   100 Mbits/sec  3815  
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[ ID] Interval           Transfer     Bitrate         Jitter    Lost/Total Datagrams
+[  5]   0.00-10.00  sec   119 MBytes   100 Mbits/sec  0.000 ms  0/3815 (0%)  sender
+[  5]   0.00-10.00  sec   119 MBytes   100 Mbits/sec  0.002 ms  0/3815 (0%)  receiver
+​
+iperf Done.
+root@ubuntu:~# tc qdisc add dev lo root netem loss 5%
+root@ubuntu:~# iperf3 -c 127.0.0.1 -u -i 10 -b 100M
+Connecting to host 127.0.0.1, port 5201
+iperf3: error - unable to read from stream socket: Resource temporarily unavailable
+root@ubuntu:~# tc qdisc change dev lo root netem loss 2%
+root@ubuntu:~# iperf3 -c 127.0.0.1 -u -i 10 -b 100M
+Connecting to host 127.0.0.1, port 5201
+[  5] local 127.0.0.1 port 45366 connected to 127.0.0.1 port 5201
+[ ID] Interval           Transfer     Bitrate         Total Datagrams
+[  5]   0.00-10.00  sec   119 MBytes   100 Mbits/sec  3815  
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[ ID] Interval           Transfer     Bitrate         Jitter    Lost/Total Datagrams
+[  5]   0.00-10.00  sec   119 MBytes   100 Mbits/sec  0.000 ms  0/3815 (0%)  sender
+[  5]   0.00-10.00  sec   117 MBytes  97.9 Mbits/sec  0.002 ms  79/3815 (2.1%)  receiver
+​
+iperf Done.
+​</code></pre> 
+<p></p> 
+<h4 id="h_449755341_5"><strong>bfifo、pfifo</strong></h4> 
+<p>这两个应该是最简单的qdisc了，数据包的处理只遵循先入先出规则，bfifo的队列的容量为能够保存数据包的大小，pfifo的队列容量为包的数目</p> 
+<p></p> 
+<h4 id="h_449755341_6"><strong>pfifo_fast</strong></h4> 
+<p>很多文章说pfifo_fast是默认的qdisc，但是我的虚拟机里面是fq_codel，可能新版本的内核更换了默认qdisc。pfifo_fast可以看作是增强版的fifo，内部维护了三个不同优先级的队列（band 0 1 2），处理数据包会根据优先级（0最高、2最低）依次处理队列中的包，即最高优先级队列里的包处理结束后才会处理下一个优先级的队列。</p> 
+<p>数据包进入其中哪一个队列取决于ip数据包头的tos（type of service）段，tos段的内容是这样的：</p> 
+<table><tbody><tr><th>7</th><th>6</th><th>5</th><th>4</th><th>3</th><th>2</th><th>1</th><th>0</th></tr><tr><td>(IP Precedence)</td><td>(IP Precedence)</td><td>(IP Precedence)</td><td>TOS（lowdelay）</td><td>TOS（throughput）</td><td>TOS（reliability）</td><td>TOS（lowcost ）</td><td>MBZ(Must be zero)</td></tr></tbody></table> 
+<ul><li>最低的bit位：MBZ位，一定是零</li><li>1~4：TOS段，这些bit任意数量可以为0或者为1，当只设定一个bit时的含义如下 
+  <ul><li>1000：最小延迟（minial delay，md）</li><li>0100：最大带宽（maximize throughput，mt）</li><li>0010：最大可靠性（Maximize reliability，mr）</li><li>0001：最小开销（Minimize monetary cost，mmc）</li></ul></li><li>5~7：IP优先权：这个字段的值越高，标记更优先被处理，0为正常处理</li></ul> 
+<p>上面所述的1~4bit的TOS段决定了包将会进入哪个band，如果IP优先权设置为0的话，整个8bit的TOS段的值和对应的band如下</p> 
+<table><tbody><tr><th>band 0</th><th>band 1</th><th>band 2</th></tr><tr><td>0x10 md</td><td>0x0</td><td>0x8 mt</td></tr><tr><td>0x12 mmc + md</td><td>0x2 mmc</td><td>0xa mmc + mt</td></tr><tr><td>0x14 mr+md</td><td>0x4 mr</td><td>0xc mr + mt</td></tr><tr><td>0x16 mmc + mr + md</td><td>0x6 mmc + mr</td><td>0xe mmc + mr + mt</td></tr><tr><td></td><td>0x18 mt + md</td><td></td></tr><tr><td></td><td>0x1a mmc + mt + md</td><td></td></tr><tr><td></td><td>0x1c mr + mt + md</td><td></td></tr><tr><td></td><td>0x1e mmc + mr + mt + md</td><td></td></tr></tbody></table> 
+<p>详细的信息可以在tc-prio的man-page看到。</p> 
+<h3 id="h_449755341_7"><strong>总结</strong></h3> 
+<p>使用tc可以为网络设备设置一类叫做classless qdisc的排队规则，这类规则依照不同的算法，在网络设备的tc处理点中，对向外部发送的数据包进行处理，可以进行限制发送速度、更改发送顺序、丢包等操作。部分classless qdisc还可以使用参数配置，使其以想要的效果运行。但是，classless qdisc无法将数据包进行分类，不能进行更精确的控制。后续将介绍classful qdisc，我们可以用它来实现更多的功能。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/3aef93c224adc3b7239a9dfc2315778c/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">linux 更改用户权限</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/54b66823a0e9a03e583fec1fe62b29e8/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Android事件分发机制之dispatchTouchEvent、onInterceptTouchEvent、onTouchEvent</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

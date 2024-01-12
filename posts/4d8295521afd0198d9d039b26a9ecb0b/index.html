@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Autosar Time Sync 时间同步 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Autosar Time Sync 时间同步" />
+<meta property="og:description" content="引入车载以太网之后，很好地解决了有大量数据交换或者发布/订阅模式需求的场景，不过呢，车内也有不少对通信过程中包含时间约束的应用场景，本文将介绍Classic AUTOSAR中和时间同步有关的内容。
+前言 首先，我们考虑以下场景：
+我们创建了两个不同的Runnable，它们都需要根据某一操作指令，控制对应的执行机，为了保证执行能正确达到预期，我们需要保证它们能同时（或者以固定的偏移量）去控制执行机。车身周围的环视摄像头，我们需要读出图像数据并且做融合，需要保证处理的各个摄像头数据时同步的；或者是发生故障时记录当时的故障数据，也需要保证能记录到当前时间点的所有数据 无论是哪一种情况，关键词就是“同步”，我们需要有一个模块来管理同步时间基准。当然，在AUTOSAR的规范里，被称作为StbM——Synchronized Time-base Manager。
+时间基准既可以代表运行时长，时间基准来源，也可以是真实世界时间。例如：
+GPS时间（绝对时间）车辆总运行时间（相对时间）ECU启动时间（相对时间） StbM 我们首先来看一下官方文档如何说明这个模块的。
+作为管理模块，StbM并不会指定，也不提供任何网络时间协议，一切和总线类型和时间协议有关的工作都需要由上图蓝色框所示的&lt;bus&gt;TSyn来完成。
+收到&lt;bus&gt;TSyn提供的信息之后，StbM就可以来同步它与其他节点的时间基准。
+作为时间基准的“代理”，StbM提供的时间信息，会提供给对应的“消费者”（OS &amp; SWC）。
+一般地，硬件参考时钟被用来作为基准时间的实现。由于硬件参考时钟达到寄存器最大值时会“溢出”再次从0开始增加，软件中会增加计数器共同来实现虚拟本地时间。
+引入频分(Rate Deviation)以及偏移(Offset)之后，虚拟本地时间可以用来作基准时间。
+三种时间“消费者” 还是这张图，我们来看看各个消费者是如何与StbM进行交互的。
+Active Customer
+从StbM读取时间信息（箭头2）根据应用信息，由StbM更新时间基准（箭头3） Triggered Customer
+仅和OS调度表同步功能有关（箭头1） Notification Customer
+时间基准状态改变（例如发生了timeout时间）（箭头4）时间基准达到给定值（箭头4），这个给定值是由消费者设定的（箭头5） 时间服务 在汽车当中，为了完成时间同步，我们会定义不同的Master与Slave，它们之间靠&lt;Bus&gt;Tsync来完成时间信息的传送。
+例如上图，我们可以有一个系统级的Master---Global time master，其他的ECU可以形成不同的time domain，并定义各自的time master与slave。
+如何做时间同步 如上图所示，Master提供时间基准给其他ECU，由于同步前每个ECU都有自己的基准时间，为了能够更新本地的基准时间保持和Master同步，需要知道两个基准时间的偏移量（offset）。
+Master周期性地发送Sync帧给Slave，那么Slave能够在t2时间收到Sync帧并记录t2时间。由于发送时的t1时间只有发送时刻才能得到，t1时间是无法和Sync帧一块儿发送的，因此需要再发送一次Followup帧，将t1时间作为数据传送给Slave。
+Slave收到之后就能根据t2-t1-d得出这个offset，修正自己的基准时间，完成同步。
+不过呢，你肯定会发现一个问题，就是总线上传输时间d，包括经由路由或交换机的延时没有被考虑在内，算式虽有，可还是无法完成计算。
+为了计算出d的大小，我们可以采取这样的方案：
+Slave发送PathDelayReq帧给到Master，并记录发送时间t1，相应的，Master记录接收时间t2。Master回送PathDelayResp帧，记录t3时间，Slave记录接收时间t4。Master再发送一个PathDelayRespFollowup帧，将t2, t3时间作为数据发送给Slave。Slave根据算式 ((t4-t1)-(t3-t2))/2得到传输时间d。 硬件时间戳 如果以太网控制器集成有时钟，能够为以太网消息加上硬件时间戳，那么时间同步的精确度可以进一步提高。如果你使用的是EB的以太网驱动，那么有无硬件时钟的两种情况，都能支持。
+Best Master Clock Algorithm (BMCA) 最佳主时钟算法 在实际工程中，为了精确度或是冗余度，可能会存在多个Master的情况，这个时候需要用到BMCA算法。
+Master会发送Announce消息，来向各个Slave声明自己是主时钟，Slave会选择更好的那一个。
+时间同步网关 查了下我司软件，如果同时配置了本节点为Master和Slave，那么就会作为Gateway的角色参与时间同步。（强烈要求广告费= =..）
+任务同步 之前有说到，OS是目前定义的唯一一个triggered customer，需要提供接口给到Stbm做调度表同步，也即修改调度表对应的Time Base。
+在同步之前，Stbm会检查OS调度表的状态，只有当状态处于WAITING，RUNNING或者RUNNING_SYNCHRONOUS时才能进行同步操作。
+QoS 待更新
+以太网时间同步EthTsync 以太网时间同步机制基于PTP (Precision Time Protocol) ，在IEEE1588和IEEE802." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/4d8295521afd0198d9d039b26a9ecb0b/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-05-29T16:16:30+08:00" />
+<meta property="article:modified_time" content="2022-05-29T16:16:30+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Autosar Time Sync 时间同步</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>引入车载以太网之后，很好地解决了有大量数据交换或者发布/订阅模式需求的场景，不过呢，车内也有不少对通信过程中包含时间约束的应用场景，本文将介绍Classic AUTOSAR中和时间同步有关的内容。</p> 
+<h3 id="h_417007241_0">前言</h3> 
+<p>首先，我们考虑以下场景：</p> 
+<ul><li>我们创建了两个不同的Runnable，它们都需要根据某一操作指令，控制对应的执行机，为了保证执行能正确达到预期，我们需要保证它们能同时（或者以固定的偏移量）去控制执行机。</li><li>车身周围的环视摄像头，我们需要读出图像数据并且做融合，需要保证处理的各个摄像头数据时同步的；或者是发生故障时记录当时的故障数据，也需要保证能记录到当前时间点的所有数据</li></ul> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/39/5e/SX0JRDRc_o.png"></p> 
+<p>无论是哪一种情况，关键词就是“同步”，我们需要有一个模块来管理同步时间基准。当然，在AUTOSAR的规范里，被称作为StbM——Synchronized Time-base Manager。</p> 
+<p>时间基准既可以代表运行时长，时间基准来源，也可以是真实世界时间。例如：</p> 
+<ul><li>GPS时间（绝对时间）</li><li>车辆总运行时间（相对时间）</li><li>ECU启动时间（相对时间）</li></ul> 
+<h3 id="h_417007241_1">StbM</h3> 
+<p>我们首先来看一下官方文档如何说明这个模块的。</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/5c/b1/9FkWYKGS_o.png"></p> 
+<p>作为管理模块，StbM并不会指定，也不提供任何网络时间协议，一切和总线类型和时间协议有关的工作都需要由上图蓝色框所示的&lt;bus&gt;TSyn来完成。</p> 
+<p>收到&lt;bus&gt;TSyn提供的信息之后，StbM就可以来同步它与其他节点的时间基准。</p> 
+<p>作为时间基准的“代理”，StbM提供的时间信息，会提供给对应的“消费者”（OS &amp; SWC）。</p> 
+<p>一般地，硬件参考时钟被用来作为基准时间的实现。由于硬件参考时钟达到寄存器最大值时会“溢出”再次从0开始增加，软件中会增加计数器共同来实现虚拟本地时间。</p> 
+<p>引入频分(Rate Deviation)以及偏移(Offset)之后，虚拟本地时间可以用来作基准时间。</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/26/c0/PzJuRHuf_o.png"></p> 
+<p></p> 
+<h3 id="h_417007241_2">三种时间“消费者”</h3> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/99/77/zXBvwU0H_o.png"></p> 
+<p>还是这张图，我们来看看各个消费者是如何与StbM进行交互的。</p> 
+<p><strong>Active Customer</strong></p> 
+<ul><li>从StbM读取时间信息（箭头2）</li><li>根据应用信息，由StbM更新时间基准（箭头3）</li></ul> 
+<p><strong>Triggered Customer</strong></p> 
+<ul><li>仅和OS调度表同步功能有关（箭头1）</li></ul> 
+<p><strong>Notification Customer</strong></p> 
+<ul><li>时间基准状态改变（例如发生了timeout时间）（箭头4）</li><li>时间基准达到给定值（箭头4），这个给定值是由消费者设定的（箭头5）</li></ul> 
+<h3 id="h_417007241_3">时间服务</h3> 
+<p>在汽车当中，为了完成时间同步，我们会定义不同的Master与Slave，它们之间靠&lt;Bus&gt;Tsync来完成时间信息的传送。</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/85/94/6ujVxMpk_o.png"></p> 
+<p>例如上图，我们可以有一个系统级的Master---Global time master，其他的ECU可以形成不同的time domain，并定义各自的time master与slave。</p> 
+<h3 id="h_417007241_4">如何做时间同步</h3> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/34/8d/GluKiIGP_o.png"></p> 
+<p>如上图所示，Master提供时间基准给其他ECU，由于同步前每个ECU都有自己的基准时间，为了能够更新本地的基准时间保持和Master同步，需要知道两个基准时间的偏移量（offset）。</p> 
+<p>Master周期性地发送Sync帧给Slave，那么Slave能够在t2时间收到Sync帧并记录t2时间。由于发送时的t1时间只有发送时刻才能得到，t1时间是无法和Sync帧一块儿发送的，因此需要再发送一次Followup帧，将t1时间作为数据传送给Slave。</p> 
+<p>Slave收到之后就能根据t2-t1-d得出这个offset，修正自己的基准时间，完成同步。</p> 
+<p>不过呢，你肯定会发现一个问题，就是总线上传输时间d，包括经由路由或交换机的延时没有被考虑在内，算式虽有，可还是无法完成计算。</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/94/a1/vD2cWZqM_o.png"></p> 
+<p>为了计算出d的大小，我们可以采取这样的方案：</p> 
+<ul><li>Slave发送PathDelayReq帧给到Master，并记录发送时间t1，相应的，Master记录接收时间t2。</li><li>Master回送PathDelayResp帧，记录t3时间，Slave记录接收时间t4。</li><li>Master再发送一个PathDelayRespFollowup帧，将t2, t3时间作为数据发送给Slave。</li><li>Slave根据算式 ((t4-t1)-(t3-t2))/2得到传输时间d。</li></ul> 
+<h3 id="h_417007241_5">硬件时间戳</h3> 
+<p>如果以太网控制器集成有时钟，能够为以太网消息加上硬件时间戳，那么时间同步的精确度可以进一步提高。如果你使用的是EB的以太网驱动，那么有无硬件时钟的两种情况，都能支持。</p> 
+<h3 id="h_417007241_6">Best Master Clock Algorithm (BMCA) 最佳主时钟算法</h3> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/23/44/9NdLW9PF_o.png"></p> 
+<p>在实际工程中，为了精确度或是冗余度，可能会存在多个Master的情况，这个时候需要用到BMCA算法。</p> 
+<p>Master会发送Announce消息，来向各个Slave声明自己是主时钟，Slave会选择更好的那一个。</p> 
+<h3 id="h_417007241_7">时间同步网关</h3> 
+<p>查了下我司软件，如果同时配置了本节点为Master和Slave，那么就会作为Gateway的角色参与时间同步。（强烈要求广告费= =..）</p> 
+<h3 id="h_417007241_8">任务同步</h3> 
+<p>之前有说到，OS是目前定义的唯一一个triggered customer，需要提供接口给到Stbm做调度表同步，也即修改调度表对应的Time Base。</p> 
+<p>在同步之前，Stbm会检查OS调度表的状态，只有当状态处于WAITING，RUNNING或者RUNNING_SYNCHRONOUS时才能进行同步操作。</p> 
+<h3 id="h_417007241_9">QoS</h3> 
+<p>待更新</p> 
+<h3 id="h_417007241_10">以太网时间同步EthTsync</h3> 
+<p>以太网时间同步机制基于PTP (Precision Time Protocol) ，在IEEE1588和IEEE802.1AS 中有对应描述。</p> 
+<p>IEEE802.1AS, 也被称作gPTP (generalized Precision Time Protocol), 可以被视为IEEE1588的一个子集。</p> 
+<p>然而, 无论是IEEE1588还是IEEE802.1AS，本身都不是基于车载需求而开发出来的，因此，目前所用的以太网时间同步机制基于IEEE802.1AS有一定的扩展以及限制。</p> 
+<p>由于车载以太网中，硬件拓扑，ECU等都是静态的，所以BMCA算法往往也是不需要的。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/6d46861a8ef3a1ac72fe4287d15d0f96/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">深入理解WKWebView白屏</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/0d3164339e0e497a7b63a450a1fb9c23/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">TensorRT 系列 （2）动态shape</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>深圳雷龙SD NAND的存储应用方案 - 菜鸟程序员博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="深圳雷龙SD NAND的存储应用方案" />
+<meta property="og:description" content=" 前言: 很感谢深圳雷龙发展有限公司为博主提供的两片SD NAND的存储芯片，在这里博主记录一下自己的使用过程以及部分设计。
+深入了解该产品： 拿到这个产品之后，我大致了解了下两款芯片的性能。CSNP4GCR01-AMW是一种基于NAND闪存和SD控制器的4Gb密度嵌入式存储；而CSNP32GCR01-AOW是一种基于NAND闪存和SD控制器的32Gb密度嵌入式存储。与原始NAND相比其具有嵌入式坏块管理和更强的嵌入式ECC。即使在异常断电，它仍然可以安全地保存数据。作为一个存储芯片，它确实做到了小巧，LGA-8的封装对比我之前用到过的TF卡，只占到了其面积的三分之一，这样对于一些嵌入式的设计就方便了很多。
+雷龙官方还很贴心的提供了样品的测试板，在这款测试板上，我焊接了4GB的CSNP4GCR01-AMW上去，并且跑了一下分，对于一款小的存储芯片而言，实在难得。
+（上图为测试板焊接图） 博主日前在设计基于H616与NB-IOT的嵌入式智能储物柜的时候考虑过存储方面的问题，当时在SD NAND和EMMC与TF卡中徘徊，以下是几个存储类型的对比。
+经过多方对比，本着不需要频繁更换的原则，同时也为了更好的防水和成本考虑，最终决定使用雷龙公司的SD NAND 作为设计样品的存储部分。
+此外，SD NAND还具有不用写驱动程序自带坏块管理的NAND FLASH（贴片式TF卡），不标准的SDIO接口，也同时兼容SPI/SD接口，10万次的SLC晶圆擦写寿命，通过一万次的随机掉电测试耐高低温，经过跑分测得，速度级别Class10。标准的SD2.0协议，普通的SD卡可以直接驱动，支持TF卡启动的SOC都可以用SD NAND，而且雷龙官方还贴心的提供了STM32参考例程和原厂技术支持，这对于刚上手的小白而言，十分友好。
+设计理念： 使用H616作为主控CPU并搭配NB-IOT来向申请下来的云端传输数据，当WIFI正常时，储物数据每搁两小时向云端传输一次，当有人取出物品时再次向云端发送一次数据（不保留在SD NAND中）；一旦系统检测到WIFI出现问题，储物数据转而存储到SD NAND中，取物时输入的物品ID和取出时间一并放入SD NAND中（我也是看中了SD NAND与原始NAND相比其具有嵌入式坏块管理和更强的嵌入式ECC。即使在异常断电，它仍然可以安全地保存数据这一点）。
+部分SD NAND的参考设计 根据官方数据手册提供的SD NAND参考设计，只占用8个GPIO，对于H616来说，确实很友好
+这里为了不泄露他人的劳动成果，我也就不粘PCB设计了。
+采用H616驱动SD NAND的示例代码 下面是关于H616驱动SD NAND的示例代码，这里记录一下自己当初的学习过程（注：这个代码不能直接拿过来就用，而是要根据自己的需求修改）
+#include &lt;stdio.h&gt; #include &lt;stdint.h&gt; #include &lt;stdlib.h&gt; #include &lt;string.h&gt; #include &#34;h616_sdio.h&#34; // 定义SDIO引脚 #define SDIO_CMD_PIN 0 #define SDIO_CLK_PIN 1 #define SDIO_D0_PIN 2 #define SDIO_D1_PIN 3 #define SDIO_D2_PIN 4 #define SDIO_D3_PIN 5 // 定义NAND芯片命令 #define CMD_READ 0x00 #define CMD_WRITE 0x80 #define CMD_ERASE 0x60 #define CMD_STATUS 0x70 #define CMD_RESET 0xff // 定义NAND芯片状态 #define STATUS_READY 0x40 #define STATUS_ERROR 0x01 // 初始化SDIO控制器 void sdio_init() { // 设置SDIO引脚模式和速率 h616_sdio_set_pin_mode(SDIO_CMD_PIN, H616_SDIO_PIN_MODE_SDIO); h616_sdio_set_pin_mode(SDIO_CLK_PIN, H616_SDIO_PIN_MODE_SDIO); h616_sdio_set_pin_mode(SDIO_D0_PIN, H616_SDIO_PIN_MODE_SDIO); h616_sdio_set_pin_mode(SDIO_D1_PIN, H616_SDIO_PIN_MODE_SDIO); h616_sdio_set_pin_mode(SDIO_D2_PIN, H616_SDIO_PIN_MODE_SDIO); h616_sdio_set_pin_mode(SDIO_D3_PIN, H616_SDIO_PIN_MODE_SDIO); h616_sdio_set_clock(H616_SDIO_CLOCK_FREQ_25MHZ); // 初始化SDIO控制器 h616_sdio_init(); } // 发送NAND芯片命令 void nand_send_cmd(uint8_t cmd) { // 设置SDIO控制器传输模式和命令码 h616_sdio_set_transfer_mode(H616_SDIO_TRANSFER_MODE_WRITE); h616_sdio_set_command_code(cmd); // 发送命令 h616_sdio_send_command(); } // 发送NAND芯片地址 void nand_send_addr(uint32_t addr) { // 设置SDIO控制器传输模式和地址 h616_sdio_set_transfer_mode(H616_SDIO_TRANSFER_MODE_WRITE); h616_sdio_set_address(addr); // 发送地址 h616_sdio_send_address(); } // 读取NAND芯片数据 void nand_read_data(uint8_t *data, uint32_t size) { // 设置SDIO控制器传输模式 h616_sdio_set_transfer_mode(H616_SDIO_TRANSFER_MODE_READ); // 读取数据 h616_sdio_read_data(data, size); } // 写入NAND芯片数据 void nand_write_data(const uint8_t *data, uint32_t size) { // 设置SDIO控制器传输模式 h616_sdio_set_transfer_mode(H616_SDIO_TRANSFER_MODE_WRITE); // 写入数据 h616_sdio_write_data(data, size); } // 读取NAND芯片状态 uint8_t nand_read_status() { uint8_t status; // 发送读取状态命令 nand_send_cmd(CMD_STATUS); // 读取状态 nand_read_data(&amp;status, 1); return status; } // 等待NAND芯片准备就绪 void nand_wait_ready() { uint8_t status; // 循环读取状态，直到NAND芯片准备就绪 do { status = nand_read_status(); } while ((status &amp; STATUS_READY) == 0); } // 读取NAND芯片数据 void nand_read(uint32_t page, uint32_t column, uint8_t *data, uint32_t size) { // 发送读取命令和地址 nand_send_cmd(CMD_READ); nand_send_addr(column | (page &lt;&lt; 8)); // 等待NAND芯片准备就绪 nand_wait_ready(); // 读取数据 nand_read_data(data, size); } // 写入NAND芯片数据 void nand_write(uint32_t page, uint32_t column, const uint8_t *data, uint32_t size) { // 发送写入命令和地址 nand_send_cmd(CMD_WRITE); nand_send_addr(column | (page &lt;&lt; 8)); // 写入数据 nand_write_data(data, size); // 等待NAND芯片准备就绪 nand_wait_ready(); } // 擦除NAND芯片块 void nand_erase(uint32_t block) { // 发送擦除命令和地址 nand_send_cmd(CMD_ERASE); nand_send_addr(block &lt;&lt; 8); // 等待NAND芯片准备就绪 nand_wait_ready(); } // 复位NAND芯片 void nand_reset() { // 发送复位命令 nand_send_cmd(CMD_RESET); // 等待NAND芯片准备就绪 nand_wait_ready(); } // 示例程序入口 int main() { uint8_t data[2048]; memset(data, 0x5a, sizeof(data)); // 初始化SDIO控制器 sdio_init(); // 复位NAND芯片 nand_reset(); // 擦除第0块 nand_erase(0); // 写入第0页 nand_write(0, 0, data, sizeof(data)); // 读取第0页 nand_read(0, 0, data, sizeof(data)); return 0; } " />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://cainiaoprogram.github.io/posts/9301173c197d1c2a48d5997f3228880a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-04-30T11:25:39+08:00" />
+<meta property="article:modified_time" content="2023-04-30T11:25:39+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="菜鸟程序员博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">菜鸟程序员博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">深圳雷龙SD NAND的存储应用方案</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h2>前言:</h2> 
+<p>        很感谢深圳雷龙发展有限公司为博主提供的两片SD NAND的存储芯片，在这里博主记录一下自己的使用过程以及部分设计。</p> 
+<h2>深入了解该产品：</h2> 
+<p>        拿到这个产品之后，我大致了解了下两款芯片的性能。CSNP4GCR01-AMW是一种基于NAND闪存和SD控制器的4Gb密度嵌入式存储；而CSNP32GCR01-AOW是一种基于NAND闪存和SD控制器的32Gb密度嵌入式存储。与原始NAND相比其具有嵌入式坏块管理和更强的嵌入式ECC。即使在异常断电，它仍然可以安全地保存数据。作为一个存储芯片，它确实做到了小巧，LGA-8的封装对比我之前用到过的TF卡，只占到了其面积的三分之一，这样对于一些嵌入式的设计就方便了很多。</p> 
+<p><img alt="" height="651" src="https://images2.imgbox.com/a6/cb/V9D5CYcJ_o.png" width="1033"></p> 
+<p>         雷龙官方还很贴心的提供了样品的测试板，在这款测试板上，我焊接了4GB的CSNP4GCR01-AMW上去，并且跑了一下分，对于一款小的存储芯片而言，实在难得。</p> 
+<p><img alt="" height="1200" src="https://images2.imgbox.com/29/79/3HY9vjlz_o.jpg" width="1200"></p> 
+<p>        （上图为测试板焊接图） </p> 
+<p><img alt="" height="863" src="https://images2.imgbox.com/d7/3f/O3y4uasH_o.png" width="1200"></p> 
+<p>       博主日前在设计基于H616与NB-IOT的嵌入式智能储物柜的时候考虑过存储方面的问题，当时在SD NAND和EMMC与TF卡中徘徊，以下是几个存储类型的对比。</p> 
+<p><img alt="" height="521" src="https://images2.imgbox.com/ca/66/Q38yIVOu_o.png" width="1200"></p> 
+<p><img alt="" height="1019" src="https://images2.imgbox.com/42/8c/VXJM6V4B_o.png" width="1095">         经过多方对比，本着不需要频繁更换的原则，同时也为了更好的防水和成本考虑，最终决定使用雷龙公司的SD NAND 作为设计样品的存储部分。</p> 
+<p>        此外，SD NAND还具有不用写驱动程序自带坏块管理的NAND FLASH（贴片式TF卡），不标准的SDIO接口，也同时兼容SPI/SD接口，10万次的SLC晶圆擦写寿命，通过一万次的随机掉电测试耐高低温，经过跑分测得，速度级别Class10。标准的SD2.0协议，普通的SD卡可以直接驱动，支持TF卡启动的SOC都可以用SD NAND，而且雷龙官方还贴心的提供了STM32参考例程和原厂技术支持，这对于刚上手的小白而言，十分友好。</p> 
+<h2>设计理念：</h2> 
+<p>        使用H616作为主控CPU并搭配NB-IOT来向申请下来的云端传输数据，当WIFI正常时，储物数据每搁两小时向云端传输一次，当有人取出物品时再次向云端发送一次数据（不保留在SD NAND中）；一旦系统检测到WIFI出现问题，储物数据转而存储到SD NAND中，取物时输入的物品ID和取出时间一并放入SD NAND中（我也是看中了SD NAND与原始NAND相比其具有嵌入式坏块管理和更强的嵌入式ECC。即使在异常断电，它仍然可以安全地保存数据这一点）。</p> 
+<h2>部分SD NAND的参考设计</h2> 
+<p>        根据官方数据手册提供的SD NAND参考设计，只占用8个GPIO，对于H616来说，确实很友好<img alt="" height="702" src="https://images2.imgbox.com/67/d7/Q8uG0wLt_o.png" width="1200"></p> 
+<p>         这里为了不泄露他人的劳动成果，我也就不粘PCB设计了。</p> 
+<p><img alt="" height="983" src="https://images2.imgbox.com/85/46/spLCuZzv_o.png" width="1200"></p> 
+<h2> 采用H616驱动SD NAND的示例代码</h2> 
+<p>        下面是关于H616驱动SD NAND的示例代码，这里记录一下自己当初的学习过程（注：这个代码不能直接拿过来就用，而是要根据自己的需求修改）</p> 
+<pre><code class="language-cs">#include &lt;stdio.h&gt;
+#include &lt;stdint.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include "h616_sdio.h"
+
+// 定义SDIO引脚
+#define SDIO_CMD_PIN    0
+#define SDIO_CLK_PIN    1
+#define SDIO_D0_PIN     2
+#define SDIO_D1_PIN     3
+#define SDIO_D2_PIN     4
+#define SDIO_D3_PIN     5
+
+// 定义NAND芯片命令
+#define CMD_READ        0x00
+#define CMD_WRITE       0x80
+#define CMD_ERASE       0x60
+#define CMD_STATUS      0x70
+#define CMD_RESET       0xff
+
+// 定义NAND芯片状态
+#define STATUS_READY    0x40
+#define STATUS_ERROR    0x01
+
+// 初始化SDIO控制器
+void sdio_init()
+{
+    // 设置SDIO引脚模式和速率
+    h616_sdio_set_pin_mode(SDIO_CMD_PIN, H616_SDIO_PIN_MODE_SDIO);
+    h616_sdio_set_pin_mode(SDIO_CLK_PIN, H616_SDIO_PIN_MODE_SDIO);
+    h616_sdio_set_pin_mode(SDIO_D0_PIN, H616_SDIO_PIN_MODE_SDIO);
+    h616_sdio_set_pin_mode(SDIO_D1_PIN, H616_SDIO_PIN_MODE_SDIO);
+    h616_sdio_set_pin_mode(SDIO_D2_PIN, H616_SDIO_PIN_MODE_SDIO);
+    h616_sdio_set_pin_mode(SDIO_D3_PIN, H616_SDIO_PIN_MODE_SDIO);
+    h616_sdio_set_clock(H616_SDIO_CLOCK_FREQ_25MHZ);
+
+    // 初始化SDIO控制器
+    h616_sdio_init();
+}
+
+// 发送NAND芯片命令
+void nand_send_cmd(uint8_t cmd)
+{
+    // 设置SDIO控制器传输模式和命令码
+    h616_sdio_set_transfer_mode(H616_SDIO_TRANSFER_MODE_WRITE);
+    h616_sdio_set_command_code(cmd);
+
+    // 发送命令
+    h616_sdio_send_command();
+}
+
+// 发送NAND芯片地址
+void nand_send_addr(uint32_t addr)
+{
+    // 设置SDIO控制器传输模式和地址
+    h616_sdio_set_transfer_mode(H616_SDIO_TRANSFER_MODE_WRITE);
+    h616_sdio_set_address(addr);
+
+    // 发送地址
+    h616_sdio_send_address();
+}
+
+// 读取NAND芯片数据
+void nand_read_data(uint8_t *data, uint32_t size)
+{
+    // 设置SDIO控制器传输模式
+    h616_sdio_set_transfer_mode(H616_SDIO_TRANSFER_MODE_READ);
+
+    // 读取数据
+    h616_sdio_read_data(data, size);
+}
+
+// 写入NAND芯片数据
+void nand_write_data(const uint8_t *data, uint32_t size)
+{
+    // 设置SDIO控制器传输模式
+    h616_sdio_set_transfer_mode(H616_SDIO_TRANSFER_MODE_WRITE);
+
+    // 写入数据
+    h616_sdio_write_data(data, size);
+}
+
+// 读取NAND芯片状态
+uint8_t nand_read_status()
+{
+    uint8_t status;
+
+    // 发送读取状态命令
+    nand_send_cmd(CMD_STATUS);
+
+    // 读取状态
+    nand_read_data(&amp;status, 1);
+
+    return status;
+}
+
+// 等待NAND芯片准备就绪
+void nand_wait_ready()
+{
+    uint8_t status;
+
+    // 循环读取状态，直到NAND芯片准备就绪
+    do {
+        status = nand_read_status();
+    } while ((status &amp; STATUS_READY) == 0);
+}
+
+// 读取NAND芯片数据
+void nand_read(uint32_t page, uint32_t column, uint8_t *data, uint32_t size)
+{
+    // 发送读取命令和地址
+    nand_send_cmd(CMD_READ);
+    nand_send_addr(column | (page &lt;&lt; 8));
+
+    // 等待NAND芯片准备就绪
+    nand_wait_ready();
+
+    // 读取数据
+    nand_read_data(data, size);
+}
+
+// 写入NAND芯片数据
+void nand_write(uint32_t page, uint32_t column, const uint8_t *data, uint32_t size)
+{
+    // 发送写入命令和地址
+    nand_send_cmd(CMD_WRITE);
+    nand_send_addr(column | (page &lt;&lt; 8));
+
+    // 写入数据
+    nand_write_data(data, size);
+
+    // 等待NAND芯片准备就绪
+    nand_wait_ready();
+}
+
+// 擦除NAND芯片块
+void nand_erase(uint32_t block)
+{
+    // 发送擦除命令和地址
+    nand_send_cmd(CMD_ERASE);
+    nand_send_addr(block &lt;&lt; 8);
+
+    // 等待NAND芯片准备就绪
+    nand_wait_ready();
+}
+
+// 复位NAND芯片
+void nand_reset()
+{
+    // 发送复位命令
+    nand_send_cmd(CMD_RESET);
+
+    // 等待NAND芯片准备就绪
+    nand_wait_ready();
+}
+
+// 示例程序入口
+int main()
+{
+    uint8_t data[2048];
+    memset(data, 0x5a, sizeof(data));
+
+    // 初始化SDIO控制器
+    sdio_init();
+
+    // 复位NAND芯片
+    nand_reset();
+
+    // 擦除第0块
+    nand_erase(0);
+
+    // 写入第0页
+    nand_write(0, 0, data, sizeof(data));
+
+    // 读取第0页
+    nand_read(0, 0, data, sizeof(data));
+
+    return 0;
+}
+</code></pre> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/0159c01c66ac2b861b7bfb47dfe77b82/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">高斯分布&amp;正态分布</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/21a900aad10a323e8768fb85df5a24c0/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">java计算税收</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 菜鸟程序员博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>
